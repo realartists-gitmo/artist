@@ -8,7 +8,7 @@ use ratatui::{
             PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
         },
         execute,
-        terminal::{Clear, ClearType},
+        terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
     },
     layout::Rect,
     style::{Color, Style},
@@ -181,6 +181,7 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
         let viewport_changed = desired_height != viewport_height;
         if viewport_changed {
             viewport_height = desired_height;
+            execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
             clear_inline(&mut terminal)?;
             terminal = ratatui::init_with_options(TerminalOptions {
                 viewport: Viewport::Inline(viewport_height),
@@ -189,6 +190,7 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
         terminal.draw(|frame| render(frame, &input))?;
         if viewport_changed {
             terminal.show_cursor()?;
+            execute!(std::io::stdout(), EndSynchronizedUpdate)?;
         }
         match event::read()? {
             Event::Key(key) if !input.handle_key(key) => {
