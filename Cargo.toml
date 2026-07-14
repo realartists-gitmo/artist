@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/llm-provider", "crates/artist-cli", "crates/artist-agent"]
+members = ["crates/llm-provider", "crates/artist-cli", "crates/artist-agent", "crates/artist-sessions"]
 resolver = "3"
 
 [workspace.package]
