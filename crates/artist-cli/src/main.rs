@@ -24,8 +24,9 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
-    match cli.command {
-        Command::Provider(args) => match (args.login, args.action) {
+    match (cli.prompt, cli.command) {
+        (Some(prompt), None) => execute_prompt(&mut store, &path, &prompt).await?,
+        (None, Some(Command::Provider(args))) => match (args.login, args.action) {
             (Some(LoginKind::Chatgpt), None) => {
                 login::chatgpt(&mut store).await?;
                 store.save(&path)?;
@@ -41,7 +42,7 @@ async fn run() -> Result<()> {
             }
             _ => bail!("choose --login chatgpt or list, set, or test"),
         },
-        Command::Model => {
+        (None, Some(Command::Model)) => {
             let selected = default_index(&store)?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
@@ -49,7 +50,23 @@ async fn run() -> Result<()> {
             models::select(&mut store.providers[selected]).await?;
             store.save(&path)?;
         }
+        (Some(_), Some(_)) => bail!("-p cannot be combined with a subcommand"),
+        (None, None) => bail!("provide -p <PROMPT> or a subcommand; run --help for usage"),
     }
+    Ok(())
+}
+
+async fn execute_prompt(
+    store: &mut ProviderStore,
+    path: &std::path::Path,
+    input: &str,
+) -> Result<()> {
+    let selected = default_index(store)?;
+    if refresh_if_needed(&mut store.providers[selected]).await? {
+        store.save(path)?;
+    }
+    let response = artist_agent::prompt(&store.providers[selected], input).await?;
+    println!("{response}");
     Ok(())
 }
 

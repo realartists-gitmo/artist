@@ -10,6 +10,7 @@ name = "artist"
 path = "src/main.rs"
 
 [dependencies]
+artist-agent = { path = "../artist-agent" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
