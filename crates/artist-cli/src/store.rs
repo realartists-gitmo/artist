@@ -16,23 +16,27 @@ pub struct ProviderStore {
     pub providers: Vec<SavedProvider>,
 }
 fn version() -> u8 {
-    1
+    2
 }
 
 impl ProviderStore {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {
-                version: 1,
+                version: 2,
                 ..Self::default()
             });
         }
-        let store: Self = toml::from_str(&fs::read_to_string(path).context("read providers.toml")?)
-            .context("parse providers.toml")?;
+        let contents = fs::read_to_string(path).context("read providers.toml")?;
+        let mut document: toml::Value =
+            toml::from_str(&contents).context("parse providers.toml")?;
+        migrate_to_chatgpt_only(&mut document);
+        let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
         Ok(store)
     }
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&mut self, path: &Path) -> Result<()> {
+        self.version = 2;
         self.validate()?;
         let parent = path.parent().context("providers path has no parent")?;
         fs::create_dir_all(parent).context("create Artist config directory")?;
@@ -72,6 +76,48 @@ impl ProviderStore {
     }
 }
 
+fn migrate_to_chatgpt_only(document: &mut toml::Value) {
+    let Some(table) = document.as_table_mut() else {
+        return;
+    };
+    table.insert("version".into(), toml::Value::Integer(2));
+    if let Some(providers) = table
+        .get_mut("providers")
+        .and_then(toml::Value::as_array_mut)
+    {
+        providers.retain(|provider| {
+            provider
+                .get("auth")
+                .and_then(|auth| auth.get("type"))
+                .and_then(toml::Value::as_str)
+                != Some("api_key")
+        });
+        let ids: Vec<String> = providers
+            .iter()
+            .filter_map(|provider| {
+                provider
+                    .get("id")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        let invalid_default = table
+            .get("default_provider")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|id| !ids.iter().any(|candidate| candidate == id));
+        if invalid_default {
+            if let Some(first) = ids.first() {
+                table.insert(
+                    "default_provider".into(),
+                    toml::Value::String(first.clone()),
+                );
+            } else {
+                table.remove("default_provider");
+            }
+        }
+    }
+}
+
 pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ARTIST_CONFIG_DIR") {
         return Ok(PathBuf::from(path).join("providers.toml"));
@@ -84,8 +130,30 @@ pub fn config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_provider::{SavedProvider, Secret};
-    use url::Url;
+    use llm_provider::{Auth, SavedProvider, Secret};
+    #[test]
+    fn removes_legacy_api_key_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        fs::write(
+            &path,
+            r#"version = 1
+default_provider = "api"
+[[providers]]
+id = "api"
+name = "API"
+base_url = "https://api.example/v1/"
+[providers.auth]
+type = "api_key"
+api_key = "secret"
+"#,
+        )
+        .unwrap();
+        let store = ProviderStore::load(&path).unwrap();
+        assert!(store.providers.is_empty());
+        assert!(store.default_provider.is_none());
+    }
+
     #[test]
     fn saves_and_loads() {
         let dir = tempfile::tempdir().unwrap();
@@ -94,15 +162,17 @@ mod tests {
             version: 1,
             ..Default::default()
         };
-        store.add(
-            SavedProvider::openai_compatible(
-                ProviderId::new("one").unwrap(),
-                "One",
-                Url::parse("https://example.com/v1/").unwrap(),
-                Secret::new("key"),
-            )
-            .unwrap(),
-        );
+        store.add(SavedProvider::chatgpt(
+            ProviderId::new("one").unwrap(),
+            "ChatGPT",
+            Auth {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                account_id: "acct".into(),
+                email: None,
+                expires_at: None,
+            },
+        ));
         store.save(&path).unwrap();
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.providers.len(), 1);
