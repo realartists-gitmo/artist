@@ -17,7 +17,8 @@ use ratatui::{
     text::Text,
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
-use std::path::Path;
+use std::{io::IsTerminal, path::Path};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
 struct ChatInput {
@@ -133,10 +134,10 @@ impl ChatInput {
     fn visual_lines(&self, inner_width: u16) -> u16 {
         let width = usize::from(inner_width.max(1));
         let mut lines = self.text.split('\n').collect::<Vec<_>>();
-        let last = lines.pop().unwrap_or_default().chars().count();
+        let last = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
         let previous = lines
             .into_iter()
-            .map(|line| line.chars().count().max(1).div_ceil(width))
+            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
             .sum::<usize>();
         (previous + last / width + 1) as u16
     }
@@ -145,10 +146,10 @@ impl ChatInput {
         let width = usize::from(inner_width.max(1));
         let prefix = &self.text[..self.cursor];
         let mut lines = prefix.split('\n').collect::<Vec<_>>();
-        let current = lines.pop().unwrap_or_default().chars().count();
+        let current = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
         let previous = lines
             .into_iter()
-            .map(|line| line.chars().count().max(1).div_ceil(width))
+            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
             .sum::<usize>();
         (
             (current % width) as u16,
@@ -165,6 +166,9 @@ pub async fn run(
     resumed: Option<(Session, Vec<Turn>)>,
     initial_prompt: Option<String>,
 ) -> Result<()> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
+    }
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
     });
@@ -294,6 +298,8 @@ async fn submit(
     insert_text(terminal, &format!("You: {prompt}"), Color::Cyan)?;
     let mut response = String::new();
     let mut visible = String::from("Artist: ");
+    let mut stream_height = 3;
+    draw_streaming(terminal, &visible, &mut stream_height)?;
     artist_agent::stream_chat(provider, &prompt, &history, |event| {
         match event {
             artist_agent::PromptEvent::TextDelta(delta) => {
@@ -303,6 +309,7 @@ async fn submit(
                 while let Some(line) = take_visible_line(&mut visible, width) {
                     insert_text(terminal, &line, Color::White)?;
                 }
+                draw_streaming(terminal, &visible, &mut stream_height)?;
             }
             artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
                 insert_text(terminal, &delta, Color::DarkGray)?;
@@ -314,6 +321,7 @@ async fn submit(
     if !visible.is_empty() {
         insert_text(terminal, &visible, Color::White)?;
     }
+    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height)?;
     turns.push(Turn {
         role: Role::User,
         content: prompt,
@@ -333,10 +341,13 @@ async fn submit(
 }
 
 fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
-    let split = pending
-        .find('\n')
-        .map(|index| index + 1)
-        .or_else(|| pending.char_indices().nth(width).map(|(index, _)| index))?;
+    let split = pending.find('\n').map(|index| index + 1).or_else(|| {
+        let mut columns = 0;
+        pending.char_indices().find_map(|(index, character)| {
+            columns += character.width().unwrap_or(0);
+            (columns > width).then_some(index)
+        })
+    })?;
     Some(pending.drain(..split).collect())
 }
 
@@ -344,7 +355,7 @@ fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color
     let width = usize::from(terminal.size()?.width.max(1));
     let height = text
         .lines()
-        .map(|line| line.chars().count().max(1).div_ceil(width))
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
         .sum::<usize>()
         .max(1) as u16;
     terminal.insert_before(height, |buffer| {
@@ -356,8 +367,61 @@ fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color
     Ok(())
 }
 
+fn draw_streaming(
+    terminal: &mut ratatui::DefaultTerminal,
+    response: &str,
+    viewport_height: &mut u16,
+) -> Result<()> {
+    let width = terminal.size()?.width.max(1);
+    let response_height = response
+        .lines()
+        .map(|line| {
+            UnicodeWidthStr::width(line)
+                .max(1)
+                .div_ceil(usize::from(width))
+        })
+        .sum::<usize>()
+        .max(1) as u16;
+    let desired = response_height.saturating_add(3);
+    let resized = desired != *viewport_height;
+    if resized {
+        *viewport_height = desired;
+        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
+        clear_inline(terminal)?;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(desired),
+        });
+    }
+    terminal.draw(|frame| {
+        let area = frame.area();
+        let response_area = Rect::new(area.x, area.y, area.width, response_height.min(area.height));
+        frame.render_widget(
+            Paragraph::new(response)
+                .style(Style::default().fg(Color::White))
+                .wrap(Wrap { trim: false }),
+            response_area,
+        );
+        let input_area = Rect::new(
+            area.x,
+            response_area.bottom(),
+            area.width,
+            area.height.saturating_sub(response_area.height),
+        );
+        render_input(frame, input_area, &ChatInput::default());
+    })?;
+    terminal.show_cursor()?;
+    if resized {
+        execute!(std::io::stdout(), EndSynchronizedUpdate)?;
+    }
+    Ok(())
+}
+
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
     let area = frame.area();
+    render_input(frame, area, input);
+}
+
+fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
     let inner_width = area.width.saturating_sub(2).max(1);
     let block = Block::default().borders(Borders::ALL);
     frame.render_widget(block, area);

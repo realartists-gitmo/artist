@@ -59,6 +59,16 @@ mod tests {
                 .as_deref(),
             Some("hello")
         );
+        let resumed = Cli::try_parse_from(["artist", "hello", "-r", "abc"]).unwrap();
+        assert_eq!(resumed.prompt.as_deref(), Some("hello"));
+        assert_eq!(resumed.resume.as_deref(), Some("abc"));
+        assert_eq!(
+            Cli::try_parse_from(["artist", "-r"])
+                .unwrap()
+                .resume
+                .as_deref(),
+            Some("")
+        );
         assert_eq!(
             Cli::try_parse_from(["artist", "-p", "next", "-r"])
                 .unwrap()
