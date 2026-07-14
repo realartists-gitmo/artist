@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ratatui::{
-    Frame,
+    Frame, TerminalOptions, Viewport,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
@@ -63,15 +63,26 @@ impl ChatInput {
 
 /// Opens the input-only chat design surface. No prompts are submitted.
 pub fn run() -> Result<()> {
-    let mut terminal = ratatui::init();
-    let result = run_loop(&mut terminal);
+    let terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(3),
+    });
+    let result = run_loop(terminal);
     ratatui::restore();
     result
 }
 
-fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
     let mut input = ChatInput::default();
+    let mut viewport_height = 3;
     loop {
+        let width = terminal.size()?.width.saturating_sub(2).max(1);
+        let desired_height = input.visual_lines(width).saturating_add(2);
+        if desired_height > viewport_height {
+            viewport_height = desired_height;
+            terminal = ratatui::init_with_options(TerminalOptions {
+                viewport: Viewport::Inline(viewport_height),
+            });
+        }
         terminal.draw(|frame| render(frame, &input))?;
         match event::read()? {
             Event::Key(key) if !input.handle_key(key) => return Ok(()),
@@ -85,13 +96,10 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
     let area = frame.area();
     let inner_width = area.width.saturating_sub(2).max(1);
-    let desired_height = input.visual_lines(inner_width).saturating_add(2);
-    let height = desired_height.min(area.height);
-    let chunks = Layout::default()
+    let input_area = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(height)])
-        .split(area);
-    let input_area = chunks[1];
+        .constraints([Constraint::Fill(1)])
+        .split(area)[0];
     let style = Style::default().fg(Color::White).bg(Color::DarkGray);
     let paragraph = Paragraph::new(Text::raw(&input.text))
         .wrap(Wrap { trim: false })
@@ -138,14 +146,14 @@ mod tests {
 
     #[test]
     fn renders_at_full_width() {
-        let backend = TestBackend::new(20, 6);
+        let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render(frame, &ChatInput::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
-        assert_eq!(buffer.cell((19, 3)).unwrap().symbol(), "┐");
-        assert_eq!(buffer.cell((1, 4)).unwrap().bg, Color::DarkGray);
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((19, 0)).unwrap().symbol(), "┐");
+        assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::DarkGray);
     }
 }
