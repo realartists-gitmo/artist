@@ -247,7 +247,13 @@ fn style_gradient_border(frame: &mut Frame<'_>, area: Rect) {
     }
     let last_row = area.height.saturating_sub(1);
     for row in 0..area.height {
-        let shade = (128 + (127 * row).checked_div(last_row).unwrap_or(127)) as u8;
+        // Keep the original three-row gradient stable as the box grows. New rows
+        // continue with its final white shade instead of recoloring existing rows.
+        let shade = match row {
+            0 => 128,
+            1 => 191,
+            _ => 255,
+        };
         let style = Style::default().fg(Color::Rgb(shade, shade, shade));
         let y = area.y + row;
         if row == 0 || row == last_row {
