@@ -1,4 +1,4 @@
-use crate::{Error, Result, Secret};
+use crate::{CHATGPT_CODEX_BASE_URL, Error, Result, Secret};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -37,6 +37,9 @@ pub enum Auth {
         access_token: Secret,
         refresh_token: Secret,
         account_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<u64>,
     },
 }
@@ -62,6 +65,8 @@ pub struct SavedProvider {
     pub id: ProviderId,
     pub name: String,
     pub base_url: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub auth: Auth,
 }
 
@@ -80,7 +85,23 @@ impl SavedProvider {
             id,
             name: name.into(),
             base_url,
+            model: None,
             auth: Auth::ApiKey { api_key },
+        })
+    }
+
+    pub fn chatgpt(id: ProviderId, name: impl Into<String>, auth: Auth) -> Result<Self> {
+        if !matches!(auth, Auth::ChatGpt { .. }) {
+            return Err(Error::InvalidConfig(
+                "ChatGPT provider requires ChatGPT credentials".into(),
+            ));
+        }
+        Ok(Self {
+            id,
+            name: name.into(),
+            base_url: Url::parse(CHATGPT_CODEX_BASE_URL).expect("constant URL"),
+            model: None,
+            auth,
         })
     }
 
@@ -122,4 +143,66 @@ fn validate_base_url(url: &Url) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_provider() -> SavedProvider {
+        SavedProvider::openai_compatible(
+            ProviderId::new("local").unwrap(),
+            "Local",
+            Url::parse("https://llm.example/v1/").unwrap(),
+            Secret::new("top-secret"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn api_key_round_trips_but_debug_is_redacted() {
+        let provider = api_provider();
+        let json = serde_json::to_string(&provider).unwrap();
+        assert!(json.contains("top-secret"));
+        assert!(!format!("{provider:?}").contains("top-secret"));
+        assert_eq!(
+            serde_json::from_str::<SavedProvider>(&json).unwrap(),
+            provider
+        );
+    }
+
+    #[test]
+    fn old_records_without_optional_fields_still_load() {
+        let json = r#"{"id":"old","name":"Old","base_url":"https://example.com/v1/","auth":{"type":"api_key","api_key":"key"}}"#;
+        let provider: SavedProvider = serde_json::from_str(json).unwrap();
+        assert_eq!(provider.model, None);
+
+        let old_chatgpt = r#"{"id":"chat","name":"ChatGPT","base_url":"https://chatgpt.com/backend-api/codex/","auth":{"type":"chat_gpt","access_token":"a","refresh_token":"r","account_id":"acct","expires_at":1}}"#;
+        let provider: SavedProvider = serde_json::from_str(old_chatgpt).unwrap();
+        assert!(matches!(provider.auth, Auth::ChatGpt { email: None, .. }));
+    }
+
+    #[test]
+    fn request_headers_differ_by_auth_kind() {
+        let api = api_provider().request_auth().unwrap();
+        assert_eq!(api.headers[AUTHORIZATION], "Bearer top-secret");
+        assert!(!api.headers.contains_key("chatgpt-account-id"));
+
+        let chatgpt = SavedProvider::chatgpt(
+            ProviderId::new("chatgpt").unwrap(),
+            "ChatGPT",
+            Auth::ChatGpt {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                account_id: "acct-1".into(),
+                email: Some("me@example.com".into()),
+                expires_at: None,
+            },
+        )
+        .unwrap();
+        let headers = chatgpt.request_auth().unwrap().headers;
+        assert_eq!(headers[AUTHORIZATION], "Bearer access");
+        assert_eq!(headers["chatgpt-account-id"], "acct-1");
+        assert_eq!(chatgpt.base_url.as_str(), CHATGPT_CODEX_BASE_URL);
+    }
 }

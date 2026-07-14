@@ -134,6 +134,7 @@ impl ChatGptOAuth {
         let Auth::ChatGpt {
             refresh_token,
             account_id,
+            email,
             ..
         } = auth
         else {
@@ -155,7 +156,7 @@ impl ChatGptOAuth {
             .json::<TokenResponse>()
             .await?;
         Ok(RefreshOutcome {
-            auth: auth_from_response(response, Some((refresh_token, account_id)))?,
+            auth: auth_from_response(response, Some((refresh_token, account_id, email)))?,
         })
     }
 }
@@ -194,27 +195,40 @@ struct TokenResponse {
 
 fn auth_from_response(
     response: TokenResponse,
-    previous: Option<(&Secret, &String)>,
+    previous: Option<(&Secret, &String, &Option<String>)>,
 ) -> Result<Auth> {
     let access_token = response
         .access_token
         .ok_or(Error::MissingToken("access_token"))?;
     let refresh_token = response
         .refresh_token
-        .or_else(|| previous.map(|(v, _)| v.expose().to_owned()))
+        .or_else(|| previous.map(|(token, _, _)| token.expose().to_owned()))
         .ok_or(Error::MissingToken("refresh_token"))?;
-    let account_id = match response.id_token {
-        Some(token) => account_id_from_jwt(&token)?,
+    let mut identity = match response.id_token {
+        Some(token) => identity_from_jwt(&token)?,
         None => previous
-            .map(|(_, id)| id.clone())
+            .map(|(_, account_id, email)| Identity {
+                account_id: account_id.clone(),
+                email: email.clone(),
+            })
             .ok_or(Error::MissingToken("id_token"))?,
     };
-    if let Some((_, expected)) = previous
-        && expected != &account_id
-    {
-        return Err(Error::InvalidIdentityToken(
-            "refreshed token belongs to a different ChatGPT account".into(),
-        ));
+    if let Some((_, expected_account, expected_email)) = previous {
+        if expected_account != &identity.account_id {
+            return Err(Error::InvalidIdentityToken(
+                "refreshed token belongs to a different ChatGPT account".into(),
+            ));
+        }
+        if let (Some(expected), Some(actual)) = (expected_email, &identity.email)
+            && expected != actual
+        {
+            return Err(Error::InvalidIdentityToken(
+                "refreshed token belongs to a different email".into(),
+            ));
+        }
+        if identity.email.is_none() {
+            identity.email.clone_from(expected_email);
+        }
     }
     let expires_at = response.expires_in.map(|seconds| {
         SystemTime::now()
@@ -226,12 +240,19 @@ fn auth_from_response(
     Ok(Auth::ChatGpt {
         access_token: Secret::new(access_token),
         refresh_token: Secret::new(refresh_token),
-        account_id,
+        account_id: identity.account_id,
+        email: identity.email,
         expires_at,
     })
 }
 
-fn account_id_from_jwt(jwt: &str) -> Result<String> {
+#[derive(Debug, PartialEq, Eq)]
+struct Identity {
+    account_id: String,
+    email: Option<String>,
+}
+
+fn identity_from_jwt(jwt: &str) -> Result<Identity> {
     let payload = jwt
         .split('.')
         .nth(1)
@@ -241,13 +262,19 @@ fn account_id_from_jwt(jwt: &str) -> Result<String> {
         .map_err(|e| Error::InvalidIdentityToken(e.to_string()))?;
     let claims: Value =
         serde_json::from_slice(&bytes).map_err(|e| Error::InvalidIdentityToken(e.to_string()))?;
-    claims
+    let account_id = claims
         .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
         .or_else(|| claims.get("chatgpt_account_id"))
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| Error::InvalidIdentityToken("missing ChatGPT account id claim".into()))
+        .ok_or_else(|| Error::InvalidIdentityToken("missing ChatGPT account id claim".into()))?;
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok(Identity { account_id, email })
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -279,13 +306,48 @@ mod tests {
         assert_ne!(query.get("code_challenge"), Some(&login.pending.verifier));
     }
     #[test]
-    fn extracts_nested_account_claim() {
-        let claims =
-            serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1"}});
+    fn extracts_nested_account_and_email_claims() {
+        let claims = serde_json::json!({
+            "email": "me@example.com",
+            "https://api.openai.com/auth": {"chatgpt_account_id":"acct-1"}
+        });
         let jwt = format!(
             "e30.{}.sig",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
         );
-        assert_eq!(account_id_from_jwt(&jwt).unwrap(), "acct-1");
+        assert_eq!(
+            identity_from_jwt(&jwt).unwrap(),
+            Identity {
+                account_id: "acct-1".into(),
+                email: Some("me@example.com".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_without_id_token_preserves_identity() {
+        let old_refresh = Secret::new("refresh");
+        let account = "acct-1".to_string();
+        let email = Some("me@example.com".to_string());
+        let auth = auth_from_response(
+            TokenResponse {
+                access_token: Some("new-access".into()),
+                refresh_token: None,
+                id_token: None,
+                expires_in: Some(60),
+            },
+            Some((&old_refresh, &account, &email)),
+        )
+        .unwrap();
+        let Auth::ChatGpt {
+            account_id,
+            email: actual_email,
+            ..
+        } = auth
+        else {
+            panic!("expected ChatGPT auth")
+        };
+        assert_eq!(account_id, account);
+        assert_eq!(actual_email, email);
     }
 }
