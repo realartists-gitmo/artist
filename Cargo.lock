@@ -63,6 +63,7 @@ name = "artist-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "llm-provider",
  "rig-core",
  "serde_json",
