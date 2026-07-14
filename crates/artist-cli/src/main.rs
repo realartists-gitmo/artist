@@ -1,5 +1,6 @@
 mod args;
 mod login;
+mod models;
 mod prompt;
 mod store;
 mod test_provider;
@@ -7,7 +8,7 @@ mod test_provider;
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};
 use clap::Parser;
-use llm_provider::{Auth, ChatGptOAuth};
+use llm_provider::ChatGptOAuth;
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::{ProviderStore, config_path};
 
@@ -25,10 +26,6 @@ async fn run() -> Result<()> {
     let mut store = ProviderStore::load(&path)?;
     match cli.command {
         Command::Provider(args) => match (args.login, args.action) {
-            (Some(LoginKind::OpenaiApi), None) => {
-                login::openai_api(&mut store)?;
-                store.save(&path)?;
-            }
             (Some(LoginKind::Chatgpt), None) => {
                 login::chatgpt(&mut store).await?;
                 store.save(&path)?;
@@ -39,11 +36,19 @@ async fn run() -> Result<()> {
                 store.save(&path)?;
             }
             (None, Some(ProviderAction::Test)) => {
-                test_selected(&mut store).await?;
+                test_selected(&mut store, &path).await?;
                 store.save(&path)?;
             }
-            _ => bail!("choose --login <chatgpt|openai-api> or list, set, or test"),
+            _ => bail!("choose --login chatgpt or list, set, or test"),
         },
+        Command::Model => {
+            let selected = default_index(&store)?;
+            if refresh_if_needed(&mut store.providers[selected]).await? {
+                store.save(&path)?;
+            }
+            models::select(&mut store.providers[selected]).await?;
+            store.save(&path)?;
+        }
     }
     Ok(())
 }
@@ -59,16 +64,15 @@ fn list(store: &ProviderStore) {
         } else {
             " "
         };
-        match &provider.auth {
-            Auth::ChatGpt {
-                email, account_id, ..
-            } => println!(
-                "{marker} {}  {}",
-                provider.name,
-                email.as_deref().unwrap_or(account_id)
-            ),
-            Auth::ApiKey { .. } => println!("{marker} {}  {}", provider.name, provider.base_url),
-        }
+        println!(
+            "{marker} {}  {}",
+            provider.name,
+            provider
+                .auth
+                .email
+                .as_deref()
+                .unwrap_or(&provider.auth.account_id)
+        );
     }
 }
 
@@ -91,14 +95,10 @@ fn set_default(store: &mut ProviderStore) -> Result<()> {
     println!("Default provider set to {}.", provider.name);
     Ok(())
 }
-async fn test_selected(store: &mut ProviderStore) -> Result<()> {
+async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Result<()> {
     let selected = choose(store, "Provider to test")?;
-    if should_refresh(&store.providers[selected].auth) {
-        let outcome = ChatGptOAuth::default()
-            .refresh(&store.providers[selected].auth)
-            .await
-            .context("refresh ChatGPT login")?;
-        store.providers[selected].auth = outcome.auth;
+    if refresh_if_needed(&mut store.providers[selected]).await? {
+        store.save(path)?;
     }
     let provider = &store.providers[selected];
     print!("Testing {}... ", provider.name);
@@ -106,13 +106,34 @@ async fn test_selected(store: &mut ProviderStore) -> Result<()> {
     println!("OK");
     Ok(())
 }
-fn should_refresh(auth: &Auth) -> bool {
-    let Auth::ChatGpt { expires_at, .. } = auth else {
-        return false;
-    };
+fn default_index(store: &ProviderStore) -> Result<usize> {
+    let id = store
+        .default_provider
+        .as_ref()
+        .context("no default provider; run `artist provider set`")?;
+    store
+        .providers
+        .iter()
+        .position(|provider| &provider.id == id)
+        .context("default provider is missing")
+}
+
+async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    expires_at.is_some_and(|expiry| expiry <= now.saturating_add(60))
+    if provider
+        .auth
+        .expires_at
+        .is_some_and(|expiry| expiry <= now.saturating_add(60))
+    {
+        provider.auth = ChatGptOAuth::default()
+            .refresh(&provider.auth)
+            .await
+            .context("refresh ChatGPT login")?
+            .auth;
+        return Ok(true);
+    }
+    Ok(false)
 }
