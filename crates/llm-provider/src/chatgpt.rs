@@ -168,3 +168,124 @@ pub struct LoginRequest {
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PendingLogin {
+    #[zeroize(skip)]
+    redirect_uri: Url,
+    state: String,
+    verifier: String,
+}
+impl std::fmt::Debug for PendingLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PendingLogin([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshOutcome {
+    pub auth: Auth,
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: Option<String>,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+fn auth_from_response(
+    response: TokenResponse,
+    previous: Option<(&Secret, &String)>,
+) -> Result<Auth> {
+    let access_token = response
+        .access_token
+        .ok_or(Error::MissingToken("access_token"))?;
+    let refresh_token = response
+        .refresh_token
+        .or_else(|| previous.map(|(v, _)| v.expose().to_owned()))
+        .ok_or(Error::MissingToken("refresh_token"))?;
+    let account_id = match response.id_token {
+        Some(token) => account_id_from_jwt(&token)?,
+        None => previous
+            .map(|(_, id)| id.clone())
+            .ok_or(Error::MissingToken("id_token"))?,
+    };
+    if let Some((_, expected)) = previous
+        && expected != &account_id
+    {
+        return Err(Error::InvalidIdentityToken(
+            "refreshed token belongs to a different ChatGPT account".into(),
+        ));
+    }
+    let expires_at = response.expires_in.map(|seconds| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_add(seconds)
+    });
+    Ok(Auth::ChatGpt {
+        access_token: Secret::new(access_token),
+        refresh_token: Secret::new(refresh_token),
+        account_id,
+        expires_at,
+    })
+}
+
+fn account_id_from_jwt(jwt: &str) -> Result<String> {
+    let payload = jwt
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| Error::InvalidIdentityToken("expected a JWT".into()))?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|e| Error::InvalidIdentityToken(e.to_string()))?;
+    let claims: Value =
+        serde_json::from_slice(&bytes).map_err(|e| Error::InvalidIdentityToken(e.to_string()))?;
+    claims
+        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+        .or_else(|| claims.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::InvalidIdentityToken("missing ChatGPT account id claim".into()))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn login_uses_pkce_and_state() {
+        let oauth = ChatGptOAuth::default();
+        let login = oauth
+            .begin_login(Url::parse("http://127.0.0.1:1455/auth/callback").unwrap())
+            .unwrap();
+        let query: std::collections::HashMap<_, _> =
+            login.authorize_url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+        assert_eq!(query.get("state"), Some(&login.pending.state));
+        assert_ne!(query.get("code_challenge"), Some(&login.pending.verifier));
+    }
+    #[test]
+    fn extracts_nested_account_claim() {
+        let claims =
+            serde_json::json!({"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1"}});
+        let jwt = format!(
+            "e30.{}.sig",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        );
+        assert_eq!(account_id_from_jwt(&jwt).unwrap(), "acct-1");
+    }
+}
