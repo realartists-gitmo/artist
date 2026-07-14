@@ -1,2 +1,9 @@
 /target/
 /.artist/
+
+
+# Added by cargo
+
+/target
+/.pi-subagents/*
+/.pi/*
