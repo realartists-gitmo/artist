@@ -7,7 +7,7 @@ use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
     providers::chatgpt,
-    streaming::{StreamedAssistantContent, StreamingPrompt},
+    streaming::{StreamedAssistantContent, StreamingChat},
 };
 use serde_json::json;
 
@@ -17,10 +17,23 @@ pub enum PromptEvent {
     TextDelta(String),
 }
 
-/// Executes one prompt and emits model output as soon as each delta arrives.
-pub async fn stream_prompt(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+/// Executes one prompt with prior chat context and emits model output as it arrives.
+pub async fn stream_chat(
     provider: &SavedProvider,
     input: &str,
+    history: &[ChatMessage],
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
     let model = provider
@@ -43,7 +56,12 @@ pub async fn stream_prompt(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
-    let mut stream = builder.build().stream_prompt(input).await;
+    let agent = builder.build();
+    let messages = history.iter().map(|message| match message.role {
+        ChatRole::User => rig_core::completion::Message::user(&message.content),
+        ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),
+    });
+    let mut stream = agent.stream_chat(input, messages).await;
     while let Some(item) = stream.next().await {
         match item.context("stream Artist agent")? {
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
@@ -59,4 +77,13 @@ pub async fn stream_prompt(
         }
     }
     Ok(())
+}
+
+/// Executes a prompt without prior context.
+pub async fn stream_prompt(
+    provider: &SavedProvider,
+    input: &str,
+    on_event: impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<()> {
+    stream_chat(provider, input, &[], on_event).await
 }

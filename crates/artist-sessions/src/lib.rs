@@ -1,5 +1,6 @@
 //! Durable, human-readable chat sessions stored below a configuration root.
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -53,9 +54,13 @@ impl SessionStore {
     /// Creates a session for an existing project directory (stored canonically).
     pub fn create(&self, project: impl AsRef<Path>, label: Option<&str>) -> Result<Session> {
         let project = fs::canonicalize(project).context("canonicalize project directory")?;
+        fs::create_dir_all(&self.root)?;
+        let lock = fs::File::create(self.root.join("index.lock"))?;
+        lock.lock_exclusive()?;
         if !project.is_dir() {
             bail!("project is not a directory")
         }
+        let label = label.map(|value| value.chars().take(80).collect::<String>());
         let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let now = duration.as_millis() as u64;
         let id = format!("{:x}-{:x}", duration.as_nanos(), std::process::id());
@@ -66,18 +71,24 @@ impl SessionStore {
             now,
             id,
             label
+                .as_deref()
                 .map(|v| format!("-{}", sanitize(v)))
                 .unwrap_or_default()
         );
         let transcript = dir.join(name);
-        fs::write(
-            &transcript,
-            format!("# Artist session\n\n- ID: `{id}`\n- Created: `{now}`\n\n"),
-        )?;
+        let transcript_file = fs::File::create(&transcript)?;
+        {
+            use std::io::Write;
+            writeln!(
+                &transcript_file,
+                "# Artist session\n\n- ID: `{id}`\n- Created: `{now}`\n"
+            )?;
+        }
+        transcript_file.sync_all()?;
         let session = Session {
             id,
             created_at_ms: now,
-            label: label.map(str::to_owned),
+            label,
             project: project.clone(),
             transcript,
         };
@@ -127,7 +138,7 @@ impl SessionStore {
                 Role::User => "User",
                 Role::Assistant => "Assistant",
             },
-            turn.content
+            markdown_content(&turn.content)
         )?;
         file.sync_all()?;
         Ok(())
@@ -170,6 +181,19 @@ impl SessionStore {
         file.sync_all()?;
         fs::rename(tmp, self.root.join("index.toml")).context("atomically replace session index")
     }
+}
+fn markdown_content(value: &str) -> String {
+    value
+        .lines()
+        .map(|line| {
+            if line.starts_with("<!-- artist-turn:") {
+                format!("\\{line}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 fn sanitize(value: &str) -> String {
     let out: String = value
@@ -216,7 +240,7 @@ mod tests {
             },
             Turn {
                 role: Role::Assistant,
-                content: "world".into(),
+                content: "world\n<!-- artist-turn:not-json -->".into(),
             },
         ];
         for turn in &turns {

@@ -6,6 +6,9 @@ pub struct Cli {
     /// Execute one prompt and print the response.
     #[arg(short = 'p', long, value_name = "PROMPT")]
     pub prompt: Option<String>,
+    /// Resume a session by ID, or select one interactively when no ID is given.
+    #[arg(short = 'r', long = "resume", value_name = "SESSION_ID", num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -46,6 +49,20 @@ mod tests {
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
         assert_eq!(cli.prompt.as_deref(), Some("reply OK"));
+        assert_eq!(
+            Cli::try_parse_from(["artist", "-p", "next", "-r"])
+                .unwrap()
+                .resume
+                .as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            Cli::try_parse_from(["artist", "-p", "next", "-r", "abc"])
+                .unwrap()
+                .resume
+                .as_deref(),
+            Some("abc")
+        );
         for action in ["list", "set", "test"] {
             assert!(Cli::try_parse_from(["artist", "provider", action]).is_ok());
         }

@@ -7,6 +7,7 @@ mod test_provider;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};
+use artist_sessions::{Role, SessionStore, Turn};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
 use std::{
@@ -27,9 +28,11 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
-    match (cli.prompt, cli.command) {
-        (Some(prompt), None) => execute_prompt(&mut store, &path, &prompt).await?,
-        (None, Some(Command::Provider(args))) => match (args.login, args.action) {
+    match (cli.prompt, cli.resume, cli.command) {
+        (Some(prompt), resume, None) => {
+            execute_prompt(&mut store, &path, &prompt, resume.as_deref()).await?
+        }
+        (None, None, Some(Command::Provider(args))) => match (args.login, args.action) {
             (Some(LoginKind::Chatgpt), None) => {
                 login::chatgpt(&mut store).await?;
                 store.save(&path)?;
@@ -45,7 +48,7 @@ async fn run() -> Result<()> {
             }
             _ => bail!("choose --login chatgpt or list, set, or test"),
         },
-        (None, Some(Command::Model)) => {
+        (None, None, Some(Command::Model)) => {
             let selected = default_index(&store)?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
@@ -53,8 +56,9 @@ async fn run() -> Result<()> {
             models::select(&mut store.providers[selected]).await?;
             store.save(&path)?;
         }
-        (Some(_), Some(_)) => bail!("-p cannot be combined with a subcommand"),
-        (None, None) => bail!("provide -p <PROMPT> or a subcommand; run --help for usage"),
+        (Some(_), _, Some(_)) => bail!("-p cannot be combined with a subcommand"),
+        (None, Some(_), _) => bail!("--resume requires -p <PROMPT>"),
+        (None, None, None) => bail!("provide -p <PROMPT> or a subcommand; run --help for usage"),
     }
     Ok(())
 }
@@ -63,14 +67,68 @@ async fn execute_prompt(
     store: &mut ProviderStore,
     path: &std::path::Path,
     input: &str,
+    resume: Option<&str>,
 ) -> Result<()> {
     let selected = default_index(store)?;
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
+    let config_root = path.parent().context("providers path has no parent")?;
+    let sessions = SessionStore::new(config_root);
+    let project = std::env::current_dir().context("find current project directory")?;
+    let (session, turns) = match resume {
+        Some("") => {
+            let mut available = sessions.list_project(&project)?;
+            available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+            if available.is_empty() {
+                bail!("no sessions found for {}", project.display());
+            }
+            let items = available
+                .iter()
+                .map(|session| {
+                    format!(
+                        "{}  {}",
+                        session.id,
+                        session.label.as_deref().unwrap_or("Untitled")
+                    )
+                })
+                .collect::<Vec<_>>();
+            let selected = prompt::select("Session to resume", &items, 0)?;
+            sessions.load(&available[selected].id)?
+        }
+        Some(id) => {
+            if !sessions
+                .list_project(&project)?
+                .iter()
+                .any(|session| session.id == id)
+            {
+                bail!("session {id} was not found in this project");
+            }
+            sessions.load(id)?
+        }
+        None => (sessions.create(&project, Some(input))?, Vec::new()),
+    };
+    let history = turns
+        .iter()
+        .map(|turn| artist_agent::ChatMessage {
+            role: match turn.role {
+                Role::User => artist_agent::ChatRole::User,
+                Role::Assistant => artist_agent::ChatRole::Assistant,
+            },
+            content: turn.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    sessions.append(
+        &session.id,
+        &Turn {
+            role: Role::User,
+            content: input.to_owned(),
+        },
+    )?;
     let styled = std::io::stdout().is_terminal();
     let mut reasoning = false;
-    artist_agent::stream_prompt(&store.providers[selected], input, |event| {
+    let mut response = String::new();
+    artist_agent::stream_chat(&store.providers[selected], input, &history, |event| {
         use artist_agent::PromptEvent;
         use std::io::Write;
         let mut output = std::io::stdout().lock();
@@ -84,6 +142,7 @@ async fn execute_prompt(
                 }
             }
             PromptEvent::TextDelta(delta) => {
+                response.push_str(&delta);
                 if std::mem::take(&mut reasoning) {
                     writeln!(output)?;
                 }
@@ -95,6 +154,13 @@ async fn execute_prompt(
     })
     .await?;
     println!();
+    sessions.append(
+        &session.id,
+        &Turn {
+            role: Role::Assistant,
+            content: response,
+        },
+    )?;
     Ok(())
 }
 
