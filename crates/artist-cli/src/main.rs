@@ -9,7 +9,10 @@ use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    io::IsTerminal,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use store::{ProviderStore, config_path};
 
 #[tokio::main]
@@ -65,8 +68,33 @@ async fn execute_prompt(
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
-    let response = artist_agent::prompt(&store.providers[selected], input).await?;
-    println!("{response}");
+    let styled = std::io::stdout().is_terminal();
+    let mut reasoning = false;
+    artist_agent::stream_prompt(&store.providers[selected], input, |event| {
+        use artist_agent::PromptEvent;
+        use std::io::Write;
+        let mut output = std::io::stdout().lock();
+        match event {
+            PromptEvent::ReasoningSummaryDelta(delta) => {
+                reasoning = true;
+                if styled {
+                    write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
+                } else {
+                    write!(output, "{delta}")?;
+                }
+            }
+            PromptEvent::TextDelta(delta) => {
+                if std::mem::take(&mut reasoning) {
+                    writeln!(output)?;
+                }
+                write!(output, "{delta}")?;
+            }
+        }
+        output.flush()?;
+        Ok(())
+    })
+    .await?;
+    println!();
     Ok(())
 }
 

@@ -1,12 +1,28 @@
 //! The tool-free Artist agent loop, built on Rig.
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use llm_provider::SavedProvider;
-use rig_core::{client::CompletionClient, completion::Prompt, providers::chatgpt};
+use rig_core::{
+    agent::MultiTurnStreamItem,
+    client::CompletionClient,
+    providers::chatgpt,
+    streaming::{StreamedAssistantContent, StreamingPrompt},
+};
 use serde_json::json;
 
-/// Executes one prompt with the provider's selected model and reasoning effort.
-pub async fn prompt(provider: &SavedProvider, input: &str) -> Result<String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PromptEvent {
+    ReasoningSummaryDelta(String),
+    TextDelta(String),
+}
+
+/// Executes one prompt and emits model output as soon as each delta arrives.
+pub async fn stream_prompt(
+    provider: &SavedProvider,
+    input: &str,
+    mut on_event: impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<()> {
     let model = provider
         .model
         .as_deref()
@@ -24,11 +40,23 @@ pub async fn prompt(provider: &SavedProvider, input: &str) -> Result<String> {
 
     let mut builder = client.agent(model);
     if let Some(effort) = &provider.reasoning_effort {
-        builder = builder.additional_params(json!({"reasoning": {"effort": effort}}));
+        builder =
+            builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
-    builder
-        .build()
-        .prompt(input)
-        .await
-        .context("run Artist agent")
+    let mut stream = builder.build().stream_prompt(input).await;
+    while let Some(item) = stream.next().await {
+        match item.context("stream Artist agent")? {
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+                on_event(PromptEvent::TextDelta(text.text))?;
+            }
+            MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::ReasoningDelta {
+                    id: None,
+                    reasoning,
+                },
+            ) => on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?,
+            _ => {}
+        }
+    }
+    Ok(())
 }
