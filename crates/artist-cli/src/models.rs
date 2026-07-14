@@ -5,6 +5,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
+// The service filters its catalog by Codex protocol version, not Artist's package version.
+// Keep this aligned with the Codex CLI release whose API contract we implement.
+const CODEX_PROTOCOL_VERSION: &str = "0.144.1";
+
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     models: Vec<Model>,
@@ -96,7 +100,7 @@ async fn fetch(provider: &SavedProvider) -> Result<Vec<Model>> {
     let mut endpoint = provider.base_url.join("models")?;
     endpoint
         .query_pairs_mut()
-        .append_pair("client_version", env!("CARGO_PKG_VERSION"));
+        .append_pair("client_version", CODEX_PROTOCOL_VERSION);
     let response = Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?
