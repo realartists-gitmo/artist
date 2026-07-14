@@ -2,7 +2,7 @@ use anyhow::Result;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
     crossterm::{
-        cursor::MoveTo,
+        cursor::{Hide, MoveTo},
         event::{
             self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
             PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -178,7 +178,8 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
     loop {
         let width = terminal.size()?.width.saturating_sub(2).max(1);
         let desired_height = input.visual_lines(width).saturating_add(2);
-        if desired_height != viewport_height {
+        let viewport_changed = desired_height != viewport_height;
+        if viewport_changed {
             viewport_height = desired_height;
             clear_inline(&mut terminal)?;
             terminal = ratatui::init_with_options(TerminalOptions {
@@ -186,6 +187,9 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
             });
         }
         terminal.draw(|frame| render(frame, &input))?;
+        if viewport_changed {
+            terminal.show_cursor()?;
+        }
         match event::read()? {
             Event::Key(key) if !input.handle_key(key) => {
                 clear_inline(&mut terminal)?;
@@ -230,6 +234,7 @@ fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let top = terminal.get_frame().area().y;
     execute!(
         std::io::stdout(),
+        Hide,
         MoveTo(0, top),
         Clear(ClearType::FromCursorDown)
     )?;
