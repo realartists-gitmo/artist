@@ -75,10 +75,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "artist-agent",
- "artist-sessions",
  "clap",
  "dialoguer",
  "dirs",
+ "fs2",
  "llm-provider",
  "reqwest 0.12.28",
  "serde",
@@ -87,18 +87,6 @@ dependencies = [
  "tokio",
  "toml",
  "url",
-]
-
-[[package]]
-name = "artist-sessions"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fs2",
- "serde",
- "serde_json",
- "tempfile",
- "toml",
 ]
 
 [[package]]

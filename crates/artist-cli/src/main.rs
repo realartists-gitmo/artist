@@ -2,14 +2,15 @@ mod args;
 mod login;
 mod models;
 mod prompt;
+mod sessions;
 mod store;
 mod test_provider;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};
-use artist_sessions::{Role, SessionStore, Turn};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
+use sessions::{Role, SessionStore, Turn};
 use std::{
     io::IsTerminal,
     time::{SystemTime, UNIX_EPOCH},
