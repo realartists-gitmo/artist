@@ -1,4 +1,6 @@
+use crate::sessions::{Role, Session, SessionStore, Turn};
 use anyhow::Result;
+use llm_provider::SavedProvider;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
     crossterm::{
@@ -13,8 +15,9 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::Text,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
+use std::path::Path;
 
 #[derive(Default)]
 struct ChatInput {
@@ -154,8 +157,14 @@ impl ChatInput {
     }
 }
 
-/// Opens the input-only chat design surface. No prompts are submitted.
-pub fn run() -> Result<()> {
+/// Runs an inline, persistent multi-turn chat. A session is created on first submission.
+pub async fn run(
+    provider: &SavedProvider,
+    sessions: &SessionStore,
+    project: &Path,
+    resumed: Option<(Session, Vec<Turn>)>,
+    initial_prompt: Option<String>,
+) -> Result<()> {
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
     });
@@ -164,7 +173,17 @@ pub fn run() -> Result<()> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let result = match keyboard_result {
-        Ok(()) => run_loop(terminal),
+        Ok(()) => {
+            run_loop(
+                terminal,
+                provider,
+                sessions,
+                project,
+                resumed,
+                initial_prompt,
+            )
+            .await
+        }
         Err(error) => Err(error.into()),
     };
     let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
@@ -172,27 +191,42 @@ pub fn run() -> Result<()> {
     result
 }
 
-fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
+async fn run_loop(
+    mut terminal: ratatui::DefaultTerminal,
+    provider: &SavedProvider,
+    sessions: &SessionStore,
+    project: &Path,
+    resumed: Option<(Session, Vec<Turn>)>,
+    mut pending: Option<String>,
+) -> Result<()> {
+    let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
     let mut viewport_height = 3;
     loop {
-        let width = terminal.size()?.width.saturating_sub(2).max(1);
-        let desired_height = input.visual_lines(width).saturating_add(2);
-        let viewport_changed = desired_height != viewport_height;
-        if viewport_changed {
-            viewport_height = desired_height;
-            execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
-            clear_inline(&mut terminal)?;
-            terminal = ratatui::init_with_options(TerminalOptions {
-                viewport: Viewport::Inline(viewport_height),
-            });
-        }
-        terminal.draw(|frame| render(frame, &input))?;
-        if viewport_changed {
-            terminal.show_cursor()?;
-            execute!(std::io::stdout(), EndSynchronizedUpdate)?;
+        resize_and_draw(&mut terminal, &input, &mut viewport_height)?;
+        if let Some(prompt) = pending.take() {
+            submit(
+                &mut terminal,
+                provider,
+                sessions,
+                project,
+                &mut session,
+                &mut turns,
+                prompt,
+            )
+            .await?;
+            continue;
         }
         match event::read()? {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Enter
+                    && !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && !input.text.trim().is_empty() =>
+            {
+                pending = Some(std::mem::take(&mut input.text));
+                input.cursor = 0;
+            }
             Event::Key(key) if !input.handle_key(key) => {
                 clear_inline(&mut terminal)?;
                 return Ok(());
@@ -202,6 +236,109 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
             _ => {}
         }
     }
+}
+
+fn resize_and_draw(
+    terminal: &mut ratatui::DefaultTerminal,
+    input: &ChatInput,
+    viewport_height: &mut u16,
+) -> Result<()> {
+    let width = terminal.size()?.width.saturating_sub(2).max(1);
+    let desired = input.visual_lines(width).saturating_add(2);
+    if desired != *viewport_height {
+        *viewport_height = desired;
+        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
+        clear_inline(terminal)?;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(desired),
+        });
+        terminal.draw(|frame| render(frame, input))?;
+        terminal.show_cursor()?;
+        execute!(std::io::stdout(), EndSynchronizedUpdate)?;
+    } else {
+        terminal.draw(|frame| render(frame, input))?;
+    }
+    Ok(())
+}
+
+async fn submit(
+    terminal: &mut ratatui::DefaultTerminal,
+    provider: &SavedProvider,
+    sessions: &SessionStore,
+    project: &Path,
+    session: &mut Option<Session>,
+    turns: &mut Vec<Turn>,
+    prompt: String,
+) -> Result<()> {
+    let active = match session {
+        Some(value) => value,
+        None => session.insert(sessions.create(project, Some(&prompt))?),
+    };
+    let history = turns
+        .iter()
+        .map(|turn| artist_agent::ChatMessage {
+            role: match turn.role {
+                Role::User => artist_agent::ChatRole::User,
+                Role::Assistant => artist_agent::ChatRole::Assistant,
+            },
+            content: turn.content.clone(),
+        })
+        .collect::<Vec<_>>();
+    sessions.append(
+        &active.id,
+        &Turn {
+            role: Role::User,
+            content: prompt.clone(),
+        },
+    )?;
+    insert_text(terminal, &format!("You: {prompt}"), Color::Cyan)?;
+    let mut response = String::new();
+    insert_text(terminal, "Artist:", Color::White)?;
+    artist_agent::stream_chat(provider, &prompt, &history, |event| {
+        match event {
+            artist_agent::PromptEvent::TextDelta(delta) => {
+                response.push_str(&delta);
+                insert_text(terminal, &delta, Color::White)?;
+            }
+            artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
+                insert_text(terminal, &delta, Color::DarkGray)?;
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    turns.push(Turn {
+        role: Role::User,
+        content: prompt,
+    });
+    sessions.append(
+        &active.id,
+        &Turn {
+            role: Role::Assistant,
+            content: response.clone(),
+        },
+    )?;
+    turns.push(Turn {
+        role: Role::Assistant,
+        content: response,
+    });
+    Ok(())
+}
+
+fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color) -> Result<()> {
+    let width = usize::from(terminal.size()?.width.max(1));
+    let height = text
+        .lines()
+        .map(|line| line.chars().count().max(1).div_ceil(width))
+        .sum::<usize>()
+        .max(1) as u16;
+    terminal.insert_before(height, |buffer| {
+        Paragraph::new(text)
+            .style(Style::default().fg(color))
+            .wrap(Wrap { trim: false })
+            .render(buffer.area, buffer);
+    })?;
+    Ok(())
 }
 
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
