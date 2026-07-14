@@ -30,27 +30,32 @@ async fn run() -> Result<()> {
     let cli = Cli::parse();
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
-    match (cli.prompt, cli.resume, cli.command) {
-        (Some(prompt), resume, None) => {
-            execute_prompt(&mut store, &path, &prompt, resume.as_deref()).await?
+    if let Some(prompt) = cli.print_prompt {
+        if cli.command.is_some() {
+            bail!("-p cannot be combined with a subcommand");
         }
-        (None, None, Some(Command::Provider(args))) => match (args.login, args.action) {
-            (Some(LoginKind::Chatgpt), None) => {
-                login::chatgpt(&mut store).await?;
-                store.save(&path)?;
+        return execute_prompt(&mut store, &path, &prompt, cli.resume.as_deref()).await;
+    }
+    match cli.command {
+        Some(Command::Provider(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            match (args.login, args.action) {
+                (Some(LoginKind::Chatgpt), None) => {
+                    login::chatgpt(&mut store).await?;
+                    store.save(&path)?;
+                }
+                (None, Some(ProviderAction::List)) => list(&store),
+                (None, Some(ProviderAction::Set)) => {
+                    set_default(&mut store)?;
+                    store.save(&path)?;
+                }
+                (None, Some(ProviderAction::Test)) => {
+                    test_selected(&mut store, &path).await?;
+                    store.save(&path)?;
+                }
+                _ => bail!("choose --login chatgpt or list, set, or test"),
             }
-            (None, Some(ProviderAction::List)) => list(&store),
-            (None, Some(ProviderAction::Set)) => {
-                set_default(&mut store)?;
-                store.save(&path)?;
-            }
-            (None, Some(ProviderAction::Test)) => {
-                test_selected(&mut store, &path).await?;
-                store.save(&path)?;
-            }
-            _ => bail!("choose --login chatgpt or list, set, or test"),
-        },
-        (None, None, Some(Command::Model)) => {
+        }
+        Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
             let selected = default_index(&store)?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
@@ -58,11 +63,63 @@ async fn run() -> Result<()> {
             models::select(&mut store.providers[selected]).await?;
             store.save(&path)?;
         }
-        (Some(_), _, Some(_)) => bail!("-p cannot be combined with a subcommand"),
-        (None, Some(_), _) => bail!("--resume requires -p <PROMPT>"),
-        (None, None, None) => chat_ui::run()?,
+        Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
+        None => {
+            let selected = default_index(&store)?;
+            if refresh_if_needed(&mut store.providers[selected]).await? {
+                store.save(&path)?;
+            }
+            let config_root = path.parent().context("providers path has no parent")?;
+            let sessions = SessionStore::new(config_root);
+            let project = std::env::current_dir().context("find current project directory")?;
+            let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
+            chat_ui::run(
+                &store.providers[selected],
+                &sessions,
+                &project,
+                resumed,
+                cli.prompt,
+            )
+            .await?;
+        }
     }
     Ok(())
+}
+
+fn load_resumed(
+    sessions: &SessionStore,
+    project: &std::path::Path,
+    resume: Option<&str>,
+) -> Result<Option<(sessions::Session, Vec<Turn>)>> {
+    let Some(requested) = resume else {
+        return Ok(None);
+    };
+    let mut available = sessions.list_project(project)?;
+    available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+    let id = if requested.is_empty() {
+        if available.is_empty() {
+            bail!("no sessions found for {}", project.display());
+        }
+        let items = available
+            .iter()
+            .map(|session| {
+                format!(
+                    "{}  {}",
+                    session.id,
+                    session.label.as_deref().unwrap_or("Untitled")
+                )
+            })
+            .collect::<Vec<_>>();
+        available[prompt::select("Session to resume", &items, 0)?]
+            .id
+            .clone()
+    } else {
+        if !available.iter().any(|session| session.id == requested) {
+            bail!("session {requested} was not found in this project");
+        }
+        requested.to_owned()
+    };
+    Ok(Some(sessions.load(&id)?))
 }
 
 async fn execute_prompt(
