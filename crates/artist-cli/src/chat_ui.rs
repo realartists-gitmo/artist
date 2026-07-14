@@ -3,7 +3,10 @@ use ratatui::{
     Frame, TerminalOptions, Viewport,
     crossterm::{
         cursor::MoveTo,
-        event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+        event::{
+            self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
         execute,
         terminal::{Clear, ClearType},
     },
@@ -25,6 +28,10 @@ impl ChatInput {
         }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => return false,
+            (KeyCode::Char('\n' | '\r'), modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.text.push('\n');
+            }
+            (KeyCode::Char('\n' | '\r'), _) => {}
             (KeyCode::Char(character), _) => self.text.push(character),
             (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
                 self.text.push('\n');
@@ -74,7 +81,15 @@ pub fn run() -> Result<()> {
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
     });
-    let result = run_loop(terminal);
+    let keyboard_result = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    let result = match keyboard_result {
+        Ok(()) => run_loop(terminal),
+        Err(error) => Err(error.into()),
+    };
+    let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     ratatui::restore();
     result
 }
