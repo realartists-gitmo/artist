@@ -3,9 +3,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "artist", version, about = "The Artist coding agent")]
 pub struct Cli {
-    /// Execute one prompt and print the response.
-    #[arg(short = 'p', long, value_name = "PROMPT")]
+    /// Prompt to send immediately in the interactive chat.
+    #[arg(value_name = "PROMPT")]
     pub prompt: Option<String>,
+    /// Execute one prompt and print the response without opening the chat UI.
+    #[arg(short = 'p', long, value_name = "PROMPT", conflicts_with = "prompt")]
+    pub print_prompt: Option<String>,
     /// Resume a session by ID, or select one interactively when no ID is given.
     #[arg(short = 'r', long = "resume", value_name = "SESSION_ID", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
@@ -48,7 +51,14 @@ mod tests {
         assert!(Cli::try_parse_from(["artist", "provider", "--login", "chatgpt"]).is_ok());
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
-        assert_eq!(cli.prompt.as_deref(), Some("reply OK"));
+        assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));
+        assert_eq!(
+            Cli::try_parse_from(["artist", "hello"])
+                .unwrap()
+                .prompt
+                .as_deref(),
+            Some("hello")
+        );
         assert_eq!(
             Cli::try_parse_from(["artist", "-p", "next", "-r"])
                 .unwrap()
