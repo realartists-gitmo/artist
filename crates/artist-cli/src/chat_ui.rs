@@ -19,6 +19,7 @@ use ratatui::{
 #[derive(Default)]
 struct ChatInput {
     text: String,
+    cursor: usize,
 }
 
 impl ChatInput {
@@ -26,23 +27,104 @@ impl ChatInput {
         if key.kind != KeyEventKind::Press {
             return true;
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') if !self.text.is_empty() => {
+                    self.text.clear();
+                    self.cursor = 0;
+                    return true;
+                }
+                KeyCode::Char('c' | 'd' | 'z') => return false,
+                _ => {}
+            }
+        }
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => return false,
+            (KeyCode::Esc, _) => return false,
             (KeyCode::Char('\n' | '\r'), modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.text.push('\n');
+                self.insert("\n");
             }
             (KeyCode::Char('\n' | '\r'), _) => {}
-            (KeyCode::Char(character), _) => self.text.push(character),
+            (KeyCode::Char(character), _) => self.insert(&character.to_string()),
             (KeyCode::Enter, modifiers) if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.text.push('\n');
+                self.insert("\n");
             }
             (KeyCode::Enter, _) => {}
-            (KeyCode::Backspace, _) => {
-                self.text.pop();
-            }
+            (KeyCode::Backspace, _) => self.backspace(),
+            (KeyCode::Delete, _) => self.delete(),
+            (KeyCode::Left, _) => self.move_left(),
+            (KeyCode::Right, _) => self.move_right(),
+            (KeyCode::Up, _) => self.move_vertical(false),
+            (KeyCode::Down, _) => self.move_vertical(true),
+            (KeyCode::Home, _) => self.cursor = self.line_start(),
+            (KeyCode::End, _) => self.cursor = self.line_end(),
             _ => {}
         }
         true
+    }
+
+    fn insert(&mut self, value: &str) {
+        self.text.insert_str(self.cursor, value);
+        self.cursor += value.len();
+    }
+    fn backspace(&mut self) {
+        if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
+            self.text.drain(index..self.cursor);
+            self.cursor = index;
+        }
+    }
+    fn delete(&mut self) {
+        if let Some(character) = self.text[self.cursor..].chars().next() {
+            self.text
+                .drain(self.cursor..self.cursor + character.len_utf8());
+        }
+    }
+    fn move_left(&mut self) {
+        if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
+            self.cursor = index;
+        }
+    }
+    fn move_right(&mut self) {
+        if let Some(character) = self.text[self.cursor..].chars().next() {
+            self.cursor += character.len_utf8();
+        }
+    }
+    fn line_start(&self) -> usize {
+        self.text[..self.cursor]
+            .rfind('\n')
+            .map_or(0, |index| index + 1)
+    }
+    fn line_end(&self) -> usize {
+        self.text[self.cursor..]
+            .find('\n')
+            .map_or(self.text.len(), |index| self.cursor + index)
+    }
+    fn move_vertical(&mut self, down: bool) {
+        let start = self.line_start();
+        let column = self.text[start..self.cursor].chars().count();
+        let (target_start, target_end) = if down {
+            let end = self.line_end();
+            if end == self.text.len() {
+                return;
+            }
+            let target_start = end + 1;
+            let target_end = self.text[target_start..]
+                .find('\n')
+                .map_or(self.text.len(), |index| target_start + index);
+            (target_start, target_end)
+        } else {
+            if start == 0 {
+                return;
+            }
+            let target_end = start - 1;
+            let target_start = self.text[..target_end]
+                .rfind('\n')
+                .map_or(0, |index| index + 1);
+            (target_start, target_end)
+        };
+        self.cursor = self.text[target_start..target_end]
+            .char_indices()
+            .nth(column)
+            .map_or(target_end, |(index, _)| target_start + index);
     }
 
     fn visual_lines(&self, inner_width: u16) -> u16 {
@@ -56,23 +138,19 @@ impl ChatInput {
         (previous + last / width + 1) as u16
     }
 
-    fn cursor(&self, inner_width: u16) -> (u16, u16) {
+    fn cursor_position(&self, inner_width: u16) -> (u16, u16) {
         let width = usize::from(inner_width.max(1));
-        let before_last = self
-            .text
-            .split('\n')
-            .rev()
-            .skip(1)
+        let prefix = &self.text[..self.cursor];
+        let mut lines = prefix.split('\n').collect::<Vec<_>>();
+        let current = lines.pop().unwrap_or_default().chars().count();
+        let previous = lines
+            .into_iter()
             .map(|line| line.chars().count().max(1).div_ceil(width))
             .sum::<usize>();
-        let last = self
-            .text
-            .rsplit('\n')
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .count();
-        ((last % width) as u16, (before_last + last / width) as u16)
+        (
+            (current % width) as u16,
+            (previous + current / width) as u16,
+        )
     }
 }
 
@@ -100,23 +178,21 @@ fn run_loop(mut terminal: ratatui::DefaultTerminal) -> Result<()> {
     loop {
         let width = terminal.size()?.width.saturating_sub(2).max(1);
         let desired_height = input.visual_lines(width).saturating_add(2);
-        if desired_height > viewport_height {
+        if desired_height != viewport_height {
             viewport_height = desired_height;
-            let top = terminal.get_frame().area().y;
-            execute!(
-                std::io::stdout(),
-                MoveTo(0, top),
-                Clear(ClearType::FromCursorDown)
-            )?;
+            clear_inline(&mut terminal)?;
             terminal = ratatui::init_with_options(TerminalOptions {
                 viewport: Viewport::Inline(viewport_height),
             });
         }
         terminal.draw(|frame| render(frame, &input))?;
         match event::read()? {
-            Event::Key(key) if !input.handle_key(key) => return Ok(()),
+            Event::Key(key) if !input.handle_key(key) => {
+                clear_inline(&mut terminal)?;
+                return Ok(());
+            }
             Event::Resize(_, _) => {}
-            Event::Paste(text) => input.text.push_str(&text),
+            Event::Paste(text) => input.insert(&text),
             _ => {}
         }
     }
@@ -142,12 +218,22 @@ fn render(frame: &mut Frame<'_>, input: &ChatInput) {
     frame.render_widget(paragraph, input_area);
 
     if input_area.width > 0 && input_area.height > 0 {
-        let (x, y) = input.cursor(inner_width);
+        let (x, y) = input.cursor_position(inner_width);
         frame.set_cursor_position((
             input_area.x + x.min(inner_width.saturating_sub(1)),
             input_area.y + y.min(input_area.height.saturating_sub(1)),
         ));
     }
+}
+
+fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    let top = terminal.get_frame().area().y;
+    execute!(
+        std::io::stdout(),
+        MoveTo(0, top),
+        Clear(ClearType::FromCursorDown)
+    )?;
+    Ok(())
 }
 
 fn style_gradient_border(frame: &mut Frame<'_>, area: Rect) {
@@ -201,13 +287,30 @@ mod tests {
         assert_eq!(input.visual_lines(10), 2);
         assert_eq!(
             ChatInput {
-                text: "1234".into()
+                text: "1234".into(),
+                cursor: 4,
             }
             .visual_lines(4),
             2
         );
         input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(input.text, "a\n");
+        input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(input.text, "a");
+    }
+
+    #[test]
+    fn navigates_and_edits_at_the_cursor() {
+        let mut input = ChatInput::default();
+        input.insert("abc\ndef");
+        input.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(input.cursor, 3);
+        input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        input.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        assert_eq!(input.text, "ab!c\ndef");
+        assert!(input.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(input.text.is_empty());
+        assert!(!input.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
     }
 
     #[test]
