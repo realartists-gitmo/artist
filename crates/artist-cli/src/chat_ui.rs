@@ -293,12 +293,16 @@ async fn submit(
     )?;
     insert_text(terminal, &format!("You: {prompt}"), Color::Cyan)?;
     let mut response = String::new();
-    insert_text(terminal, "Artist:", Color::White)?;
+    let mut visible = String::from("Artist: ");
     artist_agent::stream_chat(provider, &prompt, &history, |event| {
         match event {
             artist_agent::PromptEvent::TextDelta(delta) => {
                 response.push_str(&delta);
-                insert_text(terminal, &delta, Color::White)?;
+                visible.push_str(&delta);
+                let width = usize::from(terminal.size()?.width.max(1));
+                while let Some(line) = take_visible_line(&mut visible, width) {
+                    insert_text(terminal, &line, Color::White)?;
+                }
             }
             artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
                 insert_text(terminal, &delta, Color::DarkGray)?;
@@ -307,6 +311,9 @@ async fn submit(
         Ok(())
     })
     .await?;
+    if !visible.is_empty() {
+        insert_text(terminal, &visible, Color::White)?;
+    }
     turns.push(Turn {
         role: Role::User,
         content: prompt,
@@ -323,6 +330,14 @@ async fn submit(
         content: response,
     });
     Ok(())
+}
+
+fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
+    let split = pending
+        .find('\n')
+        .map(|index| index + 1)
+        .or_else(|| pending.char_indices().nth(width).map(|(index, _)| index))?;
+    Some(pending.drain(..split).collect())
 }
 
 fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color) -> Result<()> {
