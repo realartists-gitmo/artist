@@ -1,30 +1,12 @@
-use crate::{prompt, store::ProviderStore};
+use crate::store::ProviderStore;
 use anyhow::{Context, Result, bail};
-use llm_provider::{ChatGptOAuth, ProviderId, SavedProvider, Secret};
+use llm_provider::{ChatGptOAuth, ProviderId, SavedProvider};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 use url::Url;
-
-pub fn openai_api(store: &mut ProviderStore) -> Result<()> {
-    let name = prompt::text("Provider name", Some("OpenAI"))?;
-    let base_url = Url::parse(&prompt::text(
-        "API base URL",
-        Some("https://api.openai.com/v1/"),
-    )?)
-    .context("invalid API base URL")?;
-    let model = prompt::text("Model", Some("gpt-5-mini"))?;
-    let key = prompt::secret("API key")?;
-    let id = unique_id(store, &name);
-    let mut provider =
-        SavedProvider::openai_compatible(ProviderId::new(id)?, name, base_url, Secret::new(key))?;
-    provider.model = Some(nonempty(model, "model")?);
-    println!("Saved provider {}.", provider.name);
-    store.add(provider);
-    Ok(())
-}
 
 pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:1455")
@@ -41,12 +23,11 @@ pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
         .await
         .context("login timed out after 5 minutes")??;
     let auth = oauth.finish_login(login.pending, &code, &state).await?;
-    let mut provider = SavedProvider::chatgpt(
+    let provider = SavedProvider::chatgpt(
         ProviderId::new(unique_id(store, "chatgpt"))?,
         "ChatGPT",
         auth,
-    )?;
-    provider.model = Some("gpt-5.1-codex-mini".into());
+    );
     println!("Logged in and saved ChatGPT.");
     store.add(provider);
     Ok(())
@@ -85,12 +66,6 @@ async fn receive_callback(listener: TcpListener) -> Result<(String, String)> {
     result
 }
 
-fn nonempty(value: String, field: &str) -> Result<String> {
-    if value.trim().is_empty() {
-        bail!("{field} cannot be empty")
-    }
-    Ok(value)
-}
 fn unique_id(store: &ProviderStore, name: &str) -> String {
     let base: String = name
         .to_ascii_lowercase()

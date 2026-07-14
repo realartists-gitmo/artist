@@ -10,6 +10,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Provider(ProviderArgs),
+    /// Select the model and reasoning effort for the default provider.
+    Model,
 }
 
 #[derive(Debug, Args)]
@@ -23,7 +25,6 @@ pub struct ProviderArgs {
 #[derive(Clone, Debug, ValueEnum)]
 pub enum LoginKind {
     Chatgpt,
-    OpenaiApi,
 }
 
 #[derive(Debug, Subcommand)]
@@ -39,7 +40,7 @@ mod tests {
     #[test]
     fn parses_requested_forms() {
         assert!(Cli::try_parse_from(["artist", "provider", "--login", "chatgpt"]).is_ok());
-        assert!(Cli::try_parse_from(["artist", "provider", "--login", "openai-api"]).is_ok());
+        assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         for action in ["list", "set", "test"] {
             assert!(Cli::try_parse_from(["artist", "provider", action]).is_ok());
         }
