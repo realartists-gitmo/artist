@@ -120,7 +120,7 @@ fn render(frame: &mut Frame<'_>, input: &ChatInput) {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    let input_style = Style::default().fg(Color::White).bg(Color::Rgb(32, 32, 32));
+    let input_style = Style::default().fg(Color::White);
     let paragraph = Paragraph::new(Text::raw(&input.text))
         .wrap(Wrap { trim: false })
         .style(input_style);
@@ -205,7 +205,7 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
         assert_eq!(buffer.cell((19, 0)).unwrap().symbol(), "┐");
-        assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::Rgb(32, 32, 32));
+        assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::Reset);
         assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Rgb(128, 128, 128));
         assert_eq!(buffer.cell((0, 2)).unwrap().fg, Color::Rgb(255, 255, 255));
     }
