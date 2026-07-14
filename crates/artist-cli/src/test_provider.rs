@@ -75,8 +75,19 @@ fn response_contains_ok(text: &str) -> bool {
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
                 .is_some_and(has_ok)
-            || value.to_string().contains("OK")
+            || value.get("output").is_some_and(output_contains_ok)
     })
+}
+fn output_contains_ok(value: &Value) -> bool {
+    match value {
+        Value::String(text) => has_ok(text),
+        Value::Array(values) => values.iter().any(output_contains_ok),
+        Value::Object(fields) => fields
+            .iter()
+            .filter(|(key, _)| matches!(key.as_str(), "content" | "text" | "output_text"))
+            .any(|(_, value)| output_contains_ok(value)),
+        _ => false,
+    }
 }
 fn has_ok(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("ok")
@@ -87,4 +98,19 @@ fn sanitized(value: &str) -> String {
         .take(500)
         .collect::<String>()
         .replace(['\n', '\r'], " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::response_contains_ok;
+
+    #[test]
+    fn checks_output_instead_of_echoed_input() {
+        assert!(response_contains_ok(
+            r#"{"output":[{"content":[{"text":"OK"}]}]}"#
+        ));
+        assert!(!response_contains_ok(
+            r#"{"input":"Reply with exactly OK.","output_text":"no"}"#
+        ));
+    }
 }
