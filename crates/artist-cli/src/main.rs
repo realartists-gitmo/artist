@@ -102,6 +102,7 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     }
     let provider = &store.providers[selected];
     print!("Testing {}... ", provider.name);
+    std::io::Write::flush(&mut std::io::stdout())?;
     test_provider::test(provider).await?;
     println!("OK");
     Ok(())

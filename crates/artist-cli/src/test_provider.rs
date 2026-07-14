@@ -11,7 +11,21 @@ pub async fn test(provider: &SavedProvider) -> Result<()> {
         .context("no model selected; run `artist model` first")?;
     let client = Client::builder().timeout(Duration::from_secs(45)).build()?;
     let endpoint = provider.base_url.join("responses")?;
-    let mut body = json!({"model": model, "input": "Reply with exactly OK.", "stream": false});
+    let mut body = json!({
+        "model": model,
+        "instructions": "Reply with exactly OK and nothing else.",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Reply with exactly OK."}]
+        }],
+        "tools": [],
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "store": false,
+        "stream": true,
+        "include": []
+    });
     if let Some(effort) = &provider.reasoning_effort {
         body["reasoning"] = json!({"effort": effort});
     }
@@ -38,10 +52,21 @@ pub async fn test(provider: &SavedProvider) -> Result<()> {
 }
 
 fn response_contains_ok(text: &str) -> bool {
-    if text.lines().any(|line| {
-        line.strip_prefix("data: ")
-            .is_some_and(|data| data.contains("OK"))
-    }) {
+    let streamed_output: String = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter(|event| {
+            event.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
+        })
+        .filter_map(|event| {
+            event
+                .get("delta")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    if has_ok(&streamed_output) {
         return true;
     }
     serde_json::from_str::<Value>(text).is_ok_and(|value| {
@@ -84,6 +109,12 @@ mod tests {
         ));
         assert!(!response_contains_ok(
             r#"{"input":"Reply with exactly OK.","output_text":"no"}"#
+        ));
+        assert!(!response_contains_ok(
+            "data: {\"type\":\"response.created\",\"response\":{\"instructions\":\"Reply OK\"}}\n"
+        ));
+        assert!(response_contains_ok(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"O\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"K\"}\n"
         ));
     }
 }
