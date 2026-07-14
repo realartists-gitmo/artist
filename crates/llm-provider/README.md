@@ -1,34 +1,19 @@
 # llm-provider
 
-Provider records and authentication primitives for Artist.
+ChatGPT subscription authentication and provider records for Artist.
 
-## Credential shapes
+`SavedProvider` stores OAuth access/refresh tokens, ChatGPT workspace identity,
+and the selected Codex model and reasoning effort. Secrets are redacted from
+`Debug`, but serialization contains their real values; persist provider records
+only in a protected credential file or OS keychain.
 
-`SavedProvider` is deliberately serializable and supports:
+## Login
 
-- `Auth::ApiKey` for OpenAI-compatible `Bearer` API keys and custom base URLs.
-- `Auth::ChatGpt` for access/refresh tokens and the ChatGPT workspace ID used by
-  Codex subscription requests.
+`ChatGptOAuth::begin_login` starts Authorization Code + PKCE. The caller binds a
+loopback callback server, opens the returned authorization URL, and passes the
+callback code and state to `finish_login`. Call `refresh` before token expiry and
+persist the returned rotated credentials immediately.
 
-Secret values redact their `Debug` output, but serialization contains the real
-value. Store serialized records in an OS keychain or encrypted credential store.
-
-## ChatGPT login
-
-`ChatGptOAuth::begin_login` creates an Authorization Code + PKCE URL and opaque
-pending state. The UI should:
-
-1. Bind a loopback listener and pass its callback URL to `begin_login`.
-2. Open `LoginRequest::authorize_url` in the user's browser.
-3. Read `code` and `state` from the callback.
-4. Pass those values and `PendingLogin` to `finish_login`.
-5. Save the returned `Auth::ChatGpt` in a `SavedProvider` whose base URL is
-   `CHATGPT_CODEX_BASE_URL`.
-
-Call `refresh` before `expires_at`; refresh-token rotation is handled.
-
-The Codex OAuth client ID and OpenAI endpoints are service implementation
-details and may change. The client ID can be overridden with `ChatGptOAuth::new`.
-Using the official Codex public client ID from another application may be
-restricted by OpenAI; production distribution should confirm OpenAI's terms and
-register/use an approved client where available.
+The Codex OAuth client ID and OpenAI endpoints are service implementation details
+and may change. Production distribution should confirm OpenAI's terms and use an
+approved OAuth client where available.
