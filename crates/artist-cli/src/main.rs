@@ -1,4 +1,5 @@
 mod args;
+mod chat_ui;
 mod login;
 mod models;
 mod prompt;
@@ -59,7 +60,7 @@ async fn run() -> Result<()> {
         }
         (Some(_), _, Some(_)) => bail!("-p cannot be combined with a subcommand"),
         (None, Some(_), _) => bail!("--resume requires -p <PROMPT>"),
-        (None, None, None) => bail!("provide -p <PROMPT> or a subcommand; run --help for usage"),
+        (None, None, None) => chat_ui::run()?,
     }
     Ok(())
 }
