@@ -208,10 +208,11 @@ async fn run_loop(
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
     let mut viewport_height = 3;
+    let mut viewport_floor = 3;
     loop {
-        resize_and_draw(&mut terminal, &input, &mut viewport_height)?;
+        resize_and_draw(&mut terminal, &input, &mut viewport_height, viewport_floor)?;
         if let Some(prompt) = pending.take() {
-            submit(
+            viewport_height = submit(
                 &mut terminal,
                 provider,
                 sessions,
@@ -221,6 +222,7 @@ async fn run_loop(
                 prompt,
             )
             .await?;
+            viewport_floor = 4;
             continue;
         }
         match event::read()? {
@@ -248,9 +250,13 @@ fn resize_and_draw(
     terminal: &mut ratatui::DefaultTerminal,
     input: &ChatInput,
     viewport_height: &mut u16,
+    viewport_floor: u16,
 ) -> Result<()> {
     let width = terminal.size()?.width.saturating_sub(2).max(1);
-    let desired = input.visual_lines(width).saturating_add(2);
+    let desired = input
+        .visual_lines(width)
+        .saturating_add(2)
+        .max(viewport_floor);
     if desired != *viewport_height {
         *viewport_height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
@@ -275,7 +281,7 @@ async fn submit(
     session: &mut Option<Session>,
     turns: &mut Vec<Turn>,
     prompt: String,
-) -> Result<()> {
+) -> Result<u16> {
     let active = match session {
         Some(value) => value,
         None => session.insert(sessions.create(project, Some(&prompt))?),
@@ -314,7 +320,7 @@ async fn submit(
                 if had_reasoning {
                     insert_reasoning(terminal, &reasoning)?;
                     reasoning.clear();
-                    resize_and_draw(terminal, &empty_input, &mut stream_height)?;
+                    resize_and_draw(terminal, &empty_input, &mut stream_height, 3)?;
                 }
                 if !response_started {
                     if !had_reasoning {
@@ -347,10 +353,7 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
-    if response_started {
-        insert_blank(terminal)?;
-    }
-    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height)?;
+    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height, 4)?;
     turns.push(Turn {
         role: Role::User,
         content: prompt,
@@ -366,7 +369,7 @@ async fn submit(
         role: Role::Assistant,
         content: response,
     });
-    Ok(())
+    Ok(stream_height)
 }
 
 fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
@@ -583,8 +586,22 @@ fn draw_streaming(
 }
 
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
+    render_input_at_bottom(frame, input);
+}
+
+fn render_input_at_bottom(frame: &mut Frame<'_>, input: &ChatInput) {
     let area = frame.area();
-    render_input(frame, area, input);
+    let height = input
+        .visual_lines(area.width.saturating_sub(2).max(1))
+        .saturating_add(2)
+        .min(area.height);
+    let input_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(height),
+        area.width,
+        height,
+    );
+    render_input(frame, input_area, input);
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
