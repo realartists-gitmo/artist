@@ -3,7 +3,7 @@
 mod delegate;
 
 use anyhow::{Context, Result};
-use artist_tools::{TOOL_POLICY, ToolBundle};
+use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
@@ -77,8 +77,13 @@ pub async fn stream_chat(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
+    let system_prompt = format!(
+        "{}\nCurrent working directory: {}",
+        include_str!("system_prompt.md"),
+        tools.project_root().display()
+    );
     let agent = builder
-        .preamble(TOOL_POLICY)
+        .preamble(&system_prompt)
         .tool(tools.bash.clone())
         .tool(tools.read.clone())
         .tool(tools.find.clone())

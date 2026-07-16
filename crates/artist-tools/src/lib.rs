@@ -55,6 +55,10 @@ impl ToolBundle {
         }
     }
 
+    pub fn project_root(&self) -> &std::path::Path {
+        self.read.0.root()
+    }
+
     pub fn for_actor(&self, id: &str) -> anyhow::Result<Self> {
         Ok(Self::new(self.read.0.with_actor(id)?))
     }
