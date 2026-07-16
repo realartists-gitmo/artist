@@ -412,7 +412,7 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             .render(text_area, buffer);
         Paragraph::new(Text::styled(
             text,
-            Style::default().fg(Color::DarkGray).bg(Color::White),
+            Style::default().fg(Color::Black).bg(Color::White),
         ))
         .wrap(Wrap { trim: false })
         .render(text_area, buffer);
