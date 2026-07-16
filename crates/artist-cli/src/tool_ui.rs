@@ -50,7 +50,11 @@ impl ToolUi {
             end -= 1;
         }
         let was_truncated = end < compact.len();
-        let prefix = if call.output_started { "" } else { "= " };
+        let prefix = if matches!(call.name.as_str(), "edit" | "write") || call.output_started {
+            ""
+        } else {
+            "= "
+        };
         call.output_started = true;
         call.displayed_bytes += end;
         format!(
@@ -103,7 +107,10 @@ fn compact_output(name: &str, output: &str) -> String {
             "Read {} lines",
             output.lines().filter(|line| line.contains(" | ")).count()
         ),
-        "edit" | "write" => output.lines().next().unwrap_or("Completed").to_owned(),
+        "edit" | "write" => output
+            .split_once("Diff:\n")
+            .map(|(_, diff)| diff.trim_end().to_owned())
+            .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
     }
 }
@@ -160,6 +167,10 @@ mod tests {
                 &serde_json::json!({"path":"src/lib.rs"})
             ),
             "Edited src/lib.rs"
+        );
+        assert_eq!(
+            ui.output("e", "Applied edit.\n\nDiff:\n-old\n+new\n"),
+            "-old\n+new"
         );
     }
 }

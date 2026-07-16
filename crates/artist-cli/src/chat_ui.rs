@@ -704,10 +704,21 @@ fn insert_tool_line(
         .lines()
         .enumerate()
         .map(|(index, line)| {
-            Line::from(format!(
-                "{}{line}",
-                if index == 0 { prefix } else { "    " }
-            ))
+            let color = if first {
+                Color::White
+            } else if line.starts_with('+') {
+                Color::Rgb(120, 210, 140)
+            } else if line.starts_with('-') {
+                Color::Rgb(235, 120, 120)
+            } else if line.starts_with("@@") {
+                Color::Rgb(110, 190, 220)
+            } else {
+                Color::Rgb(175, 175, 175)
+            };
+            Line::styled(
+                format!("{}{line}", if index == 0 { prefix } else { "    " }),
+                Style::default().fg(color).bg(Color::Rgb(32, 32, 32)),
+            )
         })
         .collect::<Vec<_>>();
     let width = usize::from(terminal.size()?.width.max(1));
@@ -716,19 +727,8 @@ fn insert_tool_line(
         .map(|line| line.width().max(1).div_ceil(width))
         .sum::<usize>() as u16;
     terminal.insert_before(height.max(1), |buffer| {
-        Block::default()
-            .style(Style::default().bg(Color::Rgb(32, 32, 32)))
-            .render(buffer.area, buffer);
+        buffer.set_style(buffer.area, Style::default().bg(Color::Rgb(32, 32, 32)));
         Paragraph::new(Text::from(text))
-            .style(
-                Style::default()
-                    .fg(if first {
-                        Color::White
-                    } else {
-                        Color::Rgb(175, 175, 175)
-                    })
-                    .bg(Color::Rgb(32, 32, 32)),
-            )
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
     })?;

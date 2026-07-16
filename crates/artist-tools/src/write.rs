@@ -1,8 +1,9 @@
-use crate::{ToolError, Workspace};
+use crate::{ToolError, Workspace, output};
 use hashline_tools::WriteCondition;
 use rig_core::tool::Tool;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use similar::TextDiff;
 
 #[derive(Clone)]
 pub struct WriteTool(pub Workspace);
@@ -25,6 +26,11 @@ impl Tool for WriteTool {
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
         let target = self.0.resolve_new(&args.path)?;
         let created = !target.exists();
+        let before = if created {
+            String::new()
+        } else {
+            tokio::fs::read_to_string(&target).await?
+        };
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -38,11 +44,19 @@ impl Tool for WriteTool {
             )
             .await?;
         self.0.refresh_index(&target);
-        Ok(format!(
-            "Written {} ({} bytes; {}).",
-            args.path,
-            args.content.len(),
-            if created { "created" } else { "overwritten" }
+        let diff = TextDiff::from_lines(&before, &args.content)
+            .unified_diff()
+            .context_radius(3)
+            .to_string();
+        Ok(output::head(
+            format!(
+                "Written {} ({} bytes; {}).\n\nDiff:\n{}",
+                args.path,
+                args.content.len(),
+                if created { "created" } else { "overwritten" },
+                diff
+            ),
+            output::OUTPUT_CAP,
         ))
     }
 }
