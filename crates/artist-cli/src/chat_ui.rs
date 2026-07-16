@@ -537,12 +537,10 @@ fn draw_streaming(
         })
         .sum::<usize>()
         .max(1) as u16;
-    // Keep the input and separator pinned at the bottom once output fills the screen.
-    let visible_response_height =
-        response_height.min(terminal_size.height.saturating_sub(4).max(1));
-    let desired = visible_response_height
-        .saturating_add(4)
-        .min(terminal_size.height);
+    // Keep a fixed one-row streaming tail above the input. Completed output is
+    // inserted into scrollback, so the viewport never grows and repositions it.
+    let visible_response_height = 1;
+    let desired = 5.min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
