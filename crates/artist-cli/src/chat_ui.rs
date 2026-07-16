@@ -727,6 +727,25 @@ fn insert_blank(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
+fn truncate_display_line(line: &str, width: usize) -> String {
+    if line.width() <= width {
+        return line.to_owned();
+    }
+    let target = width.saturating_sub(1);
+    let mut used = 0;
+    let mut output = String::new();
+    for character in line.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if used + character_width > target {
+            break;
+        }
+        output.push(character);
+        used += character_width;
+    }
+    output.push('…');
+    output
+}
+
 fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
@@ -734,13 +753,17 @@ fn insert_tool_line(
     is_diff: bool,
 ) -> Result<()> {
     let prefix = if first { "  🛠  " } else { "    " };
+    let width = usize::from(terminal.size()?.width.max(1));
     let text = content
         .lines()
         .enumerate()
         .map(|(index, line)| {
-            // Literal tabs are interpreted by the terminal after Ratatui has
-            // laid out the buffer, leaving unstyled cells between columns.
+            // Tabs otherwise skip styled terminal cells. Tool lines are kept
+            // to one terminal row so large diffs cannot dominate the UI.
             let line = line.replace('\t', "    ");
+            let line_prefix = if index == 0 { prefix } else { "    " };
+            let line =
+                truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
             let color = if first {
                 Color::White
             } else if is_diff && line.starts_with('+') {
@@ -753,12 +776,11 @@ fn insert_tool_line(
                 Color::Rgb(175, 175, 175)
             };
             Line::styled(
-                format!("{}{line}", if index == 0 { prefix } else { "    " }),
+                format!("{line_prefix}{line}"),
                 Style::default().fg(color).bg(Color::Rgb(32, 32, 32)),
             )
         })
         .collect::<Vec<_>>();
-    let width = usize::from(terminal.size()?.width.max(1));
     let height = text
         .iter()
         .map(|line| line.width().max(1).div_ceil(width))
@@ -1182,6 +1204,13 @@ mod tests {
             colors.len() > 1,
             "expected multiple syntax colors: {colors:?}"
         );
+    }
+
+    #[test]
+    fn truncates_tool_lines_to_terminal_columns() {
+        assert_eq!(truncate_display_line("abcdef", 5), "abcd…");
+        assert_eq!(truncate_display_line("ab界cd", 5), "ab界…");
+        assert_eq!(truncate_display_line("short", 8), "short");
     }
 
     #[test]
