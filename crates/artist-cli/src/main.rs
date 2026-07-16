@@ -1,6 +1,9 @@
 mod args;
 mod chat_ui;
+mod clipboard;
 mod command_ui;
+mod input_atoms;
+mod input_images;
 mod interaction;
 mod login;
 mod models;
@@ -214,9 +217,10 @@ async fn execute_prompt(
     let styled = std::io::stdout().is_terminal();
     let mut reasoning = false;
     let mut response = String::new();
+    let agent_input = artist_agent::ChatInput::from(input.to_owned());
     artist_agent::stream_chat(
         &store.providers[selected],
-        input,
+        &agent_input,
         &history,
         &tools,
         artist_agent::SteeringHandle::default(),

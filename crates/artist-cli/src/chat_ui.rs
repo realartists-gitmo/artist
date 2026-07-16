@@ -1,5 +1,7 @@
 use crate::{
-    command_ui,
+    clipboard, command_ui,
+    input_atoms::{ExpandedInput, InputAtoms},
+    input_images::ImagePaste,
     interaction::{PromptHistory, SteeringQueue},
     models,
     sessions::{Role, Session, SessionStore, Turn},
@@ -33,9 +35,10 @@ use std::{collections::VecDeque, io::IsTerminal, path::Path};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
-struct ChatInput {
+pub(crate) struct ChatInput {
     text: String,
     cursor: usize,
+    atoms: InputAtoms,
 }
 
 impl ChatInput {
@@ -47,6 +50,7 @@ impl ChatInput {
             match key.code {
                 KeyCode::Char('c') if !self.text.is_empty() => {
                     self.text.clear();
+                    self.atoms.clear();
                     self.cursor = 0;
                     return true;
                 }
@@ -79,28 +83,65 @@ impl ChatInput {
     }
 
     fn insert(&mut self, value: &str) {
+        self.cursor = self.atoms.insertion_point(self.cursor);
+        self.atoms.insert_text(self.cursor, value.len());
         self.text.insert_str(self.cursor, value);
         self.cursor += value.len();
     }
+    pub(crate) fn paste(&mut self, value: &str, allow_image: bool) {
+        self.cursor = self.atoms.insertion_point(self.cursor);
+        if allow_image {
+            self.atoms
+                .insert_paste(&mut self.text, &mut self.cursor, value);
+        } else {
+            self.atoms
+                .insert_text_paste(&mut self.text, &mut self.cursor, value);
+        }
+    }
+    fn take_expanded(&mut self) -> ExpandedInput {
+        let expanded = self.atoms.expand(&self.text);
+        self.text.clear();
+        self.cursor = 0;
+        self.atoms.clear();
+        expanded
+    }
     fn backspace(&mut self) {
+        if self
+            .atoms
+            .remove_for_backspace(&mut self.text, &mut self.cursor)
+        {
+            return;
+        }
         if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
             self.text.drain(index..self.cursor);
+            self.atoms.remove_text(index, self.cursor);
             self.cursor = index;
         }
     }
     fn delete(&mut self) {
+        if self
+            .atoms
+            .remove_for_delete(&mut self.text, &mut self.cursor)
+        {
+            return;
+        }
         if let Some(character) = self.text[self.cursor..].chars().next() {
-            self.text
-                .drain(self.cursor..self.cursor + character.len_utf8());
+            let end = self.cursor + character.len_utf8();
+            self.text.drain(self.cursor..end);
+            self.atoms.remove_text(self.cursor, end);
         }
     }
     fn move_left(&mut self) {
-        if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
+        if let Some(cursor) = self.atoms.move_left(self.cursor) {
+            self.cursor = cursor;
+        } else if let Some((index, _)) = self.text[..self.cursor].char_indices().next_back() {
             self.cursor = index;
         }
     }
     fn move_right(&mut self) {
-        if let Some(character) = self.text[self.cursor..].chars().next() {
+        if let Some(cursor) = self.atoms.move_right(self.cursor) {
+            self.cursor = cursor;
+        } else if let Some(character) = self.text[self.cursor..].chars().next() {
             self.cursor += character.len_utf8();
         }
     }
@@ -141,6 +182,7 @@ impl ChatInput {
             .char_indices()
             .nth(column)
             .map_or(target_end, |(index, _)| target_start + index);
+        self.cursor = self.atoms.insertion_point(self.cursor);
     }
 
     fn visual_lines(&self, inner_width: u16) -> u16 {
@@ -201,10 +243,33 @@ struct SubmitContext<'a> {
     tools: &'a ToolBundle,
 }
 
+pub(crate) struct SubmittedPrompt {
+    display: String,
+    pub(crate) content: String,
+    pub(crate) images: Vec<ImagePaste>,
+    history_atoms: InputAtoms,
+}
+
+impl From<String> for SubmittedPrompt {
+    fn from(content: String) -> Self {
+        Self {
+            display: content.clone(),
+            content,
+            images: Vec::new(),
+            history_atoms: InputAtoms::default(),
+        }
+    }
+}
+
 struct SubmitResult {
     viewport_height: u16,
-    queued: Vec<String>,
+    queued: Vec<SubmittedPrompt>,
     delivered: Vec<String>,
+}
+
+struct PendingDelivery {
+    display: String,
+    content: String,
 }
 
 struct DeliveredSteering {
@@ -303,7 +368,7 @@ async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
     context: ChatContext<'_>,
     resumed: Option<(Session, Vec<Turn>)>,
-    mut pending: Option<String>,
+    pending: Option<String>,
     mut status: StatusRuntime,
 ) -> Result<()> {
     let resumed_session = resumed.is_some();
@@ -316,6 +381,7 @@ async fn run_loop(
             .map(|turn| turn.content.clone())
             .collect(),
     );
+    let mut pending = pending.map(SubmittedPrompt::from);
     let mut queued_prompts = VecDeque::new();
     let mut viewport_height = 3;
     let mut viewport_floor = 3;
@@ -362,7 +428,7 @@ async fn run_loop(
             viewport_floor,
         )?;
         if let Some(prompt) = pending.take() {
-            if let Some(command) = slash_commands::parse(&prompt) {
+            if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
                     Ok(command) => {
                         let command_input = ChatInput::default();
@@ -406,7 +472,7 @@ async fn run_loop(
                     &mut viewport_height,
                     3,
                 )?;
-                prompt_history.push(prompt.clone());
+                prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
@@ -424,7 +490,7 @@ async fn run_loop(
                 .await?;
                 viewport_height = result.viewport_height;
                 for delivered in result.delivered {
-                    prompt_history.push(delivered);
+                    prompt_history.push(delivered, InputAtoms::default());
                 }
                 queued_prompts.extend(result.queued);
                 pending = queued_prompts.pop_front();
@@ -439,8 +505,22 @@ async fn run_loop(
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
                     && !input.text.trim().is_empty() =>
             {
-                pending = Some(std::mem::take(&mut input.text));
-                input.cursor = 0;
+                let display = input.text.clone();
+                let history_atoms = input.atoms.clone();
+                let expanded = input.take_expanded();
+                pending = Some(SubmittedPrompt {
+                    display,
+                    content: expanded.text,
+                    images: expanded.images,
+                    history_atoms,
+                });
+            }
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('v')
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                let _ = clipboard::paste(&mut input, true);
             }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press
@@ -448,6 +528,7 @@ async fn run_loop(
                     && !suggestions.is_empty() =>
             {
                 input.text = slash_commands::completions(&input.text)[0].name.to_owned() + " ";
+                input.atoms.clear();
                 input.cursor = input.text.len();
             }
             Event::Key(key)
@@ -455,9 +536,11 @@ async fn run_loop(
                     && matches!(key.code, KeyCode::Up | KeyCode::Down)
                     && !input.text.contains('\n') =>
             {
-                if let Some(prompt) = prompt_history.navigate(key.code == KeyCode::Up, &input.text)
+                if let Some(prompt) =
+                    prompt_history.navigate(key.code == KeyCode::Up, &input.text, &input.atoms)
                 {
-                    input.text = prompt;
+                    input.text = prompt.display;
+                    input.atoms = prompt.atoms;
                     input.cursor = input.text.len();
                 }
             }
@@ -466,7 +549,7 @@ async fn run_loop(
                 return Ok(());
             }
             Event::Resize(_, _) => {}
-            Event::Paste(text) => input.insert(&text),
+            Event::Paste(text) => input.paste(&text, true),
             _ => {}
         }
     }
@@ -512,12 +595,17 @@ fn resize_and_draw(
 fn collect_messages(
     messages: Vec<String>,
     queue: &mut SteeringQueue,
-    delivered: &mut Vec<String>,
+    delivered: &mut Vec<PendingDelivery>,
 ) -> bool {
     let selected = queue.selected();
     for message in messages {
-        queue.mark_delivered(&message);
-        delivered.push(message);
+        let display = queue
+            .mark_delivered(&message)
+            .unwrap_or_else(|| message.clone());
+        delivered.push(PendingDelivery {
+            display,
+            content: message,
+        });
     }
     selected.is_some() && queue.selected().is_none()
 }
@@ -525,7 +613,7 @@ fn collect_messages(
 fn collect_delivered(
     handle: &artist_agent::SteeringHandle,
     queue: &mut SteeringQueue,
-    delivered: &mut Vec<String>,
+    delivered: &mut Vec<PendingDelivery>,
 ) -> bool {
     collect_messages(handle.take_delivered(), queue, delivered)
 }
@@ -536,12 +624,16 @@ async fn submit(
     session: &mut Option<Session>,
     turns: &mut Vec<Turn>,
     status: &mut StatusRuntime,
-    prompt: String,
+    prompt: SubmittedPrompt,
 ) -> Result<SubmitResult> {
     let started = std::time::Instant::now();
     let active = match session {
         Some(value) => value,
-        None => session.insert(context.sessions.create(context.project, Some(&prompt))?),
+        None => session.insert(
+            context
+                .sessions
+                .create(context.project, Some(&prompt.display))?,
+        ),
     };
     let history = turns
         .iter()
@@ -557,13 +649,13 @@ async fn submit(
         &active.id,
         &Turn {
             role: Role::User,
-            content: prompt.clone(),
+            content: prompt.content.clone(),
         },
     )?;
     if !turns.is_empty() {
         insert_blank(terminal)?;
     }
-    insert_message(terminal, &prompt)?;
+    insert_message(terminal, &prompt.display)?;
     let empty_input = ChatInput::default();
     let mut footer = footer_line(
         context.status_config,
@@ -592,7 +684,7 @@ async fn submit(
     let mut animation_frame = 0;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let task_provider = context.provider.clone();
-    let task_prompt = prompt.clone();
+    let task_prompt = clipboard::agent_input(&prompt)?;
     let task_history = history.clone();
     let task_tools = context.tools.clone();
     let task = tokio::spawn(async move {
@@ -639,13 +731,28 @@ async fn submit(
                             break;
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Char('v')
+                            && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let _ = clipboard::paste(&mut steering_input, false);
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
                             && key.code == KeyCode::Enter
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !steering_input.text.trim().is_empty() =>
                         {
-                            let value = steering_input.text.clone();
+                            let display = steering_input.text.clone();
+                            let history_atoms = steering_input.atoms.clone();
+                            let expanded = steering_input.take_expanded();
+                            let prompt = SubmittedPrompt {
+                                display: display.clone(),
+                                content: expanded.text,
+                                images: expanded.images,
+                                history_atoms,
+                            };
                             let applied = if let Some(index) = steering.selected() {
-                                let mutation = steering_handle.edit_pending(index, value.clone());
+                                let mutation = steering_handle
+                                    .edit_pending(index, prompt.content.clone());
                                 collect_messages(
                                     mutation.delivered,
                                     &mut steering,
@@ -653,20 +760,28 @@ async fn submit(
                                 );
                                 mutation.applied
                             } else {
-                                steering_handle.enqueue(value.clone());
+                                steering_handle.enqueue(prompt.content.clone());
                                 true
                             };
                             if applied {
-                                steering.submit(value);
+                                steering.submit(
+                                    display,
+                                    prompt.content,
+                                    prompt.images,
+                                    prompt.history_atoms,
+                                );
                             }
-                            steering_input.text.clear();
-                            steering_input.cursor = 0;
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
                         {
-                            if let Some(value) = steering.navigate(key.code == KeyCode::Up, &steering_input.text) {
-                                steering_input.text = value;
+                            if let Some(value) = steering.navigate(
+                                key.code == KeyCode::Up,
+                                &steering_input.text,
+                                &steering_input.atoms,
+                            ) {
+                                steering_input.text = value.display;
+                                steering_input.atoms = value.atoms;
                                 steering_input.cursor = steering_input.text.len();
                             }
                         }
@@ -685,10 +800,11 @@ async fn submit(
                                 steering.remove_selected();
                             }
                             steering_input.text.clear();
+                            steering_input.atoms.clear();
                             steering_input.cursor = 0;
                         }
                         Event::Key(key) => { steering_input.handle_key(key); }
-                        Event::Paste(text) => steering_input.insert(&text),
+                        Event::Paste(text) => steering_input.paste(&text, false),
                         _ => {}
                     }
                 }
@@ -749,14 +865,15 @@ async fn submit(
                             &mut pending_delivered,
                         ) {
                             steering_input.text.clear();
+                            steering_input.atoms.clear();
                             steering_input.cursor = 0;
                         }
                         if output.batch_complete {
                             insert_blank(terminal)?;
                             for message in pending_delivered.drain(..) {
-                                insert_message(terminal, &message)?;
+                                insert_message(terminal, &message.display)?;
                                 delivered_steering.push(DeliveredSteering {
-                                    message,
+                                    message: message.content,
                                     response_offset: response.len(),
                                 });
                             }
@@ -797,9 +914,9 @@ async fn submit(
     };
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
-        insert_message(terminal, &message)?;
+        insert_message(terminal, &message.display)?;
         delivered_steering.push(DeliveredSteering {
-            message,
+            message: message.content,
             response_offset: response.len(),
         });
     }
@@ -831,7 +948,7 @@ async fn submit(
     }
     turns.push(Turn {
         role: Role::User,
-        content: prompt,
+        content: prompt.content,
     });
     let delivered = delivered_steering
         .iter()
@@ -866,7 +983,16 @@ async fn submit(
     }
     Ok(SubmitResult {
         viewport_height: stream_height,
-        queued: steering.take(),
+        queued: steering
+            .take()
+            .into_iter()
+            .map(|entry| SubmittedPrompt {
+                display: entry.display,
+                content: entry.content,
+                images: entry.images,
+                history_atoms: entry.atoms,
+            })
+            .collect(),
         delivered,
     })
 }
@@ -1156,7 +1282,7 @@ fn draw_streaming(
     // inserted into scrollback, so the viewport never grows and repositions it.
     let visible_response_height = 1;
     let footer_height = (!footer.spans.is_empty()) as u16;
-    let queued_height = controls.steering.entries().len() as u16;
+    let queued_height = controls.steering.displays().count() as u16;
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
@@ -1199,8 +1325,7 @@ fn draw_streaming(
         );
         let queued = controls
             .steering
-            .entries()
-            .iter()
+            .displays()
             .enumerate()
             .map(|(index, prompt)| {
                 Line::styled(
@@ -1387,6 +1512,7 @@ mod tests {
             ChatInput {
                 text: "1234".into(),
                 cursor: 4,
+                atoms: InputAtoms::default(),
             }
             .visual_lines(4),
             2
