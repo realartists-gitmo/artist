@@ -6,7 +6,6 @@ mod models;
 mod prompt;
 mod sessions;
 mod slash_commands;
-#[allow(dead_code)] // Domain API is consumed when status-bar UI integration lands.
 mod status_bar;
 mod store;
 mod test_provider;
@@ -14,6 +13,7 @@ mod tool_ui;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};
+use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
 use sessions::{Role, SessionStore, Turn};
@@ -78,8 +78,18 @@ async fn run() -> Result<()> {
             let sessions = SessionStore::new(config_root);
             let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
+            let tools = tool_bundle(config_root, &project)?;
             chat_ui::run(
-                &mut store, selected, &path, &sessions, &project, resumed, cli.prompt,
+                &mut store,
+                selected,
+                &path,
+                chat_ui::ChatResources {
+                    sessions: &sessions,
+                    project: &project,
+                    tools: &tools,
+                },
+                resumed,
+                cli.prompt,
             )
             .await?;
         }
@@ -136,6 +146,7 @@ async fn execute_prompt(
     let config_root = path.parent().context("providers path has no parent")?;
     let sessions = SessionStore::new(config_root);
     let project = std::env::current_dir().context("find current project directory")?;
+    let tools = tool_bundle(config_root, &project)?;
     let (session, turns) = match resume {
         Some("") => {
             let mut available = sessions.list_project(&project)?;
@@ -188,34 +199,40 @@ async fn execute_prompt(
     let styled = std::io::stdout().is_terminal();
     let mut reasoning = false;
     let mut response = String::new();
-    artist_agent::stream_chat(&store.providers[selected], input, &history, |event| {
-        use artist_agent::PromptEvent;
-        use std::io::Write;
-        let mut output = std::io::stdout().lock();
-        match event {
-            PromptEvent::ReasoningSummaryDelta(delta) => {
-                reasoning = true;
-                if styled {
-                    write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
-                } else {
+    artist_agent::stream_chat(
+        &store.providers[selected],
+        input,
+        &history,
+        &tools,
+        |event| {
+            use artist_agent::PromptEvent;
+            use std::io::Write;
+            let mut output = std::io::stdout().lock();
+            match event {
+                PromptEvent::ReasoningSummaryDelta(delta) => {
+                    reasoning = true;
+                    if styled {
+                        write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
+                    } else {
+                        write!(output, "{delta}")?;
+                    }
+                }
+                PromptEvent::TextDelta(delta) => {
+                    response.push_str(&delta);
+                    if std::mem::take(&mut reasoning) {
+                        writeln!(output)?;
+                    }
                     write!(output, "{delta}")?;
                 }
+                PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
+                PromptEvent::ToolExecutionStart { .. } => {}
+                PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
+                PromptEvent::CompletionUsage { .. } => {}
             }
-            PromptEvent::TextDelta(delta) => {
-                response.push_str(&delta);
-                if std::mem::take(&mut reasoning) {
-                    writeln!(output)?;
-                }
-                write!(output, "{delta}")?;
-            }
-            PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
-            PromptEvent::ToolExecutionStart { .. } => {}
-            PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
-            PromptEvent::CompletionUsage { .. } => {}
-        }
-        output.flush()?;
-        Ok(())
-    })
+            output.flush()?;
+            Ok(())
+        },
+    )
     .await?;
     println!();
     sessions.append(
@@ -226,6 +243,17 @@ async fn execute_prompt(
         },
     )?;
     Ok(())
+}
+
+fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Result<ToolBundle> {
+    use std::hash::{Hash, Hasher};
+    let canonical = std::fs::canonicalize(project)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    let state = config_root
+        .join("tools")
+        .join(format!("{:x}", hasher.finish()));
+    Ok(ToolBundle::new(Workspace::open(canonical, state)?))
 }
 
 fn list(store: &ProviderStore) {

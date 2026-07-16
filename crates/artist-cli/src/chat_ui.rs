@@ -8,6 +8,7 @@ use crate::{
 };
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
+use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
@@ -195,6 +196,7 @@ struct SubmitContext<'a> {
     sessions: &'a SessionStore,
     project: &'a Path,
     status_config: &'a StatusBarConfig,
+    tools: &'a ToolBundle,
 }
 
 struct ChatContext<'a> {
@@ -203,6 +205,13 @@ struct ChatContext<'a> {
     store_path: &'a Path,
     sessions: &'a SessionStore,
     project: &'a Path,
+    tools: &'a ToolBundle,
+}
+
+pub struct ChatResources<'a> {
+    pub sessions: &'a SessionStore,
+    pub project: &'a Path,
+    pub tools: &'a ToolBundle,
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -210,14 +219,16 @@ pub async fn run(
     store: &mut ProviderStore,
     provider_index: usize,
     store_path: &Path,
-    sessions: &SessionStore,
-    project: &Path,
+    resources: ChatResources<'_>,
     resumed: Option<(Session, Vec<Turn>)>,
     initial_prompt: Option<String>,
 ) -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
+    let sessions = resources.sessions;
+    let project = resources.project;
+    let tools = resources.tools;
     let context_capacity = if store.status_bar.items.contains(&StatusItem::Context) {
         models::catalog(&store.providers[provider_index])
             .await
@@ -255,6 +266,7 @@ pub async fn run(
                     store_path,
                     sessions,
                     project,
+                    tools,
                 },
                 resumed,
                 initial_prompt,
@@ -357,6 +369,7 @@ async fn run_loop(
                         sessions: context.sessions,
                         project: context.project,
                         status_config: &context.store.status_bar,
+                        tools: context.tools,
                     },
                     &mut session,
                     &mut turns,
@@ -490,11 +503,18 @@ async fn submit(
     let task_provider = context.provider.clone();
     let task_prompt = prompt.clone();
     let task_history = history.clone();
+    let task_tools = context.tools.clone();
     let task = tokio::spawn(async move {
-        artist_agent::stream_chat(&task_provider, &task_prompt, &task_history, |event| {
-            tx.send(event)
-                .map_err(|_| anyhow::anyhow!("chat UI closed"))
-        })
+        artist_agent::stream_chat(
+            &task_provider,
+            &task_prompt,
+            &task_history,
+            &task_tools,
+            |event| {
+                tx.send(event)
+                    .map_err(|_| anyhow::anyhow!("chat UI closed"))
+            },
+        )
         .await
     });
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(120));

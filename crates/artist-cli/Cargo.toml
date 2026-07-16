@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 artist-agent = { path = "../artist-agent" }
+artist-tools = { path = "../artist-tools" }
 fs2 = "0.4"
 ansi-to-tui = "7"
 anyhow = "1"
