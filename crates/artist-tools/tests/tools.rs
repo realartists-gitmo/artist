@@ -176,4 +176,31 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     )
     .await;
     assert!(sent.contains("got:hello"));
+
+    let background = call(
+        &bash,
+        json!({"mode":"exec","command":"sleep 0.05; echo done","background":true,"sessionId":"job","waitMs":1}),
+    )
+    .await;
+    assert!(background.contains("sessionId: job"));
+    let finished = call(
+        &bash,
+        json!({"mode":"read","sessionId":"job","waitMs":1000}),
+    )
+    .await;
+    assert!(finished.contains("status: completed"));
+    assert!(finished.contains("done"));
+
+    call(
+        &bash,
+        json!({"mode":"exec","command":"exit 7","background":true,"sessionId":"failed","waitMs":100}),
+    )
+    .await;
+    let failed = call(
+        &bash,
+        json!({"mode":"read","sessionId":"failed","waitMs":100}),
+    )
+    .await;
+    assert!(failed.contains("status: failed"));
+    assert!(failed.contains("exitCode: 7"));
 }

@@ -1,5 +1,5 @@
 use crate::{ToolError, Workspace, output};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use rig_core::tool::Tool;
 use serde::Deserialize;
@@ -23,6 +23,7 @@ const SESSION_CAP: usize = 2 * 1024 * 1024;
 pub struct BashTool {
     workspace: Workspace,
     sessions: Arc<DashMap<String, Arc<Session>>>,
+    starting: Arc<DashSet<String>>,
 }
 struct Session {
     command: String,
@@ -37,6 +38,7 @@ impl BashTool {
         Self {
             workspace,
             sessions: Arc::new(DashMap::new()),
+            starting: Arc::new(DashSet::new()),
         }
     }
 }
@@ -53,6 +55,7 @@ pub struct BashArgs {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     signal: Option<String>,
+    background: Option<bool>,
 }
 impl Tool for BashTool {
     const NAME: &'static str = "bash";
@@ -64,7 +67,7 @@ impl Tool for BashTool {
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"mode":{"enum":["exec","start","send","read","stop","list"]},"command":{"type":"string"},"sessionId":{"type":"string"},"input":{"type":"string"},"timeout":{"type":"integer"},"waitMs":{"type":"integer"},"maxBytes":{"type":"integer"},"cwd":{"type":"string"},"env":{"type":"object","additionalProperties":{"type":"string"}},"signal":{"enum":["SIGINT","SIGTERM","SIGKILL"]}},"additionalProperties":false})
+        json!({"type":"object","properties":{"mode":{"enum":["exec","start","send","read","stop","list"]},"command":{"type":"string"},"background":{"type":"boolean","default":false,"description":"Return a persistent session immediately so other work can continue."},"sessionId":{"type":"string"},"input":{"type":"string"},"timeout":{"type":"integer"},"waitMs":{"type":"integer"},"maxBytes":{"type":"integer"},"cwd":{"type":"string"},"env":{"type":"object","additionalProperties":{"type":"string"}},"signal":{"enum":["SIGINT","SIGTERM","SIGKILL"]}},"additionalProperties":false})
     }
     async fn call(&self, args: BashArgs) -> Result<String, ToolError> {
         let mode = args.mode.as_deref().unwrap_or(if args.command.is_some() {
@@ -73,6 +76,7 @@ impl Tool for BashTool {
             "list"
         });
         match mode {
+            "exec" if args.background.unwrap_or(false) => self.start(args).await,
             "exec" => self.exec(args).await,
             "start" => self.start(args).await,
             "send" => self.send(args).await,
@@ -147,9 +151,6 @@ impl BashTool {
         let id = args
             .session_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
-        if self.sessions.contains_key(&id) {
-            return Err(ToolError::Message(format!("session already exists: {id}")));
-        }
         let pair = NativePtySystem::default().openpty(PtySize {
             rows: 24,
             cols: 120,
@@ -165,10 +166,33 @@ impl BashTool {
                 builder.env(key, value);
             }
         }
-        let child = pair.slave.spawn_command(builder)?;
+        if self.sessions.contains_key(&id) || !self.starting.insert(id.clone()) {
+            return Err(ToolError::Message(format!("session already exists: {id}")));
+        }
+        let mut child = match pair.slave.spawn_command(builder) {
+            Ok(child) => child,
+            Err(error) => {
+                self.starting.remove(&id);
+                return Err(error.into());
+            }
+        };
         drop(pair.slave);
-        let writer = pair.master.take_writer()?;
-        let mut reader = pair.master.try_clone_reader()?;
+        let writer = match pair.master.take_writer() {
+            Ok(writer) => writer,
+            Err(error) => {
+                let _ = child.kill();
+                self.starting.remove(&id);
+                return Err(error.into());
+            }
+        };
+        let mut reader = match pair.master.try_clone_reader() {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                self.starting.remove(&id);
+                return Err(error.into());
+            }
+        };
         let output = Arc::new(Mutex::new(String::new()));
         let sink = output.clone();
         let cursor = Arc::new(Mutex::new(0usize));
@@ -204,9 +228,13 @@ impl BashTool {
                 child: Mutex::new(child),
             }),
         );
+        self.starting.remove(&id);
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(250))).await;
         let output = self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?;
-        Ok(format!("status: running\nsessionId: {id}\n{output}"))
+        Ok(format!(
+            "status: {}sessionId: {id}\n{output}",
+            self.session_status(&id)?
+        ))
     }
     async fn send(&self, args: BashArgs) -> Result<String, ToolError> {
         let id = args
@@ -220,7 +248,8 @@ impl BashTool {
         session.writer.lock().unwrap().flush()?;
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(100))).await;
         Ok(format!(
-            "status: running\nsessionId: {id}\n{}",
+            "status: {}sessionId: {id}\n{}",
+            self.session_status(&id)?,
             self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
         ))
     }
@@ -230,7 +259,8 @@ impl BashTool {
             .ok_or_else(|| ToolError::Message("sessionId is required".into()))?;
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(0))).await;
         Ok(format!(
-            "sessionId: {id}\n{}",
+            "status: {}sessionId: {id}\n{}",
+            self.session_status(&id)?,
             self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
         ))
     }
@@ -308,6 +338,25 @@ impl BashTool {
             .map(|v| v.clone())
             .ok_or_else(|| ToolError::Message(format!("unknown session: {id}")))
     }
+    fn session_status(&self, id: &str) -> Result<String, ToolError> {
+        let session = self.session(id)?;
+        Ok(
+            match session
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .try_wait()
+            {
+                Ok(Some(status)) if status.success() => {
+                    format!("completed\nexitCode: {}\n", status.exit_code())
+                }
+                Ok(Some(status)) => format!("failed\nexitCode: {}\n", status.exit_code()),
+                Ok(None) => "running\n".into(),
+                Err(_) => "unknown\n".into(),
+            },
+        )
+    }
+
     fn session_output(&self, id: &str, max: usize) -> Result<String, ToolError> {
         let s = self.session(id)?;
         let output = s.output.lock().unwrap_or_else(|poison| poison.into_inner());
