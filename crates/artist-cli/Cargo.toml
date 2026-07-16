@@ -14,7 +14,7 @@ artist-agent = { path = "../artist-agent" }
 fs2 = "0.4"
 ansi-to-tui = "7"
 anyhow = "1"
-charmed-glamour = "0.2"
+charmed-glamour = { version = "0.2", features = ["syntax-highlighting"] }
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
 dirs = "6"
