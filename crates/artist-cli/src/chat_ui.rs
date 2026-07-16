@@ -171,7 +171,7 @@ pub async fn run(
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
     let terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(4),
+        viewport: Viewport::Inline(3),
     });
     let keyboard_result = execute!(
         std::io::stdout(),
@@ -206,7 +206,7 @@ async fn run_loop(
 ) -> Result<()> {
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
-    let mut viewport_height = 4;
+    let mut viewport_height = 3;
     loop {
         resize_and_draw(&mut terminal, &input, &mut viewport_height)?;
         if let Some(prompt) = pending.take() {
@@ -249,8 +249,7 @@ fn resize_and_draw(
     viewport_height: &mut u16,
 ) -> Result<()> {
     let width = terminal.size()?.width.saturating_sub(2).max(1);
-    // Reserve the top row for streamed output so the input frame never moves.
-    let desired = input.visual_lines(width).saturating_add(3);
+    let desired = input.visual_lines(width).saturating_add(2);
     if desired != *viewport_height {
         *viewport_height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
@@ -300,7 +299,7 @@ async fn submit(
     insert_message(terminal, &prompt)?;
     let mut response = String::new();
     let mut visible = String::new();
-    let mut stream_height = 4;
+    let mut stream_height = 3;
     artist_agent::stream_chat(provider, &prompt, &history, |event| {
         match event {
             artist_agent::PromptEvent::TextDelta(delta) => {
@@ -444,13 +443,7 @@ fn draw_streaming(
 
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
     let area = frame.area();
-    let input_area = Rect::new(
-        area.x,
-        area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
-    );
-    render_input(frame, input_area, input);
+    render_input(frame, area, input);
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
@@ -571,16 +564,16 @@ mod tests {
 
     #[test]
     fn renders_at_full_width() {
-        let backend = TestBackend::new(20, 4);
+        let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| render(frame, &ChatInput::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 1)).unwrap().symbol(), "┌");
-        assert_eq!(buffer.cell((19, 1)).unwrap().symbol(), "┐");
-        assert_eq!(buffer.cell((1, 2)).unwrap().bg, Color::Reset);
-        assert_eq!(buffer.cell((0, 1)).unwrap().fg, Color::Rgb(128, 128, 128));
-        assert_eq!(buffer.cell((0, 3)).unwrap().fg, Color::Rgb(255, 255, 255));
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((19, 0)).unwrap().symbol(), "┐");
+        assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::Reset);
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Rgb(128, 128, 128));
+        assert_eq!(buffer.cell((0, 2)).unwrap().fg, Color::Rgb(255, 255, 255));
     }
 }
