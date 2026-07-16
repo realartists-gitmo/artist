@@ -368,8 +368,8 @@ async fn submit(
                         reasoning.push_str(&delta);
                     }
                     artist_agent::PromptEvent::ToolCall { .. }
-                    | artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
-                    artist_agent::PromptEvent::ToolResult { .. } => phase = "thinking",
+                    | artist_agent::PromptEvent::ToolExecutionStart { .. }
+                    | artist_agent::PromptEvent::ToolResult { .. } => phase = "working",
                 }
             }
         }
