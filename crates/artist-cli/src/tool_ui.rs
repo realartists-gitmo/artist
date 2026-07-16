@@ -196,16 +196,34 @@ fn compact_delegate_output(output: &str) -> String {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     if let Some(result) = value.get("output").and_then(Value::as_str) {
-        return format!("Completed\n{}", result.trim());
+        return format!("Completed\n{}", truncate_delegate_text(result));
     }
     if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return format!("Failed\n{}", error.trim());
+        return format!("Failed\n{}", truncate_delegate_text(error));
     }
     let id = value
         .get("taskId")
         .and_then(Value::as_str)
         .unwrap_or("delegate");
     format!("{id} · {status}")
+}
+
+fn truncate_delegate_text(output: &str) -> String {
+    const MAX_LINES: usize = 8;
+    const MAX_BYTES: usize = 600;
+    let lines = output.trim().lines().collect::<Vec<_>>();
+    let limited = lines
+        .iter()
+        .take(MAX_LINES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let was_truncated = lines.len() > MAX_LINES || limited.len() > MAX_BYTES;
+    let mut result = shortened(&limited, MAX_BYTES);
+    if was_truncated && !result.ends_with('…') {
+        result.push_str("\n…");
+    }
+    result
 }
 
 fn result_count(output: &str) -> usize {
@@ -283,6 +301,10 @@ mod tests {
             )
             .text,
             "= Completed\nFound the bug."
+        );
+        assert_eq!(
+            truncate_delegate_text("1\n2\n3\n4\n5\n6\n7\n8\n9"),
+            "1\n2\n3\n4\n5\n6\n7\n8\n…"
         );
     }
 }
