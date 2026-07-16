@@ -1,5 +1,7 @@
 use crate::{
-    command_ui, models,
+    command_ui,
+    interaction::{PromptHistory, SteeringQueue},
+    models,
     sessions::{Role, Session, SessionStore, Turn},
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
@@ -27,7 +29,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
-use std::{io::IsTerminal, path::Path};
+use std::{collections::VecDeque, io::IsTerminal, path::Path};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
@@ -199,6 +201,16 @@ struct SubmitContext<'a> {
     tools: &'a ToolBundle,
 }
 
+struct SubmitResult {
+    viewport_height: u16,
+    queued: Vec<String>,
+}
+
+struct StreamingControls<'a> {
+    input: &'a ChatInput,
+    steering: &'a SteeringQueue,
+}
+
 struct ChatContext<'a> {
     store: &'a mut ProviderStore,
     provider_index: usize,
@@ -291,6 +303,14 @@ async fn run_loop(
     let resumed_session = resumed.is_some();
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
+    let mut prompt_history = PromptHistory::from_prompts(
+        turns
+            .iter()
+            .filter(|turn| turn.role == Role::User)
+            .map(|turn| turn.content.clone())
+            .collect(),
+    );
+    let mut queued_prompts = VecDeque::new();
     let mut viewport_height = 3;
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
@@ -380,7 +400,8 @@ async fn run_loop(
                     &mut viewport_height,
                     3,
                 )?;
-                viewport_height = submit(
+                prompt_history.push(prompt.clone());
+                let result = submit(
                     &mut terminal,
                     SubmitContext {
                         provider: &context.store.providers[context.provider_index],
@@ -395,6 +416,9 @@ async fn run_loop(
                     prompt,
                 )
                 .await?;
+                viewport_height = result.viewport_height;
+                queued_prompts.extend(result.queued);
+                pending = queued_prompts.pop_front();
                 viewport_floor = 3;
             }
             continue;
@@ -416,6 +440,17 @@ async fn run_loop(
             {
                 input.text = slash_commands::completions(&input.text)[0].name.to_owned() + " ";
                 input.cursor = input.text.len();
+            }
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                    && !input.text.contains('\n') =>
+            {
+                if let Some(prompt) = prompt_history.navigate(key.code == KeyCode::Up, &input.text)
+                {
+                    input.text = prompt;
+                    input.cursor = input.text.len();
+                }
             }
             Event::Key(key) if !input.handle_key(key) => {
                 clear_inline(&mut terminal)?;
@@ -472,7 +507,7 @@ async fn submit(
     turns: &mut Vec<Turn>,
     status: &mut StatusRuntime,
     prompt: String,
-) -> Result<u16> {
+) -> Result<SubmitResult> {
     let started = std::time::Instant::now();
     let active = match session {
         Some(value) => value,
@@ -516,6 +551,9 @@ async fn submit(
     let mut tools = ToolUi::default();
     let mut stream_height = 3;
     let mut phase = "thinking";
+    let mut steering = SteeringQueue::default();
+    let mut steering_input = ChatInput::default();
+    let mut cancelled = false;
     let mut animation_frame = 0;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let task_provider = context.provider.clone();
@@ -542,6 +580,10 @@ async fn submit(
         &visible,
         true,
         &status_line(phase, started.elapsed(), animation_frame),
+        StreamingControls {
+            input: &steering_input,
+            steering: &steering,
+        },
         &footer,
         &mut stream_height,
     )?;
@@ -549,6 +591,47 @@ async fn submit(
         tokio::select! {
             _ = ticker.tick() => {
                 animation_frame = animation_frame.wrapping_add(1);
+                while event::poll(std::time::Duration::ZERO)? {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && (key.code == KeyCode::Esc
+                                || (key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL))) =>
+                        {
+                            task.abort();
+                            cancelled = true;
+                            break;
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Enter
+                            && !key.modifiers.contains(KeyModifiers::SHIFT)
+                            && !steering_input.text.trim().is_empty() =>
+                        {
+                            steering.submit(std::mem::take(&mut steering_input.text));
+                            steering_input.cursor = 0;
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
+                        {
+                            if let Some(value) = steering.navigate(key.code == KeyCode::Up, &steering_input.text) {
+                                steering_input.text = value;
+                                steering_input.cursor = steering_input.text.len();
+                            }
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
+                            && steering.selected().is_some() =>
+                        {
+                            steering.remove_selected();
+                            steering_input.text.clear();
+                            steering_input.cursor = 0;
+                        }
+                        Event::Key(key) => { steering_input.handle_key(key); }
+                        Event::Paste(text) => steering_input.insert(&text),
+                        _ => {}
+                    }
+                }
+                if cancelled { break; }
             }
             event = rx.recv() => if let Some(event) = event {
                 match event {
@@ -612,11 +695,20 @@ async fn submit(
             &visible,
             !response_output_started,
             &status_line(phase, started.elapsed(), animation_frame),
+            StreamingControls {
+                input: &steering_input,
+                steering: &steering,
+            },
             &footer,
             &mut stream_height,
         )?;
     }
-    let stream_result = task.await.context("join Artist agent")?;
+    let stream_result = if cancelled {
+        let _ = task.await;
+        None
+    } else {
+        Some(task.await.context("join Artist agent")?)
+    };
     if !reasoning.is_empty() {
         insert_reasoning(terminal, &reasoning)?;
     }
@@ -626,7 +718,11 @@ async fn submit(
     insert_blank(terminal)?;
     insert_status(
         terminal,
-        &format!("  {}", format_elapsed(started.elapsed())),
+        &if cancelled {
+            format!("  stopped · {}", format_elapsed(started.elapsed()))
+        } else {
+            format!("  {}", format_elapsed(started.elapsed()))
+        },
     )?;
     resize_and_draw(
         terminal,
@@ -636,7 +732,9 @@ async fn submit(
         &mut stream_height,
         3,
     )?;
-    stream_result?;
+    if let Some(result) = stream_result {
+        result?;
+    }
     turns.push(Turn {
         role: Role::User,
         content: prompt,
@@ -652,7 +750,10 @@ async fn submit(
         role: Role::Assistant,
         content: response,
     });
-    Ok(stream_height)
+    Ok(SubmitResult {
+        viewport_height: stream_height,
+        queued: steering.take(),
+    })
 }
 
 fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
@@ -921,6 +1022,7 @@ fn draw_streaming(
     response: &str,
     first: bool,
     status: &str,
+    controls: StreamingControls<'_>,
     footer: &Line<'_>,
     viewport_height: &mut u16,
 ) -> Result<()> {
@@ -939,7 +1041,16 @@ fn draw_streaming(
     // inserted into scrollback, so the viewport never grows and repositions it.
     let visible_response_height = 1;
     let footer_height = (!footer.spans.is_empty()) as u16;
-    let desired = 6u16.saturating_add(footer_height).min(terminal_size.height);
+    let queued_height = controls.steering.entries().len() as u16;
+    let input_height = controls
+        .input
+        .visual_lines(width.saturating_sub(2).max(1))
+        .saturating_add(2);
+    let desired = 3u16
+        .saturating_add(queued_height)
+        .saturating_add(input_height)
+        .saturating_add(footer_height)
+        .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
@@ -965,12 +1076,35 @@ fn draw_streaming(
                 .scroll((response_height.saturating_sub(visible_response_height), 0)),
             response_area,
         );
-        let status_area = Rect::new(
+        let queued_area = Rect::new(
             area.x,
             response_area.bottom().saturating_add(1),
             area.width,
-            1,
+            queued_height.min(area.height),
         );
+        let queued = controls
+            .steering
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(index, prompt)| {
+                Line::styled(
+                    truncate_display_line(
+                        &format!("  queued: {prompt}"),
+                        usize::from(area.width.max(1)),
+                    ),
+                    if controls.steering.selected() == Some(index) {
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(queued), queued_area);
+        let status_area = Rect::new(area.x, queued_area.bottom(), area.width, 1);
         frame.render_widget(
             Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
             status_area,
@@ -979,10 +1113,13 @@ fn draw_streaming(
             area.x,
             status_area.bottom(),
             area.width,
-            area.height
-                .saturating_sub(response_area.height.saturating_add(2 + footer_height)),
+            area.height.saturating_sub(
+                response_area
+                    .height
+                    .saturating_add(queued_height + 2 + footer_height),
+            ),
         );
-        render_input(frame, input_area, &ChatInput::default());
+        render_input(frame, input_area, controls.input);
         if footer_height == 1 {
             frame.render_widget(
                 Paragraph::new(footer.clone()),
