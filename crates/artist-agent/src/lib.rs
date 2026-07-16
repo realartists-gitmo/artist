@@ -1,4 +1,6 @@
-//! The tool-free Artist agent loop, built on Rig.
+//! The Artist agent loop, built on Rig.
+
+mod add;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
@@ -7,7 +9,7 @@ use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
     providers::chatgpt,
-    streaming::{StreamedAssistantContent, StreamingChat},
+    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
 
@@ -15,6 +17,19 @@ use serde_json::json;
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolExecutionStart {
+        id: String,
+        name: String,
+    },
+    ToolResult {
+        id: String,
+        content: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +71,11 @@ pub async fn stream_chat(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
-    let agent = builder.build();
+    let agent = builder
+        .tool(add::Add)
+        // A tool call consumes one turn; leave another turn for the final answer.
+        .default_max_turns(3)
+        .build();
     let messages = history.iter().map(|message| match message.role {
         ChatRole::User => rig_core::completion::Message::user(&message.content),
         ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),
@@ -73,6 +92,29 @@ pub async fn stream_chat(
                     reasoning,
                 },
             ) => on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?,
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call,
+                internal_call_id,
+            }) => on_event(PromptEvent::ToolCall {
+                id: internal_call_id,
+                name: tool_call.function.name,
+                arguments: tool_call.function.arguments,
+            })?,
+            MultiTurnStreamItem::ToolExecutionStart {
+                tool_call,
+                internal_call_id,
+            } => on_event(PromptEvent::ToolExecutionStart {
+                id: internal_call_id,
+                name: tool_call.function.name,
+            })?,
+            MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                tool_result,
+                internal_call_id,
+            }) => on_event(PromptEvent::ToolResult {
+                id: internal_call_id,
+                content: serde_json::to_string(&tool_result.content)
+                    .context("serialize tool result")?,
+            })?,
             _ => {}
         }
     }

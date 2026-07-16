@@ -343,6 +343,9 @@ async fn submit(
                 )?;
             }
             artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => reasoning.push_str(&delta),
+            artist_agent::PromptEvent::ToolCall { .. }
+            | artist_agent::PromptEvent::ToolExecutionStart { .. }
+            | artist_agent::PromptEvent::ToolResult { .. } => {}
         }
         Ok(())
     })

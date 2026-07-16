@@ -207,6 +207,9 @@ async fn execute_prompt(
                 }
                 write!(output, "{delta}")?;
             }
+            PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
+            PromptEvent::ToolExecutionStart { .. } => {}
+            PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
         }
         output.flush()?;
         Ok(())
