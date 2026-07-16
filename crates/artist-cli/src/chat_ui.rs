@@ -1,7 +1,8 @@
 use crate::{
-    command_ui,
+    command_ui, models,
     sessions::{Role, Session, SessionStore, Turn},
     slash_commands,
+    status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
     tool_ui::ToolUi,
 };
@@ -166,6 +167,36 @@ impl ChatInput {
     }
 }
 
+#[derive(Default)]
+struct StatusRuntime {
+    git_branch: Option<String>,
+    used_tokens: Option<u64>,
+    context_capacity: Option<u64>,
+}
+
+fn footer_line(
+    config: &StatusBarConfig,
+    provider: &SavedProvider,
+    project: &Path,
+    runtime: &StatusRuntime,
+) -> Line<'static> {
+    status_bar::render(&status_bar::segments(
+        config,
+        project,
+        provider,
+        runtime.git_branch.as_deref(),
+        runtime.used_tokens,
+        runtime.context_capacity,
+    ))
+}
+
+struct SubmitContext<'a> {
+    provider: &'a SavedProvider,
+    sessions: &'a SessionStore,
+    project: &'a Path,
+    status_config: &'a StatusBarConfig,
+}
+
 struct ChatContext<'a> {
     store: &'a mut ProviderStore,
     provider_index: usize,
@@ -187,6 +218,26 @@ pub async fn run(
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
+    let context_capacity = if store.status_bar.items.contains(&StatusItem::Context) {
+        models::catalog(&store.providers[provider_index])
+            .await
+            .ok()
+            .and_then(|catalog| {
+                catalog
+                    .iter()
+                    .find(|model| {
+                        Some(&model.slug) == store.providers[provider_index].model.as_ref()
+                    })
+                    .and_then(|model| model.effective_context_window())
+            })
+    } else {
+        None
+    };
+    let status = StatusRuntime {
+        git_branch: status_bar::git_branch(project),
+        used_tokens: None,
+        context_capacity,
+    };
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
     });
@@ -207,6 +258,7 @@ pub async fn run(
                 },
                 resumed,
                 initial_prompt,
+                status,
             )
             .await
         }
@@ -222,6 +274,7 @@ async fn run_loop(
     context: ChatContext<'_>,
     resumed: Option<(Session, Vec<Turn>)>,
     mut pending: Option<String>,
+    mut status: StatusRuntime,
 ) -> Result<()> {
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
@@ -238,10 +291,17 @@ async fn run_loop(
         } else {
             &suggestions
         };
+        let footer = footer_line(
+            &context.store.status_bar,
+            &context.store.providers[context.provider_index],
+            context.project,
+            &status,
+        );
         resize_and_draw(
             &mut terminal,
             &input,
             panel,
+            &footer,
             &mut viewport_height,
             viewport_floor,
         )?;
@@ -250,7 +310,7 @@ async fn run_loop(
                 command_panel = match command {
                     Ok(command) => {
                         let command_input = ChatInput::default();
-                        command_ui::run(
+                        match command_ui::run(
                             context.store,
                             context.provider_index,
                             context.store_path,
@@ -260,13 +320,23 @@ async fn run_loop(
                                     &mut terminal,
                                     &command_input,
                                     panel,
+                                    &footer,
                                     &mut viewport_height,
                                     3,
                                 )
                             },
                         )
                         .await
-                        .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
+                        {
+                            Ok(output) => {
+                                if output.model_changed {
+                                    status.context_capacity = output.context_capacity;
+                                    status.used_tokens = None;
+                                }
+                                output.lines
+                            }
+                            Err(error) => vec![format!("Error: {error:#}")],
+                        }
                     }
                     Err(error) => vec![command_ui::format_parse_error(error)],
                 };
@@ -276,16 +346,21 @@ async fn run_loop(
                     &mut terminal,
                     &ChatInput::default(),
                     &[],
+                    &footer,
                     &mut viewport_height,
                     3,
                 )?;
                 viewport_height = submit(
                     &mut terminal,
-                    &context.store.providers[context.provider_index],
-                    context.sessions,
-                    context.project,
+                    SubmitContext {
+                        provider: &context.store.providers[context.provider_index],
+                        sessions: context.sessions,
+                        project: context.project,
+                        status_config: &context.store.status_bar,
+                    },
                     &mut session,
                     &mut turns,
+                    &mut status,
                     prompt,
                 )
                 .await?;
@@ -326,6 +401,7 @@ fn resize_and_draw(
     terminal: &mut ratatui::DefaultTerminal,
     input: &ChatInput,
     panel: &[String],
+    footer: &Line<'_>,
     viewport_height: &mut u16,
     viewport_floor: u16,
 ) -> Result<()> {
@@ -335,10 +411,12 @@ fn resize_and_draw(
     } else {
         panel.len() as u16 + 2
     };
+    let status_height = (!footer.spans.is_empty()) as u16;
     let desired = input
         .visual_lines(width)
         .saturating_add(2)
         .saturating_add(panel_height)
+        .saturating_add(status_height)
         .max(viewport_floor);
     if desired != *viewport_height {
         *viewport_height = desired;
@@ -347,28 +425,27 @@ fn resize_and_draw(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
-        terminal.draw(|frame| render_with_panel(frame, input, panel))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel, footer))?;
         terminal.show_cursor()?;
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;
     } else {
-        terminal.draw(|frame| render_with_panel(frame, input, panel))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel, footer))?;
     }
     Ok(())
 }
 
 async fn submit(
     terminal: &mut ratatui::DefaultTerminal,
-    provider: &SavedProvider,
-    sessions: &SessionStore,
-    project: &Path,
+    context: SubmitContext<'_>,
     session: &mut Option<Session>,
     turns: &mut Vec<Turn>,
+    status: &mut StatusRuntime,
     prompt: String,
 ) -> Result<u16> {
     let started = std::time::Instant::now();
     let active = match session {
         Some(value) => value,
-        None => session.insert(sessions.create(project, Some(&prompt))?),
+        None => session.insert(context.sessions.create(context.project, Some(&prompt))?),
     };
     let history = turns
         .iter()
@@ -380,7 +457,7 @@ async fn submit(
             content: turn.content.clone(),
         })
         .collect::<Vec<_>>();
-    sessions.append(
+    context.sessions.append(
         &active.id,
         &Turn {
             role: Role::User,
@@ -392,7 +469,13 @@ async fn submit(
     }
     insert_message(terminal, &prompt)?;
     let empty_input = ChatInput::default();
-    terminal.draw(|frame| render(frame, &empty_input))?;
+    let mut footer = footer_line(
+        context.status_config,
+        context.provider,
+        context.project,
+        status,
+    );
+    terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer))?;
     terminal.show_cursor()?;
     let mut response = String::new();
     let mut visible = String::new();
@@ -404,7 +487,7 @@ async fn submit(
     let mut phase = "thinking";
     let mut animation_frame = 0;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let task_provider = provider.clone();
+    let task_provider = context.provider.clone();
     let task_prompt = prompt.clone();
     let task_history = history.clone();
     let task = tokio::spawn(async move {
@@ -421,6 +504,7 @@ async fn submit(
         &visible,
         true,
         &status_line(phase, started.elapsed(), animation_frame),
+        &footer,
         &mut stream_height,
     )?;
     while !task.is_finished() || !rx.is_empty() {
@@ -466,6 +550,17 @@ async fn submit(
                         let output = tools.output(&id, &content);
                         insert_tool_line(terminal, &output, false)?;
                     }
+                    artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
+                        if total_tokens > 0 {
+                            status.used_tokens = Some(total_tokens);
+                        }
+                        footer = footer_line(
+                            context.status_config,
+                            context.provider,
+                            context.project,
+                            status,
+                        );
+                    }
                 }
             }
         }
@@ -474,6 +569,7 @@ async fn submit(
             &visible,
             !response_output_started,
             &status_line(phase, started.elapsed(), animation_frame),
+            &footer,
             &mut stream_height,
         )?;
     }
@@ -489,13 +585,20 @@ async fn submit(
         terminal,
         &format!("  {}", format_elapsed(started.elapsed())),
     )?;
-    resize_and_draw(terminal, &ChatInput::default(), &[], &mut stream_height, 3)?;
+    resize_and_draw(
+        terminal,
+        &ChatInput::default(),
+        &[],
+        &footer,
+        &mut stream_height,
+        3,
+    )?;
     stream_result?;
     turns.push(Turn {
         role: Role::User,
         content: prompt,
     });
-    sessions.append(
+    context.sessions.append(
         &active.id,
         &Turn {
             role: Role::Assistant,
