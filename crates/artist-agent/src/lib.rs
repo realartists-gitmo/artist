@@ -2,6 +2,9 @@
 
 mod delegate;
 mod delegate_jobs;
+mod steering;
+
+pub use steering::SteeringHandle;
 
 use anyhow::{Context, Result};
 use artist_tools::ToolBundle;
@@ -56,6 +59,7 @@ pub async fn stream_chat(
     input: &str,
     history: &[ChatMessage],
     tools: &ToolBundle,
+    steering: SteeringHandle,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
     let model = provider
@@ -92,6 +96,7 @@ pub async fn stream_chat(
         .collect::<Vec<_>>();
     let mut fork_context = messages.clone();
     fork_context.push(rig_core::completion::Message::user(input));
+    let visible_steering = steering.clone();
     let agent = builder
         .preamble(&system_prompt)
         .tool(tools.bash.clone())
@@ -100,6 +105,7 @@ pub async fn stream_chat(
         .tool(tools.grep.clone())
         .tool(tools.edit.clone())
         .tool(tools.write.clone())
+        .add_hook(steering::SteeringHook(steering))
         .tool(delegate::Delegate::new(
             provider.clone(),
             tools.clone(),
@@ -152,6 +158,9 @@ pub async fn stream_chat(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                let content = visible_steering
+                    .take_original_result(&internal_call_id)
+                    .unwrap_or(content);
                 on_event(PromptEvent::ToolResult {
                     id: internal_call_id,
                     content,
@@ -170,5 +179,13 @@ pub async fn stream_prompt(
     tools: &ToolBundle,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
-    stream_chat(provider, input, &[], tools, on_event).await
+    stream_chat(
+        provider,
+        input,
+        &[],
+        tools,
+        SteeringHandle::default(),
+        on_event,
+    )
+    .await
 }

@@ -219,6 +219,7 @@ async fn execute_prompt(
         input,
         &history,
         &tools,
+        artist_agent::SteeringHandle::default(),
         |event| {
             use artist_agent::PromptEvent;
             use std::io::Write;
