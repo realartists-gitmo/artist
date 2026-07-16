@@ -460,8 +460,10 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
 }
 
 fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
+    let mut style = glamour::Style::Dark.config();
+    style.document.margin = Some(0);
     let rendered = glamour::Renderer::new()
-        .with_style(glamour::Style::Dark)
+        .with_style_config(style)
         .with_word_wrap(width.saturating_sub(4).max(1))
         .render(markdown);
     let mut text = rendered.into_text().context("parse Glamour output")?;
