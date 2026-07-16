@@ -1,13 +1,17 @@
 mod bash;
-mod files;
+mod edit;
 mod output;
+mod read;
 mod search;
 mod workspace;
+mod write;
 
 pub use bash::BashTool;
-pub use files::{EditTool, ReadTool, WriteTool};
+pub use edit::EditTool;
+pub use read::ReadTool;
 pub use search::{FindTool, GrepTool};
 pub use workspace::Workspace;
+pub use write::WriteTool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
