@@ -8,12 +8,16 @@ pub use steering::SteeringHandle;
 
 use anyhow::{Context, Result};
 use artist_tools::ToolBundle;
+use base64::Engine;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
+    OneOrMany,
     agent::MultiTurnStreamItem,
     client::CompletionClient,
-    completion::message::ToolResultContent,
+    completion::message::{
+        DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
+    },
     providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
@@ -53,10 +57,58 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ImageAttachment {
+    pub data: Vec<u8>,
+    pub media_type: ImageMediaType,
+}
+
+impl ImageAttachment {
+    pub fn png(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            media_type: ImageMediaType::PNG,
+        }
+    }
+    pub fn jpeg(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            media_type: ImageMediaType::JPEG,
+        }
+    }
+    pub fn gif(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            media_type: ImageMediaType::GIF,
+        }
+    }
+    pub fn webp(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            media_type: ImageMediaType::WEBP,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatInput {
+    pub text: String,
+    pub images: Vec<ImageAttachment>,
+}
+
+impl From<String> for ChatInput {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
 /// Executes one prompt with prior chat context and emits model output as it arrives.
 pub async fn stream_chat(
     provider: &SavedProvider,
-    input: &str,
+    input: &ChatInput,
     history: &[ChatMessage],
     tools: &ToolBundle,
     steering: SteeringHandle,
@@ -95,7 +147,8 @@ pub async fn stream_chat(
         })
         .collect::<Vec<_>>();
     let mut fork_context = messages.clone();
-    fork_context.push(rig_core::completion::Message::user(input));
+    let input_message = user_message(input);
+    fork_context.push(input_message.clone());
     let visible_steering = steering.clone();
     let agent = builder
         .preamble(&system_prompt)
@@ -113,7 +166,7 @@ pub async fn stream_chat(
         ))
         .default_max_turns(usize::MAX)
         .build();
-    let mut stream = agent.stream_chat(input, messages).await;
+    let mut stream = agent.stream_chat(input_message, messages).await;
     while let Some(item) = stream.next().await {
         match item.context("stream Artist agent")? {
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
@@ -172,6 +225,23 @@ pub async fn stream_chat(
     Ok(())
 }
 
+pub(crate) fn user_message(input: &ChatInput) -> Message {
+    let mut content = vec![UserContent::text(input.text.clone())];
+    content.extend(input.images.iter().map(|attachment| {
+        UserContent::Image(Image {
+            data: DocumentSourceKind::Base64(
+                base64::engine::general_purpose::STANDARD.encode(&attachment.data),
+            ),
+            media_type: Some(attachment.media_type.clone()),
+            detail: None,
+            additional_params: None,
+        })
+    }));
+    Message::User {
+        content: OneOrMany::many(content).expect("chat input always contains text"),
+    }
+}
+
 /// Executes a prompt without prior context.
 pub async fn stream_prompt(
     provider: &SavedProvider,
@@ -179,9 +249,10 @@ pub async fn stream_prompt(
     tools: &ToolBundle,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
+    let input = ChatInput::from(input.to_owned());
     stream_chat(
         provider,
-        input,
+        &input,
         &[],
         tools,
         SteeringHandle::default(),
