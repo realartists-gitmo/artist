@@ -120,7 +120,11 @@ pub(crate) fn segments(
 }
 
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = Vec::new();
+    let mut spans = if segments.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::raw(" ")]
+    };
     for (index, segment) in segments.iter().enumerate() {
         if index != 0 {
             spans.push(Span::styled(
@@ -223,6 +227,8 @@ mod tests {
             text: "gpt-5".into(),
         };
         assert_eq!(segment.render().style.bg, Some(Color::Gray));
-        assert_eq!(render(&[segment]).spans.len(), 1);
+        let rendered = render(&[segment]);
+        assert_eq!(rendered.spans.len(), 2);
+        assert_eq!(rendered.spans[0].content, " ");
     }
 }
