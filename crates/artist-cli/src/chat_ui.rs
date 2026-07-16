@@ -511,10 +511,10 @@ fn insert_tool_line(
         .sum::<usize>() as u16;
     terminal.insert_before(height.max(1), |buffer| {
         Block::default()
-            .style(Style::default().bg(Color::DarkGray))
+            .style(Style::default().bg(Color::Rgb(32, 32, 32)))
             .render(buffer.area, buffer);
         Paragraph::new(Text::from(text))
-            .style(Style::default().fg(Color::White).bg(Color::DarkGray))
+            .style(Style::default().fg(Color::White).bg(Color::Rgb(32, 32, 32)))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
     })?;
