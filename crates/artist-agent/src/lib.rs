@@ -1,6 +1,9 @@
 //! The Artist agent loop, built on Rig.
 
+mod delegate;
+
 use anyhow::{Context, Result};
+use artist_tools::{TOOL_POLICY, ToolBundle};
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
@@ -51,6 +54,7 @@ pub async fn stream_chat(
     provider: &SavedProvider,
     input: &str,
     history: &[ChatMessage],
+    tools: &ToolBundle,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
     let model = provider
@@ -73,7 +77,20 @@ pub async fn stream_chat(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
-    let agent = builder.build();
+    let agent = builder
+        .preamble(TOOL_POLICY)
+        .tool(tools.bash.clone())
+        .tool(tools.read.clone())
+        .tool(tools.find.clone())
+        .tool(tools.grep.clone())
+        .tool(tools.edit.clone())
+        .tool(tools.write.clone())
+        .tool(delegate::Delegate {
+            provider: provider.clone(),
+            tools: tools.clone(),
+        })
+        .default_max_turns(12)
+        .build();
     let messages = history.iter().map(|message| match message.role {
         ChatRole::User => rig_core::completion::Message::user(&message.content),
         ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),
@@ -138,7 +155,8 @@ pub async fn stream_chat(
 pub async fn stream_prompt(
     provider: &SavedProvider,
     input: &str,
+    tools: &ToolBundle,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
-    stream_chat(provider, input, &[], on_event).await
+    stream_chat(provider, input, &[], tools, on_event).await
 }
