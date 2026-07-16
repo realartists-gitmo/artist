@@ -1194,7 +1194,7 @@ fn draw_streaming(
             .map(|(index, prompt)| {
                 Line::styled(
                     truncate_display_line(
-                        &format!("  queued: {prompt}"),
+                        &format!("  󰐕  {prompt}"),
                         usize::from(area.width.max(1)),
                     ),
                     if controls.steering.selected() == Some(index) {
