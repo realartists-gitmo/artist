@@ -1,7 +1,7 @@
 use rig_core::tool::Tool;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::convert::Infallible;
+use std::{error::Error, fmt};
 
 /// Adds two signed integers.
 #[derive(Clone, Copy)]
@@ -13,9 +13,19 @@ pub(crate) struct AddArgs {
     right: i64,
 }
 
+#[derive(Debug)]
+pub(crate) struct AddError;
+
+impl fmt::Display for AddError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("integer addition overflowed")
+    }
+}
+impl Error for AddError {}
+
 impl Tool for Add {
     const NAME: &'static str = "add_integers";
-    type Error = Infallible;
+    type Error = AddError;
     type Args = AddArgs;
     type Output = i64;
 
@@ -35,8 +45,8 @@ impl Tool for Add {
         })
     }
 
-    async fn call(&self, args: AddArgs) -> Result<i64, Infallible> {
-        Ok(args.left + args.right)
+    async fn call(&self, args: AddArgs) -> Result<i64, AddError> {
+        args.left.checked_add(args.right).ok_or(AddError)
     }
 }
 
@@ -47,6 +57,11 @@ mod tests {
     #[test]
     fn adds_signed_integers() {
         let result = futures::executor::block_on(Add.call(AddArgs { left: -2, right: 5 }));
-        assert_eq!(result, Ok(3));
+        assert_eq!(result.unwrap(), 3);
+        let overflow = futures::executor::block_on(Add.call(AddArgs {
+            left: i64::MAX,
+            right: 1,
+        }));
+        assert!(overflow.is_err());
     }
 }

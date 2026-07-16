@@ -282,6 +282,7 @@ async fn submit(
     turns: &mut Vec<Turn>,
     prompt: String,
 ) -> Result<u16> {
+    let started = std::time::Instant::now();
     let active = match session {
         Some(value) => value,
         None => session.insert(sessions.create(project, Some(&prompt))?),
@@ -313,50 +314,85 @@ async fn submit(
     let mut response_started = false;
     let mut response_output_started = false;
     let mut stream_height = 3;
-    artist_agent::stream_chat(provider, &prompt, &history, |event| {
-        match event {
-            artist_agent::PromptEvent::TextDelta(delta) => {
-                let had_reasoning = !reasoning.is_empty();
-                if had_reasoning {
-                    insert_reasoning(terminal, &reasoning)?;
-                    reasoning.clear();
-                    resize_and_draw(terminal, &empty_input, &mut stream_height, 3)?;
-                }
-                if !response_started {
-                    if !had_reasoning {
-                        insert_blank(terminal)?;
-                    }
-                    response_started = true;
-                }
-                response.push_str(&delta);
-                visible.push_str(&delta);
-                let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
-                while let Some(line) = take_visible_line(&mut visible, width) {
-                    insert_response(terminal, &line, !response_output_started)?;
-                    response_output_started = true;
-                }
-                draw_streaming(
-                    terminal,
-                    &visible,
-                    !response_output_started,
-                    &mut stream_height,
-                )?;
+    let mut phase = "thinking";
+    let mut animation_frame = 0;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task_provider = provider.clone();
+    let task_prompt = prompt.clone();
+    let task_history = history.clone();
+    let task = tokio::spawn(async move {
+        artist_agent::stream_chat(&task_provider, &task_prompt, &task_history, |event| {
+            tx.send(event)
+                .map_err(|_| anyhow::anyhow!("chat UI closed"))
+        })
+        .await
+    });
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(120));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    draw_streaming(
+        terminal,
+        &visible,
+        true,
+        &status_line(phase, started.elapsed(), animation_frame),
+        &mut stream_height,
+    )?;
+    while !task.is_finished() || !rx.is_empty() {
+        tokio::select! {
+            _ = ticker.tick() => {
+                animation_frame = animation_frame.wrapping_add(1);
             }
-            artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => reasoning.push_str(&delta),
-            artist_agent::PromptEvent::ToolCall { .. }
-            | artist_agent::PromptEvent::ToolExecutionStart { .. }
-            | artist_agent::PromptEvent::ToolResult { .. } => {}
+            event = rx.recv() => if let Some(event) = event {
+                match event {
+                    artist_agent::PromptEvent::TextDelta(delta) => {
+                        phase = "responding";
+                        let had_reasoning = !reasoning.is_empty();
+                        if had_reasoning {
+                            insert_reasoning(terminal, &reasoning)?;
+                            reasoning.clear();
+                        }
+                        if !response_started {
+                            if !had_reasoning { insert_blank(terminal)?; }
+                            response_started = true;
+                        }
+                        response.push_str(&delta);
+                        visible.push_str(&delta);
+                        let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
+                        while let Some(line) = take_visible_line(&mut visible, width) {
+                            insert_response(terminal, &line, !response_output_started)?;
+                            response_output_started = true;
+                        }
+                    }
+                    artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
+                        phase = "thinking";
+                        reasoning.push_str(&delta);
+                    }
+                    artist_agent::PromptEvent::ToolCall { .. }
+                    | artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
+                    artist_agent::PromptEvent::ToolResult { .. } => phase = "thinking",
+                }
+            }
         }
-        Ok(())
-    })
-    .await?;
+        draw_streaming(
+            terminal,
+            &visible,
+            !response_output_started,
+            &status_line(phase, started.elapsed(), animation_frame),
+            &mut stream_height,
+        )?;
+    }
+    let stream_result = task.await.context("join Artist agent")?;
     if !reasoning.is_empty() {
         insert_reasoning(terminal, &reasoning)?;
     }
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
+    insert_status(
+        terminal,
+        &format!("  {}", format_elapsed(started.elapsed())),
+    )?;
     resize_and_draw(terminal, &ChatInput::default(), &mut stream_height, 4)?;
+    stream_result?;
     turns.push(Turn {
         role: Role::User,
         content: prompt,
@@ -526,10 +562,41 @@ fn insert_response(
     Ok(())
 }
 
+fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
+    const FRAMES: [&str; 6] = ["▓", "▒", "░", " ", "░", "▒"];
+    format!(
+        "  {} {phase} [{} elapsed]",
+        FRAMES[frame % FRAMES.len()],
+        format_elapsed(elapsed)
+    )
+}
+
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours == 0 {
+        format!("{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Result<()> {
+    terminal.insert_before(1, |buffer| {
+        Paragraph::new(status)
+            .style(Style::default().fg(Color::DarkGray))
+            .render(buffer.area, buffer);
+    })?;
+    Ok(())
+}
+
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
     response: &str,
     first: bool,
+    status: &str,
     viewport_height: &mut u16,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
@@ -572,9 +639,14 @@ fn draw_streaming(
                 .scroll((response_height.saturating_sub(visible_response_height), 0)),
             response_area,
         );
+        let status_area = Rect::new(area.x, response_area.bottom(), area.width, 1);
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            status_area,
+        );
         let input_area = Rect::new(
             area.x,
-            response_area.bottom().saturating_add(1),
+            status_area.bottom(),
             area.width,
             area.height
                 .saturating_sub(response_area.height.saturating_add(1)),
@@ -768,6 +840,20 @@ mod tests {
             colors.len() > 1,
             "expected multiple syntax colors: {colors:?}"
         );
+    }
+
+    #[test]
+    fn formats_activity_elapsed_time() {
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(65)), "01:05");
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(3_661)),
+            "01:01:01"
+        );
+        assert_eq!(
+            status_line("thinking", std::time::Duration::ZERO, 0),
+            "  ▓ thinking [00:00 elapsed]"
+        );
+        assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
     }
 
     #[test]
