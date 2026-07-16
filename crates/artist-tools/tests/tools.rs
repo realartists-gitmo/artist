@@ -161,6 +161,13 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     )
     .await;
     assert!(output.contains("ok"));
+    let bounded = call(
+        &bash,
+        json!({"mode":"exec","command":"yes x | head -c 100000","maxBytes":128}),
+    )
+    .await;
+    assert!(bounded.len() < 300);
+    assert!(bounded.contains("truncated: true"));
     let started = call(&bash, json!({"mode":"start","command":"read line; echo got:$line","sessionId":"shell","waitMs":10})).await;
     assert!(started.contains("sessionId: shell"));
     let sent = call(

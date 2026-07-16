@@ -7,10 +7,14 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
+    process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 const EXEC_CAP: usize = 50 * 1024;
 const SESSION_CAP: usize = 2 * 1024 * 1024;
@@ -90,30 +94,51 @@ impl BashTool {
             .arg("-lc")
             .arg(command)
             .current_dir(cwd)
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        process.process_group(0);
         if let Some(env) = args.env {
             process.envs(env);
         }
+        let cap = args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP);
+        let mut child = process.spawn()?;
+        let buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
+        let stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
+        let stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
         let timeout = Duration::from_secs(args.timeout.unwrap_or(120));
-        match tokio::time::timeout(timeout, process.output()).await {
+        let (status, exit_code) = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(result) => {
-                let result = result?;
-                let mut output = String::from_utf8_lossy(&result.stdout).into_owned();
-                output.push_str(&String::from_utf8_lossy(&result.stderr));
-                let (output, truncated) =
-                    output::tail(output, args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP));
-                Ok(format!(
-                    "status: {}\nexitCode: {:?}\ntruncated: {truncated}\n{output}",
-                    if result.status.success() {
+                let status = result?;
+                (
+                    if status.success() {
                         "completed"
                     } else {
                         "failed"
                     },
-                    result.status.code()
-                ))
+                    status.code(),
+                )
             }
-            Err(_) => Ok("status: timedOut\ntruncated: false".into()),
-        }
+            Err(_) => {
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    let _ = nix::sys::signal::killpg(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ = child.kill().await;
+                ("timedOut", None)
+            }
+        };
+        let _ = tokio::join!(stdout, stderr);
+        let buffer = buffer.lock().await;
+        let output = String::from_utf8_lossy(&buffer.0);
+        Ok(format!(
+            "status: {status}\nexitCode: {exit_code:?}\ntruncated: {}\n{output}",
+            buffer.1
+        ))
     }
     async fn start(&self, args: BashArgs) -> Result<String, ToolError> {
         let command = args
@@ -293,5 +318,25 @@ impl BashTool {
             .to_owned();
         *cursor = output.len();
         Ok(output::tail(text, max.min(50 * 1024)).0)
+    }
+}
+
+async fn pump(
+    mut reader: impl AsyncRead + Unpin,
+    buffer: Arc<tokio::sync::Mutex<(Vec<u8>, bool)>>,
+    cap: usize,
+) {
+    let mut chunk = [0u8; 4096];
+    while let Ok(count) = reader.read(&mut chunk).await {
+        if count == 0 {
+            break;
+        }
+        let mut output = buffer.lock().await;
+        output.0.extend_from_slice(&chunk[..count]);
+        if output.0.len() > cap {
+            let drain = output.0.len() - cap;
+            output.0.drain(..drain);
+            output.1 = true;
+        }
     }
 }
