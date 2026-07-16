@@ -1,3 +1,4 @@
+use llm_provider::SavedProvider;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -68,15 +69,57 @@ pub(crate) struct StatusSegment {
 }
 
 impl StatusSegment {
-    pub fn render(&self) -> Span<'_> {
+    pub fn render(&self) -> Span<'static> {
         Span::styled(
-            self.text.as_str(),
+            self.text.clone(),
             Style::default().fg(Color::Black).bg(Color::Gray),
         )
     }
 }
 
-pub(crate) fn render(segments: &[StatusSegment]) -> Line<'_> {
+pub(crate) fn segments(
+    config: &StatusBarConfig,
+    project: &Path,
+    provider: &SavedProvider,
+    git_branch: Option<&str>,
+    used_tokens: Option<u64>,
+    context_capacity: Option<u64>,
+) -> Vec<StatusSegment> {
+    config
+        .items
+        .iter()
+        .map(|item| StatusSegment {
+            item: *item,
+            text: match item {
+                StatusItem::ProjectDirectory => project
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_else(|| project.to_str().unwrap_or("—"))
+                    .to_owned(),
+                StatusItem::GitBranch => git_branch.unwrap_or("—").to_owned(),
+                StatusItem::Model => provider.model.clone().unwrap_or_else(|| "—".into()),
+                StatusItem::Reasoning => provider
+                    .reasoning_effort
+                    .clone()
+                    .unwrap_or_else(|| "default".into()),
+                StatusItem::Context => match (used_tokens, context_capacity) {
+                    (Some(used), Some(capacity)) if capacity > 0 => {
+                        let remaining = context_remaining(used, capacity);
+                        format!(
+                            "{}%/{}",
+                            remaining.saturating_mul(100) / capacity,
+                            format_tokens(capacity)
+                        )
+                    }
+                    (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
+                    _ => "—/—".into(),
+                },
+            },
+        })
+        .collect()
+}
+
+pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         if index != 0 {
@@ -150,6 +193,27 @@ mod tests {
         assert_eq!(format_tokens(12_000), "12k");
         assert_eq!(format_tokens(2_000_000), "2m");
         assert_eq!(context_remaining(120, 100), 0);
+    }
+
+    #[test]
+    fn builds_default_runtime_values_and_context_percentage() {
+        let provider: SavedProvider = serde_json::from_value(serde_json::json!({
+            "id":"x", "name":"x", "base_url":"https://example.com/",
+            "model":"gpt-test", "reasoning_effort":"high",
+            "auth":{"access_token":"token","refresh_token":"refresh","account_id":"account"}
+        }))
+        .unwrap();
+        let segments = segments(
+            &StatusBarConfig::default(),
+            Path::new("/tmp/project"),
+            &provider,
+            Some("main"),
+            Some(25),
+            Some(100),
+        );
+        assert_eq!(segments[0].text, "project");
+        assert_eq!(segments[1].text, "main");
+        assert_eq!(segments[4].text, "75%/100");
     }
 
     #[test]

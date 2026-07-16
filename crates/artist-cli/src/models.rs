@@ -44,7 +44,6 @@ fn default_context_percent() -> u64 {
 
 impl SelectableModel {
     /// Context available to the client after the service's reserved percentage.
-    #[allow(dead_code)] // Consumed by the pending status-bar UI integration.
     pub(crate) fn effective_context_window(&self) -> Option<u64> {
         self.context_window
             .map(|window| window.saturating_mul(self.effective_context_window_percent) / 100)
