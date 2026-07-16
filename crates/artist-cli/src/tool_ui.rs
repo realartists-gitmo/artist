@@ -9,6 +9,11 @@ pub struct ToolUi {
     calls: HashMap<String, CallState>,
 }
 
+pub struct ToolOutput {
+    pub text: String,
+    pub is_diff: bool,
+}
+
 struct CallState {
     name: String,
     output_started: bool,
@@ -31,7 +36,7 @@ impl ToolUi {
 
     /// Formats a bounded output chunk. Future streaming tools can call this
     /// repeatedly without allowing tool output to dominate the transcript.
-    pub fn output(&mut self, id: &str, chunk: &str) -> String {
+    pub fn output(&mut self, id: &str, chunk: &str) -> ToolOutput {
         let call = self
             .calls
             .entry(id.to_owned())
@@ -43,7 +48,10 @@ impl ToolUi {
         let compact = compact_output(&call.name, chunk);
         let remaining = DISPLAY_OUTPUT_LIMIT.saturating_sub(call.displayed_bytes);
         if remaining == 0 {
-            return String::new();
+            return ToolOutput {
+                text: String::new(),
+                is_diff: false,
+            };
         }
         let mut end = compact.len().min(remaining);
         while end > 0 && !compact.is_char_boundary(end) {
@@ -57,11 +65,14 @@ impl ToolUi {
         };
         call.output_started = true;
         call.displayed_bytes += end;
-        format!(
-            "{prefix}{}{}",
-            &compact[..end],
-            if was_truncated { "…" } else { "" }
-        )
+        ToolOutput {
+            text: format!(
+                "{prefix}{}{}",
+                &compact[..end],
+                if was_truncated { "…" } else { "" }
+            ),
+            is_diff: matches!(call.name.as_str(), "edit" | "write"),
+        }
     }
 }
 
@@ -109,7 +120,12 @@ fn compact_output(name: &str, output: &str) -> String {
         ),
         "edit" | "write" => output
             .split_once("Diff:\n")
-            .map(|(_, diff)| diff.trim_end().to_owned())
+            .map(|(_, diff)| {
+                diff.lines()
+                    .filter(|line| !line.starts_with("@@"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
             .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
     }
@@ -157,7 +173,7 @@ mod tests {
             "Searched files for “config”"
         );
         assert_eq!(
-            ui.output("f", "src/config.rs\nconfig.toml"),
+            ui.output("f", "src/config.rs\nconfig.toml").text,
             "= Found 2 files"
         );
         assert_eq!(
@@ -169,7 +185,8 @@ mod tests {
             "Edited src/lib.rs"
         );
         assert_eq!(
-            ui.output("e", "Applied edit.\n\nDiff:\n-old\n+new\n"),
+            ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n")
+                .text,
             "-old\n+new"
         );
     }

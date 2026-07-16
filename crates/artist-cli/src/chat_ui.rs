@@ -580,14 +580,14 @@ async fn submit(
                             reasoning.clear();
                         }
                         let title = tools.start(id, &name, &arguments);
-                        insert_tool_line(terminal, &title, true)?;
+                        insert_tool_line(terminal, &title, true, false)?;
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content } => {
                         phase = "working";
                         let output = tools.output(&id, &content);
-                        if !output.is_empty() {
-                            insert_tool_line(terminal, &output, false)?;
+                        if !output.text.is_empty() {
+                            insert_tool_line(terminal, &output.text, false, output.is_diff)?;
                         }
                         insert_blank(terminal)?;
                     }
@@ -729,9 +729,9 @@ fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
     first: bool,
+    is_diff: bool,
 ) -> Result<()> {
     let prefix = if first { "  🛠  " } else { "    " };
-    let is_diff = !first && content.lines().any(|line| line.starts_with("@@"));
     let text = content
         .lines()
         .enumerate()
