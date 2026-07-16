@@ -297,6 +297,9 @@ async fn submit(
         },
     )?;
     insert_message(terminal, &prompt)?;
+    let empty_input = ChatInput::default();
+    terminal.draw(|frame| render(frame, &empty_input))?;
+    terminal.show_cursor()?;
     let mut response = String::new();
     let mut visible = String::new();
     let mut stream_height = 3;
