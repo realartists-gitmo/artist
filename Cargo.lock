@@ -123,12 +123,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "artist-tools",
+ "dashmap",
  "futures",
  "llm-provider",
  "rig-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
