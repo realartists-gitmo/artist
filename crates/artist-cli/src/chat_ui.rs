@@ -526,7 +526,8 @@ fn draw_streaming(
     first: bool,
     viewport_height: &mut u16,
 ) -> Result<()> {
-    let width = terminal.size()?.width.max(1);
+    let terminal_size = terminal.size()?;
+    let width = terminal_size.width.max(1);
     let response_height = response
         .lines()
         .map(|line| {
@@ -536,8 +537,12 @@ fn draw_streaming(
         })
         .sum::<usize>()
         .max(1) as u16;
-    // Keep one transient blank row below output while it is streaming.
-    let desired = response_height.saturating_add(4);
+    // Keep the input and separator pinned at the bottom once output fills the screen.
+    let visible_response_height =
+        response_height.min(terminal_size.height.saturating_sub(4).max(1));
+    let desired = visible_response_height
+        .saturating_add(4)
+        .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
@@ -549,11 +554,18 @@ fn draw_streaming(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let response_area = Rect::new(area.x, area.y, area.width, response_height.min(area.height));
+        let response_area = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            visible_response_height.min(area.height),
+        );
         let text = response_text(response, first, usize::from(area.width))
             .unwrap_or_else(|_| Text::raw(response));
         frame.render_widget(
-            Paragraph::new(text).wrap(Wrap { trim: false }),
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((response_height.saturating_sub(visible_response_height), 0)),
             response_area,
         );
         let input_area = Rect::new(
