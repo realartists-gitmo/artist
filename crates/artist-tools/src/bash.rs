@@ -60,7 +60,7 @@ impl Tool for BashTool {
     type Args = BashArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Run one-shot shell commands or manage persistent terminal sessions from the project root."
+        "Run tests, builds, diagnostics, package commands, or persistent terminal sessions from the project root. Use the dedicated find, grep, and read tools instead of shell file discovery or content-search commands."
             .into()
     }
     fn parameters(&self) -> Value {

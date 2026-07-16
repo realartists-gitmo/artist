@@ -65,7 +65,9 @@ impl ToolBundle {
 }
 
 pub const TOOL_POLICY: &str = r#"All paths are project-root-relative. Bash runs as if already cd'd into the project root.
-Use find for fuzzy file/path discovery. Use grep for content search. Use read before editing a file.
+Use find for all file/path discovery and grep for all content search. Do not replace find, grep, or read
+with shell commands such as ls, find, fd, grep, rg, or cat unless the dedicated tool cannot perform the operation.
+Use read before editing a file.
 Read returns mnemonic anchors for each line. Use edit for targeted changes with anchors from the latest read.
 Use write only for new files or intentional full-file replacement. Use bash for tests, builds, diagnostics,
 package commands, and persistent dev servers. Use delegate for focused subagent investigation; subagents

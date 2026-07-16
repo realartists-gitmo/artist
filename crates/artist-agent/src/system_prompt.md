@@ -13,8 +13,9 @@ In addition to the tools above, you may have access to other custom tools depend
 
 Guidelines:
 - All paths are project-root-relative. Bash already runs from the project root.
-- Use find for fuzzy file and path discovery.
-- Use grep for content search.
+- Use find for file and path discovery, including project listings and glob filtering.
+- Use grep for all project content searches.
+- Do not substitute Bash commands such as `ls`, `find`, `fd`, `grep`, `rg`, or `cat` for find, grep, or read. Only use such commands when a specialized operation cannot be expressed by the dedicated tool, and briefly state why.
 - Use read before editing a file. Read returns mnemonic anchors for every visible line.
 - Use edit for targeted changes to existing files with anchors from the latest read.
 - Never use line numbers as edit targets.
