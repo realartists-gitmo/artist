@@ -154,8 +154,58 @@ fn compact_output(name: &str, output: &str) -> String {
                     .join("\n")
             })
             .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
+        "delegate" => compact_delegate_output(output),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
     }
+}
+
+fn compact_delegate_output(output: &str) -> String {
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return shortened(output.trim(), DISPLAY_OUTPUT_LIMIT);
+    };
+    if let Some(tasks) = value.as_array() {
+        if tasks.is_empty() {
+            return "No delegate tasks".into();
+        }
+        return tasks
+            .iter()
+            .map(|task| {
+                let id = task
+                    .get("taskId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("delegate");
+                let status = task
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let prompt = task.get("prompt").and_then(Value::as_str).unwrap_or("");
+                format!(
+                    "{id} · {status}{}",
+                    if prompt.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {prompt}")
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if let Some(result) = value.get("output").and_then(Value::as_str) {
+        return format!("Completed\n{}", result.trim());
+    }
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        return format!("Failed\n{}", error.trim());
+    }
+    let id = value
+        .get("taskId")
+        .and_then(Value::as_str)
+        .unwrap_or("delegate");
+    format!("{id} · {status}")
 }
 
 fn result_count(output: &str) -> usize {
@@ -220,5 +270,19 @@ mod tests {
         ui.start("b".into(), "find", &serde_json::json!({"query":"b"}));
         assert!(!ui.output("a", "a.rs").batch_complete);
         assert!(ui.output("b", "b.rs").batch_complete);
+
+        ui.start(
+            "d".into(),
+            "delegate",
+            &serde_json::json!({"mode":"read","taskId":"delegate-1"}),
+        );
+        assert_eq!(
+            ui.output(
+                "d",
+                r#"{"taskId":"delegate-1","status":"completed","output":"Found the bug."}"#,
+            )
+            .text,
+            "= Completed\nFound the bug."
+        );
     }
 }
