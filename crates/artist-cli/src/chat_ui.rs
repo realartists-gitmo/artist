@@ -304,6 +304,9 @@ async fn submit(
             content: prompt.clone(),
         },
     )?;
+    if !turns.is_empty() {
+        insert_blank(terminal)?;
+    }
     insert_message(terminal, &prompt)?;
     let empty_input = ChatInput::default();
     terminal.draw(|frame| render(frame, &empty_input))?;
@@ -345,13 +348,11 @@ async fn submit(
                 match event {
                     artist_agent::PromptEvent::TextDelta(delta) => {
                         phase = "responding";
-                        let had_reasoning = !reasoning.is_empty();
-                        if had_reasoning {
+                        if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                         }
                         if !response_started {
-                            if !had_reasoning { insert_blank(terminal)?; }
                             response_started = true;
                         }
                         response.push_str(&delta);
