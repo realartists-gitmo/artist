@@ -204,6 +204,12 @@ struct SubmitContext<'a> {
 struct SubmitResult {
     viewport_height: u16,
     queued: Vec<String>,
+    delivered: Vec<String>,
+}
+
+struct DeliveredSteering {
+    message: String,
+    response_offset: usize,
 }
 
 struct StreamingControls<'a> {
@@ -417,6 +423,9 @@ async fn run_loop(
                 )
                 .await?;
                 viewport_height = result.viewport_height;
+                for delivered in result.delivered {
+                    prompt_history.push(delivered);
+                }
                 queued_prompts.extend(result.queued);
                 pending = queued_prompts.pop_front();
                 viewport_floor = 3;
@@ -500,6 +509,19 @@ fn resize_and_draw(
     Ok(())
 }
 
+fn collect_delivered(
+    handle: &artist_agent::SteeringHandle,
+    queue: &mut SteeringQueue,
+    delivered: &mut Vec<String>,
+) -> bool {
+    let selected = queue.selected();
+    for message in handle.take_delivered() {
+        queue.mark_delivered(&message);
+        delivered.push(message);
+    }
+    selected.is_some() && queue.selected().is_none()
+}
+
 async fn submit(
     terminal: &mut ratatui::DefaultTerminal,
     context: SubmitContext<'_>,
@@ -552,6 +574,10 @@ async fn submit(
     let mut stream_height = 3;
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
+    let steering_handle = artist_agent::SteeringHandle::default();
+    let task_steering = steering_handle.clone();
+    let mut delivered_steering = Vec::new();
+    let mut pending_delivered = Vec::new();
     let mut steering_input = ChatInput::default();
     let mut cancelled = false;
     let mut animation_frame = 0;
@@ -566,6 +592,7 @@ async fn submit(
             &task_prompt,
             &task_history,
             &task_tools,
+            task_steering,
             |event| {
                 tx.send(event)
                     .map_err(|_| anyhow::anyhow!("chat UI closed"))
@@ -607,8 +634,19 @@ async fn submit(
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !steering_input.text.trim().is_empty() =>
                         {
-                            steering.submit(std::mem::take(&mut steering_input.text));
-                            steering_input.cursor = 0;
+                            if collect_delivered(
+                                &steering_handle,
+                                &mut steering,
+                                &mut pending_delivered,
+                            ) {
+                                steering_input.text.clear();
+                                steering_input.cursor = 0;
+                            }
+                            if !steering_input.text.trim().is_empty() {
+                                steering.submit(std::mem::take(&mut steering_input.text));
+                                steering_handle.replace_pending(steering.entries());
+                                steering_input.cursor = 0;
+                            }
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
@@ -622,7 +660,13 @@ async fn submit(
                             && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
                             && steering.selected().is_some() =>
                         {
+                            collect_delivered(
+                                &steering_handle,
+                                &mut steering,
+                                &mut pending_delivered,
+                            );
                             steering.remove_selected();
+                            steering_handle.replace_pending(steering.entries());
                             steering_input.text.clear();
                             steering_input.cursor = 0;
                         }
@@ -672,8 +716,23 @@ async fn submit(
                         if !output.text.is_empty() {
                             insert_tool_line(terminal, &output.text, false, output.is_diff)?;
                         }
+                        if collect_delivered(
+                            &steering_handle,
+                            &mut steering,
+                            &mut pending_delivered,
+                        ) {
+                            steering_input.text.clear();
+                            steering_input.cursor = 0;
+                        }
                         if output.batch_complete {
                             insert_blank(terminal)?;
+                            for message in pending_delivered.drain(..) {
+                                insert_message(terminal, &message)?;
+                                delivered_steering.push(DeliveredSteering {
+                                    message,
+                                    response_offset: response.len(),
+                                });
+                            }
                         }
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
@@ -709,6 +768,14 @@ async fn submit(
     } else {
         Some(task.await.context("join Artist agent")?)
     };
+    collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
+    for message in pending_delivered.drain(..) {
+        insert_message(terminal, &message)?;
+        delivered_steering.push(DeliveredSteering {
+            message,
+            response_offset: response.len(),
+        });
+    }
     if !reasoning.is_empty() {
         insert_reasoning(terminal, &reasoning)?;
     }
@@ -739,20 +806,41 @@ async fn submit(
         role: Role::User,
         content: prompt,
     });
-    context.sessions.append(
-        &active.id,
-        &Turn {
+    let delivered = delivered_steering
+        .iter()
+        .map(|steering| steering.message.clone())
+        .collect::<Vec<_>>();
+    let mut response_offset = 0;
+    for steering in delivered_steering {
+        let next_offset = steering.response_offset.min(response.len());
+        if next_offset > response_offset {
+            let turn = Turn {
+                role: Role::Assistant,
+                content: response[response_offset..next_offset].to_owned(),
+            };
+            context.sessions.append(&active.id, &turn)?;
+            turns.push(turn);
+        }
+        let turn = Turn {
+            role: Role::User,
+            content: steering.message,
+        };
+        context.sessions.append(&active.id, &turn)?;
+        turns.push(turn);
+        response_offset = next_offset;
+    }
+    if response_offset < response.len() || delivered.is_empty() {
+        let turn = Turn {
             role: Role::Assistant,
-            content: response.clone(),
-        },
-    )?;
-    turns.push(Turn {
-        role: Role::Assistant,
-        content: response,
-    });
+            content: response[response_offset..].to_owned(),
+        };
+        context.sessions.append(&active.id, &turn)?;
+        turns.push(turn);
+    }
     Ok(SubmitResult {
         viewport_height: stream_height,
         queued: steering.take(),
+        delivered,
     })
 }
 

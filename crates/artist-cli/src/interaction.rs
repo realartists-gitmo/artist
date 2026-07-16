@@ -97,6 +97,20 @@ impl SteeringQueue {
         self.draft.clear();
         true
     }
+    pub fn mark_delivered(&mut self, message: &str) {
+        if let Some(index) = self.queued.iter().position(|queued| queued == message) {
+            self.queued.remove(index);
+            self.selected = self.selected.and_then(|selected| {
+                if selected == index {
+                    None
+                } else if selected > index {
+                    Some(selected - 1)
+                } else {
+                    Some(selected)
+                }
+            });
+        }
+    }
     pub fn take(self) -> Vec<String> {
         self.queued
     }
