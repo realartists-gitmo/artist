@@ -1,7 +1,5 @@
 //! The Artist agent loop, built on Rig.
 
-mod add;
-
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use llm_provider::SavedProvider;
@@ -72,11 +70,7 @@ pub async fn stream_chat(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
-    let agent = builder
-        .tool(add::Add)
-        // A tool call consumes one turn; leave another turn for the final answer.
-        .default_max_turns(3)
-        .build();
+    let agent = builder.build();
     let messages = history.iter().map(|message| match message.role {
         ChatRole::User => rig_core::completion::Message::user(&message.content),
         ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),

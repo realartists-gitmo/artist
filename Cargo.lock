@@ -100,7 +100,6 @@ dependencies = [
  "futures",
  "llm-provider",
  "rig-core",
- "serde",
  "serde_json",
 ]
 
