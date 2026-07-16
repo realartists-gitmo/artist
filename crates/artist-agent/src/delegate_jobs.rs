@@ -175,3 +175,35 @@ fn status_name(state: &JobState) -> &'static str {
 fn shorten(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn background_jobs_complete_and_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let jobs = DelegateJobs::for_project(root.path());
+        let started = jobs
+            .start("work".into(), async { Ok("finished".into()) })
+            .await;
+        let id = serde_json::from_str::<Value>(&started).unwrap()["taskId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let result = jobs.wait(&id, Some(1_000)).await.unwrap();
+        assert!(result.contains("completed"));
+        assert!(result.contains("finished"));
+
+        let started = jobs
+            .start("never".into(), async {
+                std::future::pending::<Result<String, String>>().await
+            })
+            .await;
+        let id = serde_json::from_str::<Value>(&started).unwrap()["taskId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(jobs.cancel(&id).await.unwrap().contains("cancelled"));
+    }
+}
