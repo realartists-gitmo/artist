@@ -99,6 +99,12 @@ fn title(name: &str, arguments: &Value) -> String {
         "edit" => format!("Edited {path}"),
         "write" => format!("Wrote {path}"),
         "bash" => match string(arguments, "mode").as_str() {
+            "exec" if arguments.get("background").and_then(Value::as_bool) == Some(true) => {
+                format!(
+                    "Started shell: {}",
+                    shortened(&string(arguments, "command"), 80)
+                )
+            }
             "start" => format!(
                 "Started shell: {}",
                 shortened(&string(arguments, "command"), 80)
@@ -109,7 +115,21 @@ fn title(name: &str, arguments: &Value) -> String {
             "list" => "Listed shell sessions".into(),
             _ => format!("Ran: {}", shortened(&string(arguments, "command"), 80)),
         },
-        "delegate" => format!("Delegated: {}", shortened(&string(arguments, "prompt"), 80)),
+        "delegate" => match string(arguments, "mode").as_str() {
+            "status" | "read" => format!("Checked delegate {}", string(arguments, "taskId")),
+            "wait" => format!("Waited for delegate {}", string(arguments, "taskId")),
+            "cancel" => format!("Cancelled delegate {}", string(arguments, "taskId")),
+            "list" => "Listed delegate tasks".into(),
+            _ if arguments.get("background").and_then(Value::as_bool) == Some(true)
+                || string(arguments, "mode") == "start" =>
+            {
+                format!(
+                    "Started delegate: {}",
+                    shortened(&string(arguments, "prompt"), 80)
+                )
+            }
+            _ => format!("Delegated: {}", shortened(&string(arguments, "prompt"), 80)),
+        },
         _ => humanize(name),
     }
 }
