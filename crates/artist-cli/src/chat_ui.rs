@@ -1,5 +1,8 @@
 use crate::{
+    command_ui,
     sessions::{Role, Session, SessionStore, Turn},
+    slash_commands,
+    store::ProviderStore,
     tool_ui::ToolUi,
 };
 use ansi_to_tui::IntoText;
@@ -163,9 +166,19 @@ impl ChatInput {
     }
 }
 
+struct ChatContext<'a> {
+    store: &'a mut ProviderStore,
+    provider_index: usize,
+    store_path: &'a Path,
+    sessions: &'a SessionStore,
+    project: &'a Path,
+}
+
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
 pub async fn run(
-    provider: &SavedProvider,
+    store: &mut ProviderStore,
+    provider_index: usize,
+    store_path: &Path,
     sessions: &SessionStore,
     project: &Path,
     resumed: Option<(Session, Vec<Turn>)>,
@@ -185,9 +198,13 @@ pub async fn run(
         Ok(()) => {
             run_loop(
                 terminal,
-                provider,
-                sessions,
-                project,
+                ChatContext {
+                    store,
+                    provider_index,
+                    store_path,
+                    sessions,
+                    project,
+                },
                 resumed,
                 initial_prompt,
             )
@@ -202,9 +219,7 @@ pub async fn run(
 
 async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
-    provider: &SavedProvider,
-    sessions: &SessionStore,
-    project: &Path,
+    context: ChatContext<'_>,
     resumed: Option<(Session, Vec<Turn>)>,
     mut pending: Option<String>,
 ) -> Result<()> {
@@ -212,20 +227,63 @@ async fn run_loop(
     let mut input = ChatInput::default();
     let mut viewport_height = 3;
     let mut viewport_floor = 3;
+    let mut command_panel = Vec::new();
     loop {
-        resize_and_draw(&mut terminal, &input, &mut viewport_height, viewport_floor)?;
+        let suggestions = slash_commands::completions(&input.text)
+            .into_iter()
+            .map(|command| format!("{}  {}", command.name, command.description))
+            .collect::<Vec<_>>();
+        let panel = if suggestions.is_empty() {
+            &command_panel
+        } else {
+            &suggestions
+        };
+        resize_and_draw(
+            &mut terminal,
+            &input,
+            panel,
+            &mut viewport_height,
+            viewport_floor,
+        )?;
         if let Some(prompt) = pending.take() {
-            viewport_height = submit(
-                &mut terminal,
-                provider,
-                sessions,
-                project,
-                &mut session,
-                &mut turns,
-                prompt,
-            )
-            .await?;
-            viewport_floor = 3;
+            if let Some(command) = slash_commands::parse(&prompt) {
+                command_panel = match command {
+                    Ok(command) => {
+                        let command_input = ChatInput::default();
+                        command_ui::run(
+                            context.store,
+                            context.provider_index,
+                            context.store_path,
+                            command,
+                            |panel| {
+                                resize_and_draw(
+                                    &mut terminal,
+                                    &command_input,
+                                    panel,
+                                    &mut viewport_height,
+                                    3,
+                                )
+                            },
+                        )
+                        .await
+                        .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
+                    }
+                    Err(error) => vec![command_ui::format_parse_error(error)],
+                };
+            } else {
+                command_panel.clear();
+                viewport_height = submit(
+                    &mut terminal,
+                    &context.store.providers[context.provider_index],
+                    context.sessions,
+                    context.project,
+                    &mut session,
+                    &mut turns,
+                    prompt,
+                )
+                .await?;
+                viewport_floor = 3;
+            }
             continue;
         }
         match event::read()? {
@@ -237,6 +295,14 @@ async fn run_loop(
             {
                 pending = Some(std::mem::take(&mut input.text));
                 input.cursor = 0;
+            }
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Tab
+                    && !suggestions.is_empty() =>
+            {
+                input.text = slash_commands::completions(&input.text)[0].name.to_owned() + " ";
+                input.cursor = input.text.len();
             }
             Event::Key(key) if !input.handle_key(key) => {
                 clear_inline(&mut terminal)?;
@@ -252,13 +318,20 @@ async fn run_loop(
 fn resize_and_draw(
     terminal: &mut ratatui::DefaultTerminal,
     input: &ChatInput,
+    panel: &[String],
     viewport_height: &mut u16,
     viewport_floor: u16,
 ) -> Result<()> {
     let width = terminal.size()?.width.saturating_sub(2).max(1);
+    let panel_height = if panel.is_empty() {
+        0
+    } else {
+        panel.len() as u16 + 2
+    };
     let desired = input
         .visual_lines(width)
         .saturating_add(2)
+        .saturating_add(panel_height)
         .max(viewport_floor);
     if desired != *viewport_height {
         *viewport_height = desired;
@@ -267,11 +340,11 @@ fn resize_and_draw(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
-        terminal.draw(|frame| render(frame, input))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel))?;
         terminal.show_cursor()?;
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;
     } else {
-        terminal.draw(|frame| render(frame, input))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel))?;
     }
     Ok(())
 }
@@ -409,7 +482,7 @@ async fn submit(
         terminal,
         &format!("  {}", format_elapsed(started.elapsed())),
     )?;
-    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height, 3)?;
+    resize_and_draw(terminal, &ChatInput::default(), &[], &mut stream_height, 3)?;
     stream_result?;
     turns.push(Turn {
         role: Role::User,
@@ -717,7 +790,34 @@ fn draw_streaming(
 }
 
 fn render(frame: &mut Frame<'_>, input: &ChatInput) {
+    render_with_panel(frame, input, &[]);
+}
+
+fn render_with_panel(frame: &mut Frame<'_>, input: &ChatInput, panel: &[String]) {
     render_input_at_bottom(frame, input);
+    if panel.is_empty() {
+        return;
+    }
+    let area = frame.area();
+    let input_height = input
+        .visual_lines(area.width.saturating_sub(2).max(1))
+        .saturating_add(2)
+        .min(area.height);
+    let panel_height = (panel.len() as u16 + 2).min(area.height.saturating_sub(input_height));
+    let panel_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(input_height + panel_height),
+        area.width,
+        panel_height,
+    );
+    frame.render_widget(
+        Paragraph::new(panel.join("\n")).block(
+            Block::default()
+                .borders(Borders::TOP | Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::White)),
+        ),
+        panel_area,
+    );
 }
 
 fn render_input_at_bottom(frame: &mut Frame<'_>, input: &ChatInput) {
@@ -910,6 +1010,26 @@ mod tests {
             "  ▓ thinking [00:00 elapsed]"
         );
         assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
+    }
+
+    #[test]
+    fn command_panel_has_only_horizontal_walls() {
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_with_panel(
+                    frame,
+                    &ChatInput::default(),
+                    &["/help  Show commands".into()],
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "─");
+        assert_ne!(buffer.cell((0, 1)).unwrap().symbol(), "│");
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "─");
+        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
     }
 
     #[test]

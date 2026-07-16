@@ -1,5 +1,6 @@
 mod args;
 mod chat_ui;
+mod command_ui;
 mod login;
 mod models;
 mod prompt;
@@ -76,11 +77,7 @@ async fn run() -> Result<()> {
             let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             chat_ui::run(
-                &store.providers[selected],
-                &sessions,
-                &project,
-                resumed,
-                cli.prompt,
+                &mut store, selected, &path, &sessions, &project, resumed, cli.prompt,
             )
             .await?;
         }
