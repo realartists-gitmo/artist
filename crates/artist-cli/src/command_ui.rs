@@ -15,18 +15,28 @@ pub fn format_parse_error(error: ParseError<'_>) -> String {
     }
 }
 
+pub struct CommandOutput {
+    pub lines: Vec<String>,
+    pub context_capacity: Option<u64>,
+    pub model_changed: bool,
+}
+
 pub async fn run(
     store: &mut ProviderStore,
     provider_index: usize,
     store_path: &Path,
     command: ParsedCommand<'_>,
     mut draw: impl FnMut(&[String]) -> Result<()>,
-) -> Result<Vec<String>> {
+) -> Result<CommandOutput> {
     match command {
-        ParsedCommand::Help => Ok(slash_commands::COMMANDS
-            .iter()
-            .map(|command| format!("{}  {}", command.usage, command.description))
-            .collect()),
+        ParsedCommand::Help => Ok(CommandOutput {
+            lines: slash_commands::COMMANDS
+                .iter()
+                .map(|command| format!("{}  {}", command.usage, command.description))
+                .collect(),
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::StatusBar => {
             let Some(config) = pick_status_bar(&store.status_bar, &mut draw)? else {
                 anyhow::bail!("status bar selection cancelled");
@@ -37,7 +47,11 @@ pub async fn run(
                 store.status_bar = previous;
                 return Err(error);
             }
-            Ok(vec!["status bar updated.".into()])
+            Ok(CommandOutput {
+                lines: vec!["status bar updated.".into()],
+                context_capacity: None,
+                model_changed: false,
+            })
         }
         ParsedCommand::Model { model, reasoning } => {
             draw(&["Loading models…".to_owned()])?;
@@ -93,14 +107,18 @@ pub async fn run(
                 store.providers[provider_index] = previous;
                 return Err(error);
             }
-            Ok(vec![format!(
-                "model set to {} with {} reasoning.",
-                selected.display_name,
-                store.providers[provider_index]
-                    .reasoning_effort
-                    .as_deref()
-                    .unwrap_or("default")
-            )])
+            Ok(CommandOutput {
+                lines: vec![format!(
+                    "model set to {} with {} reasoning.",
+                    selected.display_name,
+                    store.providers[provider_index]
+                        .reasoning_effort
+                        .as_deref()
+                        .unwrap_or("default")
+                )],
+                context_capacity: selected.effective_context_window(),
+                model_changed: true,
+            })
         }
     }
 }
