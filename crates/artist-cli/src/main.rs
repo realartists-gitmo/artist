@@ -4,6 +4,7 @@ mod login;
 mod models;
 mod prompt;
 mod sessions;
+mod slash_commands;
 mod store;
 mod test_provider;
 mod tool_ui;
