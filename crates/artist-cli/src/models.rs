@@ -5,45 +5,75 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
 
-// The service filters its catalog by Codex protocol version, not Artist's package version.
-// Keep this aligned with the Codex CLI release whose API contract we implement.
 const CODEX_PROTOCOL_VERSION: &str = "0.144.1";
 
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
-    models: Vec<Model>,
+    models: Vec<SelectableModel>,
 }
 
-#[derive(Debug, Deserialize)]
-struct Model {
-    slug: String,
-    display_name: String,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct SelectableModel {
+    pub slug: String,
+    pub display_name: String,
     #[serde(default)]
-    description: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
     priority: i32,
     #[serde(default)]
     visibility: String,
     #[serde(default)]
-    default_reasoning_level: Option<String>,
+    pub default_reasoning_level: Option<String>,
     #[serde(default)]
-    supported_reasoning_levels: Vec<ReasoningLevel>,
+    pub supported_reasoning_levels: Vec<ReasoningLevel>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ReasoningLevel {
-    effort: String,
-    description: String,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub(crate) struct ReasoningLevel {
+    pub effort: String,
+    pub description: String,
 }
 
-pub async fn select(provider: &mut SavedProvider) -> Result<()> {
+/// Fetches the account's visible, selectable models in service priority order.
+pub(crate) async fn catalog(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
     let mut models = fetch(provider).await?;
     models.retain(|model| model.visibility == "list");
     models.sort_by_key(|model| model.priority);
     if models.is_empty() {
         bail!("ChatGPT returned no selectable models for this account");
     }
+    Ok(models)
+}
 
+/// Applies an exact model slug and optional exact reasoning effort from `models`.
+pub(crate) fn apply_selection(
+    provider: &mut SavedProvider,
+    models: &[SelectableModel],
+    slug: &str,
+    reasoning: Option<&str>,
+) -> Result<()> {
+    let model = models
+        .iter()
+        .find(|model| model.slug == slug)
+        .with_context(|| format!("model `{slug}` is not selectable"))?;
+    let reasoning = reasoning.or(model.default_reasoning_level.as_deref());
+    if let Some(effort) = reasoning {
+        if !model
+            .supported_reasoning_levels
+            .iter()
+            .any(|level| level.effort == effort)
+        {
+            bail!("reasoning effort `{effort}` is not supported by model `{slug}`");
+        }
+    }
+    provider.model = Some(model.slug.clone());
+    provider.reasoning_effort = reasoning.map(str::to_owned);
+    Ok(())
+}
+
+/// Preserves the interactive `artist model` selection flow.
+pub async fn select(provider: &mut SavedProvider) -> Result<()> {
+    let models = catalog(provider).await?;
     let labels: Vec<_> = models
         .iter()
         .map(|model| match &model.description {
@@ -59,7 +89,6 @@ pub async fn select(provider: &mut SavedProvider) -> Result<()> {
         .and_then(|slug| models.iter().position(|model| &model.slug == slug))
         .unwrap_or(0);
     let model = &models[prompt::select("Model", &labels, current)?];
-
     let reasoning = if model.supported_reasoning_levels.is_empty() {
         None
     } else {
@@ -68,11 +97,11 @@ pub async fn select(provider: &mut SavedProvider) -> Result<()> {
             .iter()
             .map(|level| format!("{} — {}", level.effort, level.description))
             .collect();
-        let default_effort = provider
+        let preferred = provider
             .reasoning_effort
             .as_ref()
             .or(model.default_reasoning_level.as_ref());
-        let default = default_effort
+        let default = preferred
             .and_then(|effort| {
                 model
                     .supported_reasoning_levels
@@ -83,11 +112,10 @@ pub async fn select(provider: &mut SavedProvider) -> Result<()> {
         Some(
             model.supported_reasoning_levels[prompt::select("Reasoning effort", &labels, default)?]
                 .effort
-                .clone(),
+                .as_str(),
         )
     };
-    provider.model = Some(model.slug.clone());
-    provider.reasoning_effort = reasoning;
+    apply_selection(provider, &models, &model.slug, reasoning)?;
     println!(
         "Model set to {} (reasoning: {}).",
         model.display_name,
@@ -96,7 +124,7 @@ pub async fn select(provider: &mut SavedProvider) -> Result<()> {
     Ok(())
 }
 
-async fn fetch(provider: &SavedProvider) -> Result<Vec<Model>> {
+async fn fetch(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
     let mut endpoint = provider.base_url.join("models")?;
     endpoint
         .query_pairs_mut()
@@ -125,6 +153,32 @@ async fn fetch(provider: &SavedProvider) -> Result<Vec<Model>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model() -> SelectableModel {
+        SelectableModel {
+            slug: "gpt-5".into(),
+            display_name: "GPT-5".into(),
+            description: None,
+            priority: 1,
+            visibility: "list".into(),
+            default_reasoning_level: Some("medium".into()),
+            supported_reasoning_levels: vec![
+                ReasoningLevel {
+                    effort: "medium".into(),
+                    description: "Balanced".into(),
+                },
+                ReasoningLevel {
+                    effort: "high".into(),
+                    description: "Deep".into(),
+                },
+            ],
+        }
+    }
+
+    fn provider() -> SavedProvider {
+        serde_json::from_value(serde_json::json!({"id":"x","name":"x","base_url":"https://example.com/","auth":{"access_token":"token","refresh_token":"refresh","account_id":"account"}})).unwrap()
+    }
+
     #[test]
     fn parses_forward_compatible_reasoning_efforts() {
         let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"future","display_name":"Future","visibility":"list","default_reasoning_level":"ultra","supported_reasoning_levels":[{"effort":"ultra","description":"Deep"}]}]}"#).unwrap();
@@ -132,5 +186,23 @@ mod tests {
             response.models[0].supported_reasoning_levels[0].effort,
             "ultra"
         );
+    }
+
+    #[test]
+    fn applies_exact_selection_and_model_default() {
+        let mut provider = provider();
+        apply_selection(&mut provider, &[model()], "gpt-5", None).unwrap();
+        assert_eq!(provider.model.as_deref(), Some("gpt-5"));
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("medium"));
+        apply_selection(&mut provider, &[model()], "gpt-5", Some("high")).unwrap();
+        assert_eq!(provider.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn rejects_inexact_or_unsupported_values_without_mutation() {
+        let mut provider = provider();
+        assert!(apply_selection(&mut provider, &[model()], "GPT-5", None).is_err());
+        assert!(apply_selection(&mut provider, &[model()], "gpt-5", Some("HIGH")).is_err());
+        assert_eq!(provider.model, None);
     }
 }
