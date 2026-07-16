@@ -32,7 +32,8 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    enter_positional_project(&mut cli)?;
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     if let Some(prompt) = cli.print_prompt {
@@ -93,6 +94,19 @@ async fn run() -> Result<()> {
             )
             .await?;
         }
+    }
+    Ok(())
+}
+
+fn enter_positional_project(cli: &mut Cli) -> Result<()> {
+    let Some(candidate) = cli.prompt.as_deref() else {
+        return Ok(());
+    };
+    let path = std::path::Path::new(candidate);
+    if path.is_dir() {
+        std::env::set_current_dir(path)
+            .with_context(|| format!("enter project directory {}", path.display()))?;
+        cli.prompt = None;
     }
     Ok(())
 }

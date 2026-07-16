@@ -3,8 +3,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "artist", version, about = "The Artist coding agent")]
 pub struct Cli {
-    /// Prompt to send immediately in the interactive chat.
-    #[arg(value_name = "PROMPT")]
+    /// Prompt to send immediately, or a project directory to open.
+    #[arg(value_name = "PROMPT_OR_PROJECT")]
     pub prompt: Option<String>,
     /// Execute one prompt and print the response without opening the chat UI.
     #[arg(short = 'p', long, value_name = "PROMPT", conflicts_with = "prompt")]
