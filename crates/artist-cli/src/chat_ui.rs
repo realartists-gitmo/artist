@@ -222,7 +222,7 @@ async fn run_loop(
                 prompt,
             )
             .await?;
-            viewport_floor = 4;
+            viewport_floor = 3;
             continue;
         }
         match event::read()? {
@@ -391,7 +391,7 @@ async fn submit(
         terminal,
         &format!("  {}", format_elapsed(started.elapsed())),
     )?;
-    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height, 4)?;
+    resize_and_draw(terminal, &ChatInput::default(), &mut stream_height, 3)?;
     stream_result?;
     turns.push(Turn {
         role: Role::User,
@@ -613,7 +613,7 @@ fn draw_streaming(
     // Keep a fixed one-row streaming tail above the input. Completed output is
     // inserted into scrollback, so the viewport never grows and repositions it.
     let visible_response_height = 1;
-    let desired = 5.min(terminal_size.height);
+    let desired = 6.min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
@@ -639,7 +639,12 @@ fn draw_streaming(
                 .scroll((response_height.saturating_sub(visible_response_height), 0)),
             response_area,
         );
-        let status_area = Rect::new(area.x, response_area.bottom(), area.width, 1);
+        let status_area = Rect::new(
+            area.x,
+            response_area.bottom().saturating_add(1),
+            area.width,
+            1,
+        );
         frame.render_widget(
             Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
             status_area,
@@ -649,7 +654,7 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height
-                .saturating_sub(response_area.height.saturating_add(1)),
+                .saturating_sub(response_area.height.saturating_add(2)),
         );
         render_input(frame, input_area, &ChatInput::default());
     })?;
