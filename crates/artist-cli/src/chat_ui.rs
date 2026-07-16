@@ -347,6 +347,9 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
+    if response_started {
+        insert_blank(terminal)?;
+    }
     resize_and_draw(terminal, &ChatInput::default(), &mut stream_height)?;
     turns.push(Turn {
         role: Role::User,
