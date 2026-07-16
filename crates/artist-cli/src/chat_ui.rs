@@ -394,7 +394,7 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
-    let inner_width = usize::from(terminal.size()?.width.max(1));
+    let inner_width = usize::from(terminal.size()?.width.saturating_sub(2).max(1));
     let content_height = text
         .lines()
         .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
@@ -407,15 +407,21 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             buffer.area.width,
             content_height,
         );
+        let highlighted_area = Rect::new(
+            text_area.x.saturating_add(2),
+            text_area.y,
+            text_area.width.saturating_sub(2),
+            text_area.height,
+        );
         Block::default()
             .style(Style::default().bg(Color::White))
-            .render(text_area, buffer);
+            .render(highlighted_area, buffer);
         Paragraph::new(Text::styled(
             text,
             Style::default().fg(Color::Black).bg(Color::White),
         ))
         .wrap(Wrap { trim: false })
-        .render(text_area, buffer);
+        .render(highlighted_area, buffer);
     })?;
     Ok(())
 }
