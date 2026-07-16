@@ -1,5 +1,6 @@
 use crate::sessions::{Role, Session, SessionStore, Turn};
-use anyhow::Result;
+use ansi_to_tui::IntoText;
+use anyhow::{Context, Result};
 use llm_provider::SavedProvider;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
@@ -14,8 +15,8 @@ use ratatui::{
         terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
     },
     layout::Rect,
-    style::{Color, Style},
-    text::Text,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 use std::{io::IsTerminal, path::Path};
@@ -302,32 +303,52 @@ async fn submit(
     terminal.show_cursor()?;
     let mut response = String::new();
     let mut visible = String::new();
+    let mut reasoning = String::new();
+    let mut response_started = false;
+    let mut response_output_started = false;
     let mut stream_height = 3;
     artist_agent::stream_chat(provider, &prompt, &history, |event| {
         match event {
             artist_agent::PromptEvent::TextDelta(delta) => {
+                let had_reasoning = !reasoning.is_empty();
+                if had_reasoning {
+                    insert_reasoning(terminal, &reasoning)?;
+                    reasoning.clear();
+                    resize_and_draw(terminal, &empty_input, &mut stream_height)?;
+                }
+                if !response_started {
+                    if !had_reasoning {
+                        insert_blank(terminal)?;
+                    }
+                    response_started = true;
+                }
                 response.push_str(&delta);
                 visible.push_str(&delta);
-                let width = usize::from(terminal.size()?.width.max(1));
+                let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
                 while let Some(line) = take_visible_line(&mut visible, width) {
-                    insert_text(terminal, &line, Color::White)?;
+                    insert_response(terminal, &line, !response_output_started)?;
+                    response_output_started = true;
                 }
-                draw_streaming(terminal, &visible, &mut stream_height)?;
+                draw_streaming(
+                    terminal,
+                    &visible,
+                    !response_output_started,
+                    &mut stream_height,
+                )?;
             }
-            artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
-                insert_text(terminal, &delta, Color::DarkGray)?;
-                if visible.is_empty() {
-                    resize_and_draw(terminal, &empty_input, &mut stream_height)?;
-                } else {
-                    draw_streaming(terminal, &visible, &mut stream_height)?;
-                }
-            }
+            artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => reasoning.push_str(&delta),
         }
         Ok(())
     })
     .await?;
+    if !reasoning.is_empty() {
+        insert_reasoning(terminal, &reasoning)?;
+    }
     if !visible.is_empty() {
-        insert_text(terminal, &visible, Color::White)?;
+        insert_response(terminal, &visible, !response_output_started)?;
+    }
+    if response_started {
+        insert_blank(terminal)?;
     }
     resize_and_draw(terminal, &ChatInput::default(), &mut stream_height)?;
     turns.push(Turn {
@@ -384,18 +405,97 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
     Ok(())
 }
 
-fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color) -> Result<()> {
+fn insert_blank(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    terminal.insert_before(1, |_| {})?;
+    Ok(())
+}
+
+fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) -> Result<()> {
+    let text = reasoning_text(reasoning);
     let width = usize::from(terminal.size()?.width.max(1));
     let height = text
-        .lines()
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-        .sum::<usize>()
-        .max(1) as u16;
-    terminal.insert_before(height, |buffer| {
+        .lines
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum::<usize>() as u16;
+    terminal.insert_before(height.saturating_add(1), |buffer| {
         Paragraph::new(text)
-            .style(Style::default().fg(color))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
+    })?;
+    Ok(())
+}
+
+fn reasoning_text(reasoning: &str) -> Text<'static> {
+    Text::from(
+        reasoning
+            .lines()
+            .enumerate()
+            .map(|(line_index, line)| {
+                let mut spans = vec![Span::raw(if line_index == 0 { "  ⋗ " } else { "    " })];
+                let mut rest = line;
+                while let Some(start) = rest.find("**") {
+                    spans.push(Span::styled(
+                        rest[..start].to_owned(),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    rest = &rest[start + 2..];
+                    let Some(end) = rest.find("**") else { break };
+                    spans.push(Span::styled(
+                        rest[..end].to_owned(),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
+                    ));
+                    rest = &rest[end + 2..];
+                }
+                spans.push(Span::styled(
+                    rest.to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                Line::from(spans)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
+    let rendered = glamour::Renderer::new()
+        .with_style(glamour::Style::Dark)
+        .with_word_wrap(width.saturating_sub(4).max(1))
+        .render(markdown);
+    let mut text = rendered.into_text().context("parse Glamour output")?;
+    while text.lines.first().is_some_and(line_is_blank) {
+        text.lines.remove(0);
+    }
+    while text.lines.last().is_some_and(line_is_blank) {
+        text.lines.pop();
+    }
+    for (index, line) in text.lines.iter_mut().enumerate() {
+        let prefix = if first && index == 0 {
+            "  ⋗ "
+        } else {
+            "    "
+        };
+        line.spans.insert(0, Span::raw(prefix));
+    }
+    Ok(text)
+}
+
+fn line_is_blank(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|span| span.content.trim().is_empty())
+}
+
+fn insert_response(
+    terminal: &mut ratatui::DefaultTerminal,
+    markdown: &str,
+    first: bool,
+) -> Result<()> {
+    let width = usize::from(terminal.size()?.width.max(1));
+    let text = response_text(markdown, first, width)?;
+    let height = text.lines.len().max(1) as u16;
+    terminal.insert_before(height, |buffer| {
+        Paragraph::new(text).render(buffer.area, buffer);
     })?;
     Ok(())
 }
@@ -403,6 +503,7 @@ fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
     response: &str,
+    first: bool,
     viewport_height: &mut u16,
 ) -> Result<()> {
     let width = terminal.size()?.width.max(1);
@@ -428,10 +529,10 @@ fn draw_streaming(
     terminal.draw(|frame| {
         let area = frame.area();
         let response_area = Rect::new(area.x, area.y, area.width, response_height.min(area.height));
+        let text = response_text(response, first, usize::from(area.width))
+            .unwrap_or_else(|_| Text::raw(response));
         frame.render_widget(
-            Paragraph::new(response)
-                .style(Style::default().fg(Color::White))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(text).wrap(Wrap { trim: false }),
             response_area,
         );
         let input_area = Rect::new(
@@ -568,6 +669,38 @@ mod tests {
         assert!(input.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert!(input.text.is_empty());
         assert!(!input.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+    }
+
+    #[test]
+    fn reasoning_markers_become_italics() {
+        let text = reasoning_text("**Planning** the answer");
+        assert!(text.lines[0].spans[0].content.contains("⋗"));
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::ITALIC))
+        );
+        assert!(
+            text.lines[0]
+                .spans
+                .iter()
+                .all(|span| !span.content.contains("**"))
+        );
+    }
+
+    #[test]
+    fn glamour_styles_and_indents_responses() {
+        let text = response_text("**hello**", true, 80).unwrap();
+        let rendered = text
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("⋗"));
+        assert!(rendered.contains("hello"));
+        assert!(!rendered.contains("**"));
     }
 
     #[test]
