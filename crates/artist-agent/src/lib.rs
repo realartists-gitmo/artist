@@ -89,7 +89,7 @@ pub async fn stream_chat(
             provider: provider.clone(),
             tools: tools.clone(),
         })
-        .default_max_turns(12)
+        .default_max_turns(usize::MAX)
         .build();
     let messages = history.iter().map(|message| match message.role {
         ChatRole::User => rig_core::completion::Message::user(&message.content),

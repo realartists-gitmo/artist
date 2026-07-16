@@ -85,7 +85,7 @@ impl Tool for Delegate {
                 .tool(child_tools.write.clone());
         }
         let output = builder
-            .default_max_turns(12)
+            .default_max_turns(usize::MAX)
             .build()
             .prompt(args.prompt)
             .await
