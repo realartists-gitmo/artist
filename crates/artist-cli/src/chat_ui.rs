@@ -568,7 +568,10 @@ async fn submit(
                     artist_agent::PromptEvent::ToolResult { id, content } => {
                         phase = "working";
                         let output = tools.output(&id, &content);
-                        insert_tool_line(terminal, &output, false)?;
+                        if !output.is_empty() {
+                            insert_tool_line(terminal, &output, false)?;
+                        }
+                        insert_blank(terminal)?;
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
@@ -717,7 +720,15 @@ fn insert_tool_line(
             .style(Style::default().bg(Color::Rgb(32, 32, 32)))
             .render(buffer.area, buffer);
         Paragraph::new(Text::from(text))
-            .style(Style::default().fg(Color::White).bg(Color::Rgb(32, 32, 32)))
+            .style(
+                Style::default()
+                    .fg(if first {
+                        Color::White
+                    } else {
+                        Color::Rgb(175, 175, 175)
+                    })
+                    .bg(Color::Rgb(32, 32, 32)),
+            )
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
     })?;
