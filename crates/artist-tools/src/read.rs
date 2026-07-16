@@ -1,4 +1,4 @@
-use crate::{ToolError, Workspace, output};
+use crate::{ToolError, Workspace};
 use hashline_tools::ReadFileRequest;
 use rig_core::tool::Tool;
 use serde::Deserialize;
