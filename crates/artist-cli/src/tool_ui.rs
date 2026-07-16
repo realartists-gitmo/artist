@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 
@@ -7,11 +7,13 @@ const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 #[derive(Default)]
 pub struct ToolUi {
     calls: HashMap<String, CallState>,
+    pending: HashSet<String>,
 }
 
 pub struct ToolOutput {
     pub text: String,
     pub is_diff: bool,
+    pub batch_complete: bool,
 }
 
 struct CallState {
@@ -23,6 +25,7 @@ struct CallState {
 impl ToolUi {
     pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> String {
         let title = title(name, arguments);
+        self.pending.insert(id.clone());
         self.calls.insert(
             id,
             CallState {
@@ -48,9 +51,11 @@ impl ToolUi {
         let compact = compact_output(&call.name, chunk);
         let remaining = DISPLAY_OUTPUT_LIMIT.saturating_sub(call.displayed_bytes);
         if remaining == 0 {
+            self.pending.remove(id);
             return ToolOutput {
                 text: String::new(),
                 is_diff: false,
+                batch_complete: self.pending.is_empty(),
             };
         }
         let mut end = compact.len().min(remaining);
@@ -65,6 +70,7 @@ impl ToolUi {
         };
         call.output_started = true;
         call.displayed_bytes += end;
+        self.pending.remove(id);
         ToolOutput {
             text: format!(
                 "{prefix}{}{}",
@@ -72,6 +78,7 @@ impl ToolUi {
                 if was_truncated { "…" } else { "" }
             ),
             is_diff: matches!(call.name.as_str(), "edit" | "write"),
+            batch_complete: self.pending.is_empty(),
         }
     }
 }
@@ -172,10 +179,9 @@ mod tests {
             ui.start("f".into(), "find", &serde_json::json!({"query":"config"})),
             "Searched files for “config”"
         );
-        assert_eq!(
-            ui.output("f", "src/config.rs\nconfig.toml").text,
-            "= Found 2 files"
-        );
+        let first = ui.output("f", "src/config.rs\nconfig.toml");
+        assert_eq!(first.text, "= Found 2 files");
+        assert!(first.batch_complete);
         assert_eq!(
             ui.start(
                 "e".into(),
@@ -189,5 +195,10 @@ mod tests {
                 .text,
             "-old\n+new"
         );
+
+        ui.start("a".into(), "find", &serde_json::json!({"query":"a"}));
+        ui.start("b".into(), "find", &serde_json::json!({"query":"b"}));
+        assert!(!ui.output("a", "a.rs").batch_complete);
+        assert!(ui.output("b", "b.rs").batch_complete);
     }
 }

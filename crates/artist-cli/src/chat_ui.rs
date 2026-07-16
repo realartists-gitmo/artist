@@ -589,7 +589,9 @@ async fn submit(
                         if !output.text.is_empty() {
                             insert_tool_line(terminal, &output.text, false, output.is_diff)?;
                         }
-                        insert_blank(terminal)?;
+                        if output.batch_complete {
+                            insert_blank(terminal)?;
+                        }
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
