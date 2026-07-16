@@ -29,6 +29,9 @@ pub enum PromptEvent {
         id: String,
         content: String,
     },
+    CompletionUsage {
+        total_tokens: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +105,11 @@ pub async fn stream_chat(
                 id: internal_call_id,
                 name: tool_call.function.name,
             })?,
+            MultiTurnStreamItem::CompletionCall(call) => {
+                on_event(PromptEvent::CompletionUsage {
+                    total_tokens: call.usage.total_tokens,
+                })?;
+            }
             MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
                 internal_call_id,

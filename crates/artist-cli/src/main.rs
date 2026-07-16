@@ -211,6 +211,7 @@ async fn execute_prompt(
             PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
             PromptEvent::ToolExecutionStart { .. } => {}
             PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
+            PromptEvent::CompletionUsage { .. } => {}
         }
         output.flush()?;
         Ok(())
