@@ -1,6 +1,7 @@
 //! The Artist agent loop, built on Rig.
 
 mod delegate;
+mod delegate_jobs;
 
 use anyhow::{Context, Result};
 use artist_tools::ToolBundle;
@@ -99,11 +100,11 @@ pub async fn stream_chat(
         .tool(tools.grep.clone())
         .tool(tools.edit.clone())
         .tool(tools.write.clone())
-        .tool(delegate::Delegate {
-            provider: provider.clone(),
-            tools: tools.clone(),
-            context: fork_context,
-        })
+        .tool(delegate::Delegate::new(
+            provider.clone(),
+            tools.clone(),
+            fork_context,
+        ))
         .default_max_turns(usize::MAX)
         .build();
     let mut stream = agent.stream_chat(input, messages).await;

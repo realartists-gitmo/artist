@@ -1,27 +1,45 @@
+use crate::delegate_jobs::DelegateJobs;
 use artist_tools::{TOOL_POLICY, ToolBundle};
 use llm_provider::SavedProvider;
-use rig_core::tool::Tool;
 use rig_core::{
     client::CompletionClient,
     completion::{Chat, Message, Prompt},
     providers::chatgpt,
+    tool::Tool,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Clone)]
 pub(crate) struct Delegate {
-    pub provider: SavedProvider,
-    pub tools: ToolBundle,
-    pub context: Vec<Message>,
+    provider: SavedProvider,
+    tools: ToolBundle,
+    context: Vec<Message>,
+    jobs: DelegateJobs,
+}
+
+impl Delegate {
+    pub fn new(provider: SavedProvider, tools: ToolBundle, context: Vec<Message>) -> Self {
+        let jobs = DelegateJobs::for_project(tools.project_root());
+        Self {
+            provider,
+            tools,
+            context,
+            jobs,
+        }
+    }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DelegateArgs {
-    prompt: String,
+    mode: Option<String>,
+    prompt: Option<String>,
     read_only: Option<bool>,
     fork: Option<bool>,
+    background: Option<bool>,
+    task_id: Option<String>,
+    wait_ms: Option<u64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -39,13 +57,93 @@ impl Tool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run one focused subagent. The subagent never receives delegate; readOnly defaults to true. Set fork=true to give it the main chat context."
+        "Run a focused subagent. Set background=true to continue other work, then use status/read/wait/cancel with taskId. Set fork=true to include the main chat context."
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"prompt":{"type":"string"},"readOnly":{"type":"boolean","default":true},"fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."}},"required":["prompt"],"additionalProperties":false})
+        json!({"type":"object","properties":{
+            "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run"},
+            "prompt":{"type":"string"},
+            "readOnly":{"type":"boolean","default":true},
+            "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
+            "background":{"type":"boolean","default":false,"description":"Start the delegate and return immediately."},
+            "taskId":{"type":"string"},
+            "waitMs":{"type":"integer","minimum":1,"maximum":30000}
+        },"additionalProperties":false})
     }
+
     async fn call(&self, args: DelegateArgs) -> Result<String, DelegateError> {
+        let mode = args
+            .mode
+            .as_deref()
+            .unwrap_or(if args.background.unwrap_or(false) {
+                "start"
+            } else {
+                "run"
+            });
+        match mode {
+            "run" => {
+                let prompt = required(args.prompt, "prompt")?;
+                self.run_agent(
+                    prompt,
+                    args.read_only.unwrap_or(true),
+                    args.fork.unwrap_or(false),
+                )
+                .await
+            }
+            "start" => {
+                let prompt = required(args.prompt, "prompt")?;
+                let delegate = self.clone();
+                let task_prompt = prompt.clone();
+                Ok(self
+                    .jobs
+                    .start(prompt, async move {
+                        delegate
+                            .run_agent(
+                                task_prompt,
+                                args.read_only.unwrap_or(true),
+                                args.fork.unwrap_or(false),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                    .await)
+            }
+            "status" => self
+                .jobs
+                .status(&required(args.task_id, "taskId")?)
+                .await
+                .map_err(DelegateError::Failed),
+            "read" => self
+                .jobs
+                .read(&required(args.task_id, "taskId")?)
+                .await
+                .map_err(DelegateError::Failed),
+            "wait" => self
+                .jobs
+                .wait(&required(args.task_id, "taskId")?, args.wait_ms)
+                .await
+                .map_err(DelegateError::Failed),
+            "cancel" => self
+                .jobs
+                .cancel(&required(args.task_id, "taskId")?)
+                .await
+                .map_err(DelegateError::Failed),
+            "list" => Ok(self.jobs.list().await),
+            other => Err(DelegateError::Failed(format!(
+                "invalid delegate mode: {other}"
+            ))),
+        }
+    }
+}
+
+impl Delegate {
+    async fn run_agent(
+        &self,
+        prompt: String,
+        read_only: bool,
+        fork: bool,
+    ) -> Result<String, DelegateError> {
         let model = self
             .provider
             .model
@@ -61,24 +159,23 @@ impl Tool for Delegate {
             .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        let read_only = args.read_only.unwrap_or(true);
         let child_tools = self
             .tools
             .for_actor(&format!("delegate-{}", uuid::Uuid::new_v4().simple()))
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
         let policy = if read_only {
             format!(
-                "{TOOL_POLICY}\nYou are a read-only subagent. You may inspect with read, find, and grep. Do not modify files or run shell commands. Return concise findings, evidence, uncertainty, and errors."
+                "{TOOL_POLICY}\nYou are a read-only subagent. Inspect with read, find, and grep only. Return concise findings and evidence."
             )
         } else {
             format!(
-                "{TOOL_POLICY}\nYou are a focused subagent. Complete only the delegated task and return concise findings, evidence, uncertainty, and errors. You cannot delegate further."
+                "{TOOL_POLICY}\nComplete only the focused delegated task. Return concise findings and evidence. You cannot delegate further."
             )
         };
         let mut builder = client.agent(model).preamble(&policy);
         if let Some(effort) = &self.provider.reasoning_effort {
-            builder = builder
-                .additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
+            builder =
+                builder.additional_params(json!({"reasoning":{"effort":effort,"summary":"auto"}}));
         }
         let mut builder = builder
             .tool(child_tools.read.clone())
@@ -91,22 +188,27 @@ impl Tool for Delegate {
                 .tool(child_tools.write.clone());
         }
         let agent = builder.default_max_turns(usize::MAX).build();
-        let output = if args.fork.unwrap_or(false) {
+        let output = if fork {
             let mut context = self.context.clone();
-            agent.chat(args.prompt, &mut context).await
+            agent.chat(prompt, &mut context).await
         } else {
-            agent.prompt(args.prompt).await
+            agent.prompt(prompt).await
         }
         .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        let summary = if output.len() > 50 * 1024 {
-            let mut end = 50 * 1024 - 64;
-            while end > 0 && !output.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}\n[truncated]", &output[..end])
-        } else {
-            output
-        };
-        Ok(json!({"status":"completed","summary":summary,"findings":[],"uncertainty":[],"errors":[]}).to_string())
+        Ok(shorten(&output, 50 * 1024))
     }
+}
+
+fn required<T>(value: Option<T>, name: &str) -> Result<T, DelegateError> {
+    value.ok_or_else(|| DelegateError::Failed(format!("{name} is required")))
+}
+fn shorten(value: &str, max: usize) -> String {
+    if value.len() <= max {
+        return value.to_owned();
+    }
+    let mut end = max.saturating_sub(16);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated]", &value[..end])
 }
