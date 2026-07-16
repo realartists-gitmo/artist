@@ -578,6 +578,7 @@ async fn submit(
     let mut reasoning = String::new();
     let mut response_started = false;
     let mut response_output_started = false;
+    let mut response_since_tool = false;
     let mut tools = ToolUi::default();
     let mut stream_height = 3;
     let mut phase = "thinking";
@@ -706,6 +707,7 @@ async fn submit(
                         }
                         response.push_str(&delta);
                         visible.push_str(&delta);
+                        response_since_tool = true;
                         let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
                         while let Some(line) = take_visible_line(&mut visible, width) {
                             insert_response(terminal, &line, !response_output_started)?;
@@ -718,6 +720,15 @@ async fn submit(
                     }
                     artist_agent::PromptEvent::ToolCall { id, name, arguments } => {
                         phase = "working";
+                        if response_since_tool {
+                            if !visible.is_empty() {
+                                insert_response(terminal, &visible, !response_output_started)?;
+                                response_output_started = true;
+                                visible.clear();
+                            }
+                            insert_blank(terminal)?;
+                            response_since_tool = false;
+                        }
                         if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
