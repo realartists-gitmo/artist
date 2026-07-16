@@ -272,6 +272,13 @@ async fn run_loop(
                 };
             } else {
                 command_panel.clear();
+                resize_and_draw(
+                    &mut terminal,
+                    &ChatInput::default(),
+                    &[],
+                    &mut viewport_height,
+                    3,
+                )?;
                 viewport_height = submit(
                     &mut terminal,
                     &context.store.providers[context.provider_index],
