@@ -19,15 +19,33 @@ struct SteeringState {
     original_results: HashMap<String, String>,
 }
 
+pub struct SteeringMutation {
+    pub applied: bool,
+    pub delivered: Vec<String>,
+}
+
 impl SteeringHandle {
-    pub fn replace_pending(&self, messages: &[String]) {
+    pub fn enqueue(&self, message: String) {
+        self.lock().pending.push_back(message);
+    }
+
+    pub fn edit_pending(&self, index: usize, message: String) -> SteeringMutation {
         let mut state = self.lock();
-        let delivered = state.delivered.iter().cloned().collect::<Vec<_>>();
-        state.pending = messages
-            .iter()
-            .filter(|message| !delivered.contains(message))
-            .cloned()
-            .collect();
+        let delivered = state.delivered.drain(..).collect();
+        let applied = if let Some(pending) = state.pending.get_mut(index) {
+            *pending = message;
+            true
+        } else {
+            false
+        };
+        SteeringMutation { applied, delivered }
+    }
+
+    pub fn remove_pending(&self, index: usize) -> SteeringMutation {
+        let mut state = self.lock();
+        let delivered = state.delivered.drain(..).collect();
+        let applied = state.pending.remove(index).is_some();
+        SteeringMutation { applied, delivered }
     }
 
     pub fn take_delivered(&self) -> Vec<String> {
@@ -84,16 +102,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replaces_and_drains_steering() {
+    fn atomically_edits_and_removes_pending_steering() {
         let handle = SteeringHandle::default();
-        handle.replace_pending(&["first".into(), "second".into()]);
+        handle.enqueue("first".into());
+        handle.enqueue("second".into());
+        assert!(handle.edit_pending(1, "changed".into()).applied);
+        assert!(handle.remove_pending(0).applied);
         let mut state = handle.lock();
-        assert_eq!(state.pending.pop_front().as_deref(), Some("first"));
-        assert_eq!(state.pending.pop_front().as_deref(), Some("second"));
-        state.delivered.push_back("first".into());
+        assert_eq!(
+            state.pending.iter().cloned().collect::<Vec<_>>(),
+            ["changed"]
+        );
+        let delivered = state.pending.pop_front().unwrap();
+        state.delivered.push_back(delivered);
         drop(state);
-        handle.replace_pending(&["first".into(), "third".into()]);
-        let state = handle.lock();
-        assert_eq!(state.pending.iter().cloned().collect::<Vec<_>>(), ["third"]);
+        let mutation = handle.edit_pending(0, "too late".into());
+        assert!(!mutation.applied);
+        assert_eq!(mutation.delivered, ["changed"]);
     }
 }

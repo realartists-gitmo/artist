@@ -509,17 +509,25 @@ fn resize_and_draw(
     Ok(())
 }
 
+fn collect_messages(
+    messages: Vec<String>,
+    queue: &mut SteeringQueue,
+    delivered: &mut Vec<String>,
+) -> bool {
+    let selected = queue.selected();
+    for message in messages {
+        queue.mark_delivered(&message);
+        delivered.push(message);
+    }
+    selected.is_some() && queue.selected().is_none()
+}
+
 fn collect_delivered(
     handle: &artist_agent::SteeringHandle,
     queue: &mut SteeringQueue,
     delivered: &mut Vec<String>,
 ) -> bool {
-    let selected = queue.selected();
-    for message in handle.take_delivered() {
-        queue.mark_delivered(&message);
-        delivered.push(message);
-    }
-    selected.is_some() && queue.selected().is_none()
+    collect_messages(handle.take_delivered(), queue, delivered)
 }
 
 async fn submit(
@@ -634,19 +642,24 @@ async fn submit(
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !steering_input.text.trim().is_empty() =>
                         {
-                            if collect_delivered(
-                                &steering_handle,
-                                &mut steering,
-                                &mut pending_delivered,
-                            ) {
-                                steering_input.text.clear();
-                                steering_input.cursor = 0;
+                            let value = steering_input.text.clone();
+                            let applied = if let Some(index) = steering.selected() {
+                                let mutation = steering_handle.edit_pending(index, value.clone());
+                                collect_messages(
+                                    mutation.delivered,
+                                    &mut steering,
+                                    &mut pending_delivered,
+                                );
+                                mutation.applied
+                            } else {
+                                steering_handle.enqueue(value.clone());
+                                true
+                            };
+                            if applied {
+                                steering.submit(value);
                             }
-                            if !steering_input.text.trim().is_empty() {
-                                steering.submit(std::mem::take(&mut steering_input.text));
-                                steering_handle.replace_pending(steering.entries());
-                                steering_input.cursor = 0;
-                            }
+                            steering_input.text.clear();
+                            steering_input.cursor = 0;
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
@@ -660,13 +673,16 @@ async fn submit(
                             && matches!(key.code, KeyCode::Backspace | KeyCode::Delete)
                             && steering.selected().is_some() =>
                         {
-                            collect_delivered(
-                                &steering_handle,
+                            let index = steering.selected().expect("selected steering");
+                            let mutation = steering_handle.remove_pending(index);
+                            collect_messages(
+                                mutation.delivered,
                                 &mut steering,
                                 &mut pending_delivered,
                             );
-                            steering.remove_selected();
-                            steering_handle.replace_pending(steering.entries());
+                            if mutation.applied {
+                                steering.remove_selected();
+                            }
                             steering_input.text.clear();
                             steering_input.cursor = 0;
                         }
