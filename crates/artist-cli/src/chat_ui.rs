@@ -316,6 +316,11 @@ async fn submit(
             }
             artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
                 insert_text(terminal, &delta, Color::DarkGray)?;
+                if visible.is_empty() {
+                    resize_and_draw(terminal, &empty_input, &mut stream_height)?;
+                } else {
+                    draw_streaming(terminal, &visible, &mut stream_height)?;
+                }
             }
         }
         Ok(())
