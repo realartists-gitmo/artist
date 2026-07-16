@@ -31,20 +31,25 @@ impl SteeringHandle {
 
     pub fn edit_pending(&self, index: usize, message: String) -> SteeringMutation {
         let mut state = self.lock();
-        let delivered = state.delivered.drain(..).collect();
-        let applied = if let Some(pending) = state.pending.get_mut(index) {
-            *pending = message;
-            true
-        } else {
-            false
-        };
+        let delivered = state.delivered.drain(..).collect::<Vec<_>>();
+        let pending_index = index.checked_sub(delivered.len());
+        let applied =
+            if let Some(pending) = pending_index.and_then(|index| state.pending.get_mut(index)) {
+                *pending = message;
+                true
+            } else {
+                false
+            };
         SteeringMutation { applied, delivered }
     }
 
     pub fn remove_pending(&self, index: usize) -> SteeringMutation {
         let mut state = self.lock();
-        let delivered = state.delivered.drain(..).collect();
-        let applied = state.pending.remove(index).is_some();
+        let delivered = state.delivered.drain(..).collect::<Vec<_>>();
+        let applied = index
+            .checked_sub(delivered.len())
+            .and_then(|index| state.pending.remove(index))
+            .is_some();
         SteeringMutation { applied, delivered }
     }
 
@@ -115,9 +120,15 @@ mod tests {
         );
         let delivered = state.pending.pop_front().unwrap();
         state.delivered.push_back(delivered);
+        state.pending.push_back("next".into());
         drop(state);
-        let mutation = handle.edit_pending(0, "too late".into());
-        assert!(!mutation.applied);
+        let mutation = handle.edit_pending(1, "updated next".into());
+        assert!(mutation.applied);
         assert_eq!(mutation.delivered, ["changed"]);
+        let state = handle.lock();
+        assert_eq!(
+            state.pending.iter().cloned().collect::<Vec<_>>(),
+            ["updated next"]
+        );
     }
 }
