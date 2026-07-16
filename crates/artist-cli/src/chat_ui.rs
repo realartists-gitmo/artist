@@ -347,9 +347,6 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
-    if response_started {
-        insert_blank(terminal)?;
-    }
     resize_and_draw(terminal, &ChatInput::default(), &mut stream_height)?;
     turns.push(Turn {
         role: Role::User,
@@ -402,8 +399,9 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
         .max(1) as u16;
     terminal.insert_before(content_height.saturating_add(2), |buffer| {
         let area = buffer.area;
-        Block::default().borders(Borders::ALL).render(area, buffer);
-        style_gradient_buffer(buffer, area);
+        Block::default()
+            .style(Style::default().bg(Color::White))
+            .render(area, buffer);
         let inner = Rect::new(
             area.x.saturating_add(1),
             area.y.saturating_add(1),
@@ -411,7 +409,7 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             area.height.saturating_sub(2),
         );
         Paragraph::new(text)
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(Color::DarkGray).bg(Color::White))
             .wrap(Wrap { trim: false })
             .render(inner, buffer);
     })?;
@@ -531,7 +529,8 @@ fn draw_streaming(
         })
         .sum::<usize>()
         .max(1) as u16;
-    let desired = response_height.saturating_add(3);
+    // Keep one transient blank row below output while it is streaming.
+    let desired = response_height.saturating_add(4);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
@@ -552,9 +551,10 @@ fn draw_streaming(
         );
         let input_area = Rect::new(
             area.x,
-            response_area.bottom(),
+            response_area.bottom().saturating_add(1),
             area.width,
-            area.height.saturating_sub(response_area.height),
+            area.height
+                .saturating_sub(response_area.height.saturating_add(1)),
         );
         render_input(frame, input_area, &ChatInput::default());
     })?;
