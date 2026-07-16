@@ -20,8 +20,9 @@ use ratatui::{
     crossterm::{
         cursor::{Hide, MoveTo},
         event::{
-            self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+            self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
+            KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+            PushKeyboardEnhancementFlags,
         },
         execute,
         terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
@@ -337,7 +338,8 @@ pub async fn run(
     });
     let keyboard_result = execute!(
         std::io::stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
     );
     let result = match keyboard_result {
         Ok(()) => {
@@ -359,7 +361,11 @@ pub async fn run(
         }
         Err(error) => Err(error.into()),
     };
-    let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags
+    );
     ratatui::restore();
     result
 }
