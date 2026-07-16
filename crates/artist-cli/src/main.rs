@@ -1,6 +1,7 @@
 mod args;
 mod chat_ui;
 mod command_ui;
+mod interaction;
 mod login;
 mod models;
 mod prompt;
