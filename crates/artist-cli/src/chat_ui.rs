@@ -394,27 +394,25 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
-    let inner_width = usize::from(terminal.size()?.width.saturating_sub(2).max(1));
+    let inner_width = usize::from(terminal.size()?.width.max(1));
     let content_height = text
         .lines()
         .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
         .sum::<usize>()
         .max(1) as u16;
-    terminal.insert_before(content_height.saturating_add(2), |buffer| {
-        let area = buffer.area;
-        Block::default()
-            .style(Style::default().bg(Color::White))
-            .render(area, buffer);
-        let inner = Rect::new(
-            area.x.saturating_add(1),
-            area.y.saturating_add(1),
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
+    terminal.insert_before(content_height.saturating_add(1), |buffer| {
+        let text_area = Rect::new(
+            buffer.area.x,
+            buffer.area.y,
+            buffer.area.width,
+            content_height,
         );
-        Paragraph::new(text)
-            .style(Style::default().fg(Color::DarkGray).bg(Color::White))
-            .wrap(Wrap { trim: false })
-            .render(inner, buffer);
+        Paragraph::new(Text::styled(
+            text,
+            Style::default().fg(Color::DarkGray).bg(Color::White),
+        ))
+        .wrap(Wrap { trim: false })
+        .render(text_area, buffer);
     })?;
     Ok(())
 }
