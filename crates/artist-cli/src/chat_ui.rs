@@ -831,6 +831,7 @@ fn draw_streaming(
     response: &str,
     first: bool,
     status: &str,
+    footer: &Line<'_>,
     viewport_height: &mut u16,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
@@ -847,7 +848,8 @@ fn draw_streaming(
     // Keep a fixed one-row streaming tail above the input. Completed output is
     // inserted into scrollback, so the viewport never grows and repositions it.
     let visible_response_height = 1;
-    let desired = 6.min(terminal_size.height);
+    let footer_height = (!footer.spans.is_empty()) as u16;
+    let desired = 6u16.saturating_add(footer_height).min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
         *viewport_height = desired;
@@ -888,9 +890,15 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height
-                .saturating_sub(response_area.height.saturating_add(2)),
+                .saturating_sub(response_area.height.saturating_add(2 + footer_height)),
         );
         render_input(frame, input_area, &ChatInput::default());
+        if footer_height == 1 {
+            frame.render_widget(
+                Paragraph::new(footer.clone()),
+                Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+            );
+        }
     })?;
     terminal.show_cursor()?;
     if resized {
@@ -899,24 +907,39 @@ fn draw_streaming(
     Ok(())
 }
 
-fn render(frame: &mut Frame<'_>, input: &ChatInput) {
-    render_with_panel(frame, input, &[]);
-}
-
-fn render_with_panel(frame: &mut Frame<'_>, input: &ChatInput, panel: &[String]) {
-    render_input_at_bottom(frame, input);
-    if panel.is_empty() {
-        return;
-    }
+fn render_with_panel(
+    frame: &mut Frame<'_>,
+    input: &ChatInput,
+    panel: &[String],
+    footer: &Line<'_>,
+) {
     let area = frame.area();
+    let status_height = (!footer.spans.is_empty()) as u16;
+    if status_height == 1 {
+        frame.render_widget(
+            Paragraph::new(footer.clone()),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
+    }
     let input_height = input
         .visual_lines(area.width.saturating_sub(2).max(1))
         .saturating_add(2)
-        .min(area.height);
-    let panel_height = (panel.len() as u16 + 2).min(area.height.saturating_sub(input_height));
+        .min(area.height.saturating_sub(status_height));
+    let input_area = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(status_height + input_height),
+        area.width,
+        input_height,
+    );
+    render_input(frame, input_area, input);
+    if panel.is_empty() {
+        return;
+    }
+    let panel_height =
+        (panel.len() as u16 + 2).min(area.height.saturating_sub(status_height + input_height));
     let panel_area = Rect::new(
         area.x,
-        area.bottom().saturating_sub(input_height + panel_height),
+        input_area.y.saturating_sub(panel_height),
         area.width,
         panel_height,
     );
@@ -928,21 +951,6 @@ fn render_with_panel(frame: &mut Frame<'_>, input: &ChatInput, panel: &[String])
         ),
         panel_area,
     );
-}
-
-fn render_input_at_bottom(frame: &mut Frame<'_>, input: &ChatInput) {
-    let area = frame.area();
-    let height = input
-        .visual_lines(area.width.saturating_sub(2).max(1))
-        .saturating_add(2)
-        .min(area.height);
-    let input_area = Rect::new(
-        area.x,
-        area.bottom().saturating_sub(height),
-        area.width,
-        height,
-    );
-    render_input(frame, input_area, input);
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
@@ -1132,6 +1140,7 @@ mod tests {
                     frame,
                     &ChatInput::default(),
                     &["/help  Show commands".into()],
+                    &Line::default(),
                 )
             })
             .unwrap();
@@ -1143,11 +1152,26 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_renders_below_input() {
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let footer = Line::styled("model", Style::default().fg(Color::Black).bg(Color::Gray));
+        terminal
+            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
+        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "m");
+        assert_eq!(buffer.cell((0, 3)).unwrap().bg, Color::Gray);
+    }
+
+    #[test]
     fn renders_at_full_width() {
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render(frame, &ChatInput::default()))
+            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &Line::default()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
