@@ -6,6 +6,7 @@ mod prompt;
 mod sessions;
 mod store;
 mod test_provider;
+mod tool_ui;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction};

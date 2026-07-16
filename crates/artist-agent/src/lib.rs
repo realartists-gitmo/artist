@@ -8,6 +8,7 @@ use llm_provider::SavedProvider;
 use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
+    completion::message::ToolResultContent,
     providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
@@ -110,11 +111,21 @@ pub async fn stream_chat(
             MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
                 internal_call_id,
-            }) => on_event(PromptEvent::ToolResult {
-                id: internal_call_id,
-                content: serde_json::to_string(&tool_result.content)
-                    .context("serialize tool result")?,
-            })?,
+            }) => {
+                let content = tool_result
+                    .content
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        ToolResultContent::Text(text) => Some(text.text),
+                        ToolResultContent::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                on_event(PromptEvent::ToolResult {
+                    id: internal_call_id,
+                    content,
+                })?;
+            }
             _ => {}
         }
     }

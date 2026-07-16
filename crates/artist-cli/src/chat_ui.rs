@@ -1,4 +1,7 @@
-use crate::sessions::{Role, Session, SessionStore, Turn};
+use crate::{
+    sessions::{Role, Session, SessionStore, Turn},
+    tool_ui::ToolUi,
+};
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
 use llm_provider::SavedProvider;
@@ -316,6 +319,7 @@ async fn submit(
     let mut reasoning = String::new();
     let mut response_started = false;
     let mut response_output_started = false;
+    let mut tools = ToolUi::default();
     let mut stream_height = 3;
     let mut phase = "thinking";
     let mut animation_frame = 0;
@@ -367,9 +371,21 @@ async fn submit(
                         phase = "thinking";
                         reasoning.push_str(&delta);
                     }
-                    artist_agent::PromptEvent::ToolCall { .. }
-                    | artist_agent::PromptEvent::ToolExecutionStart { .. }
-                    | artist_agent::PromptEvent::ToolResult { .. } => phase = "working",
+                    artist_agent::PromptEvent::ToolCall { id, name, arguments } => {
+                        phase = "working";
+                        if !reasoning.is_empty() {
+                            insert_reasoning(terminal, &reasoning)?;
+                            reasoning.clear();
+                        }
+                        let title = tools.start(id, &name, &arguments);
+                        insert_tool_line(terminal, &title, true)?;
+                    }
+                    artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
+                    artist_agent::PromptEvent::ToolResult { id, content } => {
+                        phase = "working";
+                        let output = tools.output(&id, &content);
+                        insert_tool_line(terminal, &output, false)?;
+                    }
                 }
             }
         }
@@ -472,6 +488,39 @@ fn insert_blank(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
+fn insert_tool_line(
+    terminal: &mut ratatui::DefaultTerminal,
+    content: &str,
+    first: bool,
+) -> Result<()> {
+    let prefix = if first { "  🛠 " } else { "    " };
+    let text = content
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            Line::from(format!(
+                "{}{line}",
+                if index == 0 { prefix } else { "    " }
+            ))
+        })
+        .collect::<Vec<_>>();
+    let width = usize::from(terminal.size()?.width.max(1));
+    let height = text
+        .iter()
+        .map(|line| line.width().max(1).div_ceil(width))
+        .sum::<usize>() as u16;
+    terminal.insert_before(height.max(1), |buffer| {
+        Block::default()
+            .style(Style::default().bg(Color::DarkGray))
+            .render(buffer.area, buffer);
+        Paragraph::new(Text::from(text))
+            .style(Style::default().fg(Color::White).bg(Color::DarkGray))
+            .wrap(Wrap { trim: false })
+            .render(buffer.area, buffer);
+    })?;
+    Ok(())
+}
+
 fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) -> Result<()> {
     let text = reasoning_text(reasoning);
     let width = usize::from(terminal.size()?.width.max(1));
@@ -494,7 +543,7 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
             .lines()
             .enumerate()
             .map(|(line_index, line)| {
-                let mut spans = vec![Span::raw(if line_index == 0 { "  ⋗ " } else { "    " })];
+                let mut spans = vec![Span::raw(if line_index == 0 { "  ◉ " } else { "    " })];
                 let mut rest = line;
                 while let Some(start) = rest.find("**") {
                     spans.push(Span::styled(
@@ -805,7 +854,7 @@ mod tests {
     #[test]
     fn reasoning_markers_become_italics() {
         let text = reasoning_text("**Planning** the answer");
-        assert!(text.lines[0].spans[0].content.contains("⋗"));
+        assert!(text.lines[0].spans[0].content.contains("◉"));
         assert!(
             text.lines[0]
                 .spans
