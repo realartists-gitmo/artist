@@ -1,6 +1,4 @@
 //! Domain types for commands entered in the interactive prompt.
-#![allow(dead_code, reason = "consumed by the pending chat UI integration")]
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SlashCommand {
     pub name: &'static str,
