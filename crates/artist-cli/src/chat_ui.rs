@@ -370,6 +370,19 @@ async fn submit(
 }
 
 fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
+    if let Some(open) = pending.find("```") {
+        let after_open = open + 3;
+        let Some(close) = pending[after_open..].find("```") else {
+            // Keep the complete fenced block together so Glamour retains the
+            // language and can syntax-highlight content while it streams.
+            return None;
+        };
+        let mut split = after_open + close + 3;
+        if pending.as_bytes().get(split) == Some(&b'\n') {
+            split += 1;
+        }
+        return Some(pending.drain(..split).collect());
+    }
     let split = pending.find('\n').map(|index| index + 1).or_else(|| {
         let mut columns = 0;
         pending.char_indices().find_map(|(index, character)| {
@@ -703,6 +716,21 @@ mod tests {
         assert!(rendered.contains("⋗"));
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("**"));
+    }
+
+    #[test]
+    fn glamour_syntax_highlights_fenced_code() {
+        let text = response_text("```rust\nfn main() { let answer = 42; }\n```", true, 80).unwrap();
+        let colors = text
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .filter_map(|span| span.style.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            colors.len() > 1,
+            "expected multiple syntax colors: {colors:?}"
+        );
     }
 
     #[test]
