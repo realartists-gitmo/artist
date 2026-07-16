@@ -407,6 +407,9 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             buffer.area.width,
             content_height,
         );
+        Block::default()
+            .style(Style::default().bg(Color::White))
+            .render(text_area, buffer);
         Paragraph::new(Text::styled(
             text,
             Style::default().fg(Color::DarkGray).bg(Color::White),
