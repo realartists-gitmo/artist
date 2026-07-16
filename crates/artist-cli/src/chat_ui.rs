@@ -493,7 +493,7 @@ fn insert_tool_line(
     content: &str,
     first: bool,
 ) -> Result<()> {
-    let prefix = if first { "  🛠 " } else { "    " };
+    let prefix = if first { "  🛠  " } else { "    " };
     let text = content
         .lines()
         .enumerate()
