@@ -413,9 +413,6 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             text_area.width.saturating_sub(2),
             text_area.height,
         );
-        Block::default()
-            .style(Style::default().bg(Color::White))
-            .render(highlighted_area, buffer);
         Paragraph::new(Text::styled(
             text,
             Style::default().fg(Color::Black).bg(Color::White),
