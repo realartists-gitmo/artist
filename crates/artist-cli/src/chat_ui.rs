@@ -288,11 +288,29 @@ async fn run_loop(
     mut pending: Option<String>,
     mut status: StatusRuntime,
 ) -> Result<()> {
+    let resumed_session = resumed.is_some();
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
     let mut viewport_height = 3;
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
+    if resumed_session {
+        let footer = footer_line(
+            &context.store.status_bar,
+            &context.store.providers[context.provider_index],
+            context.project,
+            &status,
+        );
+        resize_and_draw(
+            &mut terminal,
+            &input,
+            &[],
+            &footer,
+            &mut viewport_height,
+            viewport_floor,
+        )?;
+        insert_history(&mut terminal, &turns)?;
+    }
     loop {
         let suggestions = slash_commands::completions(&input.text)
             .into_iter()
@@ -657,6 +675,19 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
         })
     })?;
     Some(pending.drain(..split).collect())
+}
+
+fn insert_history(terminal: &mut ratatui::DefaultTerminal, turns: &[Turn]) -> Result<()> {
+    for turn in turns {
+        match turn.role {
+            Role::User => insert_message(terminal, &turn.content)?,
+            Role::Assistant => {
+                insert_response(terminal, &turn.content, true)?;
+                insert_blank(terminal)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
