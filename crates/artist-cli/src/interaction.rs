@@ -1,28 +1,50 @@
+use crate::{input_atoms::InputAtoms, input_images::ImagePaste};
+
+#[derive(Clone, Default)]
+pub(crate) struct PromptEntry {
+    pub display: String,
+    pub atoms: InputAtoms,
+}
+
 #[derive(Default)]
 pub(crate) struct PromptHistory {
-    entries: Vec<String>,
+    entries: Vec<PromptEntry>,
     selected: Option<usize>,
-    draft: String,
+    draft: PromptEntry,
 }
 
 impl PromptHistory {
     pub fn from_prompts(entries: Vec<String>) -> Self {
         Self {
-            entries,
+            entries: entries
+                .into_iter()
+                .map(|content| PromptEntry {
+                    display: content.clone(),
+                    atoms: InputAtoms::default(),
+                })
+                .collect(),
             ..Self::default()
         }
     }
-    pub fn push(&mut self, prompt: String) {
-        self.entries.push(prompt);
+    pub fn push(&mut self, display: String, atoms: InputAtoms) {
+        self.entries.push(PromptEntry { display, atoms });
         self.selected = None;
-        self.draft.clear();
+        self.draft = PromptEntry::default();
     }
-    pub fn navigate(&mut self, up: bool, current: &str) -> Option<String> {
+    pub fn navigate(
+        &mut self,
+        up: bool,
+        current_display: &str,
+        current_atoms: &InputAtoms,
+    ) -> Option<PromptEntry> {
         if self.entries.is_empty() {
             return None;
         }
         if self.selected.is_none() {
-            self.draft = current.to_owned();
+            self.draft = PromptEntry {
+                display: current_display.to_owned(),
+                atoms: current_atoms.clone(),
+            };
         }
         self.selected = if up {
             Some(
@@ -43,26 +65,43 @@ impl PromptHistory {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct SteeringEntry {
+    pub display: String,
+    pub content: String,
+    pub images: Vec<ImagePaste>,
+    pub atoms: InputAtoms,
+}
+
 #[derive(Default)]
 pub(crate) struct SteeringQueue {
-    queued: Vec<String>,
+    queued: Vec<SteeringEntry>,
     selected: Option<usize>,
-    draft: String,
+    draft: SteeringEntry,
 }
 
 impl SteeringQueue {
-    pub fn entries(&self) -> &[String] {
-        &self.queued
+    pub fn displays(&self) -> impl Iterator<Item = &str> {
+        self.queued.iter().map(|entry| entry.display.as_str())
     }
     pub fn selected(&self) -> Option<usize> {
         self.selected
     }
-    pub fn navigate(&mut self, up: bool, current: &str) -> Option<String> {
+    pub fn navigate(
+        &mut self,
+        up: bool,
+        current: &str,
+        current_atoms: &InputAtoms,
+    ) -> Option<SteeringEntry> {
         if self.queued.is_empty() {
             return None;
         }
         if self.selected.is_none() {
-            self.draft = current.to_owned();
+            self.draft = SteeringEntry {
+                display: current.to_owned(),
+                atoms: current_atoms.clone(),
+                ..SteeringEntry::default()
+            };
         }
         self.selected = if up {
             Some(
@@ -81,25 +120,41 @@ impl SteeringQueue {
                 .map_or_else(|| self.draft.clone(), |index| self.queued[index].clone()),
         )
     }
-    pub fn submit(&mut self, value: String) {
+    pub fn submit(
+        &mut self,
+        display: String,
+        content: String,
+        images: Vec<ImagePaste>,
+        atoms: InputAtoms,
+    ) {
+        let entry = SteeringEntry {
+            display,
+            content,
+            images,
+            atoms,
+        };
         if let Some(index) = self.selected.take() {
-            self.queued[index] = value;
+            self.queued[index] = entry;
         } else {
-            self.queued.push(value);
+            self.queued.push(entry);
         }
-        self.draft.clear();
+        self.draft = SteeringEntry::default();
     }
     pub fn remove_selected(&mut self) -> bool {
         let Some(index) = self.selected.take() else {
             return false;
         };
         self.queued.remove(index);
-        self.draft.clear();
+        self.draft = SteeringEntry::default();
         true
     }
-    pub fn mark_delivered(&mut self, message: &str) {
-        if let Some(index) = self.queued.iter().position(|queued| queued == message) {
-            self.queued.remove(index);
+    pub fn mark_delivered(&mut self, message: &str) -> Option<String> {
+        if let Some(index) = self
+            .queued
+            .iter()
+            .position(|queued| queued.content == message)
+        {
+            let display = self.queued.remove(index).display;
             self.selected = self.selected.and_then(|selected| {
                 if selected == index {
                     None
@@ -109,9 +164,11 @@ impl SteeringQueue {
                     Some(selected)
                 }
             });
+            return Some(display);
         }
+        None
     }
-    pub fn take(self) -> Vec<String> {
+    pub fn take(self) -> Vec<SteeringEntry> {
         self.queued
     }
 }
@@ -122,21 +179,56 @@ mod tests {
     #[test]
     fn recalls_prompts_and_restores_draft() {
         let mut history = PromptHistory::from_prompts(vec!["one".into(), "two".into()]);
-        assert_eq!(history.navigate(true, "draft").as_deref(), Some("two"));
-        assert_eq!(history.navigate(true, "two").as_deref(), Some("one"));
-        assert_eq!(history.navigate(false, "one").as_deref(), Some("two"));
-        assert_eq!(history.navigate(false, "two").as_deref(), Some("draft"));
+        assert_eq!(
+            history
+                .navigate(true, "draft", &InputAtoms::default())
+                .unwrap()
+                .display,
+            "two"
+        );
+        assert_eq!(
+            history
+                .navigate(true, "two", &InputAtoms::default())
+                .unwrap()
+                .display,
+            "one"
+        );
+        assert_eq!(
+            history
+                .navigate(false, "one", &InputAtoms::default())
+                .unwrap()
+                .display,
+            "two"
+        );
+        assert_eq!(
+            history
+                .navigate(false, "two", &InputAtoms::default())
+                .unwrap()
+                .display,
+            "draft"
+        );
     }
     #[test]
     fn edits_and_removes_queued_steering() {
         let mut queue = SteeringQueue::default();
-        queue.submit("one".into());
-        queue.submit("two".into());
-        assert_eq!(queue.navigate(true, "draft").as_deref(), Some("two"));
-        queue.submit("changed".into());
-        assert_eq!(queue.entries(), &["one", "changed"]);
-        queue.navigate(true, "");
+        queue.submit("one".into(), "one".into(), vec![], InputAtoms::default());
+        queue.submit("two".into(), "two".into(), vec![], InputAtoms::default());
+        assert_eq!(
+            queue
+                .navigate(true, "draft", &InputAtoms::default())
+                .unwrap()
+                .display,
+            "two"
+        );
+        queue.submit(
+            "changed".into(),
+            "changed".into(),
+            vec![],
+            InputAtoms::default(),
+        );
+        assert_eq!(queue.displays().collect::<Vec<_>>(), ["one", "changed"]);
+        queue.navigate(true, "", &InputAtoms::default());
         assert!(queue.remove_selected());
-        assert_eq!(queue.entries(), &["one"]);
+        assert_eq!(queue.displays().collect::<Vec<_>>(), ["one"]);
     }
 }
