@@ -1,15 +1,17 @@
 mod bash;
 mod edit;
+mod find;
+mod grep;
 mod output;
 mod read;
-mod search;
 mod workspace;
 mod write;
 
 pub use bash::BashTool;
 pub use edit::EditTool;
+pub use find::FindTool;
+pub use grep::GrepTool;
 pub use read::ReadTool;
-pub use search::{FindTool, GrepTool};
 pub use workspace::Workspace;
 pub use write::WriteTool;
 
