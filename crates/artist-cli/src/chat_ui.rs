@@ -731,17 +731,21 @@ fn insert_tool_line(
     first: bool,
 ) -> Result<()> {
     let prefix = if first { "  🛠  " } else { "    " };
+    let is_diff = !first && content.lines().any(|line| line.starts_with("@@"));
     let text = content
         .lines()
         .enumerate()
         .map(|(index, line)| {
+            // Literal tabs are interpreted by the terminal after Ratatui has
+            // laid out the buffer, leaving unstyled cells between columns.
+            let line = line.replace('\t', "    ");
             let color = if first {
                 Color::White
-            } else if line.starts_with('+') {
+            } else if is_diff && line.starts_with('+') {
                 Color::Rgb(120, 210, 140)
-            } else if line.starts_with('-') {
+            } else if is_diff && line.starts_with('-') {
                 Color::Rgb(235, 120, 120)
-            } else if line.starts_with("@@") {
+            } else if is_diff && line.starts_with("@@") {
                 Color::Rgb(110, 190, 220)
             } else {
                 Color::Rgb(175, 175, 175)
