@@ -3,6 +3,7 @@ use anyhow::Result;
 use llm_provider::SavedProvider;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
+    buffer::Buffer,
     crossterm::{
         cursor::{Hide, MoveTo},
         event::{
@@ -295,11 +296,10 @@ async fn submit(
             content: prompt.clone(),
         },
     )?;
-    insert_text(terminal, &format!("You: {prompt}"), Color::Cyan)?;
+    insert_message(terminal, &prompt)?;
     let mut response = String::new();
-    let mut visible = String::from("Artist: ");
+    let mut visible = String::new();
     let mut stream_height = 3;
-    draw_streaming(terminal, &visible, &mut stream_height)?;
     artist_agent::stream_chat(provider, &prompt, &history, |event| {
         match event {
             artist_agent::PromptEvent::TextDelta(delta) => {
@@ -349,6 +349,31 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
         })
     })?;
     Some(pending.drain(..split).collect())
+}
+
+fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
+    let inner_width = usize::from(terminal.size()?.width.saturating_sub(2).max(1));
+    let content_height = text
+        .lines()
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
+        .sum::<usize>()
+        .max(1) as u16;
+    terminal.insert_before(content_height.saturating_add(2), |buffer| {
+        let area = buffer.area;
+        Block::default().borders(Borders::ALL).render(area, buffer);
+        style_gradient_buffer(buffer, area);
+        let inner = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        Paragraph::new(text)
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false })
+            .render(inner, buffer);
+    })?;
+    Ok(())
 }
 
 fn insert_text(terminal: &mut ratatui::DefaultTerminal, text: &str, color: Color) -> Result<()> {
@@ -460,6 +485,10 @@ fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 }
 
 fn style_gradient_border(frame: &mut Frame<'_>, area: Rect) {
+    style_gradient_buffer(frame.buffer_mut(), area);
+}
+
+fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
     if area.is_empty() {
         return;
     }
@@ -476,21 +505,12 @@ fn style_gradient_border(frame: &mut Frame<'_>, area: Rect) {
         let y = area.y + row;
         if row == 0 || row == last_row {
             for x in area.x..area.right() {
-                frame
-                    .buffer_mut()
-                    .cell_mut((x, y))
-                    .unwrap()
-                    .set_style(style);
+                buffer.cell_mut((x, y)).unwrap().set_style(style);
             }
         } else {
-            frame
-                .buffer_mut()
-                .cell_mut((area.x, y))
-                .unwrap()
-                .set_style(style);
+            buffer.cell_mut((area.x, y)).unwrap().set_style(style);
             if area.width > 1 {
-                frame
-                    .buffer_mut()
+                buffer
                     .cell_mut((area.right() - 1, y))
                     .unwrap()
                     .set_style(style);
