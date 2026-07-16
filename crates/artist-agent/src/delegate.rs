@@ -1,7 +1,11 @@
 use artist_tools::{TOOL_POLICY, ToolBundle};
 use llm_provider::SavedProvider;
 use rig_core::tool::Tool;
-use rig_core::{client::CompletionClient, completion::Prompt, providers::chatgpt};
+use rig_core::{
+    client::CompletionClient,
+    completion::{Chat, Message, Prompt},
+    providers::chatgpt,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -9,6 +13,7 @@ use serde_json::{Value, json};
 pub(crate) struct Delegate {
     pub provider: SavedProvider,
     pub tools: ToolBundle,
+    pub context: Vec<Message>,
 }
 
 #[derive(Deserialize)]
@@ -16,6 +21,7 @@ pub(crate) struct Delegate {
 pub(crate) struct DelegateArgs {
     prompt: String,
     read_only: Option<bool>,
+    fork: Option<bool>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,11 +39,11 @@ impl Tool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run one focused subagent. The subagent never receives delegate; readOnly defaults to true."
+        "Run one focused subagent. The subagent never receives delegate; readOnly defaults to true. Set fork=true to give it the main chat context."
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"prompt":{"type":"string"},"readOnly":{"type":"boolean","default":true}},"required":["prompt"],"additionalProperties":false})
+        json!({"type":"object","properties":{"prompt":{"type":"string"},"readOnly":{"type":"boolean","default":true},"fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."}},"required":["prompt"],"additionalProperties":false})
     }
     async fn call(&self, args: DelegateArgs) -> Result<String, DelegateError> {
         let model = self
@@ -84,12 +90,14 @@ impl Tool for Delegate {
                 .tool(child_tools.edit.clone())
                 .tool(child_tools.write.clone());
         }
-        let output = builder
-            .default_max_turns(usize::MAX)
-            .build()
-            .prompt(args.prompt)
-            .await
-            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        let agent = builder.default_max_turns(usize::MAX).build();
+        let output = if args.fork.unwrap_or(false) {
+            let mut context = self.context.clone();
+            agent.chat(args.prompt, &mut context).await
+        } else {
+            agent.prompt(args.prompt).await
+        }
+        .map_err(|error| DelegateError::Failed(error.to_string()))?;
         let summary = if output.len() > 50 * 1024 {
             let mut end = 50 * 1024 - 64;
             while end > 0 && !output.is_char_boundary(end) {

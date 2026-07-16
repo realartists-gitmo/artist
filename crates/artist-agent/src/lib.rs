@@ -82,6 +82,15 @@ pub async fn stream_chat(
         include_str!("system_prompt.md"),
         tools.project_root().display()
     );
+    let messages = history
+        .iter()
+        .map(|message| match message.role {
+            ChatRole::User => rig_core::completion::Message::user(&message.content),
+            ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),
+        })
+        .collect::<Vec<_>>();
+    let mut fork_context = messages.clone();
+    fork_context.push(rig_core::completion::Message::user(input));
     let agent = builder
         .preamble(&system_prompt)
         .tool(tools.bash.clone())
@@ -93,13 +102,10 @@ pub async fn stream_chat(
         .tool(delegate::Delegate {
             provider: provider.clone(),
             tools: tools.clone(),
+            context: fork_context,
         })
         .default_max_turns(usize::MAX)
         .build();
-    let messages = history.iter().map(|message| match message.role {
-        ChatRole::User => rig_core::completion::Message::user(&message.content),
-        ChatRole::Assistant => rig_core::completion::Message::assistant(&message.content),
-    });
     let mut stream = agent.stream_chat(input, messages).await;
     while let Some(item) = stream.next().await {
         match item.context("stream Artist agent")? {
