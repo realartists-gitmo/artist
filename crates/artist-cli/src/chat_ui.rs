@@ -387,6 +387,7 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
+    insert_blank(terminal)?;
     insert_status(
         terminal,
         &format!("  {}", format_elapsed(started.elapsed())),
