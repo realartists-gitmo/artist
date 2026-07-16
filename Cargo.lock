@@ -167,7 +167,6 @@ dependencies = [
  "globset",
  "hashline-tools",
  "nix 0.29.0",
- "parking_lot",
  "portable-pty",
  "regex",
  "rig-core",

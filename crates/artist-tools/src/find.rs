@@ -31,7 +31,14 @@ impl Tool for FindTool {
         let scope = validate_scope(&self.0, args.path.as_deref())?;
         let glob = compile_glob(args.glob.as_deref())?;
         let query = QueryParser::default().parse(&args.query);
-        let picker = self.0.index.lock();
+        let picker = self
+            .0
+            .index
+            .read()
+            .map_err(|error| ToolError::Message(error.to_string()))?;
+        let picker = picker
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("FFF index is unavailable".into()))?;
         let result = picker.fuzzy_search(
             &query,
             None,
@@ -45,7 +52,7 @@ impl Tool for FindTool {
         );
         let mut output = Vec::new();
         for (item, score) in result.items.iter().zip(&result.scores) {
-            let relative = item.relative_path(&*picker).replace('\\', "/");
+            let relative = item.relative_path(picker).replace('\\', "/");
             if !matches_filters(&relative, scope.as_deref(), glob.as_ref()) {
                 continue;
             }

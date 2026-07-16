@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
-use fff_search::{FFFMode, FilePicker, FilePickerOptions};
+use fff_search::{FFFMode, FilePicker, FilePickerOptions, SharedFilePicker, SharedFrecency};
 use hashline_tools::{AgentIdentity, FileCoordinator, FileToolConfig};
-use parking_lot::Mutex;
 use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -12,7 +12,7 @@ pub struct Workspace {
     root: Arc<PathBuf>,
     pub(crate) files: FileCoordinator,
     pub(crate) actor: AgentIdentity,
-    pub(crate) index: Arc<Mutex<FilePicker>>,
+    pub(crate) index: SharedFilePicker,
 }
 
 impl Workspace {
@@ -32,20 +32,27 @@ impl Workspace {
             state.join("hashlines.sqlite3"),
             state.join("locks"),
         )?;
-        let mut picker = FilePicker::new(FilePickerOptions {
-            base_path: root.to_string_lossy().into_owned(),
-            mode: FFFMode::Ai,
-            enable_content_indexing: true,
-            watch: true,
-            follow_symlinks: false,
-            ..Default::default()
-        })?;
-        picker.collect_files()?;
+        let picker = SharedFilePicker::default();
+        FilePicker::new_with_shared_state(
+            picker.clone(),
+            SharedFrecency::default(),
+            FilePickerOptions {
+                base_path: root.to_string_lossy().into_owned(),
+                mode: FFFMode::Ai,
+                enable_content_indexing: true,
+                watch: true,
+                follow_symlinks: false,
+                ..Default::default()
+            },
+        )?;
+        if !picker.wait_for_scan(Duration::from_secs(30)) {
+            bail!("timed out indexing project files")
+        }
         Ok(Self {
             root: Arc::new(root),
             files,
             actor: AgentIdentity::from_id("artist").map_err(anyhow::Error::msg)?,
-            index: Arc::new(Mutex::new(picker)),
+            index: picker,
         })
     }
 
@@ -78,7 +85,11 @@ impl Workspace {
     }
 
     pub(crate) fn refresh_index(&self, path: &Path) {
-        self.index.lock().handle_create_or_modify(path);
+        if let Ok(mut index) = self.index.write()
+            && let Some(index) = index.as_mut()
+        {
+            index.handle_create_or_modify(path);
+        }
     }
 
     pub fn display(&self, path: &Path) -> String {

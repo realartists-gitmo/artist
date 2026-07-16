@@ -59,7 +59,14 @@ impl Tool for GrepTool {
             other => return Err(ToolError::Message(format!("invalid case mode: {other}"))),
         };
         let query = QueryParser::default().parse(&search_query);
-        let picker = self.0.index.lock();
+        let picker = self
+            .0
+            .index
+            .read()
+            .map_err(|error| ToolError::Message(error.to_string()))?;
+        let picker = picker
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("FFF index is unavailable".into()))?;
         let result = picker.grep(
             &query,
             &GrepSearchOptions {
@@ -80,7 +87,7 @@ impl Tool for GrepTool {
         let mut matches_shown = 0;
         for found in &result.matches {
             let file = result.files[found.file_index];
-            let relative = file.relative_path(&*picker).replace('\\', "/");
+            let relative = file.relative_path(picker).replace('\\', "/");
             if !matches_filters(&relative, scope.as_deref(), glob.as_ref()) {
                 continue;
             }
