@@ -1,3 +1,4 @@
+use crate::status_bar::StatusBarConfig;
 use anyhow::{Context, Result, bail};
 use llm_provider::{ProviderId, SavedProvider};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub struct ProviderStore {
     pub default_provider: Option<ProviderId>,
     #[serde(default)]
     pub providers: Vec<SavedProvider>,
+    #[serde(default)]
+    pub status_bar: StatusBarConfig,
 }
 fn version() -> u8 {
     2
@@ -152,6 +155,15 @@ api_key = "secret"
         let store = ProviderStore::load(&path).unwrap();
         assert!(store.providers.is_empty());
         assert!(store.default_provider.is_none());
+    }
+
+    #[test]
+    fn old_config_gets_default_status_bar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        fs::write(&path, "version = 2\nproviders = []\n").unwrap();
+        let store = ProviderStore::load(&path).unwrap();
+        assert_eq!(store.status_bar, StatusBarConfig::default());
     }
 
     #[test]

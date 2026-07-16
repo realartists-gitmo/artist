@@ -13,6 +13,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/model [model] [reasoning]",
     },
     SlashCommand {
+        name: "/statusbar",
+        description: "Configure status bar items",
+        usage: "/statusbar",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -22,6 +27,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParsedCommand<'a> {
     Help,
+    StatusBar,
     Model {
         model: Option<&'a str>,
         reasoning: Option<&'a str>,
@@ -47,6 +53,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
         ("/help", []) => Ok(ParsedCommand::Help),
+        ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
+        ("/statusbar", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/statusbar",
+        }),
         ("/help", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/help",
@@ -91,7 +102,7 @@ mod tests {
     fn registry_has_unique_standard_commands() {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model", "/help"]
+            ["/model", "/statusbar", "/help"]
         );
         assert!(
             COMMANDS
@@ -103,6 +114,7 @@ mod tests {
     #[test]
     fn parses_supported_forms() {
         assert_eq!(parse("/help"), Some(Ok(ParsedCommand::Help)));
+        assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
         assert_eq!(
             parse(" /model "),
             Some(Ok(ParsedCommand::Model {
@@ -145,7 +157,7 @@ mod tests {
 
     #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 2);
+        assert_eq!(completions("/").len(), 3);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model"]

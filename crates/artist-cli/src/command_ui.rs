@@ -1,6 +1,7 @@
 use crate::{
     models::{self, SelectableModel},
     slash_commands::{self, ParseError, ParsedCommand},
+    status_bar::{StatusBarConfig, StatusItem},
     store::ProviderStore,
 };
 use anyhow::{Context, Result};
@@ -26,6 +27,18 @@ pub async fn run(
             .iter()
             .map(|command| format!("{}  {}", command.usage, command.description))
             .collect()),
+        ParsedCommand::StatusBar => {
+            let Some(config) = pick_status_bar(&store.status_bar, &mut draw)? else {
+                anyhow::bail!("status bar selection cancelled");
+            };
+            let previous = store.status_bar.clone();
+            store.status_bar = config;
+            if let Err(error) = store.save(store_path) {
+                store.status_bar = previous;
+                return Err(error);
+            }
+            Ok(vec!["status bar updated.".into()])
+        }
         ParsedCommand::Model { model, reasoning } => {
             draw(&["Loading models…".to_owned()])?;
             let catalog = models::catalog(&store.providers[provider_index]).await?;
@@ -88,6 +101,43 @@ pub async fn run(
                     .as_deref()
                     .unwrap_or("default")
             )])
+        }
+    }
+}
+
+fn pick_status_bar(
+    current: &StatusBarConfig,
+    draw: &mut impl FnMut(&[String]) -> Result<()>,
+) -> Result<Option<StatusBarConfig>> {
+    let mut enabled = StatusItem::ALL.map(|item| current.items.contains(&item));
+    let mut selected = 0;
+    loop {
+        let mut panel = vec!["Configure status bar (Space toggles, Enter confirms)".to_owned()];
+        panel.extend(StatusItem::ALL.iter().enumerate().map(|(index, item)| {
+            format!(
+                "{} [{}] {}",
+                if index == selected { "›" } else { " " },
+                if enabled[index] { "x" } else { " " },
+                item.label()
+            )
+        }));
+        draw(&panel)?;
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up => selected = selected.saturating_sub(1),
+                KeyCode::Down => selected = (selected + 1).min(StatusItem::ALL.len() - 1),
+                KeyCode::Char(' ') => enabled[selected] = !enabled[selected],
+                KeyCode::Enter => {
+                    let items = StatusItem::ALL
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, item)| enabled[index].then_some(item))
+                        .collect();
+                    return Ok(Some(StatusBarConfig { items }));
+                }
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
         }
     }
 }

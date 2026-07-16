@@ -6,6 +6,8 @@ mod models;
 mod prompt;
 mod sessions;
 mod slash_commands;
+#[allow(dead_code)] // Domain API is consumed when status-bar UI integration lands.
+mod status_bar;
 mod store;
 mod test_provider;
 mod tool_ui;

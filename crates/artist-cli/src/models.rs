@@ -26,12 +26,29 @@ pub(crate) struct SelectableModel {
     pub default_reasoning_level: Option<String>,
     #[serde(default)]
     pub supported_reasoning_levels: Vec<ReasoningLevel>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default = "default_context_percent")]
+    pub effective_context_window_percent: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct ReasoningLevel {
     pub effort: String,
     pub description: String,
+}
+
+fn default_context_percent() -> u64 {
+    100
+}
+
+impl SelectableModel {
+    /// Context available to the client after the service's reserved percentage.
+    #[allow(dead_code)] // Consumed by the pending status-bar UI integration.
+    pub(crate) fn effective_context_window(&self) -> Option<u64> {
+        self.context_window
+            .map(|window| window.saturating_mul(self.effective_context_window_percent) / 100)
+    }
 }
 
 /// Fetches the account's visible, selectable models in service priority order.
@@ -162,6 +179,8 @@ mod tests {
             priority: 1,
             visibility: "list".into(),
             default_reasoning_level: Some("medium".into()),
+            context_window: Some(200_000),
+            effective_context_window_percent: 95,
             supported_reasoning_levels: vec![
                 ReasoningLevel {
                     effort: "medium".into(),
@@ -186,6 +205,17 @@ mod tests {
             response.models[0].supported_reasoning_levels[0].effort,
             "ultra"
         );
+    }
+
+    #[test]
+    fn parses_and_computes_context_metadata() {
+        let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"gpt","display_name":"GPT","context_window":1000,"effective_context_window_percent":80}]}"#).unwrap();
+        assert_eq!(response.models[0].effective_context_window(), Some(800));
+        let response: ModelsResponse = serde_json::from_str(
+            r#"{"models":[{"slug":"gpt","display_name":"GPT","context_window":1000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(response.models[0].effective_context_window(), Some(1000));
     }
 
     #[test]
