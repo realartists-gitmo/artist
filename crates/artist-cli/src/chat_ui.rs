@@ -860,6 +860,7 @@ async fn submit(
             artist_agent::ToolContext {
                 native: &task_tools,
                 mcp: &task_mcp,
+                extensions: None,
                 disabled: &task_disabled_tools,
             },
             task_steering,

@@ -230,6 +230,7 @@ async fn execute_prompt(
         artist_agent::ToolContext {
             native: &tools,
             mcp,
+            extensions: None,
             disabled: &store.disabled_tools,
         },
         artist_agent::SteeringHandle::default(),

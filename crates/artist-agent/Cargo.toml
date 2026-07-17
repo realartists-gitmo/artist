@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 artist-tools = { path = "../artist-tools" }
+artist-extensions = { path = "../artist-extensions" }
 base64 = "0.22"
 dashmap = "6"
 dirs = "6"

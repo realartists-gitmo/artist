@@ -112,6 +112,7 @@ impl From<String> for ChatInput {
 pub struct ToolContext<'a> {
     pub native: &'a ToolBundle,
     pub mcp: &'a mcp::McpManager,
+    pub extensions: Option<&'a artist_extensions::Manager>,
     pub disabled: &'a [String],
 }
 
@@ -188,6 +189,9 @@ pub async fn stream_chat(
             .into_iter()
             .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>),
     );
+    if let Some(extensions) = tool_context.extensions {
+        registered.extend(extensions.tools());
+    }
     registered.retain(|tool| !disabled_tools.iter().any(|name| name == &tool.name()));
     let agent = builder
         .preamble(&system_prompt)
@@ -291,6 +295,7 @@ pub async fn stream_prompt(
         ToolContext {
             native: tools,
             mcp,
+            extensions: None,
             disabled: &[],
         },
         SteeringHandle::default(),
