@@ -116,6 +116,10 @@ impl McpManager {
     async fn names(&self) -> Vec<String> {
         self.0.servers.read().await.keys().cloned().collect()
     }
+
+    pub async fn server_names(&self) -> Vec<String> {
+        self.names().await
+    }
     pub async fn start(&self, name: &str) -> Result<()> {
         let server = self
             .0

@@ -423,6 +423,7 @@ async fn run_loop(
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
+    let mcp_servers = context.mcp.server_names().await;
     let mut prompt_history = PromptHistory::from_prompts(
         turns
             .iter()
@@ -454,17 +455,20 @@ async fn run_loop(
     }
     loop {
         let slash_suggestions = slash_commands::completions(&input.text);
+        let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
-        let suggestions = if slash_suggestions.is_empty() {
-            skill_suggestions
-                .iter()
-                .map(|skill| format!("${}  {}", skill.name, skill.description))
-                .collect::<Vec<_>>()
-        } else {
+        let suggestions = if !slash_suggestions.is_empty() {
             slash_suggestions
                 .iter()
                 .map(|command| format!("{}  {}", command.name, command.description))
                 .collect()
+        } else if !mcp_suggestions.is_empty() {
+            mcp_suggestions.clone()
+        } else {
+            skill_suggestions
+                .iter()
+                .map(|skill| format!("${}  {}", skill.name, skill.description))
+                .collect::<Vec<_>>()
         };
         let panel = if suggestions.is_empty() {
             &command_panel
@@ -588,14 +592,24 @@ async fn run_loop(
                     && key.code == KeyCode::Tab
                     && !suggestions.is_empty() =>
             {
-                if let (Some(range), Some(skill)) = (skill_range.clone(), skill_suggestions.first())
-                    && slash_suggestions.is_empty()
-                {
-                    input.replace_range(range, &format!("${}", skill.name));
-                } else if let Some(command) = slash_suggestions.first() {
+                if let Some(command) = slash_suggestions.first() {
                     input.text = command.name.to_owned() + " ";
                     input.atoms.clear();
                     input.cursor = input.text.len();
+                } else if let Some(completion) = mcp_suggestions.first() {
+                    input.text = completion.clone();
+                    if completion == "/mcp status" || completion.split_whitespace().count() == 3 {
+                        // Complete commands can be submitted immediately; actions still
+                        // awaiting a server retain a trailing space.
+                    } else {
+                        input.text.push(' ');
+                    }
+                    input.atoms.clear();
+                    input.cursor = input.text.len();
+                } else if let (Some(range), Some(skill)) =
+                    (skill_range.clone(), skill_suggestions.first())
+                {
+                    input.replace_range(range, &format!("${}", skill.name));
                 }
             }
             Event::Key(key)

@@ -130,6 +130,37 @@ pub(crate) fn completions(input: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+/// Returns complete command lines matching the MCP argument currently being typed.
+pub(crate) fn mcp_completions(input: &str, servers: &[String]) -> Vec<String> {
+    const ACTIONS: &[&str] = &["status", "start", "stop", "restart", "refresh"];
+    let trimmed = input.trim_start();
+    let Some(rest) = trimmed.strip_prefix("/mcp ") else {
+        return Vec::new();
+    };
+    if rest.contains(char::is_whitespace) {
+        let mut words = rest.split_whitespace();
+        let Some(action) = words.next() else {
+            return Vec::new();
+        };
+        let fragment = rest.strip_prefix(action).unwrap_or_default().trim_start();
+        if !matches!(action, "start" | "stop" | "restart" | "refresh")
+            || fragment.contains(char::is_whitespace)
+        {
+            return Vec::new();
+        }
+        return servers
+            .iter()
+            .filter(|server| server.starts_with(fragment))
+            .map(|server| format!("/mcp {action} {server}"))
+            .collect();
+    }
+    ACTIONS
+        .iter()
+        .filter(|action| action.starts_with(rest))
+        .map(|action| format!("/mcp {action}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +232,20 @@ mod tests {
         );
         assert!(completions("/model ").is_empty());
         assert!(completions("hello").is_empty());
+    }
+
+    #[test]
+    fn completes_mcp_actions_and_servers() {
+        let servers = vec!["filesystem".to_owned(), "github".to_owned()];
+        assert_eq!(
+            mcp_completions("/mcp st", &servers),
+            ["/mcp status", "/mcp start", "/mcp stop"]
+        );
+        assert_eq!(
+            mcp_completions("/mcp start f", &servers),
+            ["/mcp start filesystem"]
+        );
+        assert_eq!(mcp_completions("/mcp restart ", &servers).len(), 2);
+        assert!(mcp_completions("/mcp status ", &servers).is_empty());
     }
 }
