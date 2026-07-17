@@ -783,7 +783,9 @@ async fn submit(
         },
     )?;
     if context.show_splash {
-        terminal.insert_before(crate::startup_splash::HEIGHT, |buffer| {
+        // Add separation only when moving the splash into scrollback. The live
+        // startup layout already reserves its own gap above the input box.
+        terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
             crate::startup_splash::render_buffer(buffer);
         })?;
     } else if !turns.is_empty() {
