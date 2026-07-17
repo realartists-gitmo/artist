@@ -1187,7 +1187,7 @@ async fn submit(
         let _ = task.await;
         None
     } else {
-        Some(task.await.context("join Artist agent")?)
+        Some(task.await.context("join Artist agent"))
     };
     lifecycle_extensions
         .update_context(|value| value.agent_state = serde_json::json!({"state":"idle"}));
@@ -1229,7 +1229,7 @@ async fn submit(
         false,
     )?;
     if let Some(result) = stream_result {
-        result?;
+        result??;
     }
     turns.push(Turn {
         role: Role::User,

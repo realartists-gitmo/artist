@@ -251,54 +251,69 @@ async fn execute_prompt(
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"thinking"}),
     });
-    artist_agent::stream_chat(
-        &store.providers[selected],
-        &agent_input,
-        &history,
-        artist_agent::ToolContext {
-            native: &tools,
-            mcp,
-            extensions: Some(extensions),
-            disabled: &store.disabled_tools,
-        },
-        steering,
-        |event| {
-            publish_prompt_event(extensions, &event);
-            use artist_agent::PromptEvent;
-            use std::io::Write;
-            let mut output = std::io::stdout().lock();
-            match event {
-                PromptEvent::ReasoningSummaryDelta(delta) => {
-                    reasoning = true;
-                    if styled {
-                        write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
-                    } else {
+    let stream_result = {
+        let chat = artist_agent::stream_chat(
+            &store.providers[selected],
+            &agent_input,
+            &history,
+            artist_agent::ToolContext {
+                native: &tools,
+                mcp,
+                extensions: Some(extensions),
+                disabled: &store.disabled_tools,
+            },
+            steering,
+            |event| {
+                publish_prompt_event(extensions, &event);
+                use artist_agent::PromptEvent;
+                use std::io::Write;
+                let mut output = std::io::stdout().lock();
+                match event {
+                    PromptEvent::ReasoningSummaryDelta(delta) => {
+                        reasoning = true;
+                        if styled {
+                            write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
+                        } else {
+                            write!(output, "{delta}")?;
+                        }
+                    }
+                    PromptEvent::TextDelta(delta) => {
+                        response.push_str(&delta);
+                        if std::mem::take(&mut reasoning) {
+                            writeln!(output)?;
+                        }
                         write!(output, "{delta}")?;
                     }
+                    PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
+                    PromptEvent::ToolExecutionStart { .. } => {}
+                    PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
+                    PromptEvent::CompletionUsage { .. } => {}
                 }
-                PromptEvent::TextDelta(delta) => {
-                    response.push_str(&delta);
-                    if std::mem::take(&mut reasoning) {
-                        writeln!(output)?;
+                output.flush()?;
+                Ok(())
+            },
+        );
+        tokio::pin!(chat);
+        loop {
+            tokio::select! {
+                result = &mut chat => break Some(result),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    if extension_control.take_stop() {
+                        break None;
                     }
-                    write!(output, "{delta}")?;
                 }
-                PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
-                PromptEvent::ToolExecutionStart { .. } => {}
-                PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
-                PromptEvent::CompletionUsage { .. } => {}
             }
-            output.flush()?;
-            Ok(())
-        },
-    )
-    .await?;
+        }
+    };
     extension_control.set_steering(None);
     extensions.update_context(|context| context.agent_state = serde_json::json!({"state":"idle"}));
     let _ = extensions.publish(artist_extensions::Event {
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"idle"}),
     });
+    if let Some(result) = stream_result {
+        result?;
+    }
     println!();
     sessions.append(
         &session.id,
@@ -307,6 +322,18 @@ async fn execute_prompt(
             content: response,
         },
     )?;
+    for followup in extension_control.take_prompts() {
+        Box::pin(execute_prompt(
+            store,
+            path,
+            &followup,
+            Some(&session.id),
+            mcp,
+            extensions,
+            extension_control,
+        ))
+        .await?;
+    }
     Ok(())
 }
 
