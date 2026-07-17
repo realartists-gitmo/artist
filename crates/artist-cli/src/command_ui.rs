@@ -33,6 +33,7 @@ pub struct CommandOutput {
     pub model_changed: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     store: &mut ProviderStore,
     provider_index: usize,
@@ -40,6 +41,8 @@ pub async fn run(
     command: ParsedCommand<'_>,
     skills: &[artist_agent::AvailableSkill],
     mcp: &artist_agent::mcp::McpManager,
+    extension_tools: &[String],
+    extension_statuses: &[artist_extensions::StatusDeclaration],
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
@@ -69,6 +72,7 @@ pub async fn run(
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
             names.extend(mcp.tool_names().await);
+            names.extend(extension_tools.iter().cloned());
             names.extend(store.disabled_tools.iter().cloned());
             names.sort();
             names.dedup();
@@ -103,7 +107,8 @@ pub async fn run(
             })
         }
         ParsedCommand::StatusBar => {
-            let Some(config) = pick_status_bar(&store.status_bar, &mut draw)? else {
+            let Some(config) = pick_status_bar(&store.status_bar, extension_statuses, &mut draw)?
+            else {
                 anyhow::bail!("status bar selection cancelled");
             };
             let previous = store.status_bar.clone();
@@ -242,25 +247,47 @@ fn pick_tools(
 
 fn pick_status_bar(
     current: &StatusBarConfig,
+    extensions: &[artist_extensions::StatusDeclaration],
     draw: &mut impl FnMut(&[String]) -> Result<()>,
 ) -> Result<Option<StatusBarConfig>> {
-    let mut enabled = StatusItem::ALL.map(|item| current.items.contains(&item));
+    let total = StatusItem::ALL.len() + extensions.len();
+    let mut enabled = StatusItem::ALL
+        .iter()
+        .map(|item| current.items.contains(item))
+        .chain(
+            extensions
+                .iter()
+                .map(|item| current.extension_items.contains(&item.name)),
+        )
+        .collect::<Vec<_>>();
     let mut selected = 0;
     loop {
         let mut panel = vec!["Configure status bar (Space toggles, Enter confirms)".to_owned()];
-        panel.extend(StatusItem::ALL.iter().enumerate().map(|(index, item)| {
+        let labels = StatusItem::ALL
+            .iter()
+            .map(|item| item.label().to_owned())
+            .chain(extensions.iter().map(|item| {
+                let label = if item.description.is_empty() {
+                    &item.name
+                } else {
+                    &item.description
+                };
+                format!("{label} (extension)")
+            }))
+            .collect::<Vec<_>>();
+        panel.extend(labels.iter().enumerate().map(|(index, label)| {
             format!(
                 "{} [{}] {}",
                 if index == selected { "›" } else { " " },
                 if enabled[index] { "x" } else { " " },
-                item.label()
+                label
             )
         }));
         draw(&panel)?;
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Up => selected = selected.saturating_sub(1),
-                KeyCode::Down => selected = (selected + 1).min(StatusItem::ALL.len() - 1),
+                KeyCode::Down => selected = (selected + 1).min(total.saturating_sub(1)),
                 KeyCode::Char(' ') => enabled[selected] = !enabled[selected],
                 KeyCode::Enter => {
                     let items = StatusItem::ALL
@@ -268,7 +295,16 @@ fn pick_status_bar(
                         .enumerate()
                         .filter_map(|(index, item)| enabled[index].then_some(item))
                         .collect();
-                    return Ok(Some(StatusBarConfig { items }));
+                    let extension_items = extensions
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| enabled[StatusItem::ALL.len() + index])
+                        .map(|(_, item)| item.name.clone())
+                        .collect();
+                    return Ok(Some(StatusBarConfig {
+                        items,
+                        extension_items,
+                    }));
                 }
                 KeyCode::Esc => return Ok(None),
                 _ => {}

@@ -27,7 +27,8 @@ use rig_core::{
 };
 use serde_json::json;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),

@@ -51,12 +51,15 @@ fn default_items() -> Vec<StatusItem> {
 pub(crate) struct StatusBarConfig {
     #[serde(default = "default_items")]
     pub items: Vec<StatusItem>,
+    #[serde(default)]
+    pub extension_items: Vec<String>,
 }
 
 impl Default for StatusBarConfig {
     fn default() -> Self {
         Self {
             items: default_items(),
+            extension_items: Vec::new(),
         }
     }
 }
@@ -84,8 +87,9 @@ pub(crate) fn segments(
     git_branch: Option<&str>,
     used_tokens: Option<u64>,
     context_capacity: Option<u64>,
+    extension_values: &[(String, String)],
 ) -> Vec<StatusSegment> {
-    config
+    let mut segments = config
         .items
         .iter()
         .map(|item| StatusSegment {
@@ -116,7 +120,18 @@ pub(crate) fn segments(
                 },
             },
         })
-        .collect()
+        .collect::<Vec<_>>();
+    segments.extend(config.extension_items.iter().map(|name| {
+        StatusSegment {
+            item: StatusItem::Model,
+            text: extension_values
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| "—".into()),
+        }
+    }));
+    segments
 }
 
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
@@ -235,10 +250,38 @@ mod tests {
             Some("main"),
             Some(25),
             Some(100),
+            &[],
         );
         assert_eq!(segments[0].text, "project");
         assert_eq!(segments[1].text, "main");
         assert_eq!(segments[4].text, "75%/100");
+    }
+
+    #[test]
+    fn appends_configured_cached_extension_values() {
+        let provider: SavedProvider = serde_json::from_value(serde_json::json!({
+            "id":"x", "name":"x", "base_url":"https://example.com/", "model":"m",
+            "auth":{"access_token":"t","refresh_token":"r","account_id":"a"}
+        }))
+        .unwrap();
+        let config = StatusBarConfig {
+            items: vec![],
+            extension_items: vec!["quota".into()],
+        };
+        let values = vec![("quota".into(), "42%".into())];
+        assert_eq!(
+            segments(
+                &config,
+                Path::new("."),
+                &provider,
+                None,
+                None,
+                None,
+                &values
+            )[0]
+            .text,
+            "42%"
+        );
     }
 
     #[test]
