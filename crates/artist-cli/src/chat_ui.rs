@@ -381,6 +381,10 @@ pub async fn run(
     result
 }
 
+fn shell_command(input: &str) -> Option<&str> {
+    input.strip_prefix('!').map(str::trim_start)
+}
+
 fn skill_completion_range(text: &str, cursor: usize) -> Option<std::ops::Range<usize>> {
     let prefix = text.get(..cursor)?;
     let start = prefix.rfind('$')?;
@@ -504,7 +508,16 @@ async fn run_loop(
             show_splash,
         )?;
         if let Some(prompt) = pending.take() {
-            if let Some(command) = slash_commands::parse(&prompt.content) {
+            if let Some(command) = shell_command(&prompt.content) {
+                command_panel = match context.tools.bash.run_input(command).await {
+                    Ok(output) => {
+                        let mut lines = vec![format!("! {command}")];
+                        lines.extend(output.lines().map(str::to_owned));
+                        lines
+                    }
+                    Err(error) => vec![format!("Shell error: {error}")],
+                };
+            } else if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
                     Ok(command) => {
                         let command_input = ChatInput::default();
@@ -1799,6 +1812,13 @@ mod tests {
             panel_option_style(2, "  [x] branch", &input).fg,
             Some(Color::Green)
         );
+    }
+
+    #[test]
+    fn recognizes_direct_shell_input() {
+        assert_eq!(shell_command("!pwd"), Some("pwd"));
+        assert_eq!(shell_command("!  cargo test"), Some("cargo test"));
+        assert_eq!(shell_command("hello"), None);
     }
 
     #[test]
