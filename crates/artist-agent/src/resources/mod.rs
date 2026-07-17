@@ -1,12 +1,11 @@
 mod agents;
-mod instructions_tool;
+
 mod skill_io;
 mod skill_tool;
 mod skills;
 #[cfg(test)]
 mod tests;
 
-pub use instructions_tool::InstructionsTool;
 pub use skill_tool::SkillTool;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -20,7 +19,6 @@ pub struct AvailableSkill {
 pub struct Resources(Arc<ResourceData>);
 
 struct ResourceData {
-    workspace: std::path::PathBuf,
     agents: Vec<agents::AgentsFile>,
     nested_agents: Vec<std::path::PathBuf>,
     skills: BTreeMap<String, skills::Skill>,
@@ -35,17 +33,12 @@ impl Resources {
         let nested_agents = agents::nested(workspace, &mut diagnostics);
         let skills = skills::discover(workspace, &mut diagnostics);
         Self(Arc::new(ResourceData {
-            workspace: workspace.to_owned(),
             agents,
             nested_agents,
             skills,
             activated: std::sync::Mutex::new(std::collections::HashSet::new()),
             diagnostics,
         }))
-    }
-
-    pub fn instructions_tool(&self) -> InstructionsTool {
-        InstructionsTool(self.clone())
     }
 
     pub fn available_skills(&self) -> Vec<AvailableSkill> {
@@ -97,15 +90,26 @@ impl Resources {
             output.push_str("</project_context>");
         }
         if !self.0.nested_agents.is_empty() {
-            output.push_str("\n\nNested AGENTS.md files exist. Before working beneath one of these directories, call the instructions tool for the target path:\n<nested_instruction_scopes>\n");
-            for file in &self.0.nested_agents {
+            output.push_str("\n\n<scoped_project_instructions>\nThe following instructions apply only when working beneath their containing directories. More deeply nested instructions take precedence over broader instructions.\n\n");
+            let mut remaining = 128 * 1024;
+            for path in &self.0.nested_agents {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                if remaining == 0 {
+                    break;
+                }
+                let end = floor_char_boundary(&content, remaining.min(content.len()));
                 output.push_str(&format!(
-                    "  <file>{}</file>\n",
-                    xml(&file.display().to_string())
+                    "<project_instructions path=\"{}\">\n{}\n</project_instructions>\n\n",
+                    xml(&path.display().to_string()),
+                    &content[..end]
                 ));
+                remaining -= end;
             }
-            output.push_str("</nested_instruction_scopes>");
+            output.push_str("</scoped_project_instructions>");
         }
+
         if !self.0.skills.is_empty() {
             output.push_str("\n\nThe following skills provide specialized instructions. When a task matches a description, call the skill tool with mode=activate before proceeding.\n<available_skills>\n");
             for skill in self.0.skills.values() {
@@ -119,6 +123,13 @@ impl Resources {
         }
         output
     }
+}
+
+fn floor_char_boundary(value: &str, mut index: usize) -> usize {
+    while !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn mentions_skill(input: &str, name: &str) -> bool {

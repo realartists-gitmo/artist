@@ -175,7 +175,6 @@ pub async fn stream_chat(
         Box::new(tools.grep.clone()),
         Box::new(tools.edit.clone()),
         Box::new(tools.write.clone()),
-        Box::new(resources.instructions_tool()),
         Box::new(resources.skill_tool()),
         Box::new(delegate::Delegate::new(
             provider.clone(),

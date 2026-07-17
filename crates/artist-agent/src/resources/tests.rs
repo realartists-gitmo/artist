@@ -38,26 +38,19 @@ fn agents_load_global_then_broad_to_specific() {
     );
 }
 
-#[tokio::test]
-async fn nested_agents_are_loaded_only_for_the_target_scope() {
+#[test]
+fn nested_agents_are_injected_into_the_scoped_prompt() {
     let root = tempfile::tempdir().unwrap();
     write(&root.path().join("frontend/AGENTS.md"), "frontend only");
     write(&root.path().join("backend/AGENTS.md"), "backend only");
-    let resources = Resources(Arc::new(ResourceData {
-        workspace: root.path().to_owned(),
-        agents: Vec::new(),
-        nested_agents: vec![
-            root.path().join("backend/AGENTS.md"),
-            root.path().join("frontend/AGENTS.md"),
-        ],
-        skills: BTreeMap::new(),
-        activated: std::sync::Mutex::new(std::collections::HashSet::new()),
-        diagnostics: Vec::new(),
-    }));
-    let args = serde_json::from_value(json!({"path":"frontend/src/lib.rs"})).unwrap();
-    let output = resources.instructions_tool().call(args).await.unwrap();
-    assert!(output.contains("frontend only"));
-    assert!(!output.contains("backend only"));
+
+    let resources = Resources::discover(root.path());
+    let prompt = resources.prompt_section();
+
+    assert!(prompt.contains("<scoped_project_instructions>"));
+    assert!(prompt.contains("frontend only"));
+    assert!(prompt.contains("backend only"));
+    assert!(!prompt.contains("call the instructions tool"));
 }
 
 #[test]
@@ -110,7 +103,6 @@ async fn skill_tool_activates_and_rejects_resource_traversal() {
     let mut diagnostics = Vec::new();
     let skills = skills::discover_roots(vec![root.path().to_owned()], &mut diagnostics);
     let resources = Resources(Arc::new(ResourceData {
-        workspace: root.path().to_owned(),
         agents: Vec::new(),
         nested_agents: Vec::new(),
         skills,

@@ -189,7 +189,6 @@ impl Delegate {
             .tool(child_tools.read.clone())
             .tool(child_tools.find.clone())
             .tool(child_tools.grep.clone())
-            .tool(self.resources.instructions_tool())
             .tool(self.resources.skill_tool());
         if !read_only {
             builder = builder
