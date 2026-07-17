@@ -13,10 +13,12 @@ dashmap = "6"
 dirs = "6"
 futures = "0.3"
 llm-provider = { path = "../llm-provider" }
-rig-core = "0.40.0"
+rig-core = { version = "0.40.0", features = ["rmcp"] }
+rmcp = { version = "1.7", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+toml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt", "time"] }
 uuid = { version = "1", features = ["v4"] }
