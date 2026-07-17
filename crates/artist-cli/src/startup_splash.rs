@@ -20,6 +20,10 @@ const ART: [&str; HEIGHT as usize] = [
 ];
 
 pub(crate) fn render(frame: &mut Frame<'_>, area: Rect) {
+    let area = area.intersection(frame.area());
+    if area.is_empty() {
+        return;
+    }
     let last_row = ART.len().saturating_sub(1).max(1);
     let lines = ART
         .iter()
@@ -50,5 +54,13 @@ mod tests {
             buffer.cell((1, HEIGHT - 1)).unwrap().fg,
             Color::Rgb(255, 255, 255)
         );
+    }
+
+    #[test]
+    fn clips_to_small_terminal_area() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        terminal
+            .draw(|frame| render(frame, Rect::new(0, 0, 20, HEIGHT)))
+            .unwrap();
     }
 }

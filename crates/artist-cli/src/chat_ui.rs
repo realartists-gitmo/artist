@@ -1446,7 +1446,8 @@ fn draw_streaming(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let content_y = if show_splash {
+        let splash_fits = area.height >= crate::startup_splash::HEIGHT.saturating_add(4);
+        let content_y = if show_splash && splash_fits {
             crate::startup_splash::render(
                 frame,
                 Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
@@ -1536,7 +1537,7 @@ fn render_with_panel(
 ) {
     let area = frame.area();
     let status_height = (!footer.spans.is_empty()) as u16;
-    if show_splash {
+    if show_splash && area.height >= crate::startup_splash::HEIGHT.saturating_add(3) {
         crate::startup_splash::render(
             frame,
             Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
