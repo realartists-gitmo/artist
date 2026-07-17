@@ -48,6 +48,9 @@ async fn run() -> Result<()> {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
         }
+        if let Some(extra) = cli.prompt {
+            bail!("with -p, the positional argument must be a project directory: {extra}");
+        }
         let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
         let extension_control = extension_control::ExtensionControl::default();
         let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;

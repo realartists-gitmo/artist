@@ -7,7 +7,7 @@ pub struct Cli {
     #[arg(value_name = "PROMPT_OR_PROJECT")]
     pub prompt: Option<String>,
     /// Execute one prompt and print the response without opening the chat UI.
-    #[arg(short = 'p', long, value_name = "PROMPT", conflicts_with = "prompt")]
+    #[arg(short = 'p', long, value_name = "PROMPT")]
     pub print_prompt: Option<String>,
     /// Resume a session by ID, or select one interactively when no ID is given.
     #[arg(short = 'r', long = "resume", value_name = "SESSION_ID", num_args = 0..=1, default_missing_value = "")]
@@ -52,6 +52,9 @@ mod tests {
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
         assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));
+        let cli = Cli::try_parse_from(["artist", "-p", "reply OK", "/tmp"]).unwrap();
+        assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));
+        assert_eq!(cli.prompt.as_deref(), Some("/tmp"));
         assert_eq!(
             Cli::try_parse_from(["artist", "hello"])
                 .unwrap()
