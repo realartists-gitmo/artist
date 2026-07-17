@@ -96,7 +96,12 @@ async fn run() -> Result<()> {
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
-            let terminal = chat_ui::start_terminal()?;
+            // Resolve an interactive resume before entering inline TUI mode so the
+            // selector cannot be painted underneath the splash and input viewport.
+            let sessions = SessionStore::new(config_root);
+            let project = std::env::current_dir().context("find current project directory")?;
+            let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
+            let terminal = chat_ui::start_terminal(resumed.is_none(), cli.prompt.is_some())?;
             let extension_control = extension_control::ExtensionControl::default();
             let mut refreshed_provider = store.providers[selected].clone();
             let (mcp, extensions, refreshed) = tokio::join!(
@@ -110,9 +115,6 @@ async fn run() -> Result<()> {
                 store.providers[selected] = refreshed_provider;
                 store.save(&path)?;
             }
-            let sessions = SessionStore::new(config_root);
-            let project = std::env::current_dir().context("find current project directory")?;
-            let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let tools = tool_bundle(config_root, &project)?;
             chat_ui::run(
                 terminal,

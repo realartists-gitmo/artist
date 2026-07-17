@@ -336,15 +336,30 @@ pub struct ChatResources<'a> {
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
-pub fn start_terminal() -> Result<ratatui::DefaultTerminal> {
+pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
+    let height = if show_splash {
+        crate::startup_splash::HEIGHT + 3
+    } else {
+        3
+    };
     let mut terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(crate::startup_splash::HEIGHT + 3),
+        viewport: Viewport::Inline(height),
     });
     terminal.draw(|frame| {
-        render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), true)
+        if thinking {
+            frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
+        } else {
+            render_with_panel(
+                frame,
+                &ChatInput::default(),
+                &[],
+                &Line::default(),
+                show_splash,
+            );
+        }
     })?;
     terminal.show_cursor()?;
     Ok(terminal)
@@ -787,9 +802,10 @@ async fn run_loop(
                 }
             }
             Event::Key(key) if !input.handle_key(key) => {
-                clear_inline(&mut terminal)?;
+                finish_inline(&mut terminal)?;
                 return Ok(());
             }
+
             Event::Resize(_, _) => {}
             Event::Paste(text) => input.paste(&text, true),
             _ => {}
@@ -1774,9 +1790,8 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
         area.height.saturating_sub(2),
     );
     let input_style = Style::default().fg(Color::White);
-    let paragraph = Paragraph::new(Text::raw(&input.text))
-        .wrap(Wrap { trim: false })
-        .style(input_style);
+    let paragraph =
+        Paragraph::new(Text::raw(hard_wrap_input(&input.text, inner_width))).style(input_style);
     frame.render_widget(paragraph, input_area);
 
     if input_area.width > 0 && input_area.height > 0 {
@@ -1786,6 +1801,41 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
             input_area.y + y.min(input_area.height.saturating_sub(1)),
         ));
     }
+}
+
+fn hard_wrap_input(text: &str, width: u16) -> String {
+    let width = usize::from(width.max(1));
+    let mut output = String::with_capacity(text.len());
+    let mut column = 0usize;
+    for character in text.chars() {
+        if character == '\n' {
+            output.push(character);
+            column = 0;
+            continue;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if column > 0 && column + character_width > width {
+            output.push('\n');
+            column = 0;
+        }
+        output.push(character);
+        column += character_width;
+        if column == width {
+            output.push('\n');
+            column = 0;
+        }
+    }
+    output
+}
+fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    clear_inline(terminal)?;
+    let bottom = terminal.size()?.height.saturating_sub(1);
+    execute!(
+        std::io::stdout(),
+        MoveTo(0, bottom),
+        Clear(ClearType::CurrentLine)
+    )?;
+    Ok(())
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
