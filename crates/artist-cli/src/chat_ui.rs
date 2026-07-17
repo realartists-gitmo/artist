@@ -1112,14 +1112,15 @@ fn insert_tool_line(
             let line_prefix = if index == 0 { prefix } else { "    " };
             let line =
                 truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
+            let diff_content = line
+                .split_once("│ ")
+                .map_or(line.as_str(), |(_, content)| content);
             let color = if first {
                 Color::White
-            } else if is_diff && line.starts_with('+') {
+            } else if is_diff && diff_content.starts_with('+') {
                 Color::Rgb(120, 210, 140)
-            } else if is_diff && line.starts_with('-') {
+            } else if is_diff && diff_content.starts_with('-') {
                 Color::Rgb(235, 120, 120)
-            } else if is_diff && line.starts_with("@@") {
-                Color::Rgb(110, 190, 220)
             } else {
                 Color::Rgb(175, 175, 175)
             };
