@@ -36,4 +36,6 @@ pub use event::{
 pub use history::{HistoryOptions, build as build_history};
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use recorder::{Recorder, WriterTask, spawn_writer};
-pub use replay::{ReplayItem, markdown_fragment, render_markdown, replay_for_ui, user_prompts};
+pub use replay::{
+    ReplayItem, markdown_fragment, render_markdown, replay_for_ui, rewind_targets, user_prompts,
+};

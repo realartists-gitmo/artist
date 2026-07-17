@@ -33,6 +33,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/mcp [status|start|stop|restart|refresh] [server]",
     },
     SlashCommand {
+        name: "/rewind",
+        description: "Rewind to an earlier turn, or fork the session there",
+        usage: "/rewind [n] [fork]",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -52,6 +57,11 @@ pub(crate) enum ParsedCommand<'a> {
     Model {
         model: Option<&'a str>,
         reasoning: Option<&'a str>,
+    },
+    /// `target` counts user turns from the most recent (1 = latest).
+    Rewind {
+        target: Option<usize>,
+        fork: bool,
     },
 }
 
@@ -125,6 +135,22 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/model [model] [reasoning]",
         }),
+        ("/rewind", []) => Ok(ParsedCommand::Rewind {
+            target: None,
+            fork: false,
+        }),
+        ("/rewind", [n]) if n.parse::<usize>().is_ok() => Ok(ParsedCommand::Rewind {
+            target: n.parse().ok(),
+            fork: false,
+        }),
+        ("/rewind", [n, "fork"]) if n.parse::<usize>().is_ok() => Ok(ParsedCommand::Rewind {
+            target: n.parse().ok(),
+            fork: true,
+        }),
+        ("/rewind", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/rewind [n] [fork]",
+        }),
         _ => Err(ParseError::UnknownCommand(command)),
     })
 }
@@ -180,7 +206,15 @@ mod tests {
     fn registry_has_unique_standard_commands() {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model", "/statusbar", "/skills", "/tools", "/mcp", "/help"]
+            [
+                "/model",
+                "/statusbar",
+                "/skills",
+                "/tools",
+                "/mcp",
+                "/rewind",
+                "/help"
+            ]
         );
         assert!(
             COMMANDS
@@ -236,8 +270,37 @@ mod tests {
     }
 
     #[test]
+    fn parses_rewind_forms() {
+        assert_eq!(
+            parse("/rewind"),
+            Some(Ok(ParsedCommand::Rewind {
+                target: None,
+                fork: false
+            }))
+        );
+        assert_eq!(
+            parse("/rewind 2"),
+            Some(Ok(ParsedCommand::Rewind {
+                target: Some(2),
+                fork: false
+            }))
+        );
+        assert_eq!(
+            parse("/rewind 1 fork"),
+            Some(Ok(ParsedCommand::Rewind {
+                target: Some(1),
+                fork: true
+            }))
+        );
+        assert!(matches!(
+            parse("/rewind fork"),
+            Some(Err(ParseError::InvalidUsage { .. }))
+        ));
+    }
+
+    #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 6);
+        assert_eq!(completions("/").len(), 7);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model", "/mcp"]

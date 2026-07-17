@@ -46,6 +46,13 @@ pub async fn run(
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
+        // Rewind needs session state and is dispatched in chat_ui before
+        // reaching here.
+        ParsedCommand::Rewind { .. } => Ok(CommandOutput {
+            lines: vec!["/rewind is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Help => Ok(CommandOutput {
             lines: slash_commands::COMMANDS
                 .iter()

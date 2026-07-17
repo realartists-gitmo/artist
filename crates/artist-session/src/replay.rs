@@ -102,6 +102,27 @@ pub fn user_prompts(events: &[Envelope]) -> Vec<String> {
         .collect()
 }
 
+/// User-turn rewind targets: `(seq, display)` in transcript order, masked
+/// ranges excluded (an already-rewound turn is not offered again).
+pub fn rewind_targets(events: &[Envelope]) -> Vec<(u64, String)> {
+    let masks = resolve_masks(events, None);
+    events
+        .iter()
+        .filter(|envelope| {
+            envelope.lineage == crate::event::MAIN_LINEAGE && !masks.covers(envelope.seq)
+        })
+        .filter_map(|envelope| match envelope.event() {
+            SessionEvent::TurnUser(turn) if turn.source == "prompt" || turn.source == "queued" => {
+                Some((
+                    envelope.seq,
+                    turn.display.unwrap_or_else(|| blocks_text(&turn.content)),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn blocks_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()

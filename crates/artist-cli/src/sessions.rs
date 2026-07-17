@@ -205,6 +205,77 @@ impl SessionStore {
         Ok((session, events))
     }
 
+    /// Fork a session at a point in its history: a new session whose log is
+    /// the verbatim event prefix `seq <= up_to_seq` (identical seqs, so
+    /// rewind/compact references stay valid) with a fresh `session.created`
+    /// carrying the parent pointer. The parent session is untouched.
+    pub fn fork(&self, parent_id: &str, up_to_seq: u64) -> Result<ActiveSession> {
+        let (parent, events) = self.peek(parent_id)?;
+        let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
+        let now = duration.as_millis() as u64;
+        let id = format!("{:x}-{:x}", duration.as_nanos(), std::process::id());
+        let dir = self.root.join(project_key(&parent.project)).join(&id);
+        fs::create_dir_all(&dir)?;
+        {
+            let mut writer = EventLogWriter::open(&dir, &id)?;
+            let mut wrote_created = false;
+            for envelope in events.iter().filter(|envelope| envelope.seq <= up_to_seq) {
+                if !wrote_created {
+                    // Replace the parent's session.created (seq 0) with the
+                    // fork's, keeping the seq slot.
+                    writer.append(
+                        None,
+                        artist_session::MAIN_LINEAGE,
+                        &SessionEvent::SessionCreated(SessionCreated {
+                            project: parent.project.display().to_string(),
+                            label: parent.label.clone(),
+                            artist_version: env!("CARGO_PKG_VERSION").to_owned(),
+                            parent_session: Some(parent.id.clone()),
+                        }),
+                    )?;
+                    wrote_created = true;
+                    if envelope.kind == "session.created" {
+                        continue;
+                    }
+                }
+                writer.append_raw(envelope)?;
+            }
+        }
+        // Attachments are content-addressed; copy any the prefix may reference.
+        let parent_attachments = parent.dir().join("attachments");
+        if parent_attachments.is_dir() {
+            let fork_attachments = dir.join("attachments");
+            fs::create_dir_all(&fork_attachments)?;
+            for entry in fs::read_dir(&parent_attachments)?.flatten() {
+                let _ = fs::copy(entry.path(), fork_attachments.join(entry.file_name()));
+            }
+        }
+        let fork_events = EventLogReader::new(&dir).read_all()?;
+        fs::write(
+            dir.join("transcript.md"),
+            artist_session::render_markdown(&fork_events),
+        )?;
+        let session = Session {
+            id,
+            created_at_ms: now,
+            label: parent.label.clone(),
+            project: parent.project.clone(),
+            transcript: dir.join("transcript.md"),
+            parent: Some(parent.id.clone()),
+        };
+        let _lock = self.lock_index()?;
+        let mut index = self.read_index()?;
+        match index.projects.iter_mut().find(|p| p.path == parent.project) {
+            Some(p) => p.sessions.push(session.clone()),
+            None => index.projects.push(Project {
+                path: parent.project.clone(),
+                sessions: vec![session.clone()],
+            }),
+        }
+        self.write_index(&index)?;
+        open_session_dir(session)
+    }
+
     /// One-shot conversion of a legacy markdown session into an event-log
     /// session directory. Idempotent (keyed on events.jsonl existence); the
     /// old markdown becomes the session's transcript projection.
@@ -482,6 +553,59 @@ mod tests {
         )?;
         assert_eq!(history.len(), 2);
         active.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fork_copies_prefix_with_stable_seqs_and_parent_pointer() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("proj");
+        fs::create_dir(&project)?;
+        let store = SessionStore::new(temp.path().join("config"));
+        let active = store.create(&project, Some("root"))?;
+        let parent_id = active.session.id.clone();
+        active.recorder.record(user_turn("one"));
+        active.recorder.record(artist_session::ModelTurn {
+            turn: 1,
+            content: vec![ContentBlock::Text { text: "a1".into() }],
+            total_tokens: 0,
+            partial: false,
+        });
+        active.recorder.record(user_turn("two"));
+        active.recorder.record(artist_session::ModelTurn {
+            turn: 1,
+            content: vec![ContentBlock::Text { text: "a2".into() }],
+            total_tokens: 0,
+            partial: false,
+        });
+        active.recorder.flush().await;
+        // Fork before "two" (seq 3): keep seqs 0..=2.
+        let fork = store.fork(&parent_id, 2)?;
+        assert_eq!(fork.session.parent.as_deref(), Some(parent_id.as_str()));
+        let events = fork.events()?;
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        match events[0].event() {
+            SessionEvent::SessionCreated(created) => {
+                assert_eq!(created.parent_session.as_deref(), Some(parent_id.as_str()));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let history = artist_session::build_history(
+            &events,
+            &fork.attachments,
+            &artist_session::HistoryOptions::default(),
+        )?;
+        assert_eq!(history.len(), 2, "user one + assistant a1 only");
+        fork.close().await?;
+        // Parent untouched and still openable.
+        active.close().await?;
+        let (parent, parent_events) = store.open(&parent_id)?;
+        assert_eq!(parent_events.len(), 5);
+        parent.close().await?;
         Ok(())
     }
 }

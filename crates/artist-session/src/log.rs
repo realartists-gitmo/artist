@@ -158,6 +158,32 @@ impl EventLogWriter {
         )
     }
 
+    /// Append a verbatim envelope under this log's session id and the next
+    /// seq. Used by session forking to copy a prefix with full fidelity
+    /// (including event kinds this binary does not model). The caller must
+    /// preserve source order so control-event seq references stay valid.
+    pub fn append_raw(&mut self, envelope: &Envelope) -> Result<u64> {
+        let seq = self.next_seq;
+        let envelope = Envelope {
+            v: envelope.v,
+            seq,
+            ts: envelope.ts,
+            session: self.session.clone(),
+            run: envelope.run.clone(),
+            lineage: envelope.lineage.clone(),
+            kind: envelope.kind.clone(),
+            payload: envelope.payload.clone(),
+        };
+        let mut line = serde_json::to_string(&envelope).context("serialize event")?;
+        line.push('\n');
+        self.file
+            .write_all(line.as_bytes())
+            .context("append event")?;
+        self.file.sync_data().context("sync event log")?;
+        self.next_seq = seq + 1;
+        Ok(seq)
+    }
+
     pub fn last_seq(&self) -> Option<u64> {
         self.next_seq.checked_sub(1)
     }

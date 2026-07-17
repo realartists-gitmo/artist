@@ -522,6 +522,17 @@ async fn run_loop(
         if let Some(prompt) = pending.take() {
             if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
+                    Ok(slash_commands::ParsedCommand::Rewind { target, fork }) => handle_rewind(
+                        &mut terminal,
+                        context.sessions,
+                        &mut active,
+                        &mut history,
+                        &mut input,
+                        target,
+                        fork,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let command_input = ChatInput::default();
                         match command_ui::run(
@@ -682,6 +693,96 @@ async fn run_loop(
             _ => {}
         }
     }
+}
+
+/// `/rewind [n] [fork]`: list rewind targets, or mask history back to just
+/// before the nth-most-recent user turn (append-only — nothing is deleted),
+/// optionally forking into a new session that shares the prefix. The chosen
+/// turn's text is pre-filled into the input for editing.
+async fn handle_rewind(
+    terminal: &mut ratatui::DefaultTerminal,
+    sessions: &SessionStore,
+    active: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
+    input: &mut ChatInput,
+    target: Option<usize>,
+    fork: bool,
+) -> Result<Vec<String>> {
+    let Some(current) = active.as_ref() else {
+        return Ok(vec!["No session yet — nothing to rewind.".to_owned()]);
+    };
+    current.recorder.flush().await;
+    let events = current.events()?;
+    let targets = artist_session::rewind_targets(&events);
+    if targets.is_empty() {
+        return Ok(vec!["No user turns to rewind to.".to_owned()]);
+    }
+    let Some(n) = target else {
+        let mut lines: Vec<String> = targets
+            .iter()
+            .rev()
+            .take(10)
+            .enumerate()
+            .map(|(index, (_, display))| {
+                let mut preview = display.lines().next().unwrap_or("").to_owned();
+                if preview.chars().count() > 70 {
+                    preview = preview.chars().take(69).chain(['\u{2026}']).collect();
+                }
+                format!("{}  {}", index + 1, preview)
+            })
+            .collect();
+        lines.push("Rewind with /rewind <n>, or fork with /rewind <n> fork".to_owned());
+        return Ok(lines);
+    };
+    if n == 0 || n > targets.len() {
+        return Ok(vec![format!(
+            "No such turn: {n} (1..{} available)",
+            targets.len()
+        )]);
+    }
+    let (seq, display) = targets[targets.len() - n].clone();
+    let to_seq = seq.saturating_sub(1);
+    let marker;
+    if fork {
+        let forked = sessions.fork(&current.session.id, to_seq)?;
+        marker = format!(
+            "  \u{23EA} forked session {} from {} (before \"{}\")",
+            forked.session.id,
+            current.session.id,
+            display.lines().next().unwrap_or("")
+        );
+        let events = forked.events()?;
+        *history = artist_session::build_history(
+            &events,
+            &forked.attachments,
+            &artist_session::HistoryOptions::default(),
+        )?;
+        if let Some(old) = active.replace(forked) {
+            old.close().await?;
+        }
+    } else {
+        current.recorder.record(artist_session::HistoryRewind {
+            to_seq,
+            reason: "user rewind".to_owned(),
+            by: "user".to_owned(),
+        });
+        current.recorder.flush().await;
+        let events = current.events()?;
+        *history = artist_session::build_history(
+            &events,
+            &current.attachments,
+            &artist_session::HistoryOptions::default(),
+        )?;
+        marker = format!(
+            "  \u{23EA} rewound to before \"{}\" \u{2014} history after this point is masked, not deleted",
+            display.lines().next().unwrap_or("")
+        );
+    }
+    insert_status(terminal, &marker)?;
+    input.text = display;
+    input.cursor = input.text.len();
+    input.atoms.clear();
+    Ok(Vec::new())
 }
 
 fn resize_and_draw(
