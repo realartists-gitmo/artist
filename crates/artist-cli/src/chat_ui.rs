@@ -1453,20 +1453,22 @@ fn insert_tool_line(
     terminal.insert_before(height.max(1), |buffer| {
         let background = Style::default().bg(Color::Rgb(32, 32, 32));
         buffer.set_style(buffer.area, background);
-        // Keep the final cell non-empty so terminals without background-color
-        // erase support (notably herdr) cannot turn the shaded suffix black.
-        if buffer.area.width > 0 {
-            for y in buffer.area.y..buffer.area.bottom() {
-                buffer
-                    .cell_mut((buffer.area.right() - 1, y))
-                    .expect("tool panel cell")
-                    .set_symbol("\u{00a0}")
-                    .set_style(background);
-            }
-        }
         Paragraph::new(Text::from(text))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
+        // Ratatui may optimize trailing ordinary spaces into an erase-to-EOL
+        // sequence. Terminals without background-color erase support (notably
+        // herdr) then paint those cells with the default black background.
+        // Make every blank panel cell explicit after Paragraph has rendered so
+        // the shaded background survives that optimization.
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
+                if cell.symbol() == " " {
+                    cell.set_symbol("\u{00a0}");
+                }
+            }
+        }
     })?;
     Ok(())
 }
