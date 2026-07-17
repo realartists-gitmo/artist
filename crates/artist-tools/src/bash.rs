@@ -104,21 +104,10 @@ fn clean_input_output(output: &str, command: Option<&str>) -> String {
 }
 
 fn input_shell_command() -> String {
-    let shell = std::env::var("SHELL")
+    std::env::var("SHELL")
         .ok()
         .filter(|shell| Path::new(shell).is_absolute() && Path::new(shell).is_file())
-        .unwrap_or_else(|| "/bin/sh".into());
-    let quoted = shell.replace('\'', "'\\''");
-    let executable = Path::new(&shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let loop_command = if executable == "fish" {
-        "while read -l line; eval $line; end"
-    } else {
-        "while IFS= read -r line; do eval \"$line\"; done"
-    };
-    format!("exec '{quoted}' -c '{loop_command}'")
+        .unwrap_or_else(|| "/bin/sh".into())
 }
 
 #[derive(Deserialize)]
@@ -254,9 +243,25 @@ impl BashTool {
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut builder = CommandBuilder::new("/bin/bash");
-        builder.arg("-lc");
-        builder.arg(&command);
+        let mut builder = if id == INPUT_SESSION_ID {
+            let mut shell = CommandBuilder::new(&command);
+            shell.arg("-c");
+            let executable = Path::new(&command)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            shell.arg(if executable == "fish" {
+                "while read --prompt-str='' -l line; eval $line; end"
+            } else {
+                "while IFS= read -r line; do eval \"$line\"; done"
+            });
+            shell
+        } else {
+            let mut shell = CommandBuilder::new("/bin/bash");
+            shell.arg("-lc");
+            shell.arg(&command);
+            shell
+        };
         builder.cwd(self.cwd(args.cwd.as_deref())?);
         if let Some(env) = args.env {
             for (key, value) in env {

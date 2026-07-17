@@ -210,4 +210,10 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     assert!(!direct.contains("sessionId:"));
     assert!(!direct.contains("status:"));
     assert!(!direct.lines().any(|line| line.trim() == "pwd"));
+
+    let typo = "artist_command_that_does_not_exist";
+    let _ = bash.run_input(typo).await.unwrap();
+    let following = bash.run_input("whoami").await.unwrap();
+    assert!(!following.contains(typo));
+    assert!(!following.contains("read>"));
 }
