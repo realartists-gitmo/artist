@@ -38,4 +38,5 @@ pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{
     ReplayItem, markdown_fragment, render_markdown, replay_for_ui, rewind_targets, user_prompts,
+    visible_events,
 };

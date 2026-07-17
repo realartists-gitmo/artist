@@ -21,6 +21,7 @@
 pub mod declarative;
 pub mod discovery;
 pub mod matcher;
+pub mod retro;
 pub mod state;
 pub mod types;
 

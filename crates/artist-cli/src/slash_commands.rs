@@ -38,6 +38,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/rewind [n] [fork]",
     },
     SlashCommand {
+        name: "/rules",
+        description: "Stream rules: list, scan the session, dry-run, toggle",
+        usage: "/rules [scan|dry-run <file>|enable <rule>|disable <rule>]",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -63,6 +68,16 @@ pub(crate) enum ParsedCommand<'a> {
         target: Option<usize>,
         fork: bool,
     },
+    Rules(RulesAction<'a>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RulesAction<'a> {
+    List,
+    Scan,
+    DryRun { file: &'a str },
+    Enable { rule: &'a str },
+    Disable { rule: &'a str },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +166,15 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/rewind [n] [fork]",
         }),
+        ("/rules", []) => Ok(ParsedCommand::Rules(RulesAction::List)),
+        ("/rules", ["scan"]) => Ok(ParsedCommand::Rules(RulesAction::Scan)),
+        ("/rules", ["dry-run", file]) => Ok(ParsedCommand::Rules(RulesAction::DryRun { file })),
+        ("/rules", ["enable", rule]) => Ok(ParsedCommand::Rules(RulesAction::Enable { rule })),
+        ("/rules", ["disable", rule]) => Ok(ParsedCommand::Rules(RulesAction::Disable { rule })),
+        ("/rules", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/rules [scan|dry-run <file>|enable <rule>|disable <rule>]",
+        }),
         _ => Err(ParseError::UnknownCommand(command)),
     })
 }
@@ -213,6 +237,7 @@ mod tests {
                 "/tools",
                 "/mcp",
                 "/rewind",
+                "/rules",
                 "/help"
             ]
         );

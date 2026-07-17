@@ -102,6 +102,16 @@ pub fn user_prompts(events: &[Envelope]) -> Vec<String> {
         .collect()
 }
 
+/// Events not hidden by rewind/compaction masks — the "current" view of
+/// the session that on-demand scans should see.
+pub fn visible_events(events: &[Envelope]) -> Vec<&Envelope> {
+    let masks = resolve_masks(events, None);
+    events
+        .iter()
+        .filter(|envelope| !masks.covers(envelope.seq))
+        .collect()
+}
+
 /// User-turn rewind targets: `(seq, display)` in transcript order, masked
 /// ranges excluded (an already-rewound turn is not offered again).
 pub fn rewind_targets(events: &[Envelope]) -> Vec<(u64, String)> {

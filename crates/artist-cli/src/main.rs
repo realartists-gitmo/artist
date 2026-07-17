@@ -16,7 +16,7 @@ mod test_provider;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, LoginKind, ProviderAction};
+use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
@@ -74,6 +74,11 @@ async fn run() -> Result<()> {
             }
             models::select(&mut store.providers[selected]).await?;
             store.save(&path)?;
+        }
+        Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            match args.action {
+                RulesCommand::New { name } => scaffold_rule(&name)?,
+            }
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
@@ -250,6 +255,51 @@ async fn execute_prompt(
     println!();
     let _ = response;
     active.close().await?;
+    Ok(())
+}
+
+/// `artist rules new <name>`: write a commented rule template into the
+/// project's .artist/rules/ directory.
+fn scaffold_rule(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        bail!("rule names are lowercase-kebab-case (got {name:?})");
+    }
+    let dir = std::env::current_dir()?.join(".artist/rules");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.md"));
+    if path.exists() {
+        bail!("{} already exists", path.display());
+    }
+    let template = format!(
+        r#"---
+name: {name}
+description: One line describing what this rule catches
+# What to match against. Any of: assistant-text, tool-args, reasoning-summary.
+targets: [assistant-text]
+# Linear-time regexes; a match mid-stream aborts the request, injects the
+# reminder below, and retries from the same point.
+patterns:
+  - 'REPLACE ME'
+# Only for tool-args targets: restrict to these tools (empty = all).
+# tools: [write, edit, bash]
+# fire: once        # once per session (default) | per-turn
+# persistence: session  # keep reminding every turn (default) | message
+# scope: [main, delegate]
+---
+Write the reminder the model receives here. Say what NOT to do and what to
+do instead.
+"#
+    );
+    std::fs::write(&path, template)?;
+    println!("created {}", path.display());
+    println!(
+        "test it against a session with: /rules dry-run {}",
+        path.display()
+    );
     Ok(())
 }
 

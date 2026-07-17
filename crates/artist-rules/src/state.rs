@@ -135,6 +135,14 @@ impl RulesHandle {
         }
     }
 
+    /// Rules currently disabled from `/rules` (session-scoped).
+    pub fn disabled(&self) -> Vec<RuleId> {
+        let state = self.lock();
+        let mut disabled: Vec<RuleId> = state.disabled.iter().cloned().collect();
+        disabled.sort();
+        disabled
+    }
+
     /// `(rule, hits)` tallies for the `/rules` panel.
     pub fn hits(&self) -> Vec<(RuleId, u32)> {
         self.lock().hits.clone()

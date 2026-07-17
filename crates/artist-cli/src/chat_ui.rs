@@ -533,6 +533,14 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Rules(action)) => handle_rules(
+                        context.rules_engine,
+                        context.rules_handle,
+                        active.as_ref(),
+                        action,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let command_input = ChatInput::default();
                         match command_ui::run(
@@ -691,6 +699,153 @@ async fn run_loop(
             Event::Resize(_, _) => {}
             Event::Paste(text) => input.paste(&text, true),
             _ => {}
+        }
+    }
+}
+
+/// `/rules`: the live rules panel and its actions. Listing shows every
+/// loaded rule with armed/fired/disabled state and session hit counts;
+/// `scan` retro-evaluates all rules over this session's log; `dry-run`
+/// evaluates a candidate rule file without activating it.
+async fn handle_rules(
+    engine: &RulesEngine,
+    handle: &RulesHandle,
+    active: Option<&ActiveSession>,
+    action: slash_commands::RulesAction<'_>,
+) -> Result<Vec<String>> {
+    use slash_commands::RulesAction;
+    engine.reload_if_changed();
+    let rules = engine.snapshot();
+    let resolve = |name: &str| -> Option<artist_rules::types::RuleId> {
+        let bare = artist_rules::types::RuleId(name.to_owned());
+        let builtin = artist_rules::types::RuleId(format!("builtin:{name}"));
+        if rules.get(&bare).is_some() {
+            Some(bare)
+        } else if rules.get(&builtin).is_some() {
+            Some(builtin)
+        } else {
+            None
+        }
+    };
+    match action {
+        RulesAction::List => {
+            let fired = handle.fired();
+            let hits = handle.hits();
+            let disabled = handle.disabled();
+            let mut lines: Vec<String> = rules
+                .rules
+                .iter()
+                .map(|compiled| {
+                    let id = &compiled.rule.id;
+                    let state = if disabled.contains(id) {
+                        "disabled"
+                    } else if fired.contains(id) {
+                        "fired"
+                    } else {
+                        "armed"
+                    };
+                    let count = hits
+                        .iter()
+                        .find(|(rule, _)| rule == id)
+                        .map(|(_, count)| format!(" ({count}\u{d7})"))
+                        .unwrap_or_default();
+                    format!("{state:>8}{count}  {id}  {}", compiled.rule.description)
+                })
+                .collect();
+            if lines.is_empty() {
+                lines.push("No rules loaded. Add markdown rules under .artist/rules/".to_owned());
+            }
+            for diagnostic in engine.diagnostics() {
+                lines.push(format!("! {diagnostic}"));
+            }
+            Ok(lines)
+        }
+        RulesAction::Enable { rule } | RulesAction::Disable { rule } => {
+            let disable = matches!(action, RulesAction::Disable { .. });
+            match resolve(rule) {
+                Some(id) => {
+                    handle.set_disabled(id.clone(), disable);
+                    Ok(vec![format!(
+                        "rule {id} {}",
+                        if disable { "disabled" } else { "enabled" }
+                    )])
+                }
+                None => Ok(vec![format!("unknown rule: {rule}")]),
+            }
+        }
+        RulesAction::Scan => {
+            let Some(active) = active else {
+                return Ok(vec!["No session yet — nothing to scan.".to_owned()]);
+            };
+            active.recorder.flush().await;
+            let events = active.events()?;
+            let findings = artist_rules::retro::scan(&rules, &events);
+            if findings.is_empty() {
+                return Ok(vec![
+                    "No rule matches in this session's history.".to_owned(),
+                ]);
+            }
+            let mut lines: Vec<String> = findings
+                .iter()
+                .take(15)
+                .map(|finding| {
+                    format!(
+                        "{}  @{}  \"{}\"",
+                        finding.rule, finding.seq, finding.excerpt
+                    )
+                })
+                .collect();
+            if findings.len() > 15 {
+                lines.push(format!("… and {} more", findings.len() - 15));
+            }
+            let mut by_rule: Vec<(String, u64, Vec<String>)> = Vec::new();
+            for finding in &findings {
+                match by_rule
+                    .iter_mut()
+                    .find(|(rule, ..)| *rule == finding.rule.0)
+                {
+                    Some((_, count, examples)) => {
+                        *count += 1;
+                        if examples.len() < 3 {
+                            examples.push(finding.excerpt.clone());
+                        }
+                    }
+                    None => {
+                        by_rule.push((finding.rule.0.clone(), 1, vec![finding.excerpt.clone()]))
+                    }
+                }
+            }
+            for (rule, count, examples) in by_rule {
+                active.recorder.record(artist_session::RuleRetroFindings {
+                    rule,
+                    count,
+                    examples,
+                });
+            }
+            Ok(lines)
+        }
+        RulesAction::DryRun { file } => {
+            let Some(active) = active else {
+                return Ok(vec!["No session yet — nothing to scan against.".to_owned()]);
+            };
+            let rule = artist_rules::declarative::parse(std::path::Path::new(file))
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let id = rule.id.clone();
+            let candidate = artist_rules::matcher::RuleSet::compile(vec![rule]);
+            active.recorder.flush().await;
+            let events = active.events()?;
+            let findings = artist_rules::retro::scan(&candidate, &events);
+            let mut lines = vec![format!(
+                "{id}: would have fired {}\u{d7} this session (not activated)",
+                findings.len()
+            )];
+            lines.extend(
+                findings
+                    .iter()
+                    .take(5)
+                    .map(|finding| format!("  @{}  \"{}\"", finding.seq, finding.excerpt)),
+            );
+            Ok(lines)
         }
     }
 }

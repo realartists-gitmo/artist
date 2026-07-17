@@ -21,6 +21,20 @@ pub enum Command {
     Provider(ProviderArgs),
     /// Select the model and reasoning effort for the default provider.
     Model,
+    /// Manage stream rules.
+    Rules(RulesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct RulesArgs {
+    #[command(subcommand)]
+    pub action: RulesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RulesCommand {
+    /// Scaffold a new declarative rule in .artist/rules/.
+    New { name: String },
 }
 
 #[derive(Debug, Args)]

@@ -149,6 +149,50 @@ impl RuleSet {
         }
     }
 
+    /// Every rule matching `haystack` for this target (retro scans; ignores
+    /// armed/fired state). Returns `(rule, excerpt)` pairs, deduplicated by
+    /// rule.
+    pub fn scan_all(
+        &self,
+        target: MatchTarget,
+        haystack: &str,
+        tool: Option<&str>,
+    ) -> Vec<(RuleId, String)> {
+        let matcher = match target {
+            MatchTarget::AssistantText => &self.text,
+            MatchTarget::ReasoningSummary => &self.reasoning,
+            MatchTarget::ToolArgs => &self.tool_args,
+        };
+        if matcher.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<(RuleId, String)> = Vec::new();
+        for pattern_index in matcher.set.matches(haystack) {
+            let (rule_index, regex_index) = matcher.origins[pattern_index];
+            let compiled = &self.rules[rule_index];
+            if found.iter().any(|(rule, _)| *rule == compiled.rule.id) {
+                continue;
+            }
+            if let Some(tool) = tool
+                && !compiled.rule.tools.is_empty()
+                && !compiled.rule.tools.iter().any(|name| name == tool)
+            {
+                continue;
+            }
+            if let Some(matched) = compiled.regexes[regex_index].find(haystack) {
+                let mut excerpt = matched.as_str().to_owned();
+                excerpt.truncate(
+                    (0..=EXCERPT_CAP.min(excerpt.len()))
+                        .rev()
+                        .find(|index| excerpt.is_char_boundary(*index))
+                        .unwrap_or(0),
+                );
+                found.push((compiled.rule.id.clone(), excerpt));
+            }
+        }
+        found
+    }
+
     pub fn get(&self, id: &RuleId) -> Option<&Arc<CompiledRule>> {
         self.rules.iter().find(|compiled| compiled.rule.id == *id)
     }

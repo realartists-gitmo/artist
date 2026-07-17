@@ -53,6 +53,11 @@ pub async fn run(
             context_capacity: None,
             model_changed: false,
         }),
+        ParsedCommand::Rules(_) => Ok(CommandOutput {
+            lines: vec!["/rules is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Help => Ok(CommandOutput {
             lines: slash_commands::COMMANDS
                 .iter()
