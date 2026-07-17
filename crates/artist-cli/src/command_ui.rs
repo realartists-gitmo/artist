@@ -27,6 +27,7 @@ pub async fn run(
     store_path: &Path,
     command: ParsedCommand<'_>,
     skills: &[artist_agent::AvailableSkill],
+    mcp: &artist_agent::mcp::McpManager,
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
@@ -50,6 +51,22 @@ pub async fn run(
             context_capacity: None,
             model_changed: false,
         }),
+        ParsedCommand::Mcp { action, server } => {
+            if let Some(server) = server {
+                match action {
+                    "start" => mcp.start(server).await?,
+                    "stop" => mcp.stop(server).await?,
+                    "restart" => mcp.restart(server).await?,
+                    "refresh" => mcp.refresh(server).await?,
+                    _ => unreachable!(),
+                }
+            }
+            Ok(CommandOutput {
+                lines: mcp.status().await,
+                context_capacity: None,
+                model_changed: false,
+            })
+        }
         ParsedCommand::StatusBar => {
             let Some(config) = pick_status_bar(&store.status_bar, &mut draw)? else {
                 anyhow::bail!("status bar selection cancelled");

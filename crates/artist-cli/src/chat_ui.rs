@@ -248,6 +248,7 @@ struct SubmitContext<'a> {
     project: &'a Path,
     status_config: &'a StatusBarConfig,
     tools: &'a ToolBundle,
+    mcp: &'a artist_agent::mcp::McpManager,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -296,12 +297,14 @@ struct ChatContext<'a> {
     sessions: &'a SessionStore,
     project: &'a Path,
     tools: &'a ToolBundle,
+    mcp: &'a artist_agent::mcp::McpManager,
 }
 
 pub struct ChatResources<'a> {
     pub sessions: &'a SessionStore,
     pub project: &'a Path,
     pub tools: &'a ToolBundle,
+    pub mcp: &'a artist_agent::mcp::McpManager,
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -319,6 +322,7 @@ pub async fn run(
     let sessions = resources.sessions;
     let project = resources.project;
     let tools = resources.tools;
+    let mcp = resources.mcp;
     let context_capacity = if store.status_bar.items.contains(&StatusItem::Context) {
         models::catalog(&store.providers[provider_index])
             .await
@@ -358,6 +362,7 @@ pub async fn run(
                     sessions,
                     project,
                     tools,
+                    mcp,
                 },
                 resumed,
                 initial_prompt,
@@ -491,6 +496,7 @@ async fn run_loop(
                             context.store_path,
                             command,
                             &skills,
+                            context.mcp,
                             |panel| {
                                 resize_and_draw(
                                     &mut terminal,
@@ -535,6 +541,7 @@ async fn run_loop(
                         project: context.project,
                         status_config: &context.store.status_bar,
                         tools: context.tools,
+                        mcp: context.mcp,
                     },
                     &mut session,
                     &mut turns,
@@ -747,12 +754,14 @@ async fn submit(
     let task_prompt = clipboard::agent_input(&prompt)?;
     let task_history = history.clone();
     let task_tools = context.tools.clone();
+    let task_mcp = context.mcp.clone();
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
             &task_prompt,
             &task_history,
             &task_tools,
+            &task_mcp,
             task_steering,
             |event| {
                 tx.send(event)

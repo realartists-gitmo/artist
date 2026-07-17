@@ -2,6 +2,7 @@
 
 mod delegate;
 mod delegate_jobs;
+pub mod mcp;
 mod resources;
 
 pub use resources::AvailableSkill;
@@ -114,6 +115,7 @@ pub async fn stream_chat(
     input: &ChatInput,
     history: &[ChatMessage],
     tools: &ToolBundle,
+    mcp: &mcp::McpManager,
     steering: SteeringHandle,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
@@ -156,6 +158,12 @@ pub async fn stream_chat(
     let input_message = user_message(input);
     fork_context.push(input_message.clone());
     let visible_steering = steering.clone();
+    let mcp_tools = mcp
+        .tools()
+        .await
+        .into_iter()
+        .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>)
+        .collect();
     let agent = builder
         .preamble(&system_prompt)
         .tool(tools.bash.clone())
@@ -173,6 +181,7 @@ pub async fn stream_chat(
             fork_context,
             resources,
         ))
+        .tools(mcp_tools)
         .default_max_turns(usize::MAX)
         .build();
     let mut stream = agent.stream_chat(input_message, messages).await;
@@ -260,6 +269,7 @@ pub async fn stream_prompt(
     provider: &SavedProvider,
     input: &str,
     tools: &ToolBundle,
+    mcp: &mcp::McpManager,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
     let input = ChatInput::from(input.to_owned());
@@ -268,6 +278,7 @@ pub async fn stream_prompt(
         &input,
         &[],
         tools,
+        mcp,
         SteeringHandle::default(),
         on_event,
     )

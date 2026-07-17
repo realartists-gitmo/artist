@@ -40,11 +40,13 @@ async fn run() -> Result<()> {
     enter_positional_project(&mut cli)?;
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
+    let config_root = path.parent().context("providers path has no parent")?;
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
         }
-        return execute_prompt(&mut store, &path, &prompt, cli.resume.as_deref()).await;
+        let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
+        return execute_prompt(&mut store, &path, &prompt, cli.resume.as_deref(), &mcp).await;
     }
     match cli.command {
         Some(Command::Provider(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -76,10 +78,10 @@ async fn run() -> Result<()> {
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
+            let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
             }
-            let config_root = path.parent().context("providers path has no parent")?;
             let sessions = SessionStore::new(config_root);
             let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
@@ -92,6 +94,7 @@ async fn run() -> Result<()> {
                     sessions: &sessions,
                     project: &project,
                     tools: &tools,
+                    mcp: &mcp,
                 },
                 resumed,
                 cli.prompt,
@@ -156,6 +159,7 @@ async fn execute_prompt(
     path: &std::path::Path,
     input: &str,
     resume: Option<&str>,
+    mcp: &artist_agent::mcp::McpManager,
 ) -> Result<()> {
     let selected = default_index(store)?;
     if refresh_if_needed(&mut store.providers[selected]).await? {
@@ -223,6 +227,7 @@ async fn execute_prompt(
         &agent_input,
         &history,
         &tools,
+        mcp,
         artist_agent::SteeringHandle::default(),
         |event| {
             use artist_agent::PromptEvent;

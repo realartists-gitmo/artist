@@ -23,6 +23,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/skills",
     },
     SlashCommand {
+        name: "/mcp",
+        description: "Manage MCP servers",
+        usage: "/mcp [status|start|stop|restart|refresh] [server]",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -34,6 +39,10 @@ pub(crate) enum ParsedCommand<'a> {
     Help,
     Skills,
     StatusBar,
+    Mcp {
+        action: &'a str,
+        server: Option<&'a str>,
+    },
     Model {
         model: Option<&'a str>,
         reasoning: Option<&'a str>,
@@ -59,6 +68,22 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
         ("/help", []) => Ok(ParsedCommand::Help),
+        ("/mcp", []) | ("/mcp", ["status"]) => Ok(ParsedCommand::Mcp {
+            action: "status",
+            server: None,
+        }),
+        ("/mcp", [action, server])
+            if matches!(*action, "start" | "stop" | "restart" | "refresh") =>
+        {
+            Ok(ParsedCommand::Mcp {
+                action,
+                server: Some(server),
+            })
+        }
+        ("/mcp", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/mcp [status|start|stop|restart|refresh] [server]",
+        }),
         ("/skills", []) => Ok(ParsedCommand::Skills),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
@@ -113,7 +138,7 @@ mod tests {
     fn registry_has_unique_standard_commands() {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model", "/statusbar", "/skills", "/help"]
+            ["/model", "/statusbar", "/skills", "/mcp", "/help"]
         );
         assert!(
             COMMANDS
@@ -169,10 +194,10 @@ mod tests {
 
     #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 4);
+        assert_eq!(completions("/").len(), 5);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model"]
+            ["/model", "/mcp"]
         );
         assert!(completions("/model ").is_empty());
         assert!(completions("hello").is_empty());
