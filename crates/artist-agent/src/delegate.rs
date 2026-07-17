@@ -1,4 +1,4 @@
-use crate::delegate_jobs::DelegateJobs;
+use crate::{delegate_jobs::DelegateJobs, resources::Resources};
 use artist_tools::{TOOL_POLICY, ToolBundle};
 use llm_provider::SavedProvider;
 use rig_core::{
@@ -16,16 +16,23 @@ pub(crate) struct Delegate {
     tools: ToolBundle,
     context: Vec<Message>,
     jobs: DelegateJobs,
+    resources: Resources,
 }
 
 impl Delegate {
-    pub fn new(provider: SavedProvider, tools: ToolBundle, context: Vec<Message>) -> Self {
+    pub fn new(
+        provider: SavedProvider,
+        tools: ToolBundle,
+        context: Vec<Message>,
+        resources: Resources,
+    ) -> Self {
         let jobs = DelegateJobs::for_project(tools.project_root());
         Self {
             provider,
             tools,
             context,
             jobs,
+            resources,
         }
     }
 }
@@ -163,7 +170,7 @@ impl Delegate {
             .tools
             .for_actor(&format!("delegate-{}", uuid::Uuid::new_v4().simple()))
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        let policy = if read_only {
+        let mut policy = if read_only {
             format!(
                 "{TOOL_POLICY}\nYou are a read-only subagent. Inspect with read, find, and grep only. Return concise findings and evidence."
             )
@@ -172,6 +179,7 @@ impl Delegate {
                 "{TOOL_POLICY}\nComplete only the focused delegated task. Return concise findings and evidence. You cannot delegate further."
             )
         };
+        policy.push_str(&self.resources.prompt_section());
         let mut builder = client.agent(model).preamble(&policy);
         if let Some(effort) = &self.provider.reasoning_effort {
             builder =
@@ -180,7 +188,9 @@ impl Delegate {
         let mut builder = builder
             .tool(child_tools.read.clone())
             .tool(child_tools.find.clone())
-            .tool(child_tools.grep.clone());
+            .tool(child_tools.grep.clone())
+            .tool(self.resources.instructions_tool())
+            .tool(self.resources.skill_tool());
         if !read_only {
             builder = builder
                 .tool(child_tools.bash.clone())

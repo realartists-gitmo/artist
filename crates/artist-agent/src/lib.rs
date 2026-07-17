@@ -2,6 +2,7 @@
 
 mod delegate;
 mod delegate_jobs;
+mod resources;
 mod steering;
 
 pub use steering::SteeringHandle;
@@ -134,9 +135,11 @@ pub async fn stream_chat(
         builder =
             builder.additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
     }
+    let resources = resources::Resources::discover(tools.project_root());
     let system_prompt = format!(
-        "{}\nCurrent working directory: {}",
+        "{}{}\nCurrent working directory: {}",
         include_str!("system_prompt.md"),
+        resources.prompt_section(),
         tools.project_root().display()
     );
     let messages = history
@@ -158,11 +161,14 @@ pub async fn stream_chat(
         .tool(tools.grep.clone())
         .tool(tools.edit.clone())
         .tool(tools.write.clone())
+        .tool(resources.instructions_tool())
+        .tool(resources.skill_tool())
         .add_hook(steering::SteeringHook(steering))
         .tool(delegate::Delegate::new(
             provider.clone(),
             tools.clone(),
             fork_context,
+            resources,
         ))
         .default_max_turns(usize::MAX)
         .build();
