@@ -249,6 +249,7 @@ struct SubmitContext<'a> {
     status_config: &'a StatusBarConfig,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    show_splash: bool,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -496,8 +497,7 @@ async fn run_loop(
             context.project,
             &status,
         );
-        let show_splash =
-            !resumed_session && turns.is_empty() && input.text.is_empty() && panel.is_empty();
+        let show_splash = !resumed_session;
         resize_and_draw(
             &mut terminal,
             &input,
@@ -575,6 +575,7 @@ async fn run_loop(
                         status_config: &context.store.status_bar,
                         tools: context.tools,
                         mcp: context.mcp,
+                        show_splash: !resumed_session,
                     },
                     &mut session,
                     &mut turns,
@@ -792,7 +793,8 @@ async fn submit(
         context.project,
         status,
     );
-    terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, false))?;
+    terminal
+        .draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, context.show_splash))?;
     terminal.show_cursor()?;
     let mut response = String::new();
     let mut visible = String::new();
@@ -845,6 +847,7 @@ async fn submit(
         },
         &footer,
         &mut stream_height,
+        context.show_splash,
     )?;
     while !task.is_finished() || !rx.is_empty() {
         tokio::select! {
@@ -1035,6 +1038,7 @@ async fn submit(
             },
             &footer,
             &mut stream_height,
+            context.show_splash,
         )?;
     }
     let stream_result = if cancelled {
@@ -1073,7 +1077,7 @@ async fn submit(
         &footer,
         &mut stream_height,
         3,
-        false,
+        context.show_splash,
     )?;
     if let Some(result) = stream_result {
         result?;
@@ -1399,6 +1403,7 @@ fn draw_streaming(
     controls: StreamingControls<'_>,
     footer: &Line<'_>,
     viewport_height: &mut u16,
+    show_splash: bool,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
     let width = terminal_size.width.max(1);
@@ -1424,6 +1429,11 @@ fn draw_streaming(
         .saturating_add(queued_height)
         .saturating_add(input_height)
         .saturating_add(footer_height)
+        .saturating_add(if show_splash {
+            crate::startup_splash::HEIGHT + 1
+        } else {
+            0
+        })
         .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
@@ -1436,9 +1446,18 @@ fn draw_streaming(
     }
     terminal.draw(|frame| {
         let area = frame.area();
+        let content_y = if show_splash {
+            crate::startup_splash::render(
+                frame,
+                Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
+            );
+            area.y.saturating_add(crate::startup_splash::HEIGHT + 1)
+        } else {
+            area.y
+        };
         let response_area = Rect::new(
             area.x,
-            area.y,
+            content_y,
             area.width,
             visible_response_height.min(area.height),
         );
@@ -1489,7 +1508,8 @@ fn draw_streaming(
             area.height.saturating_sub(
                 response_area
                     .height
-                    .saturating_add(queued_height + 2 + footer_height),
+                    .saturating_add(queued_height + 2 + footer_height)
+                    .saturating_add(content_y.saturating_sub(area.y)),
             ),
         );
         render_input(frame, input_area, controls.input);
