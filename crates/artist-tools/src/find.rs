@@ -27,6 +27,7 @@ impl Tool for FindTool {
         json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false})
     }
     async fn call(&self, args: FindArgs) -> Result<String, ToolError> {
+        self.0.wait_for_index().await?;
         let limit = args.limit.unwrap_or(20).min(100);
         let scope = validate_scope(&self.0, args.path.as_deref())?;
         let glob = compile_glob(args.glob.as_deref())?;

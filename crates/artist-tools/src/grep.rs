@@ -32,6 +32,7 @@ impl Tool for GrepTool {
         json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"match":{"enum":["smart","literal","regex"]},"case":{"enum":["smart","sensitive","insensitive"]},"context":{"type":"integer","minimum":0,"maximum":5},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false})
     }
     async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
+        self.0.wait_for_index().await?;
         let limit = args.limit.unwrap_or(20).min(100);
         let context = args.context.unwrap_or(1).min(5);
         let scope = validate_scope(&self.0, args.path.as_deref())?;

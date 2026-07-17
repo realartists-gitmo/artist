@@ -45,9 +45,6 @@ impl Workspace {
                 ..Default::default()
             },
         )?;
-        if !picker.wait_for_scan(Duration::from_secs(30)) {
-            bail!("timed out indexing project files")
-        }
         Ok(Self {
             root: Arc::new(root),
             files,
@@ -64,6 +61,18 @@ impl Workspace {
 
     pub fn root(&self) -> &Path {
         self.root.as_ref()
+    }
+
+    pub(crate) async fn wait_for_index(&self) -> Result<()> {
+        let picker = self.index.clone();
+        let ready =
+            tokio::task::spawn_blocking(move || picker.wait_for_scan(Duration::from_secs(30)))
+                .await
+                .context("join project indexing task")?;
+        if !ready {
+            bail!("timed out indexing project files")
+        }
+        Ok(())
     }
 
     pub fn resolve_existing(&self, input: &str) -> Result<PathBuf> {
