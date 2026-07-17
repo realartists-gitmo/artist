@@ -1,0 +1,14 @@
+/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/deps/serde-2e35a0210bdd7e86.d: /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/build/serde-03a3c8e6d33394cd/out/private.rs
+
+/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/deps/libserde-2e35a0210bdd7e86.rlib: /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/build/serde-03a3c8e6d33394cd/out/private.rs
+
+/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/deps/libserde-2e35a0210bdd7e86.rmeta: /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/build/serde-03a3c8e6d33394cd/out/private.rs
+
+/home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/adam/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/build/serde-03a3c8e6d33394cd/out/private.rs:
+
+# env-dep:OUT_DIR=/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/release/build/serde-03a3c8e6d33394cd/out

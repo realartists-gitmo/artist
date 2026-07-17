@@ -6,6 +6,7 @@ members = [
     "crates/artist-cli",
     "crates/artist-agent",
     "crates/artist-tools",
+    "crates/artist-session",
     "crates/hashline-tools",
     "crates/artist-extensions",
 ]

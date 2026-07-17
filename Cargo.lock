@@ -237,6 +237,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "fs2",
+ "rig-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "artist-tools"
 version = "0.1.0"
 dependencies = [
