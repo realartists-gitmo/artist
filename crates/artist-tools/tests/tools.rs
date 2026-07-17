@@ -207,4 +207,7 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     bash.run_input("cd /tmp").await.unwrap();
     let direct = bash.run_input("pwd").await.unwrap();
     assert!(direct.contains("/tmp"));
+    assert!(!direct.contains("sessionId:"));
+    assert!(!direct.contains("status:"));
+    assert!(!direct.lines().any(|line| line.trim() == "pwd"));
 }

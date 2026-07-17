@@ -61,7 +61,7 @@ impl BashTool {
         if !self.sessions.contains_key(INPUT_SESSION_ID) {
             self.start(BashArgs {
                 mode: Some("start".into()),
-                command: Some("exec /bin/bash --noprofile --norc -i".into()),
+                command: Some("exec env PS1= PS2= /bin/bash --noprofile --norc -i".into()),
                 session_id: Some(INPUT_SESSION_ID.into()),
                 input: None,
                 timeout: None,
@@ -75,11 +75,27 @@ impl BashTool {
             .await?;
         }
         if command.trim().is_empty() {
-            return self.read(BashArgs::for_input(None)).await;
+            return self
+                .read(BashArgs::for_input(None))
+                .await
+                .map(|output| clean_input_output(&output, None));
         }
         self.send(BashArgs::for_input(Some(format!("{command}\n"))))
             .await
+            .map(|output| clean_input_output(&output, Some(command)))
     }
+}
+
+fn clean_input_output(output: &str, command: Option<&str>) -> String {
+    let mut lines = output.lines().skip(2).peekable();
+    if let Some(command) = command
+        && lines
+            .peek()
+            .is_some_and(|line| line.trim_end_matches('\r') == command)
+    {
+        lines.next();
+    }
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 #[derive(Deserialize)]
