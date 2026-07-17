@@ -125,6 +125,12 @@ impl artist::extension::host::Host for State {
     }
 }
 
+/// wasmtime 46's `Error` no longer implements `std::error::Error`; convert
+/// explicitly at the API boundary.
+fn wasm_err(error: wasmtime::Error) -> anyhow::Error {
+    anyhow::anyhow!("{error:#}")
+}
+
 pub struct Instance {
     store: Mutex<Store<State>>,
     bindings: ArtistExtension,
@@ -137,16 +143,18 @@ impl Instance {
         control: Arc<dyn HostControl>,
     ) -> Result<Self> {
         let mut config = Config::new();
-        config.async_support(true).wasm_component_model(true);
-        let engine = Engine::new(&config)?;
-        let component = Component::from_file(&engine, &extension.wasm)?;
+        // async support is always on in wasmtime 46; the old toggle is gone.
+        config.wasm_component_model(true);
+        let engine = Engine::new(&config).map_err(wasm_err)?;
+        let component = Component::from_file(&engine, &extension.wasm).map_err(wasm_err)?;
         let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-        ArtistExtension::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(wasm_err)?;
+        ArtistExtension::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s).map_err(wasm_err)?;
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stdio().inherit_env().inherit_network();
         #[cfg(unix)]
-        wasi.preopened_dir("/", "/", DirPerms::all(), FilePerms::all())?;
+        wasi.preopened_dir("/", "/", DirPerms::all(), FilePerms::all())
+            .map_err(wasm_err)?;
         let mut store = Store::new(
             &engine,
             State {
@@ -159,12 +167,15 @@ impl Instance {
                 events,
             },
         );
-        let bindings = ArtistExtension::instantiate_async(&mut store, &component, &linker).await?;
+        let bindings = ArtistExtension::instantiate_async(&mut store, &component, &linker)
+            .await
+            .map_err(wasm_err)?;
         let activation_context =
             serde_json::to_string(&*context.read().expect("extension context poisoned"))?;
         bindings
             .call_activate(&mut store, &activation_context)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)?;
         Ok(Self {
             store: Mutex::new(store),
@@ -175,26 +186,32 @@ impl Instance {
         let mut s = self.store.lock().await;
         self.bindings
             .call_invoke_tool(&mut *s, name, &arguments.to_string())
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn invoke_command(&self, name: &str, arguments: &str) -> Result<String> {
         let mut s = self.store.lock().await;
         self.bindings
             .call_invoke_command(&mut *s, name, arguments)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn status(&self, name: &str) -> Result<String> {
         let mut s = self.store.lock().await;
         self.bindings
             .call_status(&mut *s, name)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn event(&self, json: &str) -> Result<()> {
         let mut s = self.store.lock().await;
-        self.bindings.call_event(&mut *s, json).await?;
+        self.bindings
+            .call_event(&mut *s, json)
+            .await
+            .map_err(wasm_err)?;
         Ok(())
     }
 }

@@ -48,6 +48,7 @@ artist/                          # Cargo workspace
 | **artist-cli** | UX surface: CLI args, config I/O, chat UI, event recording/replay wiring, `/rules` `/rewind` and custom commands, session maintenance subcommands. |
 | **artist-agent** | The model loop: builds the Rig agent, drives the TTSR abort/inject/retry loop, owns the capture/steering/TTSR hooks, `delegate` subagents, MCP. |
 | **artist-rules** | The rules engine: declarative rule files, discovery + hot reload, streaming matcher, per-session state, retro scanning, wasmtime plugin host (feature `wasm`). |
+| **artist-extensions** | Trusted WASM extensions: persistent component instances discovered from `<config>/extensions` manifests, with a powerful host interface (run/spawn commands, steer, queue prompts, stop the agent, live context, event bus). Distinct trust model from rule plugins — extensions are trusted and capable; rule plugins are untrusted and sandboxed. Both hosts share one wasmtime (46). |
 | **artist-session** | The canonical event log (`events.jsonl`), content schema + rig converters, recorder/writer task, and every projection (model history, markdown transcript, TUI replay, rewind targets). |
 | **artist-tools** | Tool implementations bound to a `Workspace` (project-jailed file tools, PTY bash, FFF find/grep). |
 | **hashline-tools** | Standalone file-tool core: mnemonic anchors, hidden line hashes, SQLite anchor state, cross-process path locks. |
@@ -289,8 +290,10 @@ leave the tree. On stale/unknown anchors the model must re-read then retry
 
 - **Interactive:** `artist` / `artist <dir>`; **one-shot:** `artist -p "…"`;
   **resume:** `-r [id]`.
-- **Slash commands:** `/model`, `/statusbar`, `/skills`, `/mcp`, `/rewind`,
-  `/rules`, `/help` — plus **custom commands**: markdown prompt templates in
+- **Slash commands:** `/model`, `/statusbar`, `/skills`, `/tools`, `/mcp`,
+  `/rewind`, `/rules`, `/help`, extension-declared commands, and `!` bang
+  commands routed to the persistent input shell — plus **custom commands**:
+  markdown prompt templates in
   `<project>/.artist/commands/*.md` or `~/.config/artist/commands/` with
   optional frontmatter (`description`) and `$ARGUMENTS` expansion; they
   join the completion menu (built-in names always win).

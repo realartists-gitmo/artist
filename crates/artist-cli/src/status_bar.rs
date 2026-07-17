@@ -80,6 +80,7 @@ impl StatusSegment {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // display params accrete; a struct refactor is follow-up
 pub(crate) fn segments(
     config: &StatusBarConfig,
     project: &Path,
@@ -289,6 +290,7 @@ mod tests {
                 None,
                 None,
                 None,
+                0,
                 &values
             )[0]
             .text,

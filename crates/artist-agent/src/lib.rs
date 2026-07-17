@@ -44,7 +44,8 @@ use tokio_util::sync::CancellationToken;
 use capture::{CaptureHook, ToolMeta};
 use ttsr::{TtsrHook, TtsrShared, reminder_message};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),
@@ -182,6 +183,15 @@ impl From<String> for ChatInput {
     }
 }
 
+/// The tool surfaces available to a run: native tools, MCP proxies,
+/// extension-provided tools, and the user's disabled-tool list.
+pub struct ToolContext<'a> {
+    pub native: &'a ToolBundle,
+    pub mcp: &'a mcp::McpManager,
+    pub extensions: Option<&'a artist_extensions::Manager>,
+    pub disabled: &'a [String],
+}
+
 /// Executes one prompt with prior chat context and emits model output as it
 /// arrives. `history` carries full-fidelity rig messages (tool calls, tool
 /// results, reasoning) rebuilt from the session event log.
@@ -189,11 +199,12 @@ pub async fn stream_chat(
     provider: &SavedProvider,
     input: &ChatInput,
     history: Vec<Message>,
-    tools: &ToolBundle,
-    mcp: &mcp::McpManager,
+    tool_context: ToolContext<'_>,
     handles: SessionHandles,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
+    let tools = tool_context.native;
+    let mcp = tool_context.mcp;
     let model = provider
         .model
         .as_deref()
@@ -240,16 +251,41 @@ pub async fn stream_chat(
             builder = builder
                 .additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
         }
+        let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
+            Box::new(tools.bash.clone()),
+            Box::new(tools.read.clone()),
+            Box::new(tools.find.clone()),
+            Box::new(tools.grep.clone()),
+            Box::new(tools.edit.clone()),
+            Box::new(tools.write.clone()),
+            Box::new(resources.instructions_tool()),
+            Box::new(resources.skill_tool()),
+            Box::new(delegate::Delegate::new(
+                provider.clone(),
+                tools.clone(),
+                fork_context.clone(),
+                resources.clone(),
+                handles.clone(),
+            )),
+        ];
+        registered.extend(
+            mcp_tools
+                .iter()
+                .cloned()
+                .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>),
+        );
+        if let Some(extensions) = tool_context.extensions {
+            registered.extend(extensions.tools());
+        }
+        registered.retain(|tool| {
+            !tool_context
+                .disabled
+                .iter()
+                .any(|name| name == &tool.name())
+        });
         let agent = builder
             .preamble(&system_prompt)
-            .tool(tools.bash.clone())
-            .tool(tools.read.clone())
-            .tool(tools.find.clone())
-            .tool(tools.grep.clone())
-            .tool(tools.edit.clone())
-            .tool(tools.write.clone())
-            .tool(resources.instructions_tool())
-            .tool(resources.skill_tool())
+            .tools(registered)
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(
                 run_recorder.clone(),
@@ -257,20 +293,6 @@ pub async fn stream_chat(
                 tool_meta.clone(),
             ))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
-            .tool(delegate::Delegate::new(
-                provider.clone(),
-                tools.clone(),
-                fork_context.clone(),
-                resources.clone(),
-                handles.clone(),
-            ))
-            .tools(
-                mcp_tools
-                    .iter()
-                    .cloned()
-                    .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>)
-                    .collect(),
-            )
             .default_max_turns(usize::MAX)
             .build();
 
@@ -475,5 +497,18 @@ pub async fn stream_prompt(
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
     let input = ChatInput::from(input.to_owned());
-    stream_chat(provider, &input, Vec::new(), tools, mcp, handles, on_event).await
+    stream_chat(
+        provider,
+        &input,
+        Vec::new(),
+        ToolContext {
+            native: tools,
+            mcp,
+            extensions: None,
+            disabled: &[],
+        },
+        handles,
+        on_event,
+    )
+    .await
 }

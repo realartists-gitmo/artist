@@ -14,8 +14,8 @@ serde_json = "1"
 rig-core = "0.40.0"
 tokio = { version = "1", features = ["process", "sync", "io-util", "rt"] }
 toml = "0.9"
-wasmtime = { version = "36.0.2", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std"] }
-wasmtime-wasi = { version = "36.0.2", default-features = false }
+wasmtime = { version = "46", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std"] }
+wasmtime-wasi = { version = "46", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
