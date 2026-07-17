@@ -2,6 +2,7 @@ mod args;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
+mod extension_control;
 mod input_atoms;
 mod input_images;
 mod interaction;
@@ -24,6 +25,7 @@ use llm_provider::ChatGptOAuth;
 use sessions::{Role, SessionStore, Turn};
 use std::{
     io::IsTerminal,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use store::{ProviderStore, config_path};
@@ -47,7 +49,18 @@ async fn run() -> Result<()> {
             bail!("-p cannot be combined with a subcommand");
         }
         let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
-        return execute_prompt(&mut store, &path, &prompt, cli.resume.as_deref(), &mcp).await;
+        let extension_control = extension_control::ExtensionControl::default();
+        let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;
+        return execute_prompt(
+            &mut store,
+            &path,
+            &prompt,
+            cli.resume.as_deref(),
+            &mcp,
+            &extensions,
+            &extension_control,
+        )
+        .await;
     }
     match cli.command {
         Some(Command::Provider(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -80,6 +93,9 @@ async fn run() -> Result<()> {
         None => {
             let selected = default_index(&store)?;
             let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
+            let extension_control = extension_control::ExtensionControl::default();
+            let extensions =
+                extension_manager(config_root, &store, extension_control.clone()).await?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
             }
@@ -96,6 +112,8 @@ async fn run() -> Result<()> {
                     project: &project,
                     tools: &tools,
                     mcp: &mcp,
+                    extensions: &extensions,
+                    extension_control: &extension_control,
                 },
                 resumed,
                 cli.prompt,
@@ -161,6 +179,8 @@ async fn execute_prompt(
     input: &str,
     resume: Option<&str>,
     mcp: &artist_agent::mcp::McpManager,
+    extensions: &Arc<artist_extensions::Manager>,
+    extension_control: &extension_control::ExtensionControl,
 ) -> Result<()> {
     let selected = default_index(store)?;
     if refresh_if_needed(&mut store.providers[selected]).await? {
@@ -223,6 +243,14 @@ async fn execute_prompt(
     let mut reasoning = false;
     let mut response = String::new();
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
+    let steering = artist_agent::SteeringHandle::default();
+    extension_control.set_steering(Some(steering.clone()));
+    extensions
+        .update_context(|context| context.agent_state = serde_json::json!({"state":"thinking"}));
+    let _ = extensions.publish(artist_extensions::Event {
+        kind: "state_transition".into(),
+        payload: serde_json::json!({"state":"thinking"}),
+    });
     artist_agent::stream_chat(
         &store.providers[selected],
         &agent_input,
@@ -230,11 +258,12 @@ async fn execute_prompt(
         artist_agent::ToolContext {
             native: &tools,
             mcp,
-            extensions: None,
+            extensions: Some(extensions),
             disabled: &store.disabled_tools,
         },
-        artist_agent::SteeringHandle::default(),
+        steering,
         |event| {
+            publish_prompt_event(extensions, &event);
             use artist_agent::PromptEvent;
             use std::io::Write;
             let mut output = std::io::stdout().lock();
@@ -264,6 +293,12 @@ async fn execute_prompt(
         },
     )
     .await?;
+    extension_control.set_steering(None);
+    extensions.update_context(|context| context.agent_state = serde_json::json!({"state":"idle"}));
+    let _ = extensions.publish(artist_extensions::Event {
+        kind: "state_transition".into(),
+        payload: serde_json::json!({"state":"idle"}),
+    });
     println!();
     sessions.append(
         &session.id,
@@ -273,6 +308,51 @@ async fn execute_prompt(
         },
     )?;
     Ok(())
+}
+
+async fn extension_manager(
+    config_root: &std::path::Path,
+    store: &ProviderStore,
+    control: extension_control::ExtensionControl,
+) -> Result<Arc<artist_extensions::Manager>> {
+    let project = std::env::current_dir().context("find current project directory")?;
+    let provider = default_index(store)
+        .ok()
+        .and_then(|i| store.providers.get(i));
+    let context = artist_extensions::ExtensionContext {
+        project,
+        model: provider.and_then(|p| p.model.clone()),
+        reasoning: provider.and_then(|p| p.reasoning_effort.clone()),
+        agent_state: serde_json::json!({"state": "idle"}),
+        recent_events: Vec::new(),
+    };
+    Ok(Arc::new(
+        artist_extensions::Manager::load(
+            config_root.join("extensions"),
+            context,
+            Arc::new(control),
+        )
+        .await,
+    ))
+}
+
+fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_agent::PromptEvent) {
+    use artist_agent::PromptEvent;
+    let state = match event {
+        PromptEvent::ReasoningSummaryDelta(_) => Some("thinking"),
+        PromptEvent::TextDelta(_) => Some("responding"),
+        PromptEvent::ToolCall { .. } | PromptEvent::ToolExecutionStart { .. } => Some("working"),
+        PromptEvent::ToolResult { .. } => Some("thinking"),
+        PromptEvent::CompletionUsage { .. } => None,
+    };
+    if let Some(state) = state {
+        manager.update_context(|context| context.agent_state = serde_json::json!({"state": state}));
+    }
+    let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    let _ = manager.publish(artist_extensions::Event {
+        kind: "prompt_event".into(),
+        payload,
+    });
 }
 
 fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Result<ToolBundle> {

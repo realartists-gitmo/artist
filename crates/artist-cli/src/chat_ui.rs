@@ -224,6 +224,7 @@ struct StatusRuntime {
     git_branch: Option<String>,
     used_tokens: Option<u64>,
     context_capacity: Option<u64>,
+    extension_values: Vec<(String, String)>,
 }
 
 impl StatusRuntime {
@@ -257,6 +258,7 @@ fn footer_line(
         runtime.git_branch.as_deref(),
         runtime.used_tokens,
         runtime.context_capacity,
+        &runtime.extension_values,
     ))
 }
 
@@ -267,6 +269,8 @@ struct SubmitContext<'a> {
     status_config: &'a StatusBarConfig,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    extensions: &'a std::sync::Arc<artist_extensions::Manager>,
+    extension_control: &'a crate::extension_control::ExtensionControl,
     disabled_tools: &'a [String],
     show_splash: bool,
 }
@@ -318,6 +322,8 @@ struct ChatContext<'a> {
     project: &'a Path,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    extensions: &'a std::sync::Arc<artist_extensions::Manager>,
+    extension_control: &'a crate::extension_control::ExtensionControl,
 }
 
 pub struct ChatResources<'a> {
@@ -325,6 +331,8 @@ pub struct ChatResources<'a> {
     pub project: &'a Path,
     pub tools: &'a ToolBundle,
     pub mcp: &'a artist_agent::mcp::McpManager,
+    pub extensions: &'a std::sync::Arc<artist_extensions::Manager>,
+    pub extension_control: &'a crate::extension_control::ExtensionControl,
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -343,6 +351,8 @@ pub async fn run(
     let project = resources.project;
     let tools = resources.tools;
     let mcp = resources.mcp;
+    let extensions = resources.extensions;
+    let extension_control = resources.extension_control;
     let context_capacity = if store.status_bar.items.contains(&StatusItem::Context) {
         models::catalog(&store.providers[provider_index])
             .await
@@ -362,6 +372,7 @@ pub async fn run(
         git_branch: None,
         used_tokens: None,
         context_capacity,
+        extension_values: extensions.status_items(),
     };
     status.refresh(&store.status_bar, project);
     let terminal = ratatui::init_with_options(TerminalOptions {
@@ -384,6 +395,8 @@ pub async fn run(
                     project,
                     tools,
                     mcp,
+                    extensions,
+                    extension_control,
                 },
                 resumed,
                 initial_prompt,
@@ -400,6 +413,35 @@ pub async fn run(
     );
     ratatui::restore();
     result
+}
+
+fn extension_command_completions<'a>(
+    input: &str,
+    commands: &'a [artist_extensions::CommandDeclaration],
+) -> Vec<&'a artist_extensions::CommandDeclaration> {
+    let trimmed = input.trim_start();
+    if !trimmed.starts_with('/') || trimmed.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    commands
+        .iter()
+        .filter(|command| command.name.starts_with(trimmed))
+        .collect()
+}
+
+fn extension_command<'a>(
+    input: &'a str,
+    commands: &[artist_extensions::CommandDeclaration],
+) -> Option<(&'a str, &'a str)> {
+    let trimmed = input.trim();
+    let (name, arguments) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    (!slash_commands::COMMANDS
+        .iter()
+        .any(|command| command.name == name)
+        && commands.iter().any(|command| command.name == name))
+    .then_some((name, arguments.trim_start()))
 }
 
 fn shell_command(input: &str) -> Option<&str> {
@@ -482,12 +524,20 @@ async fn run_loop(
         insert_history(&mut terminal, &turns)?;
     }
     loop {
+        let provider = &context.store.providers[context.provider_index];
+        context.extensions.update_context(|extension_context| {
+            extension_context.model = provider.model.clone();
+            extension_context.reasoning = provider.reasoning_effort.clone();
+        });
+        status.extension_values = context.extensions.status_items();
         // Prompt execution can change any external status (notably the checked-out
         // branch), so refresh both before submission and after it returns.
         if pending.is_some() {
             status.refresh(&context.store.status_bar, context.project);
         }
         let slash_suggestions = slash_commands::completions(&input.text);
+        let extension_commands = context.extensions.commands();
+        let extension_suggestions = extension_command_completions(&input.text, &extension_commands);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
@@ -496,6 +546,11 @@ async fn run_loop(
         }
         let mut suggestions = if !slash_suggestions.is_empty() {
             slash_suggestions
+                .iter()
+                .map(|command| format!("{}  {}", command.name, command.description))
+                .collect()
+        } else if !extension_suggestions.is_empty() {
+            extension_suggestions
                 .iter()
                 .map(|command| format!("{}  {}", command.name, command.description))
                 .collect()
@@ -542,6 +597,13 @@ async fn run_loop(
                     }
                     Err(error) => vec![format!("Shell error: {error}")],
                 };
+            } else if let Some((name, arguments)) =
+                extension_command(&prompt.content, &context.extensions.commands())
+            {
+                command_panel = match context.extensions.invoke_command(name, arguments).await {
+                    Ok(output) => output.lines().map(str::to_owned).collect(),
+                    Err(error) => vec![format!("Error: {error:#}")],
+                };
             } else if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
                     Ok(command) => {
@@ -553,6 +615,8 @@ async fn run_loop(
                             command,
                             &skills,
                             context.mcp,
+                            &context.extensions.tool_names(),
+                            &context.extensions.status_declarations(),
                             |panel| {
                                 resize_and_draw(
                                     &mut terminal,
@@ -600,6 +664,8 @@ async fn run_loop(
                         status_config: &context.store.status_bar,
                         tools: context.tools,
                         mcp: context.mcp,
+                        extensions: context.extensions,
+                        extension_control: context.extension_control,
                         disabled_tools: &context.store.disabled_tools,
                         show_splash: !resumed_session,
                     },
@@ -614,10 +680,30 @@ async fn run_loop(
                     prompt_history.push(delivered, InputAtoms::default());
                 }
                 queued_prompts.extend(result.queued);
+                queued_prompts.extend(
+                    context
+                        .extension_control
+                        .take_prompts()
+                        .into_iter()
+                        .map(SubmittedPrompt::from),
+                );
                 pending = queued_prompts.pop_front();
                 viewport_floor = 3;
             }
+            if pending.is_none() {
+                queued_prompts.extend(
+                    context
+                        .extension_control
+                        .take_prompts()
+                        .into_iter()
+                        .map(SubmittedPrompt::from),
+                );
+                pending = queued_prompts.pop_front();
+            }
             status.refresh(&context.store.status_bar, context.project);
+            continue;
+        }
+        if !event::poll(std::time::Duration::from_millis(120))? {
             continue;
         }
         match event::read()? {
@@ -663,6 +749,10 @@ async fn run_loop(
                     && !suggestions.is_empty() =>
             {
                 if let Some(command) = slash_suggestions.get(suggestion_index) {
+                    input.text = command.name.to_owned() + " ";
+                    input.atoms.clear();
+                    input.cursor = input.text.len();
+                } else if let Some(command) = extension_suggestions.get(suggestion_index) {
                     input.text = command.name.to_owned() + " ";
                     input.atoms.clear();
                     input.cursor = input.text.len();
@@ -839,6 +929,9 @@ async fn submit(
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
+    context
+        .extension_control
+        .set_steering(Some(steering_handle.clone()));
     let task_steering = steering_handle.clone();
     let mut delivered_steering = Vec::new();
     let mut pending_delivered = Vec::new();
@@ -852,6 +945,15 @@ async fn submit(
     let task_tools = context.tools.clone();
     let task_mcp = context.mcp.clone();
     let task_disabled_tools = context.disabled_tools.to_vec();
+    let task_extensions = context.extensions.clone();
+    let event_extensions = task_extensions.clone();
+    let lifecycle_extensions = task_extensions.clone();
+    task_extensions
+        .update_context(|value| value.agent_state = serde_json::json!({"state":"thinking"}));
+    let _ = task_extensions.publish(artist_extensions::Event {
+        kind: "state_transition".into(),
+        payload: serde_json::json!({"state":"thinking"}),
+    });
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
@@ -860,11 +962,12 @@ async fn submit(
             artist_agent::ToolContext {
                 native: &task_tools,
                 mcp: &task_mcp,
-                extensions: None,
+                extensions: Some(&task_extensions),
                 disabled: &task_disabled_tools,
             },
             task_steering,
             |event| {
+                crate::publish_prompt_event(&event_extensions, &event);
                 tx.send(event)
                     .map_err(|_| anyhow::anyhow!("chat UI closed"))
             },
@@ -889,6 +992,10 @@ async fn submit(
         tokio::select! {
             _ = ticker.tick() => {
                 animation_frame = animation_frame.wrapping_add(1);
+                if context.extension_control.take_stop() {
+                    task.abort();
+                    cancelled = true;
+                }
                 while event::poll(std::time::Duration::ZERO)? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press
@@ -1082,6 +1189,13 @@ async fn submit(
     } else {
         Some(task.await.context("join Artist agent")?)
     };
+    lifecycle_extensions
+        .update_context(|value| value.agent_state = serde_json::json!({"state":"idle"}));
+    let _ = lifecycle_extensions.publish(artist_extensions::Event {
+        kind: "state_transition".into(),
+        payload: serde_json::json!({"state":"idle", "cancelled": cancelled}),
+    });
+    context.extension_control.set_steering(None);
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
         insert_message(terminal, &message.display)?;
@@ -1719,6 +1833,7 @@ mod tests {
 
         let config = StatusBarConfig {
             items: vec![StatusItem::Model],
+            extension_items: Vec::new(),
         };
         let mut resolved = false;
         runtime.refresh_git_branch_with(&config, || {
@@ -1872,6 +1987,24 @@ mod tests {
             panel_option_style(2, "  [x] branch", &input).fg,
             Some(Color::Green)
         );
+    }
+
+    #[test]
+    fn extension_commands_complete_and_split_arguments() {
+        let commands = vec![artist_extensions::CommandDeclaration {
+            name: "/deploy".into(),
+            description: "Deploy".into(),
+            usage: "/deploy [env]".into(),
+        }];
+        assert_eq!(
+            extension_command_completions("/dep", &commands)[0].name,
+            "/deploy"
+        );
+        assert_eq!(
+            extension_command(" /deploy staging ", &commands),
+            Some(("/deploy", "staging"))
+        );
+        assert!(extension_command("/other", &commands).is_none());
     }
 
     #[test]
