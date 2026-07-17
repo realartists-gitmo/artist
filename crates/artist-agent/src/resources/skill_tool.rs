@@ -75,7 +75,7 @@ impl SkillTool {
         cap(lines.join("\n"))
     }
 
-    fn activate(&self, name: String) -> Result<String, SkillError> {
+    pub(super) fn activate(&self, name: String) -> Result<String, SkillError> {
         let skill = self.skill(&name)?;
         let text = read_bounded(&skill.file, &skill.base)?;
         let (_, body) = skills::frontmatter(&text).map_err(message)?;

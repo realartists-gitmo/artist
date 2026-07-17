@@ -10,6 +10,12 @@ pub use instructions_tool::InstructionsTool;
 pub use skill_tool::SkillTool;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailableSkill {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Clone)]
 pub struct Resources(Arc<ResourceData>);
 
@@ -40,6 +46,30 @@ impl Resources {
 
     pub fn instructions_tool(&self) -> InstructionsTool {
         InstructionsTool(self.clone())
+    }
+
+    pub fn available_skills(&self) -> Vec<AvailableSkill> {
+        self.0
+            .skills
+            .values()
+            .map(|skill| AvailableSkill {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect()
+    }
+
+    pub fn explicit_skill_section(&self, input: &str) -> String {
+        let mut output = String::new();
+        for skill in self.0.skills.values() {
+            if mentions_skill(input, &skill.name)
+                && let Ok(content) = self.skill_tool().activate(skill.name.clone())
+            {
+                output.push_str("\n\n");
+                output.push_str(&content);
+            }
+        }
+        output
     }
 
     pub fn skill_tool(&self) -> SkillTool {
@@ -89,6 +119,18 @@ impl Resources {
         }
         output
     }
+}
+
+fn mentions_skill(input: &str, name: &str) -> bool {
+    let needle = format!("${name}");
+    input.match_indices(&needle).any(|(index, _)| {
+        input[index + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| {
+                !(character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
+            })
+    })
 }
 
 fn xml(value: &str) -> String {

@@ -3,6 +3,8 @@
 mod delegate;
 mod delegate_jobs;
 mod resources;
+
+pub use resources::AvailableSkill;
 mod steering;
 
 pub use steering::SteeringHandle;
@@ -137,9 +139,10 @@ pub async fn stream_chat(
     }
     let resources = resources::Resources::discover(tools.project_root());
     let system_prompt = format!(
-        "{}{}\nCurrent working directory: {}",
+        "{}{}{}\nCurrent working directory: {}",
         include_str!("system_prompt.md"),
         resources.prompt_section(),
+        resources.explicit_skill_section(&input.text),
         tools.project_root().display()
     );
     let messages = history
@@ -246,6 +249,10 @@ pub(crate) fn user_message(input: &ChatInput) -> Message {
     Message::User {
         content: OneOrMany::many(content).expect("chat input always contains text"),
     }
+}
+
+pub fn available_skills(project: &std::path::Path) -> Vec<AvailableSkill> {
+    resources::Resources::discover(project).available_skills()
 }
 
 /// Executes a prompt without prior context.

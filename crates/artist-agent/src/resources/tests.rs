@@ -61,6 +61,13 @@ async fn nested_agents_are_loaded_only_for_the_target_scope() {
 }
 
 #[test]
+fn embedded_skill_mentions_use_exact_boundaries() {
+    assert!(mentions_skill("please use $linear for this", "linear"));
+    assert!(mentions_skill("$linear, then continue", "linear"));
+    assert!(!mentions_skill("use $linear-extra", "linear"));
+}
+
+#[test]
 fn project_skills_override_user_and_malformed_skills_are_skipped() {
     let user = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
