@@ -10,6 +10,7 @@ mod models;
 mod prompt;
 mod sessions;
 mod slash_commands;
+mod startup_splash;
 mod status_bar;
 mod store;
 mod test_provider;

@@ -452,6 +452,7 @@ async fn run_loop(
             &footer,
             &mut viewport_height,
             viewport_floor,
+            false,
         )?;
         insert_history(&mut terminal, &turns)?;
     }
@@ -491,6 +492,8 @@ async fn run_loop(
             context.project,
             &status,
         );
+        let show_splash =
+            !resumed_session && turns.is_empty() && input.text.is_empty() && panel.is_empty();
         resize_and_draw(
             &mut terminal,
             &input,
@@ -498,6 +501,7 @@ async fn run_loop(
             &footer,
             &mut viewport_height,
             viewport_floor,
+            show_splash,
         )?;
         if let Some(prompt) = pending.take() {
             if let Some(command) = slash_commands::parse(&prompt.content) {
@@ -519,6 +523,7 @@ async fn run_loop(
                                     &footer,
                                     &mut viewport_height,
                                     3,
+                                    false,
                                 )
                             },
                         )
@@ -545,6 +550,7 @@ async fn run_loop(
                     &footer,
                     &mut viewport_height,
                     3,
+                    false,
                 )?;
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
                 let result = submit(
@@ -666,6 +672,7 @@ fn resize_and_draw(
     footer: &Line<'_>,
     viewport_height: &mut u16,
     viewport_floor: u16,
+    show_splash: bool,
 ) -> Result<()> {
     let width = terminal.size()?.width.saturating_sub(2).max(1);
     let panel_height = if panel.is_empty() {
@@ -679,6 +686,11 @@ fn resize_and_draw(
         .saturating_add(2)
         .saturating_add(panel_height)
         .saturating_add(status_height)
+        .saturating_add(if show_splash {
+            crate::startup_splash::HEIGHT + 1
+        } else {
+            0
+        })
         .max(viewport_floor);
     if desired != *viewport_height {
         *viewport_height = desired;
@@ -687,11 +699,11 @@ fn resize_and_draw(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
-        terminal.draw(|frame| render_with_panel(frame, input, panel, footer))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
         terminal.show_cursor()?;
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;
     } else {
-        terminal.draw(|frame| render_with_panel(frame, input, panel, footer))?;
+        terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
     }
     Ok(())
 }
@@ -767,7 +779,7 @@ async fn submit(
         context.project,
         status,
     );
-    terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer))?;
+    terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, false))?;
     terminal.show_cursor()?;
     let mut response = String::new();
     let mut visible = String::new();
@@ -1048,6 +1060,7 @@ async fn submit(
         &footer,
         &mut stream_height,
         3,
+        false,
     )?;
     if let Some(result) = stream_result {
         result?;
@@ -1486,9 +1499,16 @@ fn render_with_panel(
     input: &ChatInput,
     panel: &[String],
     footer: &Line<'_>,
+    show_splash: bool,
 ) {
     let area = frame.area();
     let status_height = (!footer.spans.is_empty()) as u16;
+    if show_splash {
+        crate::startup_splash::render(
+            frame,
+            Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
+        );
+    }
     if status_height == 1 {
         frame.render_widget(
             Paragraph::new(footer.clone()),
@@ -1754,6 +1774,7 @@ mod tests {
                     &ChatInput::default(),
                     &["/help  Show commands".into()],
                     &Line::default(),
+                    false,
                 )
             })
             .unwrap();
@@ -1808,6 +1829,7 @@ mod tests {
                     &input,
                     &["/help  Show commands".into(), "/model  Select model".into()],
                     &Line::default(),
+                    false,
                 )
             })
             .unwrap();
@@ -1823,7 +1845,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let footer = Line::styled("model", Style::default().fg(Color::Black).bg(Color::Gray));
         terminal
-            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer))
+            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
@@ -1837,7 +1859,9 @@ mod tests {
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &Line::default()))
+            .draw(|frame| {
+                render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), false)
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
