@@ -3,7 +3,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Span, Text},
+    text::{Line, Text},
     widgets::{Paragraph, Widget},
 };
 
@@ -20,48 +20,29 @@ const ART: [&str; HEIGHT as usize] = [
     " ▒▒▒▒▒▒▒▒ ▒▒▒▒▒        ▒▒▒▒▒  ▒▒▒▒▒ ▒▒▒▒▒▒     ▒▒▒▒▒",
 ];
 
-/// Gradient endpoints, top-left → bottom-right. Change these two to retheme.
-const GRADIENT_START: (u8, u8, u8) = (129, 80, 223); // violet
-const GRADIENT_END: (u8, u8, u8) = (255, 148, 66); // amber
+/// The transgender pride flag, top to bottom. Swap this table to retheme.
+const STRIPES: [(u8, u8, u8); 5] = [
+    (91, 206, 250),  // light blue
+    (245, 169, 184), // pink
+    (255, 255, 255), // white
+    (245, 169, 184), // pink
+    (91, 206, 250),  // light blue
+];
 
-fn lerp_color(t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let channel = |start: u8, end: u8| (start as f32 + (end as f32 - start as f32) * t) as u8;
-    Color::Rgb(
-        channel(GRADIENT_START.0, GRADIENT_END.0),
-        channel(GRADIENT_START.1, GRADIENT_END.1),
-        channel(GRADIENT_START.2, GRADIENT_END.2),
-    )
+/// The stripe covering `row`. Rows sample the flag at their midpoint, so an
+/// even art height splits symmetrically (8 rows → 2/1/2/1/2).
+fn stripe_color(row: usize) -> Color {
+    let t = (row as f32 + 0.5) / HEIGHT as f32;
+    let stripe = ((t * STRIPES.len() as f32) as usize).min(STRIPES.len() - 1);
+    let (r, g, b) = STRIPES[stripe];
+    Color::Rgb(r, g, b)
 }
 
 fn splash_text() -> Text<'static> {
-    let last_row = ART.len().saturating_sub(1).max(1);
-    let last_col = ART
-        .iter()
-        .map(|row| row.chars().count())
-        .max()
-        .unwrap_or(1)
-        .saturating_sub(1)
-        .max(1);
     Text::from(
         ART.iter()
             .enumerate()
-            .map(|(row, text)| {
-                // Diagonal blend: equal weight to the row and column position.
-                let row_t = row as f32 / last_row as f32;
-                Line::from(
-                    text.chars()
-                        .enumerate()
-                        .map(|(col, character)| {
-                            let col_t = col as f32 / last_col as f32;
-                            Span::styled(
-                                character.to_string(),
-                                Style::default().fg(lerp_color((row_t + col_t) / 2.0)),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
+            .map(|(row, text)| Line::styled(*text, Style::default().fg(stripe_color(row))))
             .collect::<Vec<_>>(),
     )
 }
@@ -83,27 +64,21 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn renders_art_with_diagonal_color_gradient() {
+    fn renders_art_as_symmetric_trans_flag_stripes() {
         let mut terminal = Terminal::new(TestBackend::new(64, HEIGHT)).unwrap();
         terminal.draw(|frame| render(frame, frame.area())).unwrap();
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((22, 0)).unwrap().symbol(), "█");
-        // Top-left cell carries the pure start color…
+        let row = |y: u16| buffer.cell((22, y)).unwrap().fg;
+        let blue = Color::Rgb(91, 206, 250);
+        let pink = Color::Rgb(245, 169, 184);
+        let white = Color::Rgb(255, 255, 255);
+        // 8 rows → 2 blue, 1 pink, 2 white, 1 pink, 2 blue.
         assert_eq!(
-            buffer.cell((0, 0)).unwrap().fg,
-            Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2)
+            (0..HEIGHT).map(row).collect::<Vec<_>>(),
+            [blue, blue, pink, white, white, pink, blue, blue]
         );
-        // …and the blend actually progresses toward the end color.
-        let near = buffer.cell((1, 0)).unwrap().fg;
-        let far = buffer.cell((50, HEIGHT - 1)).unwrap().fg;
-        assert_ne!(near, far, "gradient must vary across the art");
-        // The far cell's color matches the same diagonal blend the renderer
-        // computes for that position.
-        let last_col = ART.iter().map(|row| row.chars().count()).max().unwrap() - 1;
-        let expected =
-            lerp_color(((HEIGHT - 1) as f32 / (HEIGHT - 1) as f32 + 50.0 / last_col as f32) / 2.0);
-        assert_eq!(far, expected);
     }
 
     #[test]
