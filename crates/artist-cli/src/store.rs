@@ -127,7 +127,7 @@ pub fn config_path() -> Result<PathBuf> {
     }
     Ok(dirs::config_dir()
         .context("could not find user config directory")?
-        .join(".artist/providers.toml"))
+        .join("artist/providers.toml"))
 }
 
 #[cfg(test)]
