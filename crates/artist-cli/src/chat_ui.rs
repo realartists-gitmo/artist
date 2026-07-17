@@ -1228,8 +1228,10 @@ async fn submit(
         3,
         false,
     )?;
-    if let Some(result) = stream_result {
-        result??;
+    if let Some(result) = stream_result
+        && let Err(error) = result.and_then(|result| result)
+    {
+        insert_message(terminal, &format!("Error: {error:#}"))?;
     }
     turns.push(Turn {
         role: Role::User,
