@@ -35,10 +35,10 @@ impl Default for HistoryOptions<'_> {
 
 /// A half-open set of masked seq ranges (inclusive bounds).
 #[derive(Debug, Default)]
-struct Masks(Vec<(u64, u64)>);
+pub(crate) struct Masks(Vec<(u64, u64)>);
 
 impl Masks {
-    fn covers(&self, seq: u64) -> bool {
+    pub(crate) fn covers(&self, seq: u64) -> bool {
         self.0
             .iter()
             .any(|(start, end)| *start <= seq && seq <= *end)
@@ -49,7 +49,7 @@ impl Masks {
 /// latest to earliest: a control event that falls inside a later active
 /// control's range is disabled (e.g. rewinding past a compaction restores
 /// the originals the compaction had replaced).
-fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Masks {
+pub(crate) fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Masks {
     let mut masks = Masks::default();
     for envelope in events.iter().rev() {
         if let Some(limit) = up_to_seq

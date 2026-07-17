@@ -4,7 +4,7 @@ use crate::{
     input_images::ImagePaste,
     interaction::{PromptHistory, SteeringQueue},
     models,
-    sessions::{Role, Session, SessionStore, Turn},
+    sessions::{ActiveSession, SessionStore},
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
@@ -12,6 +12,8 @@ use crate::{
 };
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
+use artist_rules::{RulesEngine, state::RulesHandle};
+use artist_session::{ContentBlock, Envelope, ReplayItem, SteeringDelivered, TurnUser};
 use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
 use ratatui::{
@@ -32,7 +34,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
+use rig_core::completion::message::Message;
 use std::{collections::VecDeque, io::IsTerminal, path::Path};
+use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
@@ -249,6 +253,8 @@ struct SubmitContext<'a> {
     status_config: &'a StatusBarConfig,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    rules_engine: &'a RulesEngine,
+    rules_handle: &'a RulesHandle,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -280,11 +286,6 @@ struct PendingDelivery {
     content: String,
 }
 
-struct DeliveredSteering {
-    message: String,
-    response_offset: usize,
-}
-
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
@@ -298,6 +299,8 @@ struct ChatContext<'a> {
     project: &'a Path,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    rules_engine: &'a RulesEngine,
+    rules_handle: &'a RulesHandle,
 }
 
 pub struct ChatResources<'a> {
@@ -305,6 +308,8 @@ pub struct ChatResources<'a> {
     pub project: &'a Path,
     pub tools: &'a ToolBundle,
     pub mcp: &'a artist_agent::mcp::McpManager,
+    pub rules_engine: &'a RulesEngine,
+    pub rules_handle: &'a RulesHandle,
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -313,7 +318,7 @@ pub async fn run(
     provider_index: usize,
     store_path: &Path,
     resources: ChatResources<'_>,
-    resumed: Option<(Session, Vec<Turn>)>,
+    resumed: Option<(ActiveSession, Vec<Envelope>)>,
     initial_prompt: Option<String>,
 ) -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -363,6 +368,8 @@ pub async fn run(
                     project,
                     tools,
                     mcp,
+                    rules_engine: resources.rules_engine,
+                    rules_handle: resources.rules_handle,
                 },
                 resumed,
                 initial_prompt,
@@ -415,22 +422,32 @@ fn skill_completions<'a>(
 async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
     context: ChatContext<'_>,
-    resumed: Option<(Session, Vec<Turn>)>,
+    resumed: Option<(ActiveSession, Vec<Envelope>)>,
     pending: Option<String>,
     mut status: StatusRuntime,
 ) -> Result<()> {
     let resumed_session = resumed.is_some();
-    let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
+    let (mut active, resumed_events) = resumed.map_or((None, Vec::new()), |(active, events)| {
+        (Some(active), events)
+    });
+    // Full-fidelity model history (tool calls/results included), rebuilt
+    // from the event log after each turn.
+    let mut history: Vec<Message> = match &active {
+        Some(active) => {
+            context.rules_handle.restore_from_log(&resumed_events);
+            artist_session::build_history(
+                &resumed_events,
+                &active.attachments,
+                &artist_session::HistoryOptions::default(),
+            )?
+        }
+        None => Vec::new(),
+    };
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
     let mcp_servers = context.mcp.server_names().await;
-    let mut prompt_history = PromptHistory::from_prompts(
-        turns
-            .iter()
-            .filter(|turn| turn.role == Role::User)
-            .map(|turn| turn.content.clone())
-            .collect(),
-    );
+    let mut prompt_history =
+        PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
     let mut pending = pending.map(SubmittedPrompt::from);
     let mut queued_prompts = VecDeque::new();
     let mut viewport_height = 3;
@@ -453,7 +470,10 @@ async fn run_loop(
             &mut viewport_height,
             viewport_floor,
         )?;
-        insert_history(&mut terminal, &turns)?;
+        insert_history(
+            &mut terminal,
+            &artist_session::replay_for_ui(&resumed_events),
+        )?;
     }
     loop {
         let slash_suggestions = slash_commands::completions(&input.text);
@@ -556,9 +576,11 @@ async fn run_loop(
                         status_config: &context.store.status_bar,
                         tools: context.tools,
                         mcp: context.mcp,
+                        rules_engine: context.rules_engine,
+                        rules_handle: context.rules_handle,
                     },
-                    &mut session,
-                    &mut turns,
+                    &mut active,
+                    &mut history,
                     &mut status,
                     prompt,
                 )
@@ -650,6 +672,9 @@ async fn run_loop(
             }
             Event::Key(key) if !input.handle_key(key) => {
                 clear_inline(&mut terminal)?;
+                if let Some(active) = active.take() {
+                    active.close().await?;
+                }
                 return Ok(());
             }
             Event::Resize(_, _) => {}
@@ -725,12 +750,13 @@ fn collect_delivered(
 async fn submit(
     terminal: &mut ratatui::DefaultTerminal,
     context: SubmitContext<'_>,
-    session: &mut Option<Session>,
-    turns: &mut Vec<Turn>,
+    session: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
     status: &mut StatusRuntime,
     prompt: SubmittedPrompt,
 ) -> Result<SubmitResult> {
     let started = std::time::Instant::now();
+    let first_turn = history.is_empty();
     let active = match session {
         Some(value) => value,
         None => session.insert(
@@ -739,27 +765,16 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
-    let history = turns
-        .iter()
-        .map(|turn| {
-            artist_agent::ChatMessage {
-                role: match turn.role {
-                    Role::User => artist_agent::ChatRole::User,
-                    Role::Assistant => artist_agent::ChatRole::Assistant,
-                },
-                content: turn.content.clone(),
-            }
-            .to_rig()
-        })
-        .collect::<Vec<_>>();
-    context.sessions.append(
-        &active.id,
-        &Turn {
-            role: Role::User,
-            content: prompt.content.clone(),
-        },
-    )?;
-    if !turns.is_empty() {
+    // Rules hot-reload between turns; the run holds the snapshot.
+    context.rules_engine.reload_if_changed();
+    let rule_set = context.rules_engine.snapshot();
+    let agent_input_probe = clipboard::agent_input(&prompt)?;
+    active.recorder.record(TurnUser {
+        content: user_turn_blocks(&agent_input_probe, &active.attachments),
+        display: Some(prompt.display.clone()),
+        source: "prompt".to_owned(),
+    });
+    if !first_turn {
         insert_blank(terminal)?;
     }
     insert_message(terminal, &prompt.display)?;
@@ -784,17 +799,26 @@ async fn submit(
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
     let task_steering = steering_handle.clone();
-    let mut delivered_steering = Vec::new();
+    let mut delivered_steering: Vec<String> = Vec::new();
     let mut pending_delivered = Vec::new();
     let mut steering_input = ChatInput::default();
     let mut cancelled = false;
     let mut animation_frame = 0;
+    let cancel = CancellationToken::new();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let task_provider = context.provider.clone();
-    let task_prompt = clipboard::agent_input(&prompt)?;
+    let task_prompt = agent_input_probe;
     let task_history = history.clone();
     let task_tools = context.tools.clone();
     let task_mcp = context.mcp.clone();
+    let task_handles = artist_agent::SessionHandles {
+        steering: task_steering,
+        rules: context.rules_handle.clone(),
+        rule_set,
+        recorder: active.recorder.clone(),
+        attachments: active.attachments.clone(),
+        cancel: cancel.clone(),
+    };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
@@ -802,10 +826,7 @@ async fn submit(
             task_history,
             &task_tools,
             &task_mcp,
-            artist_agent::SessionHandles {
-                steering: task_steering,
-                ..Default::default()
-            },
+            task_handles,
             |event| {
                 tx.send(event)
                     .map_err(|_| anyhow::anyhow!("chat UI closed"))
@@ -838,7 +859,11 @@ async fn submit(
                                 || (key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL))) =>
                         {
-                            task.abort();
+                            // Cooperative cancel: the driver's select! arm
+                            // returns RunOutcome::Cancelled and records
+                            // run.finished — no abandoned MCP calls, no
+                            // partial-turn loss.
+                            cancel.cancel();
                             cancelled = true;
                             break;
                         }
@@ -992,10 +1017,11 @@ async fn submit(
                             insert_blank(terminal)?;
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
-                                delivered_steering.push(DeliveredSteering {
-                                    message: message.content,
-                                    response_offset: response.len(),
+                                active.recorder.record(SteeringDelivered {
+                                    content: message.content.clone(),
+                                    after_internal_call_id: id.clone(),
                                 });
+                                delivered_steering.push(message.content);
                             }
                         }
                     }
@@ -1012,10 +1038,9 @@ async fn submit(
                     }
                     artist_agent::PromptEvent::RuleFired { rule, matched } => {
                         // The aborted partial output never entered the model's
-                        // context; drop it from the pending buffers and the
-                        // persisted response too. (Already-flushed scrollback
-                        // lines remain — full clean-rewind rendering lands
-                        // with the rules UX pass.)
+                        // context; drop it from the pending buffers too.
+                        // (Already-flushed scrollback lines remain — full
+                        // clean-rewind rendering lands with the rules UX pass.)
                         phase = "rewinding";
                         visible.clear();
                         reasoning.clear();
@@ -1023,9 +1048,6 @@ async fn submit(
                         response_output_started = false;
                         response_started = false;
                         response_since_tool = false;
-                        for entry in &mut delivered_steering {
-                            entry.response_offset = 0;
-                        }
                         let excerpt: String = matched.chars().take(60).collect();
                         insert_status(
                             terminal,
@@ -1057,10 +1079,11 @@ async fn submit(
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
         insert_message(terminal, &message.display)?;
-        delivered_steering.push(DeliveredSteering {
-            message: message.content,
-            response_offset: response.len(),
+        active.recorder.record(SteeringDelivered {
+            content: message.content.clone(),
+            after_internal_call_id: String::new(),
         });
+        delivered_steering.push(message.content);
     }
     if !reasoning.is_empty() {
         insert_reasoning(terminal, &reasoning)?;
@@ -1088,41 +1111,27 @@ async fn submit(
     if let Some(result) = stream_result {
         result?;
     }
-    turns.push(Turn {
-        role: Role::User,
-        content: prompt.content,
-    });
-    let delivered = delivered_steering
-        .iter()
-        .map(|steering| steering.message.clone())
-        .collect::<Vec<_>>();
-    let mut response_offset = 0;
-    for steering in delivered_steering {
-        let next_offset = steering.response_offset.min(response.len());
-        if next_offset > response_offset {
-            let turn = Turn {
-                role: Role::Assistant,
-                content: response[response_offset..next_offset].to_owned(),
-            };
-            context.sessions.append(&active.id, &turn)?;
-            turns.push(turn);
-        }
-        let turn = Turn {
-            role: Role::User,
-            content: steering.message,
-        };
-        context.sessions.append(&active.id, &turn)?;
-        turns.push(turn);
-        response_offset = next_offset;
+    // A cancelled turn's accumulated text never reached a commit point;
+    // preserve it in the log as a partial model turn so nothing is lost.
+    if cancelled && !response.is_empty() {
+        active.recorder.record(artist_session::ModelTurn {
+            turn: 0,
+            content: vec![ContentBlock::Text {
+                text: response.clone(),
+            }],
+            total_tokens: 0,
+            partial: true,
+        });
     }
-    if response_offset < response.len() || delivered.is_empty() {
-        let turn = Turn {
-            role: Role::Assistant,
-            content: response[response_offset..].to_owned(),
-        };
-        context.sessions.append(&active.id, &turn)?;
-        turns.push(turn);
-    }
+    // Rebuild the model-facing history from the log — the single source of
+    // truth, including tool round-trips and any TTSR rule turns.
+    active.recorder.flush().await;
+    *history = artist_session::build_history(
+        &active.events()?,
+        &active.attachments,
+        &artist_session::HistoryOptions::default(),
+    )?;
+    let delivered = delivered_steering;
     Ok(SubmitResult {
         viewport_height: stream_height,
         queued: steering
@@ -1163,17 +1172,56 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
     Some(pending.drain(..split).collect())
 }
 
-fn insert_history(terminal: &mut ratatui::DefaultTerminal, turns: &[Turn]) -> Result<()> {
-    for turn in turns {
-        match turn.role {
-            Role::User => insert_message(terminal, &turn.content)?,
-            Role::Assistant => {
-                insert_response(terminal, &turn.content, true)?;
+fn insert_history(terminal: &mut ratatui::DefaultTerminal, items: &[ReplayItem]) -> Result<()> {
+    for item in items {
+        match item {
+            ReplayItem::User(text) => insert_message(terminal, text)?,
+            ReplayItem::Assistant(text) => {
+                insert_response(terminal, text, true)?;
                 insert_blank(terminal)?;
+            }
+            ReplayItem::Reasoning(text) => insert_reasoning(terminal, text)?,
+            ReplayItem::Tool { name, preview } => {
+                let line = if preview.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name} · {preview}")
+                };
+                insert_tool_line(terminal, &line, true, false)?;
+            }
+            ReplayItem::Steering(text) => insert_message(terminal, text)?,
+            ReplayItem::RuleFired { rule, matched } => {
+                let excerpt: String = matched.chars().take(60).collect();
+                insert_status(
+                    terminal,
+                    &format!("  ⚠ rule {rule} fired on \"{excerpt}\" — rewound and retried"),
+                )?;
             }
         }
     }
     Ok(())
+}
+
+/// The stored content blocks for a user turn: prompt text plus any pasted
+/// images (content-addressed into the session's attachment store).
+fn user_turn_blocks(
+    input: &artist_agent::ChatInput,
+    attachments: &artist_session::AttachmentStore,
+) -> Vec<ContentBlock> {
+    let mut blocks = vec![ContentBlock::Text {
+        text: input.text.clone(),
+    }];
+    for image in &input.images {
+        if let Ok(attachment) = attachments.put(&image.data) {
+            blocks.push(ContentBlock::Image {
+                attachment,
+                media_type: serde_json::to_value(&image.media_type)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned)),
+            });
+        }
+    }
+    blocks
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {

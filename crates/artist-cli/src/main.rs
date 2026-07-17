@@ -20,7 +20,7 @@ use args::{Cli, Command, LoginKind, ProviderAction};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
-use sessions::{Role, SessionStore, Turn};
+use sessions::{ActiveSession, SessionStore};
 use std::{
     io::IsTerminal,
     time::{SystemTime, UNIX_EPOCH},
@@ -86,6 +86,8 @@ async fn run() -> Result<()> {
             let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let tools = tool_bundle(config_root, &project)?;
+            let rules_engine = artist_rules::RulesEngine::discover(&project);
+            let rules_handle = artist_rules::state::RulesHandle::default();
             chat_ui::run(
                 &mut store,
                 selected,
@@ -95,6 +97,8 @@ async fn run() -> Result<()> {
                     project: &project,
                     tools: &tools,
                     mcp: &mcp,
+                    rules_engine: &rules_engine,
+                    rules_handle: &rules_handle,
                 },
                 resumed,
                 cli.prompt,
@@ -122,7 +126,7 @@ fn load_resumed(
     sessions: &SessionStore,
     project: &std::path::Path,
     resume: Option<&str>,
-) -> Result<Option<(sessions::Session, Vec<Turn>)>> {
+) -> Result<Option<(ActiveSession, Vec<artist_session::Envelope>)>> {
     let Some(requested) = resume else {
         return Ok(None);
     };
@@ -136,9 +140,14 @@ fn load_resumed(
             .iter()
             .map(|session| {
                 format!(
-                    "{}  {}",
+                    "{}  {}{}",
                     session.id,
-                    session.label.as_deref().unwrap_or("Untitled")
+                    session.label.as_deref().unwrap_or("Untitled"),
+                    session
+                        .parent
+                        .as_deref()
+                        .map(|parent| format!("  (fork of {parent})"))
+                        .unwrap_or_default()
                 )
             })
             .collect::<Vec<_>>();
@@ -151,7 +160,7 @@ fn load_resumed(
         }
         requested.to_owned()
     };
-    Ok(Some(sessions.load(&id)?))
+    Ok(Some(sessions.open(&id)?))
 }
 
 async fn execute_prompt(
@@ -169,58 +178,30 @@ async fn execute_prompt(
     let sessions = SessionStore::new(config_root);
     let project = std::env::current_dir().context("find current project directory")?;
     let tools = tool_bundle(config_root, &project)?;
-    let (session, turns) = match resume {
-        Some("") => {
-            let mut available = sessions.list_project(&project)?;
-            available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-            if available.is_empty() {
-                bail!("no sessions found for {}", project.display());
-            }
-            let items = available
-                .iter()
-                .map(|session| {
-                    format!(
-                        "{}  {}",
-                        session.id,
-                        session.label.as_deref().unwrap_or("Untitled")
-                    )
-                })
-                .collect::<Vec<_>>();
-            let selected = prompt::select("Session to resume", &items, 0)?;
-            sessions.load(&available[selected].id)?
-        }
-        Some(id) => {
-            if !sessions
-                .list_project(&project)?
-                .iter()
-                .any(|session| session.id == id)
-            {
-                bail!("session {id} was not found in this project");
-            }
-            sessions.load(id)?
-        }
+    let (active, events) = match load_resumed(&sessions, &project, resume)? {
+        Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
-    let history = turns
-        .iter()
-        .map(|turn| {
-            artist_agent::ChatMessage {
-                role: match turn.role {
-                    Role::User => artist_agent::ChatRole::User,
-                    Role::Assistant => artist_agent::ChatRole::Assistant,
-                },
-                content: turn.content.clone(),
-            }
-            .to_rig()
-        })
-        .collect::<Vec<_>>();
-    sessions.append(
-        &session.id,
-        &Turn {
-            role: Role::User,
-            content: input.to_owned(),
-        },
+    let history = artist_session::build_history(
+        &events,
+        &active.attachments,
+        &artist_session::HistoryOptions::default(),
     )?;
+    active.recorder.record(artist_session::TurnUser {
+        content: vec![artist_session::ContentBlock::Text {
+            text: input.to_owned(),
+        }],
+        display: None,
+        source: "prompt".to_owned(),
+    });
+    let rules_engine = artist_rules::RulesEngine::discover(&project);
+    let handles = artist_agent::SessionHandles {
+        rules: artist_rules::state::RulesHandle::default(),
+        rule_set: rules_engine.snapshot(),
+        recorder: active.recorder.clone(),
+        attachments: active.attachments.clone(),
+        ..Default::default()
+    };
     let styled = std::io::stdout().is_terminal();
     let mut reasoning = false;
     let mut response = String::new();
@@ -231,7 +212,7 @@ async fn execute_prompt(
         history,
         &tools,
         mcp,
-        artist_agent::SessionHandles::default(),
+        handles,
         |event| {
             use artist_agent::PromptEvent;
             use std::io::Write;
@@ -267,13 +248,8 @@ async fn execute_prompt(
     )
     .await?;
     println!();
-    sessions.append(
-        &session.id,
-        &Turn {
-            role: Role::Assistant,
-            content: response,
-        },
-    )?;
+    let _ = response;
+    active.close().await?;
     Ok(())
 }
 

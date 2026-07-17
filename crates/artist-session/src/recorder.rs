@@ -14,6 +14,12 @@ use tokio::sync::mpsc;
 use crate::event::{MAIN_LINEAGE, SessionEvent};
 use crate::log::EventLogWriter;
 
+enum WriterMessage {
+    Event(Box<RecordedEvent>),
+    /// Barrier: acked once every previously sent event is durably appended.
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
 struct RecordedEvent {
     run: Option<String>,
     lineage: String,
@@ -37,7 +43,7 @@ impl Watermark {
 /// an optional run id; deriving scoped recorders is cheap.
 #[derive(Clone)]
 pub struct Recorder {
-    sender: Option<mpsc::UnboundedSender<RecordedEvent>>,
+    sender: Option<mpsc::UnboundedSender<WriterMessage>>,
     lineage: String,
     run: Option<String>,
     watermark: Watermark,
@@ -58,11 +64,23 @@ impl Recorder {
     /// silently drops if the writer task has shut down (session closing).
     pub fn record(&self, event: impl Into<SessionEvent>) {
         if let Some(sender) = &self.sender {
-            let _ = sender.send(RecordedEvent {
+            let _ = sender.send(WriterMessage::Event(Box::new(RecordedEvent {
                 run: self.run.clone(),
                 lineage: self.lineage.clone(),
                 event: event.into(),
-            });
+            })));
+        }
+    }
+
+    /// Wait until everything recorded so far is durably in the log — call
+    /// before rebuilding history from disk at a turn boundary.
+    pub async fn flush(&self) {
+        let Some(sender) = &self.sender else {
+            return;
+        };
+        let (ack, done) = tokio::sync::oneshot::channel();
+        if sender.send(WriterMessage::Flush(ack)).is_ok() {
+            let _ = done.await;
         }
     }
 
@@ -109,18 +127,54 @@ impl WriterTask {
     }
 }
 
-/// Spawn the single writer task for a session.
-pub fn spawn_writer(mut writer: EventLogWriter) -> (Recorder, WriterTask) {
-    let (sender, mut receiver) = mpsc::unbounded_channel::<RecordedEvent>();
+/// Spawn the single writer task for a session. When `transcript` is given,
+/// the task also appends the derived markdown fragment for each event —
+/// the transcript is a regenerable projection, so its writes are
+/// best-effort (never fail the log append).
+pub fn spawn_writer(
+    mut writer: EventLogWriter,
+    transcript: Option<std::path::PathBuf>,
+) -> (Recorder, WriterTask) {
+    let (sender, mut receiver) = mpsc::unbounded_channel::<WriterMessage>();
     let watermark = Watermark::default();
     if let Some(seq) = writer.last_seq() {
         watermark.store(seq);
     }
     let task_watermark = watermark.clone();
     let handle = tokio::task::spawn_blocking(move || -> Result<()> {
-        while let Some(recorded) = receiver.blocking_recv() {
+        let mut transcript_file = transcript.as_deref().and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
+        while let Some(message) = receiver.blocking_recv() {
+            let recorded = match message {
+                WriterMessage::Event(recorded) => *recorded,
+                WriterMessage::Flush(ack) => {
+                    let _ = ack.send(());
+                    continue;
+                }
+            };
             let seq = writer.append(recorded.run.as_deref(), &recorded.lineage, &recorded.event)?;
             task_watermark.store(seq);
+            if let Some(file) = &mut transcript_file {
+                let envelope = crate::event::Envelope {
+                    v: crate::event::SCHEMA_VERSION,
+                    seq,
+                    ts: 0,
+                    session: String::new(),
+                    run: recorded.run,
+                    lineage: recorded.lineage,
+                    kind: recorded.event.kind().to_owned(),
+                    payload: recorded.event.payload(),
+                };
+                if let Some(fragment) = crate::replay::markdown_fragment(&envelope) {
+                    use std::io::Write;
+                    let _ = file.write_all(fragment.as_bytes());
+                }
+            }
         }
         Ok(())
     });
@@ -153,7 +207,7 @@ mod tests {
     async fn events_from_clones_are_totally_ordered_and_flushed() {
         let dir = tempfile::tempdir().unwrap();
         let writer = EventLogWriter::open(dir.path(), "s-1").unwrap();
-        let (recorder, task) = spawn_writer(writer);
+        let (recorder, task) = spawn_writer(writer, None);
 
         let delegate = recorder.child_lineage("delegate-1").with_run("r-2");
         recorder.record(user_turn("main"));
@@ -174,7 +228,7 @@ mod tests {
     async fn watermark_tracks_committed_seq() {
         let dir = tempfile::tempdir().unwrap();
         let writer = EventLogWriter::open(dir.path(), "s-1").unwrap();
-        let (recorder, task) = spawn_writer(writer);
+        let (recorder, task) = spawn_writer(writer, None);
         assert_eq!(recorder.last_committed_seq(), None);
         recorder.record(user_turn("one"));
         // The writer commits asynchronously; poll the live watermark.
