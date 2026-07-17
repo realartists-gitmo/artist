@@ -139,17 +139,26 @@ pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
 
 /// Finds the branch checked out by the repository containing `project`.
 pub(crate) fn git_branch(project: &Path) -> Option<String> {
+    // Unlike `rev-parse --abbrev-ref HEAD`, symbolic-ref also works before the
+    // repository has its first commit.
+    git_output(project, &["symbolic-ref", "--quiet", "--short", "HEAD"]).or_else(|| {
+        git_output(project, &["rev-parse", "--short", "HEAD"])
+            .map(|commit| format!("detached@{commit}"))
+    })
+}
+
+fn git_output(project: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(args)
         .current_dir(project)
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    let branch = String::from_utf8(output.stdout).ok()?;
-    let branch = branch.trim();
-    (!branch.is_empty()).then(|| branch.to_owned())
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 pub(crate) fn format_tokens(tokens: u64) -> String {
@@ -188,6 +197,18 @@ mod tests {
     fn config_uses_stable_snake_case_names() {
         let config: StatusBarConfig = toml::from_str("items = ['model', 'git_branch']").unwrap();
         assert_eq!(config.items, [StatusItem::Model, StatusItem::GitBranch]);
+    }
+
+    #[test]
+    fn detects_branch_before_first_commit() {
+        let project = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet", "--initial-branch", "other"])
+            .current_dir(project.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(git_branch(project.path()).as_deref(), Some("other"));
     }
 
     #[test]
