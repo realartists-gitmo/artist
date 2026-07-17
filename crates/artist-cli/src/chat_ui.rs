@@ -1416,8 +1416,24 @@ fn render_with_panel(
         area.width,
         panel_height,
     );
+    let panel_text = Text::from(
+        panel
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                Line::styled(
+                    option.clone(),
+                    if index == 0 && input.text.starts_with('/') {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        Style::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
     frame.render_widget(
-        Paragraph::new(panel.join("\n")).block(
+        Paragraph::new(panel_text).block(
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(Color::White)),
@@ -1630,6 +1646,28 @@ mod tests {
         assert_ne!(buffer.cell((0, 1)).unwrap().symbol(), "│");
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "─");
         assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
+    }
+
+    #[test]
+    fn tab_completion_option_is_blue() {
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut input = ChatInput::default();
+        input.insert("/");
+        terminal
+            .draw(|frame| {
+                render_with_panel(
+                    frame,
+                    &input,
+                    &["/help  Show commands".into(), "/model  Select model".into()],
+                    &Line::default(),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer().cell((0, 1)).unwrap().fg,
+            Color::Blue
+        );
     }
 
     #[test]
