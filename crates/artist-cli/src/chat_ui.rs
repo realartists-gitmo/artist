@@ -99,6 +99,12 @@ impl ChatInput {
                 .insert_text_paste(&mut self.text, &mut self.cursor, value);
         }
     }
+    fn replace_range(&mut self, range: std::ops::Range<usize>, value: &str) {
+        self.text.replace_range(range.clone(), value);
+        self.atoms.remove_text(range.start, range.end);
+        self.atoms.insert_text(range.start, value.len());
+        self.cursor = range.start + value.len();
+    }
     fn take_expanded(&mut self) -> ExpandedInput {
         let expanded = self.atoms.expand(&self.text);
         self.text.clear();
@@ -370,6 +376,37 @@ pub async fn run(
     result
 }
 
+fn skill_completion_range(text: &str, cursor: usize) -> Option<std::ops::Range<usize>> {
+    let prefix = text.get(..cursor)?;
+    let start = prefix.rfind('$')?;
+    let fragment = &prefix[start + 1..];
+    if fragment.chars().all(|character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+    }) {
+        Some(start..cursor)
+    } else {
+        None
+    }
+}
+
+fn skill_completions<'a>(
+    input: &ChatInput,
+    skills: &'a [artist_agent::AvailableSkill],
+) -> (
+    Option<std::ops::Range<usize>>,
+    Vec<&'a artist_agent::AvailableSkill>,
+) {
+    let Some(range) = skill_completion_range(&input.text, input.cursor) else {
+        return (None, Vec::new());
+    };
+    let fragment = &input.text[range.start + 1..range.end];
+    let matches = skills
+        .iter()
+        .filter(|skill| skill.name.starts_with(fragment))
+        .collect();
+    (Some(range), matches)
+}
+
 async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
     context: ChatContext<'_>,
@@ -380,6 +417,7 @@ async fn run_loop(
     let resumed_session = resumed.is_some();
     let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
     let mut input = ChatInput::default();
+    let skills = artist_agent::available_skills(context.project);
     let mut prompt_history = PromptHistory::from_prompts(
         turns
             .iter()
@@ -410,10 +448,19 @@ async fn run_loop(
         insert_history(&mut terminal, &turns)?;
     }
     loop {
-        let suggestions = slash_commands::completions(&input.text)
-            .into_iter()
-            .map(|command| format!("{}  {}", command.name, command.description))
-            .collect::<Vec<_>>();
+        let slash_suggestions = slash_commands::completions(&input.text);
+        let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
+        let suggestions = if slash_suggestions.is_empty() {
+            skill_suggestions
+                .iter()
+                .map(|skill| format!("${}  {}", skill.name, skill.description))
+                .collect::<Vec<_>>()
+        } else {
+            slash_suggestions
+                .iter()
+                .map(|command| format!("{}  {}", command.name, command.description))
+                .collect()
+        };
         let panel = if suggestions.is_empty() {
             &command_panel
         } else {
@@ -443,6 +490,7 @@ async fn run_loop(
                             context.provider_index,
                             context.store_path,
                             command,
+                            &skills,
                             |panel| {
                                 resize_and_draw(
                                     &mut terminal,
@@ -533,9 +581,15 @@ async fn run_loop(
                     && key.code == KeyCode::Tab
                     && !suggestions.is_empty() =>
             {
-                input.text = slash_commands::completions(&input.text)[0].name.to_owned() + " ";
-                input.atoms.clear();
-                input.cursor = input.text.len();
+                if let (Some(range), Some(skill)) = (skill_range.clone(), skill_suggestions.first())
+                    && slash_suggestions.is_empty()
+                {
+                    input.replace_range(range, &format!("${}", skill.name));
+                } else if let Some(command) = slash_suggestions.first() {
+                    input.text = command.name.to_owned() + " ";
+                    input.atoms.clear();
+                    input.cursor = input.text.len();
+                }
             }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press
@@ -1443,7 +1497,11 @@ fn panel_option_style(index: usize, option: &str, input: &ChatInput) -> Style {
             .add_modifier(Modifier::BOLD)
     } else if option.contains("[x]") {
         Style::default().fg(Color::Green)
-    } else if index == 0 && input.text.starts_with('/') {
+    } else if index == 0
+        && (input.text.starts_with('/')
+            || (option.starts_with('$')
+                && skill_completion_range(&input.text, input.cursor).is_some()))
+    {
         Style::default().fg(Color::Blue)
     } else if index == 0 {
         Style::default()
@@ -1674,6 +1732,21 @@ mod tests {
             panel_option_style(2, "  [x] branch", &input).fg,
             Some(Color::Green)
         );
+    }
+
+    #[test]
+    fn completes_embedded_skill_mentions() {
+        let mut input = ChatInput::default();
+        input.insert("please use $lin");
+        let skills = vec![artist_agent::AvailableSkill {
+            name: "linear".into(),
+            description: "Manage Linear issues".into(),
+        }];
+        let (range, matches) = skill_completions(&input, &skills);
+        assert_eq!(range, Some(11..15));
+        assert_eq!(matches[0].name, "linear");
+        input.replace_range(range.unwrap(), "$linear");
+        assert_eq!(input.text, "please use $linear");
     }
 
     #[test]
