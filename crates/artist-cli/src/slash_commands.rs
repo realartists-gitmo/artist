@@ -18,6 +18,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/statusbar",
     },
     SlashCommand {
+        name: "/skills",
+        description: "List available Agent Skills",
+        usage: "/skills",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -27,6 +32,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParsedCommand<'a> {
     Help,
+    Skills,
     StatusBar,
     Model {
         model: Option<&'a str>,
@@ -53,10 +59,15 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
         ("/help", []) => Ok(ParsedCommand::Help),
+        ("/skills", []) => Ok(ParsedCommand::Skills),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/statusbar",
+        }),
+        ("/skills", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/skills",
         }),
         ("/help", _) => Err(ParseError::InvalidUsage {
             command,
@@ -102,7 +113,7 @@ mod tests {
     fn registry_has_unique_standard_commands() {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model", "/statusbar", "/help"]
+            ["/model", "/statusbar", "/skills", "/help"]
         );
         assert!(
             COMMANDS
@@ -115,6 +126,7 @@ mod tests {
     fn parses_supported_forms() {
         assert_eq!(parse("/help"), Some(Ok(ParsedCommand::Help)));
         assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
+        assert_eq!(parse("/skills"), Some(Ok(ParsedCommand::Skills)));
         assert_eq!(
             parse(" /model "),
             Some(Ok(ParsedCommand::Model {
@@ -157,7 +169,7 @@ mod tests {
 
     #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 3);
+        assert_eq!(completions("/").len(), 4);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model"]

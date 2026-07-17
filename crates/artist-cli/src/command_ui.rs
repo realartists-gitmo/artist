@@ -26,6 +26,7 @@ pub async fn run(
     provider_index: usize,
     store_path: &Path,
     command: ParsedCommand<'_>,
+    skills: &[artist_agent::AvailableSkill],
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
@@ -34,6 +35,18 @@ pub async fn run(
                 .iter()
                 .map(|command| format!("{}  {}", command.usage, command.description))
                 .collect(),
+            context_capacity: None,
+            model_changed: false,
+        }),
+        ParsedCommand::Skills => Ok(CommandOutput {
+            lines: if skills.is_empty() {
+                vec!["No Agent Skills discovered.".into()]
+            } else {
+                skills
+                    .iter()
+                    .map(|skill| format!("${}  {}", skill.name, skill.description))
+                    .collect()
+            },
             context_capacity: None,
             model_changed: false,
         }),
