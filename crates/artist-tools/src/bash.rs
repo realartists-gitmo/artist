@@ -18,6 +18,7 @@ use tokio::{
 
 const EXEC_CAP: usize = 50 * 1024;
 const SESSION_CAP: usize = 2 * 1024 * 1024;
+const INPUT_SESSION_ID: &str = "artist-input-shell";
 
 #[derive(Clone)]
 pub struct BashTool {
@@ -41,7 +42,46 @@ impl BashTool {
             starting: Arc::new(DashSet::new()),
         }
     }
+
+    /// Send a command to the single persistent shell used by `!` input.
+    /// An empty command reads any output produced since the previous request.
+    pub async fn run_input(&self, command: &str) -> Result<String, ToolError> {
+        if self.sessions.get(INPUT_SESSION_ID).is_some_and(|session| {
+            session
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .try_wait()
+                .ok()
+                .flatten()
+                .is_some()
+        }) {
+            self.sessions.remove(INPUT_SESSION_ID);
+        }
+        if !self.sessions.contains_key(INPUT_SESSION_ID) {
+            self.start(BashArgs {
+                mode: Some("start".into()),
+                command: Some("exec /bin/bash --noprofile --norc -i".into()),
+                session_id: Some(INPUT_SESSION_ID.into()),
+                input: None,
+                timeout: None,
+                wait_ms: Some(100),
+                max_bytes: Some(EXEC_CAP),
+                cwd: None,
+                env: None,
+                signal: None,
+                background: None,
+            })
+            .await?;
+        }
+        if command.trim().is_empty() {
+            return self.read(BashArgs::for_input(None)).await;
+        }
+        self.send(BashArgs::for_input(Some(format!("{command}\n"))))
+            .await
+    }
 }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashArgs {
@@ -56,6 +96,24 @@ pub struct BashArgs {
     env: Option<BTreeMap<String, String>>,
     signal: Option<String>,
     background: Option<bool>,
+}
+
+impl BashArgs {
+    fn for_input(input: Option<String>) -> Self {
+        Self {
+            mode: Some(if input.is_some() { "send" } else { "read" }.into()),
+            command: None,
+            session_id: Some(INPUT_SESSION_ID.into()),
+            input,
+            timeout: None,
+            wait_ms: Some(100),
+            max_bytes: Some(EXEC_CAP),
+            cwd: None,
+            env: None,
+            signal: None,
+            background: None,
+        }
+    }
 }
 impl Tool for BashTool {
     const NAME: &'static str = "bash";

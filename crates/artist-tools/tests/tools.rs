@@ -203,4 +203,8 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     .await;
     assert!(failed.contains("status: failed"));
     assert!(failed.contains("exitCode: 7"));
+
+    bash.run_input("cd /tmp").await.unwrap();
+    let direct = bash.run_input("pwd").await.unwrap();
+    assert!(direct.contains("/tmp"));
 }
