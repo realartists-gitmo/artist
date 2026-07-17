@@ -6,6 +6,8 @@ mod delegate_jobs;
 pub mod mcp;
 mod resources;
 mod ttsr;
+#[cfg(test)]
+mod ttsr_tests;
 
 pub use resources::AvailableSkill;
 mod steering;
