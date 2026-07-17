@@ -847,6 +847,10 @@ fn resize_and_draw(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
+        // Reinitializing ratatui resets terminal modes, including bracketed paste.
+        // Restore it so terminal-provided image paths continue to arrive as
+        // `Event::Paste` rather than being typed into the prompt.
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
         terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
         terminal.show_cursor()?;
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;

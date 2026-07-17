@@ -15,7 +15,7 @@ artist-extensions = { path = "../artist-extensions" }
 artist-tools = { path = "../artist-tools" }
 fs2 = "0.4"
 ansi-to-tui = "7"
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 anyhow = "1"
 charmed-glamour = { version = "0.2", features = ["syntax-highlighting"] }
 clap = { version = "4", features = ["derive"] }
