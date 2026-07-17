@@ -1421,14 +1421,7 @@ fn render_with_panel(
             .iter()
             .enumerate()
             .map(|(index, option)| {
-                Line::styled(
-                    option.clone(),
-                    if index == 0 && input.text.starts_with('/') {
-                        Style::default().fg(Color::Blue)
-                    } else {
-                        Style::default()
-                    },
-                )
+                Line::styled(option.clone(), panel_option_style(index, option, input))
             })
             .collect::<Vec<_>>(),
     );
@@ -1440,6 +1433,24 @@ fn render_with_panel(
         ),
         panel_area,
     );
+}
+
+fn panel_option_style(index: usize, option: &str, input: &ChatInput) -> Style {
+    if option.trim_start().starts_with('›') {
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    } else if option.contains("[x]") {
+        Style::default().fg(Color::Green)
+    } else if index == 0 && input.text.starts_with('/') {
+        Style::default().fg(Color::Blue)
+    } else if index == 0 {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
@@ -1646,6 +1657,22 @@ mod tests {
         assert_ne!(buffer.cell((0, 1)).unwrap().symbol(), "│");
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "─");
         assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
+    }
+
+    #[test]
+    fn interactive_selection_uses_color() {
+        let input = ChatInput::default();
+        let selected = panel_option_style(1, "› model", &input);
+        assert_eq!(selected.fg, Some(Color::Blue));
+        assert!(selected.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(
+            panel_option_style(0, "Select model", &input).fg,
+            Some(Color::Cyan)
+        );
+        assert_eq!(
+            panel_option_style(2, "  [x] branch", &input).fg,
+            Some(Color::Green)
+        );
     }
 
     #[test]
