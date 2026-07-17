@@ -28,15 +28,23 @@ impl Manager {
         let events = EventBus::new(64);
         context.recent_events = events.recent();
         let context = Arc::new(RwLock::new(context));
+        let loads = registry.extensions.iter().cloned().map(|extension| {
+            let context = context.clone();
+            let events = events.clone();
+            let control = control.clone();
+            async move {
+                let result = Instance::load(&extension, context, events, control).await;
+                (extension, result)
+            }
+        });
         let mut instances = HashMap::new();
-        for extension in &registry.extensions {
-            match Instance::load(extension, context.clone(), events.clone(), control.clone()).await
-            {
+        for (extension, result) in futures::future::join_all(loads).await {
+            match result {
                 Ok(instance) => {
                     instances.insert(extension.manifest.id.clone(), Arc::new(instance));
                 }
                 Err(error) => registry.diagnostics.push(Diagnostic {
-                    path: extension.wasm.clone(),
+                    path: extension.wasm,
                     message: format!("activate {}: {error:#}", extension.manifest.id),
                 }),
             }

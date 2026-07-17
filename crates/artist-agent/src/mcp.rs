@@ -102,12 +102,13 @@ impl McpManager {
         Ok(manager)
     }
     async fn start_startup(&self) {
-        let names = self.names().await;
-        for name in names {
+        let mut startup = Vec::new();
+        for name in self.names().await {
             if self.activation(&name).await == Some(Activation::Startup) {
-                let _ = self.start(&name).await;
+                startup.push(name);
             }
         }
+        futures::future::join_all(startup.iter().map(|name| self.start(name))).await;
     }
     async fn activation(&self, name: &str) -> Option<Activation> {
         let server = self.0.servers.read().await.get(name)?.clone();
