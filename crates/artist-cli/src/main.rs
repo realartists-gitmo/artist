@@ -2,6 +2,7 @@ mod args;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
+mod custom_commands;
 mod input_atoms;
 mod input_images;
 mod interaction;
@@ -16,7 +17,7 @@ mod test_provider;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand};
+use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
@@ -78,6 +79,18 @@ async fn run() -> Result<()> {
         Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
             match args.action {
                 RulesCommand::New { name } => scaffold_rule(&name)?,
+            }
+        }
+        Some(Command::Sessions(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            let sessions = SessionStore::new(config_root);
+            match args.action {
+                SessionsCommand::List => sessions_list(&sessions)?,
+                SessionsCommand::Render { id } => sessions_render(&sessions, &id)?,
+                SessionsCommand::Gc {
+                    keep,
+                    older_than_days,
+                    dry_run,
+                } => sessions_gc(&sessions, keep, older_than_days, dry_run)?,
             }
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
@@ -256,6 +269,117 @@ async fn execute_prompt(
     let _ = response;
     active.close().await?;
     Ok(())
+}
+
+fn sessions_list(sessions: &SessionStore) -> Result<()> {
+    let project = std::env::current_dir()?;
+    let mut entries = sessions.list_project(&project)?;
+    if entries.is_empty() {
+        println!("No sessions for {}", project.display());
+        return Ok(());
+    }
+    entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+    for session in entries {
+        let size = dir_size(session.dir());
+        println!(
+            "{}  {:>8}  {}{}",
+            session.id,
+            format_size(size),
+            session.label.as_deref().unwrap_or("Untitled"),
+            session
+                .parent
+                .as_deref()
+                .map(|parent| format!("  (fork of {parent})"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn sessions_render(sessions: &SessionStore, id: &str) -> Result<()> {
+    let (session, events) = sessions.peek(id)?;
+    let markdown = artist_session::render_markdown(&events);
+    std::fs::write(&session.transcript, &markdown)?;
+    println!("regenerated {}", session.transcript.display());
+    Ok(())
+}
+
+fn sessions_gc(
+    sessions: &SessionStore,
+    keep: usize,
+    older_than_days: u64,
+    dry_run: bool,
+) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    let cutoff = now.saturating_sub(older_than_days * 24 * 60 * 60 * 1000);
+    let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
+        Default::default();
+    for session in sessions.list()? {
+        by_project
+            .entry(session.project.clone())
+            .or_default()
+            .push(session);
+    }
+    let mut removed = 0usize;
+    let mut reclaimed = 0u64;
+    for (_, mut entries) in by_project {
+        entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+        for session in entries.into_iter().skip(keep) {
+            if session.created_at_ms >= cutoff {
+                continue;
+            }
+            let size = dir_size(session.dir());
+            removed += 1;
+            reclaimed += size;
+            if dry_run {
+                println!(
+                    "would delete {}  {:>8}  {}",
+                    session.id,
+                    format_size(size),
+                    session.label.as_deref().unwrap_or("Untitled")
+                );
+            } else {
+                sessions.remove(&session.id)?;
+                println!("deleted {}  {:>8}", session.id, format_size(size));
+            }
+        }
+    }
+    println!(
+        "{}{} session(s), {}",
+        if dry_run { "would delete " } else { "deleted " },
+        removed,
+        format_size(reclaimed)
+    );
+    Ok(())
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![dir.to_owned()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+fn format_size(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1048575 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1048576.0),
+    }
 }
 
 /// `artist rules new <name>`: write a commented rule template into the

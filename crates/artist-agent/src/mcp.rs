@@ -197,12 +197,19 @@ impl McpManager {
     }
     pub async fn refresh(&self, name: &str) -> Result<()> {
         self.start(name).await?;
-        let server = self.0.servers.read().await.get(name).unwrap().clone();
+        let server = self
+            .0
+            .servers
+            .read()
+            .await
+            .get(name)
+            .with_context(|| format!("unknown MCP server: {name}"))?
+            .clone();
         let mut state = server.lock().await;
         let defs = state
             .service
             .as_ref()
-            .unwrap()
+            .with_context(|| format!("MCP server {name} is not running"))?
             .peer()
             .list_all_tools()
             .await?;
@@ -213,7 +220,9 @@ impl McpManager {
     pub async fn status(&self) -> Vec<String> {
         let mut out = Vec::new();
         for name in self.names().await {
-            let server = self.0.servers.read().await[&name].clone();
+            let Some(server) = self.0.servers.read().await.get(&name).cloned() else {
+                continue;
+            };
             let state = server.lock().await;
             out.push(format!(
                 "{name}: {} ({:?}, {} tools){}",
@@ -239,7 +248,9 @@ impl McpManager {
     pub async fn tools(&self) -> Vec<McpProxyTool> {
         let mut out = Vec::new();
         for server_name in self.names().await {
-            let server = self.0.servers.read().await[&server_name].clone();
+            let Some(server) = self.0.servers.read().await.get(&server_name).cloned() else {
+                continue;
+            };
             let state = server.lock().await;
             // Manual servers are deliberately invisible until the user starts them.
             // On-call servers retain their cached schemas while stopped so the model
@@ -260,7 +271,9 @@ impl McpManager {
     async fn persist(&self) -> Result<()> {
         let mut cache = Cache::default();
         for name in self.names().await {
-            let server = self.0.servers.read().await[&name].clone();
+            let Some(server) = self.0.servers.read().await.get(&name).cloned() else {
+                continue;
+            };
             cache
                 .servers
                 .insert(name, server.lock().await.tools.clone());
@@ -339,7 +352,15 @@ impl Tool for McpProxyTool {
 impl McpProxyTool {
     async fn call_inner(&self, args: serde_json::Value) -> Result<String> {
         self.manager.start(&self.server).await?;
-        let server = self.manager.0.servers.read().await[&self.server].clone();
+        let server = self
+            .manager
+            .0
+            .servers
+            .read()
+            .await
+            .get(&self.server)
+            .with_context(|| format!("unknown MCP server: {}", self.server))?
+            .clone();
         let state = server.lock().await;
         let peer = state
             .service
@@ -363,14 +384,22 @@ impl McpProxyTool {
             .context("MCP tool timed out")??;
         let mut text = serde_json::to_string(&result)?;
         if text.len() > MAX_OUTPUT {
+            // Truncating serialized JSON at a byte boundary would hand the
+            // model malformed JSON; wrap the prefix in a valid envelope with
+            // an explicit truncation marker instead.
             let boundary = text
                 .char_indices()
                 .map(|(index, _)| index)
                 .take_while(|index| *index <= MAX_OUTPUT)
                 .last()
                 .unwrap_or(0);
+            let original_bytes = text.len();
             text.truncate(boundary);
-            text.push_str("\n[output truncated]");
+            text = serde_json::to_string(&serde_json::json!({
+                "truncated": true,
+                "original_bytes": original_bytes,
+                "partial_output": text,
+            }))?;
         }
         Ok(text)
     }

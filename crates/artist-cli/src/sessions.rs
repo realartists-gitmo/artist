@@ -166,7 +166,6 @@ impl SessionStore {
     /// Read a session's events without taking the writer lock (inspection
     /// commands). Legacy sessions are parsed via the migration path but not
     /// converted.
-    #[allow(dead_code)] // used by `/rules dry-run` and `artist sessions render`
     pub fn peek(&self, id: &str) -> Result<(Session, Vec<Envelope>)> {
         let session = self
             .list()?
@@ -350,6 +349,34 @@ impl SessionStore {
             .find(|p| p.path == path)
             .map(|p| p.sessions)
             .unwrap_or_default())
+    }
+
+    /// Delete a session's files and index entry. Refuses when the session is
+    /// active in another process.
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let session = self
+            .list()?
+            .into_iter()
+            .find(|s| s.id == id)
+            .context("session not found")?;
+        if session.has_event_log() {
+            // Probe the writer lock so we never delete under an active writer.
+            let probe = EventLogWriter::open(session.dir(), &session.id)
+                .context("session is active in another process")?;
+            drop(probe);
+            fs::remove_dir_all(session.dir()).context("remove session directory")?;
+        } else {
+            let _ = fs::remove_file(&session.transcript);
+        }
+        let _lock = self.lock_index()?;
+        let mut index = self.read_index()?;
+        for project in &mut index.projects {
+            project.sessions.retain(|entry| entry.id != id);
+        }
+        index
+            .projects
+            .retain(|project| !project.sessions.is_empty());
+        self.write_index(&index)
     }
 
     fn lock_index(&self) -> Result<fs::File> {

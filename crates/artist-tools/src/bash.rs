@@ -400,16 +400,33 @@ impl BashTool {
             .unwrap_or_else(|p| p.into_inner())
             .kill()?;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        Ok(format!(
-            "status: stopped\nsessionId: {id}\n{}",
-            self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
-        ))
+        let output = self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?;
+        // Reap the map entry once the child is gone so long-lived processes
+        // don't accumulate dead sessions and their output buffers.
+        let exited = session
+            .child
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some();
+        let status = if exited {
+            self.sessions.remove(&id);
+            "stopped (session removed)"
+        } else {
+            "stopping"
+        };
+        Ok(format!("status: {status}\nsessionId: {id}\n{output}"))
     }
     fn list(&self) -> String {
         if self.sessions.is_empty() {
             return "sessions: []".into();
         }
-        self.sessions
+        // Exited sessions appear once (as a tombstone) and are then reaped.
+        let mut exited = Vec::new();
+        let lines = self
+            .sessions
             .iter()
             .map(|entry| {
                 let status = match entry
@@ -419,14 +436,21 @@ impl BashTool {
                     .unwrap_or_else(|p| p.into_inner())
                     .try_wait()
                 {
-                    Ok(Some(_)) => "exited",
+                    Ok(Some(_)) => {
+                        exited.push(entry.key().clone());
+                        "exited (removed)"
+                    }
                     Ok(None) => "running",
                     Err(_) => "unknown",
                 };
                 format!("{}\t{status}\t{}", entry.key(), entry.value().command)
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        for id in exited {
+            self.sessions.remove(&id);
+        }
+        lines
     }
     fn cwd(&self, input: Option<&str>) -> Result<std::path::PathBuf, ToolError> {
         Ok(match input {

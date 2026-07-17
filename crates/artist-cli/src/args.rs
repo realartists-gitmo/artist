@@ -23,6 +23,34 @@ pub enum Command {
     Model,
     /// Manage stream rules.
     Rules(RulesArgs),
+    /// Inspect and maintain stored sessions.
+    Sessions(SessionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SessionsArgs {
+    #[command(subcommand)]
+    pub action: SessionsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionsCommand {
+    /// List sessions for the current project with on-disk sizes.
+    List,
+    /// Regenerate a session's markdown transcript from its event log.
+    Render { id: String },
+    /// Delete old sessions (never the N most recent per project).
+    Gc {
+        /// Keep this many recent sessions per project.
+        #[arg(long, default_value_t = 10)]
+        keep: usize,
+        /// Only delete sessions older than this many days.
+        #[arg(long, default_value_t = 30)]
+        older_than_days: u64,
+        /// Show what would be deleted without deleting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Args)]

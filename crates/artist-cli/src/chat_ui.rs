@@ -226,8 +226,11 @@ impl ChatInput {
 #[derive(Default)]
 struct StatusRuntime {
     git_branch: Option<String>,
+    /// Last completion's total — the current context size.
     used_tokens: Option<u64>,
     context_capacity: Option<u64>,
+    /// Sum of all completion totals this session (billed volume).
+    session_tokens: u64,
 }
 
 fn footer_line(
@@ -243,6 +246,7 @@ fn footer_line(
         runtime.git_branch.as_deref(),
         runtime.used_tokens,
         runtime.context_capacity,
+        runtime.session_tokens,
     ))
 }
 
@@ -347,6 +351,7 @@ pub async fn run(
         git_branch: status_bar::git_branch(project),
         used_tokens: None,
         context_capacity,
+        session_tokens: 0,
     };
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
@@ -445,6 +450,7 @@ async fn run_loop(
     };
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
+    let custom_commands = crate::custom_commands::discover(context.project);
     let mcp_servers = context.mcp.server_names().await;
     let mut prompt_history =
         PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
@@ -477,16 +483,22 @@ async fn run_loop(
     }
     loop {
         let slash_suggestions = slash_commands::completions(&input.text);
+        let custom_suggestions = crate::custom_commands::completions(&custom_commands, &input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
             suggestion_index = 0;
             suggestion_input.clone_from(&input.text);
         }
-        let mut suggestions = if !slash_suggestions.is_empty() {
+        let mut suggestions = if !slash_suggestions.is_empty() || !custom_suggestions.is_empty() {
             slash_suggestions
                 .iter()
                 .map(|command| format!("{}  {}", command.name, command.description))
+                .chain(
+                    custom_suggestions
+                        .iter()
+                        .map(|command| format!("{}  {}", command.name, command.description)),
+                )
                 .collect()
         } else if !mcp_suggestions.is_empty() {
             mcp_suggestions.clone()
@@ -519,7 +531,14 @@ async fn run_loop(
             &mut viewport_height,
             viewport_floor,
         )?;
-        if let Some(prompt) = pending.take() {
+        if let Some(mut prompt) = pending.take() {
+            // Custom commands expand to prompt templates (once — an expanded
+            // template is never re-expanded).
+            if let Some(expanded) =
+                crate::custom_commands::expand_invocation(&custom_commands, &prompt.content)
+            {
+                prompt.content = expanded;
+            }
             if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
                     Ok(slash_commands::ParsedCommand::Rewind { target, fork }) => handle_rewind(
@@ -658,6 +677,14 @@ async fn run_loop(
             {
                 if let Some(command) = slash_suggestions.get(suggestion_index) {
                     input.text = command.name.to_owned() + " ";
+                    input.atoms.clear();
+                    input.cursor = input.text.len();
+                } else if let Some(command) = (!slash_suggestions.is_empty()
+                    || !custom_suggestions.is_empty())
+                .then(|| custom_suggestions.get(suggestion_index - slash_suggestions.len()))
+                .flatten()
+                {
+                    input.text = command.name.clone() + " ";
                     input.atoms.clear();
                     input.cursor = input.text.len();
                 } else if let Some(completion) = mcp_suggestions.get(suggestion_index) {
@@ -1284,6 +1311,7 @@ async fn submit(
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
                             status.used_tokens = Some(total_tokens);
+                            status.session_tokens += total_tokens;
                         }
                         footer = footer_line(
                             context.status_config,

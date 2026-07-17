@@ -87,6 +87,7 @@ pub(crate) fn segments(
     git_branch: Option<&str>,
     used_tokens: Option<u64>,
     context_capacity: Option<u64>,
+    session_tokens: u64,
     extension_values: &[(String, String)],
 ) -> Vec<StatusSegment> {
     let mut segments = config
@@ -106,18 +107,28 @@ pub(crate) fn segments(
                     .reasoning_effort
                     .clone()
                     .unwrap_or_else(|| "default".into()),
-                StatusItem::Context => match (used_tokens, context_capacity) {
-                    (Some(used), Some(capacity)) if capacity > 0 => {
-                        let remaining = context_remaining(used, capacity);
-                        format!(
-                            "{}%/{}",
-                            remaining.saturating_mul(100) / capacity,
-                            format_tokens(capacity)
-                        )
+                StatusItem::Context => {
+                    // Current-context view (last request), plus the session's
+                    // cumulative billed volume so a long tool loop or TTSR
+                    // retries aren't misread as context size.
+                    let context = match (used_tokens, context_capacity) {
+                        (Some(used), Some(capacity)) if capacity > 0 => {
+                            let remaining = context_remaining(used, capacity);
+                            format!(
+                                "{}%/{}",
+                                remaining.saturating_mul(100) / capacity,
+                                format_tokens(capacity)
+                            )
+                        }
+                        (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
+                        _ => "—/—".into(),
+                    };
+                    if session_tokens > 0 {
+                        format!("{context} · {} total", format_tokens(session_tokens))
+                    } else {
+                        context
                     }
-                    (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
-                    _ => "—/—".into(),
-                },
+                }
             },
         })
         .collect::<Vec<_>>();
@@ -250,6 +261,7 @@ mod tests {
             Some("main"),
             Some(25),
             Some(100),
+            0,
             &[],
         );
         assert_eq!(segments[0].text, "project");
