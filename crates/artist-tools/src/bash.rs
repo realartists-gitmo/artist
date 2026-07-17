@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
+    path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
@@ -61,18 +62,22 @@ impl BashTool {
         if !self.sessions.contains_key(INPUT_SESSION_ID) {
             self.start(BashArgs {
                 mode: Some("start".into()),
-                command: Some("exec env PS1= PS2= /bin/bash --noprofile --norc -i".into()),
+                command: Some(input_shell_command()),
                 session_id: Some(INPUT_SESSION_ID.into()),
                 input: None,
                 timeout: None,
-                wait_ms: Some(100),
+                wait_ms: Some(300),
                 max_bytes: Some(EXEC_CAP),
                 cwd: None,
-                env: None,
+                env: Some(BTreeMap::from([("TERM".into(), "dumb".into())])),
                 signal: None,
                 background: None,
             })
             .await?;
+            // Shell initialization can continue writing after the first PTY read.
+            // Drain it before accepting a command so it cannot leak into that
+            // command's output.
+            let _ = self.read(BashArgs::for_input(None)).await?;
         }
         if command.trim().is_empty() {
             return self
@@ -91,11 +96,29 @@ fn clean_input_output(output: &str, command: Option<&str>) -> String {
     if let Some(command) = command
         && lines
             .peek()
-            .is_some_and(|line| line.trim_end_matches('\r') == command)
+            .is_some_and(|line| line.trim_end_matches('\r').trim_end().ends_with(command))
     {
         lines.next();
     }
     lines.collect::<Vec<_>>().join("\n")
+}
+
+fn input_shell_command() -> String {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|shell| Path::new(shell).is_absolute() && Path::new(shell).is_file())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let quoted = shell.replace('\'', "'\\''");
+    let executable = Path::new(&shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let loop_command = if executable == "fish" {
+        "while read -l line; eval $line; end"
+    } else {
+        "while IFS= read -r line; do eval \"$line\"; done"
+    };
+    format!("exec '{quoted}' -c '{loop_command}'")
 }
 
 #[derive(Deserialize)]
@@ -122,7 +145,7 @@ impl BashArgs {
             session_id: Some(INPUT_SESSION_ID.into()),
             input,
             timeout: None,
-            wait_ms: Some(100),
+            wait_ms: Some(250),
             max_bytes: Some(EXEC_CAP),
             cwd: None,
             env: None,
