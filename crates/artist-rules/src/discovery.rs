@@ -70,6 +70,133 @@ pub fn discover(workspace: &Path, diagnostics: &mut Vec<String>) -> Vec<Declarat
     discover_roots(&roots(workspace), diagnostics)
 }
 
+/// Programmable plugins loaded from rules dirs (empty without the `wasm`
+/// feature).
+#[cfg(feature = "wasm")]
+pub type WasmRules = Vec<std::sync::Arc<crate::wasm::WasmRule>>;
+#[cfg(not(feature = "wasm"))]
+pub type WasmRules = Vec<std::convert::Infallible>;
+
+/// Discover declarative rules plus wasm plugin manifests. Each plugin
+/// contributes an ordinary declarative rule (its mandatory prefilter) with
+/// a `wasm:` id; the plugin judges prefilter hits at match time.
+pub fn discover_all(
+    roots: &[PathBuf],
+    diagnostics: &mut Vec<String>,
+) -> (Vec<DeclarativeRule>, WasmRules) {
+    let mut rules = discover_roots(roots, diagnostics);
+    let mut wasm: WasmRules = Vec::new();
+    for root in roots {
+        for manifest_path in wasm_manifests(root) {
+            match load_wasm_rule(&manifest_path) {
+                Ok((rule, plugin)) => {
+                    if rules.iter().any(|existing| existing.id == rule.id) {
+                        diagnostics.push(format!(
+                            "duplicate wasm rule skipped: {}",
+                            manifest_path.display()
+                        ));
+                        continue;
+                    }
+                    if rules.len() >= MAX_RULES {
+                        diagnostics.push(format!(
+                            "rule catalog capped; skipped {}",
+                            manifest_path.display()
+                        ));
+                        continue;
+                    }
+                    rules.push(rule);
+                    #[cfg(feature = "wasm")]
+                    wasm.push(plugin);
+                    #[cfg(not(feature = "wasm"))]
+                    let _ = plugin;
+                }
+                Err(error) => diagnostics.push(format!("{}: {error:#}", manifest_path.display())),
+            }
+        }
+    }
+    (rules, wasm)
+}
+
+/// `<name>.toml` manifests with a sibling `<name>.wasm`.
+fn wasm_manifests(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .take(MAX_DIR_ENTRIES)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "toml")
+                && path.with_extension("wasm").exists()
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+#[cfg(feature = "wasm")]
+fn load_wasm_rule(
+    manifest_path: &Path,
+) -> anyhow::Result<(DeclarativeRule, std::sync::Arc<crate::wasm::WasmRule>)> {
+    use anyhow::Context as _;
+    let name = manifest_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .context("manifest has no stem")?
+        .to_owned();
+    let manifest: crate::wasm::WasmManifest =
+        toml::from_str(&std::fs::read_to_string(manifest_path)?).context("parse manifest")?;
+    anyhow::ensure!(
+        !manifest.prefilter.is_empty(),
+        "empty prefilter (mandatory)"
+    );
+    let rule = crate::types::DeclarativeRule {
+        id: crate::types::RuleId(format!("wasm:{name}")),
+        description: manifest.description.clone(),
+        targets: manifest
+            .targets
+            .clone()
+            .unwrap_or_else(|| vec![crate::types::MatchTarget::AssistantText]),
+        patterns: manifest.prefilter.clone(),
+        tools: manifest.tools.clone().unwrap_or_default(),
+        window: crate::types::DEFAULT_WINDOW,
+        fire: manifest.fire.unwrap_or_default(),
+        persistence: Default::default(),
+        scope: match &manifest.scope {
+            None => Default::default(),
+            Some(entries) => crate::types::RuleScope {
+                main: entries.iter().any(|scope| scope == "main"),
+                delegate: entries.iter().any(|scope| scope == "delegate"),
+            },
+        },
+        enabled: manifest.enabled.unwrap_or(true),
+        // Placeholder — the plugin's verdict supplies the real reminder.
+        reminder: "(judged by wasm plugin)".to_owned(),
+        source: Some(manifest_path.to_owned()),
+    };
+    // Validate the prefilter regexes like ordinary patterns.
+    for pattern in &rule.patterns {
+        regex::RegexBuilder::new(pattern)
+            .size_limit(crate::declarative::REGEX_SIZE_LIMIT)
+            .build()
+            .map_err(|error| anyhow::anyhow!("prefilter `{pattern}`: {error}"))?;
+    }
+    let plugin = std::sync::Arc::new(crate::wasm::WasmRule::load(
+        rule.id.clone(),
+        &manifest_path.with_extension("wasm"),
+    )?);
+    Ok((rule, plugin))
+}
+
+#[cfg(not(feature = "wasm"))]
+fn load_wasm_rule(
+    _manifest_path: &Path,
+) -> anyhow::Result<(DeclarativeRule, std::convert::Infallible)> {
+    anyhow::bail!("wasm rule plugins are not compiled into this build")
+}
+
 pub fn discover_roots(roots: &[PathBuf], diagnostics: &mut Vec<String>) -> Vec<DeclarativeRule> {
     let mut rules: Vec<DeclarativeRule> = builtin_rules();
     for root in roots {

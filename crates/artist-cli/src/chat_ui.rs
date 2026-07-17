@@ -759,12 +759,15 @@ async fn handle_rules(
             let fired = handle.fired();
             let hits = handle.hits();
             let disabled = handle.disabled();
+            let poisoned = rules.poisoned();
             let mut lines: Vec<String> = rules
                 .rules
                 .iter()
                 .map(|compiled| {
                     let id = &compiled.rule.id;
-                    let state = if disabled.contains(id) {
+                    let state = if poisoned.contains(id) {
+                        "poisoned"
+                    } else if disabled.contains(id) {
                         "disabled"
                     } else if fired.contains(id) {
                         "fired"

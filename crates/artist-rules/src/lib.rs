@@ -24,6 +24,8 @@ pub mod matcher;
 pub mod retro;
 pub mod state;
 pub mod types;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -49,15 +51,28 @@ impl RulesEngine {
     pub fn discover(workspace: &Path) -> Self {
         let roots = discovery::roots(workspace);
         let mut diagnostics = Vec::new();
-        let rules = discovery::discover_roots(&roots, &mut diagnostics);
+        let rules = Self::compile(&roots, &mut diagnostics);
         let fingerprint = discovery::fingerprint(&roots);
         Self {
             roots,
             inner: RwLock::new(EngineInner {
-                rules: Arc::new(RuleSet::compile(rules)),
+                rules,
                 fingerprint,
                 diagnostics,
             }),
+        }
+    }
+
+    fn compile(roots: &[PathBuf], diagnostics: &mut Vec<String>) -> Arc<RuleSet> {
+        let (rules, wasm) = discovery::discover_all(roots, diagnostics);
+        #[cfg(feature = "wasm")]
+        {
+            Arc::new(RuleSet::compile(rules).with_wasm(wasm))
+        }
+        #[cfg(not(feature = "wasm"))]
+        {
+            let _ = wasm;
+            Arc::new(RuleSet::compile(rules))
         }
     }
 
@@ -72,9 +87,9 @@ impl RulesEngine {
             }
         }
         let mut diagnostics = Vec::new();
-        let rules = discovery::discover_roots(&self.roots, &mut diagnostics);
+        let rules = Self::compile(&self.roots, &mut diagnostics);
         let mut inner = self.write();
-        inner.rules = Arc::new(RuleSet::compile(rules));
+        inner.rules = rules;
         inner.fingerprint = fingerprint;
         inner.diagnostics = diagnostics.clone();
         Some(diagnostics)

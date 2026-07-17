@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Programmable rule plugins (wasmtime component host). Enabled by artist-cli;
+# off here so `cargo test -p artist-rules` stays fast.
+wasm = ["dep:wasmtime", "dep:wasmtime-wasi"]
+
 [dependencies]
 anyhow = "1"
 artist-session = { path = "../artist-session" }
@@ -13,6 +18,9 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+toml = "0.9"
+wasmtime = { version = "46", optional = true }
+wasmtime-wasi = { version = "46", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -27,6 +27,9 @@ pub struct RuleSet {
     text: TargetMatcher,
     reasoning: TargetMatcher,
     tool_args: TargetMatcher,
+    /// Programmable rules keyed by id — consulted to judge prefilter hits.
+    #[cfg(feature = "wasm")]
+    wasm: std::collections::HashMap<RuleId, Arc<crate::wasm::WasmRule>>,
 }
 
 /// RegexSet prescreen for one match target: pattern index → (rule, regex).
@@ -132,7 +135,49 @@ impl RuleSet {
             text,
             reasoning,
             tool_args,
+            #[cfg(feature = "wasm")]
+            wasm: Default::default(),
         }
+    }
+
+    /// Attach programmable plugins (their prefilters are already among
+    /// `rules` as ordinary compiled rules with matching ids).
+    #[cfg(feature = "wasm")]
+    pub fn with_wasm(mut self, plugins: Vec<Arc<crate::wasm::WasmRule>>) -> Self {
+        self.wasm = plugins
+            .into_iter()
+            .map(|plugin| (plugin.id.clone(), plugin))
+            .collect();
+        self
+    }
+
+    /// Resolve a matcher firing into the final verdict. Native rules fire
+    /// as-is; wasm-backed rules are judged by their plugin (behind the
+    /// native prefilter that produced `firing`). `None` = suppressed.
+    pub fn verdict(&self, firing: Firing, turn: u32) -> Option<Firing> {
+        #[cfg(feature = "wasm")]
+        if let Some(plugin) = self.wasm.get(&firing.rule) {
+            return plugin.judge(&firing, turn);
+        }
+        let _ = turn;
+        Some(firing)
+    }
+
+    /// Poisoned plugin ids (for the `/rules` panel).
+    pub fn poisoned(&self) -> Vec<RuleId> {
+        #[cfg(feature = "wasm")]
+        {
+            let mut poisoned: Vec<RuleId> = self
+                .wasm
+                .values()
+                .filter(|plugin| plugin.is_poisoned())
+                .map(|plugin| plugin.id.clone())
+                .collect();
+            poisoned.sort();
+            poisoned
+        }
+        #[cfg(not(feature = "wasm"))]
+        Vec::new()
     }
 
     pub fn is_empty(&self) -> bool {

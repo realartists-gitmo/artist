@@ -44,11 +44,23 @@ pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
                 _ => MatchTarget::ToolArgs,
             };
             for (rule, excerpt) in matched {
-                findings.push(RetroFinding {
+                // Wasm-backed rules judge their prefilter hits in scans too,
+                // so a plugin's pass never shows up as a false finding.
+                let firing = crate::types::Firing {
                     rule,
                     target,
+                    matched: excerpt,
+                    reminder: String::new(),
+                    persistence: Default::default(),
+                };
+                let Some(firing) = rules.verdict(firing, 0) else {
+                    continue;
+                };
+                findings.push(RetroFinding {
+                    rule: firing.rule,
+                    target,
                     seq: envelope.seq,
-                    excerpt,
+                    excerpt: firing.matched,
                 });
             }
         }

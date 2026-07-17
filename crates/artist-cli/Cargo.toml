@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 artist-agent = { path = "../artist-agent" }
 artist-extensions = { path = "../artist-extensions" }
-artist-rules = { path = "../artist-rules" }
+artist-rules = { path = "../artist-rules", features = ["wasm"] }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
 fs2 = "0.4"

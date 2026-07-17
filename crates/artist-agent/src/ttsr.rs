@@ -81,6 +81,12 @@ impl TtsrShared {
     /// (false = budget exhausted, degraded to inject-only). On abort the
     /// firing lands in this run's pending slot for the driver.
     fn fire(&self, firing: Firing) -> bool {
+        // Wasm-backed rules judge the prefilter hit here; a pass (or a
+        // poisoned plugin) suppresses the firing entirely.
+        let turn = self.turn();
+        let Some(firing) = self.rules.verdict(firing, turn) else {
+            return false;
+        };
         let policy = self
             .rules
             .get(&firing.rule)
