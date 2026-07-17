@@ -15,6 +15,18 @@ pub fn format_parse_error(error: ParseError<'_>) -> String {
     }
 }
 
+const BUILTIN_TOOLS: &[&str] = &[
+    "bash",
+    "read",
+    "find",
+    "grep",
+    "edit",
+    "write",
+    "instructions",
+    "skill",
+    "delegate",
+];
+
 pub struct CommandOutput {
     pub lines: Vec<String>,
     pub context_capacity: Option<u64>,
@@ -51,6 +63,29 @@ pub async fn run(
             context_capacity: None,
             model_changed: false,
         }),
+        ParsedCommand::Tools => {
+            let mut names = BUILTIN_TOOLS
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            names.extend(mcp.tool_names().await);
+            names.extend(store.disabled_tools.iter().cloned());
+            names.sort();
+            names.dedup();
+            let Some(disabled) = pick_tools(&names, &store.disabled_tools, &mut draw)? else {
+                anyhow::bail!("tool selection cancelled");
+            };
+            let previous = std::mem::replace(&mut store.disabled_tools, disabled);
+            if let Err(error) = store.save(store_path) {
+                store.disabled_tools = previous;
+                return Err(error);
+            }
+            Ok(CommandOutput {
+                lines: vec!["tools updated.".into()],
+                context_capacity: None,
+                model_changed: false,
+            })
+        }
         ParsedCommand::Mcp { action, server } => {
             if let Some(server) = server {
                 match action {
@@ -149,6 +184,58 @@ pub async fn run(
                 context_capacity: selected.effective_context_window(),
                 model_changed: true,
             })
+        }
+    }
+}
+
+fn pick_tools(
+    names: &[String],
+    disabled: &[String],
+    draw: &mut impl FnMut(&[String]) -> Result<()>,
+) -> Result<Option<Vec<String>>> {
+    let mut enabled = names
+        .iter()
+        .map(|name| !disabled.contains(name))
+        .collect::<Vec<_>>();
+    let mut selected = 0usize;
+    loop {
+        let mut panel = vec!["Configure tools (Space toggles, Enter confirms)".to_owned()];
+        let start = selected
+            .saturating_sub(4)
+            .min(names.len().saturating_sub(9));
+        panel.extend(
+            names
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(9)
+                .map(|(index, name)| {
+                    format!(
+                        "{} [{}] {}",
+                        if index == selected { "›" } else { " " },
+                        if enabled[index] { "x" } else { " " },
+                        name
+                    )
+                }),
+        );
+        draw(&panel)?;
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up => selected = selected.saturating_sub(1),
+                KeyCode::Down => selected = (selected + 1).min(names.len().saturating_sub(1)),
+                KeyCode::Char(' ') if !names.is_empty() => enabled[selected] = !enabled[selected],
+                KeyCode::Enter => {
+                    return Ok(Some(
+                        names
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, name)| (!enabled[index]).then_some(name.clone()))
+                            .collect(),
+                    ));
+                }
+                KeyCode::Esc => return Ok(None),
+                _ => {}
+            }
         }
     }
 }

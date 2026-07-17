@@ -227,8 +227,11 @@ async fn execute_prompt(
         &store.providers[selected],
         &agent_input,
         &history,
-        &tools,
-        mcp,
+        artist_agent::ToolContext {
+            native: &tools,
+            mcp,
+            disabled: &store.disabled_tools,
+        },
         artist_agent::SteeringHandle::default(),
         |event| {
             use artist_agent::PromptEvent;

@@ -17,6 +17,8 @@ pub struct ProviderStore {
     pub providers: Vec<SavedProvider>,
     #[serde(default)]
     pub status_bar: StatusBarConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_tools: Vec<String>,
 }
 fn version() -> u8 {
     2
@@ -174,6 +176,7 @@ api_key = "secret"
             version: 1,
             ..Default::default()
         };
+        store.disabled_tools = vec!["bash".into()];
         store.add(SavedProvider::chatgpt(
             ProviderId::new("one").unwrap(),
             "ChatGPT",
@@ -188,6 +191,7 @@ api_key = "secret"
         store.save(&path).unwrap();
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.providers.len(), 1);
+        assert_eq!(loaded.disabled_tools, ["bash"]);
         assert_eq!(loaded.default_provider.unwrap().as_str(), "one");
         #[cfg(unix)]
         {

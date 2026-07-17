@@ -249,6 +249,7 @@ struct SubmitContext<'a> {
     status_config: &'a StatusBarConfig,
     tools: &'a ToolBundle,
     mcp: &'a artist_agent::mcp::McpManager,
+    disabled_tools: &'a [String],
     show_splash: bool,
 }
 
@@ -575,6 +576,7 @@ async fn run_loop(
                         status_config: &context.store.status_bar,
                         tools: context.tools,
                         mcp: context.mcp,
+                        disabled_tools: &context.store.disabled_tools,
                         show_splash: !resumed_session,
                     },
                     &mut session,
@@ -824,13 +826,17 @@ async fn submit(
     let task_history = history.clone();
     let task_tools = context.tools.clone();
     let task_mcp = context.mcp.clone();
+    let task_disabled_tools = context.disabled_tools.to_vec();
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
             &task_prompt,
             &task_history,
-            &task_tools,
-            &task_mcp,
+            artist_agent::ToolContext {
+                native: &task_tools,
+                mcp: &task_mcp,
+                disabled: &task_disabled_tools,
+            },
             task_steering,
             |event| {
                 tx.send(event)

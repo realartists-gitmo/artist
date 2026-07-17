@@ -109,16 +109,24 @@ impl From<String> for ChatInput {
     }
 }
 
+pub struct ToolContext<'a> {
+    pub native: &'a ToolBundle,
+    pub mcp: &'a mcp::McpManager,
+    pub disabled: &'a [String],
+}
+
 /// Executes one prompt with prior chat context and emits model output as it arrives.
 pub async fn stream_chat(
     provider: &SavedProvider,
     input: &ChatInput,
     history: &[ChatMessage],
-    tools: &ToolBundle,
-    mcp: &mcp::McpManager,
+    tool_context: ToolContext<'_>,
     steering: SteeringHandle,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<()> {
+    let tools = tool_context.native;
+    let mcp = tool_context.mcp;
+    let disabled_tools = tool_context.disabled;
     let model = provider
         .model
         .as_deref()
@@ -158,30 +166,33 @@ pub async fn stream_chat(
     let input_message = user_message(input);
     fork_context.push(input_message.clone());
     let visible_steering = steering.clone();
-    let mcp_tools = mcp
-        .tools()
-        .await
-        .into_iter()
-        .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>)
-        .collect();
-    let agent = builder
-        .preamble(&system_prompt)
-        .tool(tools.bash.clone())
-        .tool(tools.read.clone())
-        .tool(tools.find.clone())
-        .tool(tools.grep.clone())
-        .tool(tools.edit.clone())
-        .tool(tools.write.clone())
-        .tool(resources.instructions_tool())
-        .tool(resources.skill_tool())
-        .add_hook(steering::SteeringHook(steering))
-        .tool(delegate::Delegate::new(
+    let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
+        Box::new(tools.bash.clone()),
+        Box::new(tools.read.clone()),
+        Box::new(tools.find.clone()),
+        Box::new(tools.grep.clone()),
+        Box::new(tools.edit.clone()),
+        Box::new(tools.write.clone()),
+        Box::new(resources.instructions_tool()),
+        Box::new(resources.skill_tool()),
+        Box::new(delegate::Delegate::new(
             provider.clone(),
             tools.clone(),
             fork_context,
             resources,
-        ))
-        .tools(mcp_tools)
+        )),
+    ];
+    registered.extend(
+        mcp.tools()
+            .await
+            .into_iter()
+            .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>),
+    );
+    registered.retain(|tool| !disabled_tools.iter().any(|name| name == &tool.name()));
+    let agent = builder
+        .preamble(&system_prompt)
+        .tools(registered)
+        .add_hook(steering::SteeringHook(steering))
         .default_max_turns(usize::MAX)
         .build();
     let mut stream = agent.stream_chat(input_message, messages).await;
@@ -277,8 +288,11 @@ pub async fn stream_prompt(
         provider,
         &input,
         &[],
-        tools,
-        mcp,
+        ToolContext {
+            native: tools,
+            mcp,
+            disabled: &[],
+        },
         SteeringHandle::default(),
         on_event,
     )

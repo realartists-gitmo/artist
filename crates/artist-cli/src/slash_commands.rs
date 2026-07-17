@@ -23,6 +23,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/skills",
     },
     SlashCommand {
+        name: "/tools",
+        description: "Enable or disable agent tools",
+        usage: "/tools",
+    },
+    SlashCommand {
         name: "/mcp",
         description: "Manage MCP servers",
         usage: "/mcp [status|start|stop|restart|refresh] [server]",
@@ -38,6 +43,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
 pub(crate) enum ParsedCommand<'a> {
     Help,
     Skills,
+    Tools,
     StatusBar,
     Mcp {
         action: &'a str,
@@ -85,6 +91,7 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             usage: "/mcp [status|start|stop|restart|refresh] [server]",
         }),
         ("/skills", []) => Ok(ParsedCommand::Skills),
+        ("/tools", []) => Ok(ParsedCommand::Tools),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
             command,
@@ -93,6 +100,10 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         ("/skills", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/skills",
+        }),
+        ("/tools", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/tools",
         }),
         ("/help", _) => Err(ParseError::InvalidUsage {
             command,
@@ -169,7 +180,7 @@ mod tests {
     fn registry_has_unique_standard_commands() {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/model", "/statusbar", "/skills", "/mcp", "/help"]
+            ["/model", "/statusbar", "/skills", "/tools", "/mcp", "/help"]
         );
         assert!(
             COMMANDS
@@ -183,6 +194,7 @@ mod tests {
         assert_eq!(parse("/help"), Some(Ok(ParsedCommand::Help)));
         assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
         assert_eq!(parse("/skills"), Some(Ok(ParsedCommand::Skills)));
+        assert_eq!(parse("/tools"), Some(Ok(ParsedCommand::Tools)));
         assert_eq!(
             parse(" /model "),
             Some(Ok(ParsedCommand::Model {
@@ -225,7 +237,7 @@ mod tests {
 
     #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 5);
+        assert_eq!(completions("/").len(), 6);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model", "/mcp"]

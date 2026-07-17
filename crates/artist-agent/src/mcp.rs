@@ -120,6 +120,14 @@ impl McpManager {
     pub async fn server_names(&self) -> Vec<String> {
         self.names().await
     }
+
+    pub async fn tool_names(&self) -> Vec<String> {
+        self.tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name())
+            .collect()
+    }
     pub async fn start(&self, name: &str) -> Result<()> {
         let server = self
             .0
