@@ -226,6 +226,24 @@ struct StatusRuntime {
     context_capacity: Option<u64>,
 }
 
+impl StatusRuntime {
+    fn refresh(&mut self, config: &StatusBarConfig, project: &Path) {
+        self.refresh_git_branch_with(config, || status_bar::git_branch(project));
+    }
+
+    fn refresh_git_branch_with(
+        &mut self,
+        config: &StatusBarConfig,
+        resolve: impl FnOnce() -> Option<String>,
+    ) {
+        self.git_branch = config
+            .items
+            .contains(&StatusItem::GitBranch)
+            .then(resolve)
+            .flatten();
+    }
+}
+
 fn footer_line(
     config: &StatusBarConfig,
     provider: &SavedProvider,
@@ -340,11 +358,12 @@ pub async fn run(
     } else {
         None
     };
-    let status = StatusRuntime {
-        git_branch: status_bar::git_branch(project),
+    let mut status = StatusRuntime {
+        git_branch: None,
         used_tokens: None,
         context_capacity,
     };
+    status.refresh(&store.status_bar, project);
     let terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(3),
     });
@@ -463,6 +482,11 @@ async fn run_loop(
         insert_history(&mut terminal, &turns)?;
     }
     loop {
+        // Prompt execution can change any external status (notably the checked-out
+        // branch), so refresh both before submission and after it returns.
+        if pending.is_some() {
+            status.refresh(&context.store.status_bar, context.project);
+        }
         let slash_suggestions = slash_commands::completions(&input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
@@ -593,6 +617,7 @@ async fn run_loop(
                 pending = queued_prompts.pop_front();
                 viewport_floor = 3;
             }
+            status.refresh(&context.store.status_bar, context.project);
             continue;
         }
         match event::read()? {
@@ -1681,6 +1706,27 @@ fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn status_runtime_refreshes_only_configured_external_values() {
+        let mut runtime = StatusRuntime {
+            git_branch: Some("main".into()),
+            ..StatusRuntime::default()
+        };
+        runtime.refresh_git_branch_with(&StatusBarConfig::default(), || Some("feature".into()));
+        assert_eq!(runtime.git_branch.as_deref(), Some("feature"));
+
+        let config = StatusBarConfig {
+            items: vec![StatusItem::Model],
+        };
+        let mut resolved = false;
+        runtime.refresh_git_branch_with(&config, || {
+            resolved = true;
+            Some("ignored".into())
+        });
+        assert!(!resolved);
+        assert_eq!(runtime.git_branch, None);
+    }
 
     #[test]
     fn edits_and_expands_input() {
