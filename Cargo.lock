@@ -237,6 +237,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-rules"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "artist-session",
+ "dirs 6.0.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+]
+
+[[package]]
 name = "artist-session"
 version = "0.1.0"
 dependencies = [
