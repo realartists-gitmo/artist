@@ -18,7 +18,7 @@ use ratatui::{
     Frame, TerminalOptions, Viewport,
     buffer::Buffer,
     crossterm::{
-        cursor::{Hide, MoveTo},
+        cursor::{Hide, MoveTo, Show},
         event::{
             self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
             KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -428,6 +428,16 @@ pub async fn run(
         PopKeyboardEnhancementFlags
     );
     ratatui::restore();
+    // Inline restoration can return to the cursor position saved during setup.
+    // Reposition afterwards so the shell prompt starts below the cleared UI.
+    if let Ok((_, height)) = ratatui::crossterm::terminal::size() {
+        let _ = execute!(
+            std::io::stdout(),
+            Show,
+            MoveTo(0, height.saturating_sub(1)),
+            Clear(ClearType::CurrentLine)
+        );
+    }
     result
 }
 
@@ -1849,14 +1859,7 @@ fn hard_wrap_input(text: &str, width: u16) -> String {
     output
 }
 fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    clear_inline(terminal)?;
-    let bottom = terminal.size()?.height.saturating_sub(1);
-    execute!(
-        std::io::stdout(),
-        MoveTo(0, bottom),
-        Clear(ClearType::CurrentLine)
-    )?;
-    Ok(())
+    clear_inline(terminal)
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
