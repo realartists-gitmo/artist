@@ -21,8 +21,6 @@ struct SessionState {
     per_turn_fired: HashSet<RuleId>,
     /// `(rule, reminder)` pairs re-injected on every completion call.
     active_injections: Vec<(RuleId, String)>,
-    /// Set by the matcher/hook at abort time; taken by the retry driver.
-    pending: Option<Firing>,
     retries_this_prompt: u32,
     retry_budget: u32,
     /// Rules disabled at runtime from `/rules` (session-scoped).
@@ -78,12 +76,13 @@ impl RulesHandle {
         !state.fired.contains(rule) && !state.disabled.contains(rule)
     }
 
-    /// Record a firing: marks the rule fired, tallies the hit, activates a
-    /// persistent injection when applicable, and — if the retry budget
-    /// allows — stashes the firing for the driver and returns `true`
-    /// (meaning: abort and retry). Returns `false` when the budget is
-    /// exhausted and the firing degrades to inject-only.
-    pub fn record_firing(&self, firing: Firing, fire: FirePolicy) -> bool {
+    /// Record a firing: marks the rule fired, tallies the hit, and activates
+    /// a persistent injection when applicable. Returns `true` when the retry
+    /// budget allows an abort-and-retry; `false` when exhausted (the firing
+    /// degrades to inject-only). The firing itself is NOT stashed here — the
+    /// abort slot is per-run (in the TTSR hook state), because delegates
+    /// share this handle and concurrent runs must not race one slot.
+    pub fn record_firing(&self, firing: &Firing, fire: FirePolicy) -> bool {
         let mut state = self.lock();
         state.fired.insert(firing.rule.clone());
         if fire == FirePolicy::PerTurn {
@@ -108,14 +107,7 @@ impl RulesHandle {
             return false;
         }
         state.retries_this_prompt += 1;
-        state.pending = Some(firing);
         true
-    }
-
-    /// Take the firing that aborted the current run, if any. The driver
-    /// calls this on stream error to distinguish TTSR aborts from failures.
-    pub fn take_pending(&self) -> Option<Firing> {
-        self.lock().pending.take()
     }
 
     /// Active session-persistent reminders, for per-turn re-injection.
@@ -202,7 +194,7 @@ mod tests {
         let handle = RulesHandle::default();
         let rule = RuleId("r".into());
         assert!(handle.is_armed(&rule));
-        assert!(handle.record_firing(firing("r", Persistence::Session), FirePolicy::Once));
+        assert!(handle.record_firing(&firing("r", Persistence::Session), FirePolicy::Once));
         assert!(!handle.is_armed(&rule));
         handle.note_user_turn();
         assert!(
@@ -215,7 +207,7 @@ mod tests {
     fn per_turn_rule_rearms_on_user_turn() {
         let handle = RulesHandle::default();
         let rule = RuleId("r".into());
-        assert!(handle.record_firing(firing("r", Persistence::Message), FirePolicy::PerTurn));
+        assert!(handle.record_firing(&firing("r", Persistence::Message), FirePolicy::PerTurn));
         assert!(!handle.is_armed(&rule));
         handle.note_user_turn();
         assert!(handle.is_armed(&rule));
@@ -224,13 +216,10 @@ mod tests {
     #[test]
     fn retry_budget_degrades_to_inject_only() {
         let handle = RulesHandle::new(2);
-        assert!(handle.record_firing(firing("a", Persistence::Session), FirePolicy::Once));
-        handle.take_pending().unwrap();
-        assert!(handle.record_firing(firing("b", Persistence::Session), FirePolicy::Once));
-        handle.take_pending().unwrap();
+        assert!(handle.record_firing(&firing("a", Persistence::Session), FirePolicy::Once));
+        assert!(handle.record_firing(&firing("b", Persistence::Session), FirePolicy::Once));
         // Budget exhausted: recorded but no abort.
-        assert!(!handle.record_firing(firing("c", Persistence::Session), FirePolicy::Once));
-        assert!(handle.take_pending().is_none());
+        assert!(!handle.record_firing(&firing("c", Persistence::Session), FirePolicy::Once));
         // The reminder still becomes an active injection.
         assert_eq!(handle.injections().len(), 3);
     }
@@ -238,9 +227,9 @@ mod tests {
     #[test]
     fn session_persistence_injections_deduplicate() {
         let handle = RulesHandle::default();
-        handle.record_firing(firing("a", Persistence::Session), FirePolicy::PerTurn);
+        handle.record_firing(&firing("a", Persistence::Session), FirePolicy::PerTurn);
         handle.note_user_turn();
-        handle.record_firing(firing("a", Persistence::Session), FirePolicy::PerTurn);
+        handle.record_firing(&firing("a", Persistence::Session), FirePolicy::PerTurn);
         assert_eq!(handle.injections().len(), 1);
         assert_eq!(handle.hits(), vec![(RuleId("a".into()), 2)]);
     }
@@ -248,7 +237,7 @@ mod tests {
     #[test]
     fn message_persistence_does_not_linger() {
         let handle = RulesHandle::default();
-        handle.record_firing(firing("a", Persistence::Message), FirePolicy::Once);
+        handle.record_firing(&firing("a", Persistence::Message), FirePolicy::Once);
         assert!(handle.injections().is_empty());
     }
 

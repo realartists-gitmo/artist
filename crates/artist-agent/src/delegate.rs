@@ -1,10 +1,22 @@
-use crate::{delegate_jobs::DelegateJobs, resources::Resources};
+use std::sync::Arc;
+
+use crate::{
+    SessionHandles,
+    capture::{CaptureHook, ToolMeta},
+    delegate_jobs::DelegateJobs,
+    resources::Resources,
+    ttsr::{TtsrHook, TtsrShared, reminder_message},
+};
+use artist_session::{DelegateFinished, DelegateStarted, RunFinished, RunStarted};
 use artist_tools::{TOOL_POLICY, ToolBundle};
+use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
+    agent::MultiTurnStreamItem,
     client::CompletionClient,
-    completion::{Chat, Message, Prompt},
+    completion::Message,
     providers::chatgpt,
+    streaming::{StreamedAssistantContent, StreamingChat},
     tool::Tool,
 };
 use serde::Deserialize;
@@ -17,6 +29,7 @@ pub(crate) struct Delegate {
     context: Vec<Message>,
     jobs: DelegateJobs,
     resources: Resources,
+    handles: SessionHandles,
 }
 
 impl Delegate {
@@ -25,6 +38,7 @@ impl Delegate {
         tools: ToolBundle,
         context: Vec<Message>,
         resources: Resources,
+        handles: SessionHandles,
     ) -> Self {
         let jobs = DelegateJobs::for_project(tools.project_root());
         Self {
@@ -33,6 +47,7 @@ impl Delegate {
             context,
             jobs,
             resources,
+            handles,
         }
     }
 }
@@ -145,6 +160,11 @@ impl Tool for Delegate {
 }
 
 impl Delegate {
+    /// Drive the subagent on the streaming surface (delta hooks — and
+    /// therefore stream rules — only exist there), with the same TTSR
+    /// abort/inject/retry loop as the main agent. The shared `RulesHandle`
+    /// makes once-per-session global across main + delegates; delegate
+    /// events land in the session log under a child lineage.
     async fn run_agent(
         &self,
         prompt: String,
@@ -166,10 +186,18 @@ impl Delegate {
             .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        let actor = format!("delegate-{}", uuid::Uuid::new_v4().simple());
         let child_tools = self
             .tools
-            .for_actor(&format!("delegate-{}", uuid::Uuid::new_v4().simple()))
+            .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        let recorder = self.handles.recorder.child_lineage(&actor);
+        recorder.record(DelegateStarted {
+            prompt: prompt.clone(),
+            read_only,
+            fork,
+            background: false,
+        });
         let mut policy = if read_only {
             format!(
                 "{TOOL_POLICY}\nYou are a read-only subagent. Inspect with read, find, and grep only. Return concise findings and evidence."
@@ -180,31 +208,130 @@ impl Delegate {
             )
         };
         policy.push_str(&self.resources.prompt_section());
-        let mut builder = client.agent(model).preamble(&policy);
-        if let Some(effort) = &self.provider.reasoning_effort {
-            builder =
-                builder.additional_params(json!({"reasoning":{"effort":effort,"summary":"auto"}}));
-        }
-        let mut builder = builder
-            .tool(child_tools.read.clone())
-            .tool(child_tools.find.clone())
-            .tool(child_tools.grep.clone())
-            .tool(self.resources.instructions_tool())
-            .tool(self.resources.skill_tool());
-        if !read_only {
-            builder = builder
-                .tool(child_tools.bash.clone())
-                .tool(child_tools.edit.clone())
-                .tool(child_tools.write.clone());
-        }
-        let agent = builder.default_max_turns(usize::MAX).build();
-        let output = if fork {
-            let mut context = self.context.clone();
-            agent.chat(prompt, &mut context).await
+
+        let mut seed_history = if fork {
+            self.context.clone()
         } else {
-            agent.prompt(prompt).await
-        }
-        .map_err(|error| DelegateError::Failed(error.to_string()))?;
+            Vec::new()
+        };
+        let mut seed_prompt = Message::user(&prompt);
+
+        let output = loop {
+            let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
+            let run_recorder = recorder.with_run(&run_id);
+            let ttsr = TtsrShared::new(
+                self.handles.rules.clone(),
+                Arc::clone(&self.handles.rule_set),
+                true,
+            );
+            let mut builder = client.agent(model).preamble(&policy);
+            if let Some(effort) = &self.provider.reasoning_effort {
+                builder = builder
+                    .additional_params(json!({"reasoning":{"effort":effort,"summary":"auto"}}));
+            }
+            let mut builder = builder
+                .tool(child_tools.read.clone())
+                .tool(child_tools.find.clone())
+                .tool(child_tools.grep.clone())
+                .tool(self.resources.instructions_tool())
+                .tool(self.resources.skill_tool())
+                .add_hook(CaptureHook::new(
+                    run_recorder.clone(),
+                    self.handles.attachments.clone(),
+                    ToolMeta::default(),
+                ))
+                .add_hook(TtsrHook(Arc::clone(&ttsr)));
+            if !read_only {
+                builder = builder
+                    .tool(child_tools.bash.clone())
+                    .tool(child_tools.edit.clone())
+                    .tool(child_tools.write.clone());
+            }
+            let agent = builder.default_max_turns(usize::MAX).build();
+            run_recorder.record(RunStarted {
+                provider: "chatgpt".to_owned(),
+                model: model.to_owned(),
+                reasoning_effort: self.provider.reasoning_effort.clone(),
+            });
+
+            let mut stream = agent
+                .stream_chat(seed_prompt.clone(), seed_history.clone())
+                .await;
+            // Text of the current model turn; the last turn's text is the
+            // delegate's answer (matching the non-streaming `chat` output).
+            let mut turn_text = String::new();
+            let mut retry = false;
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = self.handles.cancel.cancelled() => {
+                        run_recorder.record(RunFinished::Cancelled);
+                        recorder.record(DelegateFinished { outcome: "cancelled".into() });
+                        return Err(DelegateError::Failed("cancelled".into()));
+                    }
+                    item = stream.next() => item,
+                };
+                let Some(item) = item else {
+                    run_recorder.record(RunFinished::Completed);
+                    break;
+                };
+                match item {
+                    Ok(MultiTurnStreamItem::CompletionCall(_)) => turn_text.clear(),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::Text(text),
+                    )) => turn_text.push_str(&text.text),
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::ReasoningDelta {
+                            id: None,
+                            reasoning,
+                        },
+                    )) => {
+                        if ttsr.push_reasoning(&reasoning) {
+                            let firing = ttsr.take_pending().expect("reasoning firing stashed");
+                            drop(stream);
+                            let (committed, _) = ttsr.committed();
+                            seed_history = committed;
+                            crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                            run_recorder.record(RunFinished::Cancelled);
+                            seed_prompt = reminder_message(&firing);
+                            retry = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if let Some(firing) = ttsr.take_pending()
+                            && let rig_core::agent::StreamingError::Prompt(boxed) = &error
+                            && let rig_core::completion::PromptError::PromptCancelled {
+                                chat_history,
+                                ..
+                            } = boxed.as_ref()
+                        {
+                            seed_history = chat_history.clone();
+                            crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                            run_recorder.record(RunFinished::Cancelled);
+                            seed_prompt = reminder_message(&firing);
+                            retry = true;
+                            break;
+                        }
+                        run_recorder.record(RunFinished::Error {
+                            error: error.to_string(),
+                        });
+                        recorder.record(DelegateFinished {
+                            outcome: "error".into(),
+                        });
+                        return Err(DelegateError::Failed(error.to_string()));
+                    }
+                }
+            }
+            if retry {
+                continue;
+            }
+            break turn_text;
+        };
+        recorder.record(DelegateFinished {
+            outcome: "completed".into(),
+        });
         Ok(shorten(&output, 50 * 1024))
     }
 }

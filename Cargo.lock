@@ -173,6 +173,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "artist-extensions",
+ "artist-rules",
+ "artist-session",
  "artist-tools",
  "base64",
  "dashmap",
@@ -187,6 +189,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "uuid",
 ]

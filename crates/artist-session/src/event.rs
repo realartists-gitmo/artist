@@ -236,7 +236,7 @@ pub struct ToolResultEvent {
     pub duration_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolOutcomeRecord {
     Success,
