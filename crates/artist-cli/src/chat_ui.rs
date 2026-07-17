@@ -335,8 +335,24 @@ pub struct ChatResources<'a> {
     pub extension_control: &'a crate::extension_control::ExtensionControl,
 }
 
+/// Draw the startup UI before loading models, extensions, indexes, or servers.
+pub fn start_terminal() -> Result<ratatui::DefaultTerminal> {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
+    }
+    let mut terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(crate::startup_splash::HEIGHT + 3),
+    });
+    terminal.draw(|frame| {
+        render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), true)
+    })?;
+    terminal.show_cursor()?;
+    Ok(terminal)
+}
+
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
 pub async fn run(
+    terminal: ratatui::DefaultTerminal,
     store: &mut ProviderStore,
     provider_index: usize,
     store_path: &Path,
@@ -353,21 +369,9 @@ pub async fn run(
     let mcp = resources.mcp;
     let extensions = resources.extensions;
     let extension_control = resources.extension_control;
-    let context_capacity = if store.status_bar.items.contains(&StatusItem::Context) {
-        models::catalog(&store.providers[provider_index])
-            .await
-            .ok()
-            .and_then(|catalog| {
-                catalog
-                    .iter()
-                    .find(|model| {
-                        Some(&model.slug) == store.providers[provider_index].model.as_ref()
-                    })
-                    .and_then(|model| model.effective_context_window())
-            })
-    } else {
-        None
-    };
+    // Model metadata is optional startup work; fetch it only after the user
+    // submits the first prompt so the input UI can appear immediately.
+    let context_capacity = None;
     let mut status = StatusRuntime {
         git_branch: None,
         used_tokens: None,
@@ -375,9 +379,6 @@ pub async fn run(
         extension_values: extensions.status_items(),
     };
     status.refresh(&store.status_bar, project);
-    let terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(3),
-    });
     let keyboard_result = execute!(
         std::io::stdout(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
@@ -909,6 +910,20 @@ async fn submit(
         insert_blank(terminal)?;
     }
     insert_message(terminal, &prompt.display)?;
+    if status.context_capacity.is_none()
+        && context.status_config.items.contains(&StatusItem::Context)
+    {
+        status.context_capacity =
+            models::catalog(context.provider)
+                .await
+                .ok()
+                .and_then(|catalog| {
+                    catalog
+                        .iter()
+                        .find(|model| Some(&model.slug) == context.provider.model.as_ref())
+                        .and_then(|model| model.effective_context_window())
+                });
+    }
     let empty_input = ChatInput::default();
     let mut footer = footer_line(
         context.status_config,

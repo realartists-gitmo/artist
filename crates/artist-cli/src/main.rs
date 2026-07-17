@@ -33,6 +33,7 @@ use store::{ProviderStore, config_path};
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
+        ratatui::restore();
         eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
@@ -95,11 +96,18 @@ async fn run() -> Result<()> {
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
-            let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
+            let terminal = chat_ui::start_terminal()?;
             let extension_control = extension_control::ExtensionControl::default();
-            let extensions =
-                extension_manager(config_root, &store, extension_control.clone()).await?;
-            if refresh_if_needed(&mut store.providers[selected]).await? {
+            let mut refreshed_provider = store.providers[selected].clone();
+            let (mcp, extensions, refreshed) = tokio::join!(
+                artist_agent::mcp::McpManager::load(config_root),
+                extension_manager(config_root, &store, extension_control.clone()),
+                refresh_if_needed(&mut refreshed_provider)
+            );
+            let mcp = mcp?;
+            let extensions = extensions?;
+            if refreshed? {
+                store.providers[selected] = refreshed_provider;
                 store.save(&path)?;
             }
             let sessions = SessionStore::new(config_root);
@@ -107,6 +115,7 @@ async fn run() -> Result<()> {
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let tools = tool_bundle(config_root, &project)?;
             chat_ui::run(
+                terminal,
                 &mut store,
                 selected,
                 &path,
