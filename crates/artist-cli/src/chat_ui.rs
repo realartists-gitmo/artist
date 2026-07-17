@@ -667,7 +667,7 @@ async fn run_loop(
                         extensions: context.extensions,
                         extension_control: context.extension_control,
                         disabled_tools: &context.store.disabled_tools,
-                        show_splash: !resumed_session,
+                        show_splash,
                     },
                     &mut session,
                     &mut turns,
