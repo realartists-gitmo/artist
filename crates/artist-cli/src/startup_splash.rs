@@ -9,7 +9,7 @@ use ratatui::{
 pub(crate) const HEIGHT: u16 = 8;
 
 const ART: [&str; HEIGHT as usize] = [
-    "█████     ███           █████",
+    "                      █████     ███           █████",
     "                     ▒▒███     ▒▒▒           ▒▒███",
     "  ██████   ████████  ███████   ████   █████  ███████",
     " ▒▒▒▒▒███ ▒▒███▒▒███▒▒▒███▒   ▒▒███  ███▒▒  ▒▒▒███▒",
@@ -43,8 +43,8 @@ mod tests {
         terminal.draw(|frame| render(frame, frame.area())).unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "█");
-        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Rgb(128, 128, 128));
+        assert_eq!(buffer.cell((22, 0)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((22, 0)).unwrap().fg, Color::Rgb(128, 128, 128));
         assert_eq!(buffer.cell((1, HEIGHT - 1)).unwrap().symbol(), "▒");
         assert_eq!(
             buffer.cell((1, HEIGHT - 1)).unwrap().fg,
