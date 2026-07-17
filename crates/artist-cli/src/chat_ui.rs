@@ -1451,7 +1451,19 @@ fn insert_tool_line(
         .map(|line| line.width().max(1).div_ceil(width))
         .sum::<usize>() as u16;
     terminal.insert_before(height.max(1), |buffer| {
-        buffer.set_style(buffer.area, Style::default().bg(Color::Rgb(32, 32, 32)));
+        let background = Style::default().bg(Color::Rgb(32, 32, 32));
+        buffer.set_style(buffer.area, background);
+        // Keep the final cell non-empty so terminals without background-color
+        // erase support (notably herdr) cannot turn the shaded suffix black.
+        if buffer.area.width > 0 {
+            for y in buffer.area.y..buffer.area.bottom() {
+                buffer
+                    .cell_mut((buffer.area.right() - 1, y))
+                    .expect("tool panel cell")
+                    .set_symbol("\u{00a0}")
+                    .set_style(background);
+            }
+        }
         Paragraph::new(Text::from(text))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
@@ -1478,6 +1490,9 @@ fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) ->
 fn reasoning_text(reasoning: &str) -> Text<'static> {
     Text::from(
         reasoning
+            // Providers commonly stream adjacent bold summary headings without
+            // a newline between the closing and opening markers.
+            .replace("****", "**\n**")
             .lines()
             .enumerate()
             .map(|(line_index, line)| {
@@ -1970,6 +1985,25 @@ mod tests {
                 .iter()
                 .all(|span| !span.content.contains("**"))
         );
+    }
+
+    #[test]
+    fn adjacent_reasoning_headings_get_separate_rows() {
+        let text = reasoning_text("**Diagnosing****Evaluating****Identifying**");
+        assert_eq!(text.lines.len(), 3);
+        let rows = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(rows[0].contains("Diagnosing"));
+        assert!(rows[1].contains("Evaluating"));
+        assert!(rows[2].contains("Identifying"));
     }
 
     #[test]
