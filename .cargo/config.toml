@@ -1,0 +1,13 @@
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+
+[alias]
+# Fat-LTO + native-CPU optimized binary (see [profile.product] in Cargo.toml).
+product = "run --profile product --bin artist"
+
+[env]
+# The product profile's fat-LTO bin compile can exceed zccache's default 180s
+# wedge budget; at Low child priority it gets starved under load and the client
+# kills the daemon mid-compile (zccache#666).
+ZCCACHE_WEDGE_RECV_TIMEOUT_SECS = "1800"
+ZCCACHE_COMPILE_PRIORITY = "normal"
