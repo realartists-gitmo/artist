@@ -1,6 +1,9 @@
-use crate::{DiscoveredExtension, ExtensionContext, HostControl};
+use crate::{DiscoveredExtension, EventBus, ExtensionContext, HostControl};
 use anyhow::Result;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 use tokio::{
     io::AsyncWriteExt,
     process::{Child, Command},
@@ -23,6 +26,8 @@ struct State {
     children: HashMap<u64, Child>,
     next_child: u64,
     control: Arc<dyn HostControl>,
+    context: Arc<RwLock<ExtensionContext>>,
+    events: EventBus,
 }
 impl WasiView for State {
     fn ctx(&mut self) -> WasiCtxView<'_> {
@@ -109,6 +114,15 @@ impl artist::extension::host::Host for State {
     async fn stop(&mut self) {
         self.control.stop().await;
     }
+    async fn current_context(&mut self) -> String {
+        serde_json::to_string(&*self.context.read().expect("extension context poisoned"))
+            .unwrap_or_else(|_| "{}".into())
+    }
+    async fn recent_event_blocks(&mut self, count: u32) -> Vec<String> {
+        let events = self.events.recent();
+        let start = events.len().saturating_sub(count as usize);
+        events[start..].to_vec()
+    }
 }
 
 pub struct Instance {
@@ -118,7 +132,8 @@ pub struct Instance {
 impl Instance {
     pub async fn load(
         extension: &DiscoveredExtension,
-        context: &ExtensionContext,
+        context: Arc<RwLock<ExtensionContext>>,
+        events: EventBus,
         control: Arc<dyn HostControl>,
     ) -> Result<Self> {
         let mut config = Config::new();
@@ -140,11 +155,15 @@ impl Instance {
                 children: HashMap::new(),
                 next_child: 0,
                 control,
+                context: context.clone(),
+                events,
             },
         );
         let bindings = ArtistExtension::instantiate_async(&mut store, &component, &linker).await?;
+        let activation_context =
+            serde_json::to_string(&*context.read().expect("extension context poisoned"))?;
         bindings
-            .call_activate(&mut store, &serde_json::to_string(context)?)
+            .call_activate(&mut store, &activation_context)
             .await?
             .map_err(anyhow::Error::msg)?;
         Ok(Self {

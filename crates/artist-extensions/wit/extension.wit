@@ -8,6 +8,8 @@ interface host {
   steer: func(message: string);
   prompt-after: func(message: string);
   stop: func();
+  current-context: func() -> string;
+  recent-event-blocks: func(count: u32) -> list<string>;
 }
 
 world artist-extension {

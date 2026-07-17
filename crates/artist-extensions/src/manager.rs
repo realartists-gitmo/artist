@@ -15,6 +15,7 @@ pub struct Manager {
     instances: HashMap<String, Arc<Instance>>,
     statuses: Arc<RwLock<HashMap<String, String>>>,
     events: EventBus,
+    context: Arc<RwLock<ExtensionContext>>,
 }
 
 impl Manager {
@@ -23,13 +24,21 @@ impl Manager {
         mut context: ExtensionContext,
         control: Arc<dyn HostControl>,
     ) -> Self {
-        let registry = Registry::load(root);
+        let mut registry = Registry::load(root);
         let events = EventBus::new(64);
         context.recent_events = events.recent();
+        let context = Arc::new(RwLock::new(context));
         let mut instances = HashMap::new();
         for extension in &registry.extensions {
-            if let Ok(instance) = Instance::load(extension, &context, control.clone()).await {
-                instances.insert(extension.manifest.id.clone(), Arc::new(instance));
+            match Instance::load(extension, context.clone(), events.clone(), control.clone()).await
+            {
+                Ok(instance) => {
+                    instances.insert(extension.manifest.id.clone(), Arc::new(instance));
+                }
+                Err(error) => registry.diagnostics.push(Diagnostic {
+                    path: extension.wasm.clone(),
+                    message: format!("activate {}: {error:#}", extension.manifest.id),
+                }),
             }
         }
         let manager = Self {
@@ -37,6 +46,7 @@ impl Manager {
             instances,
             statuses: Default::default(),
             events,
+            context,
         };
         manager.start_status_refresh();
         manager.start_event_forwarding();
@@ -99,17 +109,40 @@ impl Manager {
     pub fn recent_events(&self) -> Vec<String> {
         self.events.recent()
     }
+    pub fn update_context(&self, update: impl FnOnce(&mut ExtensionContext)) {
+        update(&mut self.context.write().expect("extension context poisoned"));
+    }
+    pub fn tool_names(&self) -> Vec<String> {
+        self.registry
+            .tools()
+            .filter(|(m, _)| self.instances.contains_key(&m.id))
+            .map(|(_, tool)| tool.name.clone())
+            .collect()
+    }
+    pub fn status_declarations(&self) -> Vec<crate::StatusDeclaration> {
+        self.registry
+            .status_items()
+            .filter(|(m, _)| self.instances.contains_key(&m.id))
+            .map(|(_, status)| status.clone())
+            .collect()
+    }
 
     fn start_event_forwarding(&self) {
-        let mut receiver = self.events.subscribe();
         let instances = self.instances.values().cloned().collect::<Vec<_>>();
-        tokio::spawn(async move {
-            while let Ok(json) = receiver.recv().await {
-                for instance in &instances {
-                    let _ = instance.event(&json).await;
+        for instance in instances {
+            let mut receiver = self.events.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match receiver.recv().await {
+                        Ok(json) => {
+                            let _ = instance.event(&json).await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     fn start_status_refresh(&self) {
