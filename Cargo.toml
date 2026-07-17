@@ -5,6 +5,7 @@ members = [
     "crates/artist-agent",
     "crates/artist-tools",
     "crates/hashline-tools",
+    "crates/artist-extensions",
 ]
 resolver = "3"
 
