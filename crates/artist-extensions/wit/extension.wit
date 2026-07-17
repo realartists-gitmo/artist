@@ -1,0 +1,20 @@
+package artist:extension@0.1.0;
+
+interface host {
+  run-command: func(program: string, args: list<string>, stdin: option<string>) -> result<string, string>;
+  spawn-command: func(program: string, args: list<string>) -> result<u64, string>;
+  process-write: func(id: u64, data: string) -> result<_, string>;
+  process-kill: func(id: u64) -> result<_, string>;
+  steer: func(message: string);
+  prompt-after: func(message: string);
+  stop: func();
+}
+
+world artist-extension {
+  import host;
+  export activate: func(context-json: string) -> result<_, string>;
+  export invoke-tool: func(name: string, arguments-json: string) -> result<string, string>;
+  export invoke-command: func(name: string, arguments: string) -> result<string, string>;
+  export status: func(name: string) -> result<string, string>;
+  export event: func(event-json: string);
+}
