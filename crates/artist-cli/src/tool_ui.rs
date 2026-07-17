@@ -96,6 +96,24 @@ fn title(name: &str, arguments: &Value) -> String {
             }
         }
         "grep" => format!("Searched code for “{query}”"),
+        "web_search" => {
+            let query = if query.is_empty() {
+                arguments
+                    .get("queries")
+                    .and_then(Value::as_array)
+                    .map(|queries| {
+                        queries
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_default()
+            } else {
+                query
+            };
+            format!("Web searched for “{}”", shortened(&query, 100))
+        }
         "edit" => format!("Edited {path}"),
         "write" => format!("Wrote {path}"),
         "bash" => match string(arguments, "mode").as_str() {
@@ -305,6 +323,15 @@ mod tests {
         let first = ui.output("f", "src/config.rs\nconfig.toml");
         assert_eq!(first.text, "= Found 2 files");
         assert!(first.batch_complete);
+        assert_eq!(
+            ui.start(
+                "w".into(),
+                "web_search",
+                &serde_json::json!({"query":"rust async runtimes"})
+            ),
+            "Web searched for “rust async runtimes”"
+        );
+        ui.output("w", "results");
         assert_eq!(
             ui.start(
                 "e".into(),
