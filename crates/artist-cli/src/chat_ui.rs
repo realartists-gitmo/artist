@@ -436,6 +436,8 @@ async fn run_loop(
     let mut viewport_height = 3;
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
+    let mut suggestion_index = 0usize;
+    let mut suggestion_input = String::new();
     if resumed_session {
         let footer = footer_line(
             &context.store.status_bar,
@@ -457,7 +459,11 @@ async fn run_loop(
         let slash_suggestions = slash_commands::completions(&input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
-        let suggestions = if !slash_suggestions.is_empty() {
+        if suggestion_input != input.text {
+            suggestion_index = 0;
+            suggestion_input.clone_from(&input.text);
+        }
+        let mut suggestions = if !slash_suggestions.is_empty() {
             slash_suggestions
                 .iter()
                 .map(|command| format!("{}  {}", command.name, command.description))
@@ -470,6 +476,10 @@ async fn run_loop(
                 .map(|skill| format!("${}  {}", skill.name, skill.description))
                 .collect::<Vec<_>>()
         };
+        suggestion_index = suggestion_index.min(suggestions.len().saturating_sub(1));
+        if let Some(selected) = suggestions.get_mut(suggestion_index) {
+            selected.insert_str(0, "› ");
+        }
         let panel = if suggestions.is_empty() {
             &command_panel
         } else {
@@ -589,14 +599,27 @@ async fn run_loop(
             }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                    && !suggestions.is_empty() =>
+            {
+                suggestion_index = if key.code == KeyCode::Up {
+                    suggestion_index
+                        .checked_sub(1)
+                        .unwrap_or(suggestions.len() - 1)
+                } else {
+                    (suggestion_index + 1) % suggestions.len()
+                };
+            }
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
                     && key.code == KeyCode::Tab
                     && !suggestions.is_empty() =>
             {
-                if let Some(command) = slash_suggestions.first() {
+                if let Some(command) = slash_suggestions.get(suggestion_index) {
                     input.text = command.name.to_owned() + " ";
                     input.atoms.clear();
                     input.cursor = input.text.len();
-                } else if let Some(completion) = mcp_suggestions.first() {
+                } else if let Some(completion) = mcp_suggestions.get(suggestion_index) {
                     input.text = completion.clone();
                     if completion == "/mcp status" || completion.split_whitespace().count() == 3 {
                         // Complete commands can be submitted immediately; actions still
@@ -607,7 +630,7 @@ async fn run_loop(
                     input.atoms.clear();
                     input.cursor = input.text.len();
                 } else if let (Some(range), Some(skill)) =
-                    (skill_range.clone(), skill_suggestions.first())
+                    (skill_range.clone(), skill_suggestions.get(suggestion_index))
                 {
                     input.replace_range(range, &format!("${}", skill.name));
                 }
