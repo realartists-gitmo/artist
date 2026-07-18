@@ -161,7 +161,7 @@ fn compact_output(name: &str, output: &str) -> String {
         ),
         "read" => format!(
             "Read {} lines",
-            output.lines().filter(|line| line.contains(" | ")).count()
+            output.lines().filter(|line| line.contains(": ")).count()
         ),
         "edit" | "write" => output
             .split_once("Diff:\n")
