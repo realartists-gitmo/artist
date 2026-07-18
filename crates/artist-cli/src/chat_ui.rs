@@ -891,6 +891,19 @@ async fn run_loop(
                     input.cursor = input.text.len();
                 }
             }
+            // First ctrl+c on a non-empty prompt clears it; make that legible
+            // (otherwise it silently wipes typed text and looks like a no-op).
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !input.text.is_empty() =>
+            {
+                input.text.clear();
+                input.atoms.clear();
+                input.cursor = 0;
+                insert_status(&mut terminal, "  input cleared — ctrl+c again to quit")?;
+            }
             Event::Key(key) if !input.handle_key(key) => {
                 finish_inline(&mut terminal)?;
                 if let Some(active) = active.take() {

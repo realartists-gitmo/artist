@@ -113,6 +113,12 @@ async fn run() -> Result<()> {
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
+            // Catch a missing model here, before the TUI takes over — otherwise
+            // it only surfaces as an agent error on the first prompt, forcing a
+            // quit → `artist model` → relaunch.
+            if store.providers[selected].model.is_none() {
+                bail!("no model selected — run `artist model` to choose one first");
+            }
             // Resolve an interactive resume before entering inline TUI mode so the
             // selector cannot be painted underneath the splash and input viewport.
             // Draw the startup UI before loading models, extensions, indexes, or
@@ -169,6 +175,10 @@ fn enter_positional_project(cli: &mut Cli) -> Result<()> {
     if path.is_dir() {
         std::env::set_current_dir(path)
             .with_context(|| format!("enter project directory {}", path.display()))?;
+        // The positional arg doubles as prompt-or-project-dir; say which it was
+        // so a one-word prompt that happens to be a directory name isn't
+        // silently swallowed.
+        eprintln!("opening project {}", path.display());
         cli.prompt = None;
     }
     Ok(())
