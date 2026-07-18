@@ -281,7 +281,10 @@ impl Delegate {
                     )) => turn_text.push_str(&text.text),
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ReasoningDelta {
-                            id: None,
+                            // Match summary (`id: None`) and raw (`id: Some`)
+                            // reasoning alike; raw deltas were dropped before,
+                            // so reasoning-target rules missed them.
+                            id: _,
                             reasoning,
                         },
                     )) => {

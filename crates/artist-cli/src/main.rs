@@ -659,11 +659,14 @@ async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if provider
+    // A token with no known expiry is refreshed proactively rather than
+    // trusted forever — otherwise it silently rots into an unrecoverable 401.
+    // The refresh response populates `expires_at`, so this self-corrects.
+    let needs_refresh = provider
         .auth
         .expires_at
-        .is_some_and(|expiry| expiry <= now.saturating_add(60))
-    {
+        .map_or(true, |expiry| expiry <= now.saturating_add(60));
+    if needs_refresh {
         provider.auth = ChatGptOAuth::default()
             .refresh(&provider.auth)
             .await

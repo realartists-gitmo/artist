@@ -325,12 +325,17 @@ pub async fn stream_chat(
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta {
-                        id: None,
+                        // Handle both summary deltas (`id: None`) and raw
+                        // reasoning deltas (`id: Some`); the latter used to fall
+                        // through and be dropped, so reasoning-target rules
+                        // silently failed to match whenever the backend streamed
+                        // raw reasoning instead of a summary.
+                        id: _,
                         reasoning,
                     },
                 )) => {
                     // rig has no hook event for reasoning deltas, so
-                    // reasoning-summary rules match here on the driver side.
+                    // reasoning rules match here on the driver side.
                     if ttsr.push_reasoning(&reasoning) {
                         let firing = ttsr
                             .take_pending()
