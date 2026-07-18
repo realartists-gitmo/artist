@@ -775,6 +775,7 @@ async fn run_loop(
                     &mut history,
                     &mut status,
                     prompt,
+                    viewport_height,
                 )
                 .await?;
                 viewport_height = result.viewport_height;
@@ -1251,6 +1252,7 @@ async fn submit(
     history: &mut Vec<Message>,
     status: &mut StatusRuntime,
     prompt: SubmittedPrompt,
+    viewport_height: u16,
 ) -> Result<SubmitResult> {
     let started = std::time::Instant::now();
     let first_turn = history.is_empty();
@@ -1311,7 +1313,10 @@ async fn submit(
     let mut response_output_started = false;
     let mut response_since_tool = false;
     let mut tools = ToolUi::default();
-    let mut stream_height = 3;
+    // Start at the real viewport height the input box already occupies. The
+    // streaming layout keeps that height (response goes to scrollback, not a
+    // live tail), so entering a turn doesn't re-init/blink the viewport.
+    let mut stream_height = viewport_height;
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
@@ -1373,14 +1378,11 @@ async fn submit(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     draw_streaming(
         terminal,
-        &visible,
-        true,
         &status_line(phase, started.elapsed(), animation_frame),
         StreamingControls {
             input: &steering_input,
             steering: &steering,
         },
-        &footer,
         &mut stream_height,
     )?;
     while !task.is_finished() || !rx.is_empty() {
@@ -1599,14 +1601,11 @@ async fn submit(
         }
         draw_streaming(
             terminal,
-            &visible,
-            !response_output_started,
             &status_line(phase, started.elapsed(), animation_frame),
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
             },
-            &footer,
             &mut stream_height,
         )?;
     }
@@ -2019,37 +2018,23 @@ fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Resul
 
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
-    response: &str,
-    first: bool,
     status: &str,
     controls: StreamingControls<'_>,
-    footer: &Line<'_>,
     viewport_height: &mut u16,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
     let width = terminal_size.width.max(1);
-    let response_height = response
-        .lines()
-        .map(|line| {
-            UnicodeWidthStr::width(line)
-                .max(1)
-                .div_ceil(usize::from(width))
-        })
-        .sum::<usize>()
-        .max(1) as u16;
-    // Keep a fixed one-row streaming tail above the input. Completed output is
-    // inserted into scrollback, so the viewport never grows and repositions it.
-    let visible_response_height = 1;
-    let footer_height = (!footer.spans.is_empty()) as u16;
     let queued_height = controls.steering.displays().count() as u16;
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
-    let desired = 3u16
+    // Keep the same height as the idle input box (input rows + one status row).
+    // The response streams into scrollback (not a live in-viewport tail), so a
+    // turn starting or ending never resizes/re-inits the viewport — no blink.
+    let desired = input_height
         .saturating_add(queued_height)
-        .saturating_add(input_height)
-        .saturating_add(footer_height)
+        .saturating_add(1)
         .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
@@ -2059,29 +2044,11 @@ fn draw_streaming(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let response_area = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            visible_response_height.min(area.height),
-        );
-        let text = response_text(response, first, usize::from(area.width))
-            .unwrap_or_else(|_| Text::raw(response));
-        frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .scroll((response_height.saturating_sub(visible_response_height), 0)),
-            response_area,
-        );
-        let queued_area = Rect::new(
-            area.x,
-            response_area.bottom().saturating_add(1),
-            area.width,
-            queued_height.min(area.height),
-        );
+        let queued_area = Rect::new(area.x, area.y, area.width, queued_height.min(area.height));
         let queued = controls
             .steering
             .displays()
@@ -2103,28 +2070,17 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
-        let status_area = Rect::new(area.x, queued_area.bottom(), area.width, 1);
-        frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
-            status_area,
-        );
         let input_area = Rect::new(
             area.x,
-            status_area.bottom(),
+            queued_area.bottom(),
             area.width,
-            area.height.saturating_sub(
-                response_area
-                    .height
-                    .saturating_add(queued_height + 2 + footer_height),
-            ),
+            area.height.saturating_sub(queued_height + 1),
         );
         render_input(frame, input_area, controls.input);
-        if footer_height == 1 {
-            frame.render_widget(
-                Paragraph::new(footer.clone()),
-                Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-            );
-        }
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
     })?;
     terminal.show_cursor()?;
     if resized {
