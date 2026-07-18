@@ -1,1 +1,0 @@
-/home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/target/wasm32-wasip2/release/rule_guest.wasm: /home/adam/Projects/artist/crates/artist-rules/tests/fixtures/rule-guest/src/lib.rs /home/adam/Projects/artist/crates/artist-rules/wit/rule-plugin.wit
