@@ -27,7 +27,7 @@ use artist_session::{
 use artist_tools::ToolBundle;
 use base64::Engine;
 use futures::StreamExt;
-use llm_provider::SavedProvider;
+use llm_provider::{ProviderKind, SavedProvider};
 use rig_core::{
     OneOrMany,
     agent::MultiTurnStreamItem,
@@ -35,7 +35,7 @@ use rig_core::{
     completion::message::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
-    providers::chatgpt,
+    providers::{anthropic, chatgpt, gemini, xai},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
@@ -209,16 +209,6 @@ pub async fn stream_chat(
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let client = chatgpt::Client::builder()
-        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.auth.access_token().unwrap_or_default().to_owned(),
-            account_id: provider.auth.account_id().map(str::to_owned),
-        })
-        .base_url(provider.base_url.as_str())
-        .originator("artist")
-        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build ChatGPT client")?;
 
     let resources = resources::Resources::discover(tools.project_root());
     let system_prompt = format!(
@@ -229,7 +219,7 @@ pub async fn stream_chat(
     );
     handles.rules.note_user_turn();
 
-    let mut seed_history = history;
+    let seed_history = history;
     let mut seed_prompt = user_message(input);
     // Skill instructions depend on what the user just typed, so ride them on
     // the user turn instead of folding them into the (otherwise stable)
@@ -246,36 +236,16 @@ pub async fn stream_chat(
         context.push(seed_prompt.clone());
         context
     });
-    let visible_steering = handles.steering.clone();
-    let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
-
     // Per-run abort-retry budget: spans this turn's retries but is isolated
     // from concurrent delegate runs (each has its own counter).
     let retry_budget = handles.rules.retry_budget();
-    let mut retries_used = 0u32;
     // Stable per-project+model prompt-cache key so a session's turns route to
     // the same server-side prefix cache — better hit rate, fewer billed tokens.
     let cache_key = prompt_cache_key(tools.project_root(), model);
-    'retry: loop {
-        let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
-        let run_recorder = handles.recorder.with_run(&run_id);
-        let ttsr = TtsrShared::new(
-            handles.rules.clone(),
-            Arc::clone(&handles.rule_set),
-            false,
-            retries_used < retry_budget,
-        );
-
-        let mut builder = client.agent(model);
-        let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-        if let Some(effort) = &provider.reasoning_effort {
-            // No `summary` field: reasoning summaries are off (TOK-5) — they
-            // billed output tokens every turn. Reasoning-target stream rules
-            // match against raw reasoning deltas instead (handled in the loop).
-            params["reasoning"] = json!({ "effort": effort });
-        }
-        builder = builder.additional_params(params);
+    // The tool set is rebuilt for each retry attempt (fresh Delegate, etc.);
+    // the generic driver calls this once per attempt.
+    let make_tools = || -> Vec<Box<dyn rig_core::tool::ToolDyn>> {
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
             Box::new(tools.read.clone()),
@@ -301,15 +271,177 @@ pub async fn stream_chat(
         if let Some(extensions) = tool_context.extensions {
             registered.extend(extensions.tools());
         }
-        registered.retain(|tool| {
-            !tool_context
-                .disabled
-                .iter()
-                .any(|name| name == &tool.name())
-        });
-        let agent = builder
-            .preamble(&system_prompt)
-            .tools(registered)
+        registered.retain(|tool| !tool_context.disabled.iter().any(|name| name == &tool.name()));
+        registered
+    };
+    let run = AgentRun {
+        model,
+        system_prompt: &system_prompt,
+        params: provider_params(provider, &cache_key),
+        handles: &handles,
+        retry_budget,
+        provider_label: provider_label(provider.kind),
+        reasoning_effort: provider.reasoning_effort.clone(),
+        is_delegate: false,
+    };
+    // Dispatch on the provider's backend. Each builds a distinct rig client
+    // type; all are driven through the same generic retry/stream loop.
+    match provider.kind {
+        ProviderKind::ChatGpt => {
+            run_retry_loop(build_chatgpt(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::OpenAi => {
+            run_retry_loop(build_openai_compatible(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Anthropic => {
+            run_retry_loop(build_anthropic(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Gemini => {
+            run_retry_loop(build_gemini(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+    }
+}
+
+/// The immutable context a single agent run needs, shared across the retry
+/// loop. Bundled so the generic driver takes a sane number of arguments.
+struct AgentRun<'a> {
+    model: &'a str,
+    system_prompt: &'a str,
+    params: serde_json::Value,
+    handles: &'a SessionHandles,
+    retry_budget: u32,
+    provider_label: &'static str,
+    reasoning_effort: Option<String>,
+    /// Delegate runs pass `true` (the third `TtsrShared::new` flag); the main
+    /// agent passes `false`.
+    is_delegate: bool,
+}
+
+pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::ChatGpt => "chatgpt",
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
+    }
+}
+
+fn provider_params(provider: &SavedProvider, cache_key: &str) -> serde_json::Value {
+    params_for(provider.kind, provider.reasoning_effort.as_deref(), cache_key)
+}
+
+/// The per-backend `additional_params`. ChatGPT (Responses) takes a
+/// `prompt_cache_key` and nested `reasoning.effort`; OpenAI-compatible
+/// chat-completions take a top-level `reasoning_effort`; Anthropic maps effort
+/// to a thinking-token budget; Gemini manages thinking itself.
+pub(crate) fn params_for(
+    kind: ProviderKind,
+    effort: Option<&str>,
+    cache_key: &str,
+) -> serde_json::Value {
+    match kind {
+        ProviderKind::ChatGpt => {
+            let mut params = json!({ "prompt_cache_key": cache_key });
+            if let Some(effort) = effort {
+                // No `summary` field: reasoning summaries are off (TOK-5).
+                params["reasoning"] = json!({ "effort": effort });
+            }
+            params
+        }
+        ProviderKind::OpenAi => match effort {
+            Some(effort) => json!({ "reasoning_effort": effort }),
+            None => json!({}),
+        },
+        ProviderKind::Anthropic => match effort.map(thinking_budget) {
+            Some(budget) => json!({ "thinking": { "type": "enabled", "budget_tokens": budget } }),
+            None => json!({}),
+        },
+        ProviderKind::Gemini => json!({}),
+    }
+}
+
+fn thinking_budget(effort: &str) -> u64 {
+    match effort {
+        "minimal" | "low" => 4_096,
+        "high" | "max" => 24_576,
+        _ => 12_288,
+    }
+}
+
+pub(crate) fn build_chatgpt(provider: &SavedProvider) -> Result<chatgpt::Client> {
+    chatgpt::Client::builder()
+        .api_key(chatgpt::ChatGPTAuth::AccessToken {
+            access_token: provider.auth.access_token().unwrap_or_default().to_owned(),
+            account_id: provider.auth.account_id().map(str::to_owned),
+        })
+        .base_url(provider.base_url.as_str())
+        .originator("artist")
+        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build ChatGPT client")
+}
+
+/// One client for every OpenAI-compatible chat-completions backend (xAI/Grok,
+/// Groq, DeepSeek, OpenRouter, Together, …): rig's xAI client is a plain
+/// bearer-auth OpenAI-compatible client, pointed at the provider's base URL.
+pub(crate) fn build_openai_compatible(provider: &SavedProvider) -> Result<xai::Client> {
+    xai::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build OpenAI-compatible client")
+}
+
+pub(crate) fn build_anthropic(provider: &SavedProvider) -> Result<anthropic::Client> {
+    anthropic::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Anthropic client")
+}
+
+pub(crate) fn build_gemini(provider: &SavedProvider) -> Result<gemini::Client> {
+    gemini::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Gemini client")
+}
+
+/// Drive one agent run to completion (or cancellation), retrying in place when
+/// a stream rule fires. Generic over the provider client `C` so every backend
+/// shares this loop; the streaming/hook layer is already provider-agnostic.
+async fn run_retry_loop<C, F>(
+    client: C,
+    run: AgentRun<'_>,
+    make_tools: &F,
+    mut seed_prompt: Message,
+    mut seed_history: Vec<Message>,
+    on_event: &mut impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome>
+where
+    C: CompletionClient,
+    C::CompletionModel: 'static,
+    F: Fn() -> Vec<Box<dyn rig_core::tool::ToolDyn>>,
+{
+    let handles = run.handles;
+    let visible_steering = handles.steering.clone();
+    let tool_meta = ToolMeta::default();
+    let mut retries_used = 0u32;
+    'retry: loop {
+        let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
+        let run_recorder = handles.recorder.with_run(&run_id);
+        let ttsr = TtsrShared::new(
+            handles.rules.clone(),
+            Arc::clone(&handles.rule_set),
+            run.is_delegate,
+            retries_used < run.retry_budget,
+        );
+        let agent = client
+            .agent(run.model)
+            .additional_params(run.params.clone())
+            .preamble(run.system_prompt)
+            .tools(make_tools())
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(
                 run_recorder.clone(),
@@ -321,9 +453,9 @@ pub async fn stream_chat(
             .build();
 
         run_recorder.record(RunStarted {
-            provider: "chatgpt".to_owned(),
-            model: model.to_owned(),
-            reasoning_effort: provider.reasoning_effort.clone(),
+            provider: run.provider_label.to_owned(),
+            model: run.model.to_owned(),
+            reasoning_effort: run.reasoning_effort.clone(),
         });
 
         let mut stream = agent
