@@ -71,6 +71,30 @@ async fn writes_finds_and_greps_project_files() {
         .contains("src/lib.rs:1")
     );
     assert!(
+        call(
+            &tools.find,
+            json!({"query":"lib rs","path":".","glob":"**/*.rs"})
+        )
+        .await
+        .contains("src/lib.rs")
+    );
+    assert!(
+        call(
+            &tools.grep,
+            json!({"query":"needle","path":".","glob":"**/*.rs"})
+        )
+        .await
+        .contains("src/lib.rs:1")
+    );
+    assert_eq!(
+        call(
+            &tools.grep,
+            json!({"query":"needle","path":".","glob":"**/*.md"})
+        )
+        .await,
+        "No matches found."
+    );
+    assert!(
         call(&tools.grep, json!({"query":"NEEDLE","case":"insensitive"}))
             .await
             .contains("src/lib.rs:1")

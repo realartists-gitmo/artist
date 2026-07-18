@@ -233,7 +233,6 @@ impl Delegate {
                 .tool(child_tools.read.clone())
                 .tool(child_tools.find.clone())
                 .tool(child_tools.grep.clone())
-                .tool(self.resources.instructions_tool())
                 .tool(self.resources.skill_tool())
                 .add_hook(CaptureHook::new(
                     run_recorder.clone(),

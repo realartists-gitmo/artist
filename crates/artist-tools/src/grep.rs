@@ -85,11 +85,15 @@ impl Tool for GrepTool {
             return Err(ToolError::Message(error.clone()));
         }
         let mut output = Vec::new();
-        let mut matches_shown = 0;
+        let mut filtered_matches = 0;
         for found in &result.matches {
             let file = result.files[found.file_index];
             let relative = file.relative_path(picker).replace('\\', "/");
             if !matches_filters(&relative, scope.as_deref(), glob.as_ref()) {
+                continue;
+            }
+            filtered_matches += 1;
+            if filtered_matches > limit {
                 continue;
             }
             let before_start = found
@@ -113,14 +117,11 @@ impl Tool for GrepTool {
                     found.line_number + index as u64 + 1
                 ));
             }
-            matches_shown += 1;
-            if matches_shown >= limit {
-                break;
-            }
         }
-        if result.matches.len() > matches_shown {
+        if filtered_matches > limit {
             output.push(format!("[truncated: showing at most {limit} matches]"));
         }
+
         Ok(if output.is_empty() {
             "No matches found.".into()
         } else {
@@ -130,14 +131,15 @@ impl Tool for GrepTool {
 }
 
 fn validate_scope(workspace: &Workspace, scope: Option<&str>) -> Result<Option<String>, ToolError> {
-    scope
+    Ok(scope
         .map(|path| {
-            workspace
-                .resolve_existing(path)
-                .map(|p| workspace.display(&p))
-                .map_err(Into::into)
+            workspace.resolve_existing(path).map(|p| {
+                let relative = workspace.display(&p);
+                (!relative.is_empty()).then_some(relative)
+            })
         })
-        .transpose()
+        .transpose()?
+        .flatten())
 }
 fn compile_glob(value: Option<&str>) -> Result<Option<globset::GlobMatcher>, ToolError> {
     value

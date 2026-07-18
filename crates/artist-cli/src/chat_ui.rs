@@ -345,15 +345,30 @@ pub struct ChatResources<'a> {
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
-pub fn start_terminal() -> Result<ratatui::DefaultTerminal> {
+pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
+    let height = if show_splash {
+        crate::startup_splash::HEIGHT + 3
+    } else {
+        3
+    };
     let mut terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(crate::startup_splash::HEIGHT + 3),
+        viewport: Viewport::Inline(height),
     });
     terminal.draw(|frame| {
-        render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), true)
+        if thinking {
+            frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
+        } else {
+            render_with_panel(
+                frame,
+                &ChatInput::default(),
+                &[],
+                &Line::default(),
+                show_splash,
+            );
+        }
     })?;
     terminal.show_cursor()?;
     Ok(terminal)
@@ -865,12 +880,13 @@ async fn run_loop(
                 }
             }
             Event::Key(key) if !input.handle_key(key) => {
-                clear_inline(&mut terminal)?;
+                finish_inline(&mut terminal)?;
                 if let Some(active) = active.take() {
                     active.close().await?;
                 }
                 return Ok(());
             }
+
             Event::Resize(_, _) => {}
             Event::Paste(text) => input.paste(&text, true),
             _ => {}
@@ -1152,6 +1168,10 @@ fn resize_and_draw(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
+        // Reinitializing ratatui resets terminal modes, including bracketed paste.
+        // Restore it so terminal-provided image paths continue to arrive as
+        // `Event::Paste` rather than being typed into the prompt.
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
         terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
         terminal.show_cursor()?;
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;
@@ -1814,7 +1834,19 @@ fn insert_tool_line(
         .map(|line| line.width().max(1).div_ceil(width))
         .sum::<usize>() as u16;
     terminal.insert_before(height.max(1), |buffer| {
-        buffer.set_style(buffer.area, Style::default().bg(Color::Rgb(32, 32, 32)));
+        let background = Style::default().bg(Color::Rgb(32, 32, 32));
+        buffer.set_style(buffer.area, background);
+        // Keep the final cell non-empty so terminals without background-color
+        // erase support (notably herdr) cannot turn the shaded suffix black.
+        if buffer.area.width > 0 {
+            for y in buffer.area.y..buffer.area.bottom() {
+                buffer
+                    .cell_mut((buffer.area.right() - 1, y))
+                    .expect("tool panel cell")
+                    .set_symbol("\u{00a0}")
+                    .set_style(background);
+            }
+        }
         Paragraph::new(Text::from(text))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
@@ -1841,6 +1873,9 @@ fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) ->
 fn reasoning_text(reasoning: &str) -> Text<'static> {
     Text::from(
         reasoning
+            // Providers commonly stream adjacent bold summary headings without
+            // a newline between the closing and opening markers.
+            .replace("****", "**\n**")
             .lines()
             .enumerate()
             .map(|(line_index, line)| {
@@ -2157,9 +2192,8 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
         area.height.saturating_sub(2),
     );
     let input_style = Style::default().fg(Color::White);
-    let paragraph = Paragraph::new(Text::raw(&input.text))
-        .wrap(Wrap { trim: false })
-        .style(input_style);
+    let paragraph =
+        Paragraph::new(Text::raw(hard_wrap_input(&input.text, inner_width))).style(input_style);
     frame.render_widget(paragraph, input_area);
 
     if input_area.width > 0 && input_area.height > 0 {
@@ -2169,6 +2203,41 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
             input_area.y + y.min(input_area.height.saturating_sub(1)),
         ));
     }
+}
+
+fn hard_wrap_input(text: &str, width: u16) -> String {
+    let width = usize::from(width.max(1));
+    let mut output = String::with_capacity(text.len());
+    let mut column = 0usize;
+    for character in text.chars() {
+        if character == '\n' {
+            output.push(character);
+            column = 0;
+            continue;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if column > 0 && column + character_width > width {
+            output.push('\n');
+            column = 0;
+        }
+        output.push(character);
+        column += character_width;
+        if column == width {
+            output.push('\n');
+            column = 0;
+        }
+    }
+    output
+}
+fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    clear_inline(terminal)?;
+    let bottom = terminal.size()?.height.saturating_sub(1);
+    execute!(
+        std::io::stdout(),
+        MoveTo(0, bottom),
+        Clear(ClearType::CurrentLine)
+    )?;
+    Ok(())
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
@@ -2277,6 +2346,25 @@ mod tests {
                 .iter()
                 .all(|span| !span.content.contains("**"))
         );
+    }
+
+    #[test]
+    fn adjacent_reasoning_headings_get_separate_rows() {
+        let text = reasoning_text("**Diagnosing****Evaluating****Identifying**");
+        assert_eq!(text.lines.len(), 3);
+        let rows = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(rows[0].contains("Diagnosing"));
+        assert!(rows[1].contains("Evaluating"));
+        assert!(rows[2].contains("Identifying"));
     }
 
     #[test]

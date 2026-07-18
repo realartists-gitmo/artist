@@ -52,18 +52,18 @@ impl Tool for FindTool {
             },
         );
         let mut output = Vec::new();
+        let mut filtered_matches = 0;
         for (item, score) in result.items.iter().zip(&result.scores) {
             let relative = item.relative_path(picker).replace('\\', "/");
             if !matches_filters(&relative, scope.as_deref(), glob.as_ref()) {
                 continue;
             }
-            output.push(format!("{}\t(score {})", relative, score.total));
-            if output.len() == limit {
-                break;
+            filtered_matches += 1;
+            if output.len() < limit {
+                output.push(format!("{}\t(score {})", relative, score.total));
             }
         }
-        let truncated = result.total_matched > output.len();
-        if truncated {
+        if filtered_matches > output.len() {
             output.push(format!("[truncated: showing at most {limit} results]"));
         }
         Ok(if output.is_empty() {
@@ -75,14 +75,15 @@ impl Tool for FindTool {
 }
 
 fn validate_scope(workspace: &Workspace, scope: Option<&str>) -> Result<Option<String>, ToolError> {
-    scope
+    Ok(scope
         .map(|path| {
-            workspace
-                .resolve_existing(path)
-                .map(|p| workspace.display(&p))
-                .map_err(Into::into)
+            workspace.resolve_existing(path).map(|p| {
+                let relative = workspace.display(&p);
+                (!relative.is_empty()).then_some(relative)
+            })
         })
-        .transpose()
+        .transpose()?
+        .flatten())
 }
 fn compile_glob(value: Option<&str>) -> Result<Option<globset::GlobMatcher>, ToolError> {
     value
