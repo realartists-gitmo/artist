@@ -232,11 +232,11 @@ pub async fn stream_chat(
 
     let mut seed_history = history;
     let mut seed_prompt = user_message(input);
-    let fork_context = {
+    let fork_context = Arc::new({
         let mut context = seed_history.clone();
         context.push(seed_prompt.clone());
         context
-    };
+    });
     let visible_steering = handles.steering.clone();
     let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
@@ -262,7 +262,7 @@ pub async fn stream_chat(
             Box::new(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
-                fork_context.clone(),
+                Arc::clone(&fork_context),
                 resources.clone(),
                 handles.clone(),
             )),

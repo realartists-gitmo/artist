@@ -26,7 +26,10 @@ use serde_json::{Value, json};
 pub(crate) struct Delegate {
     provider: SavedProvider,
     tools: ToolBundle,
-    context: Vec<Message>,
+    /// The main-agent context to seed a `fork=true` delegate with. Shared via
+    /// `Arc` so constructing a Delegate each run/retry is a cheap refcount bump;
+    /// the history is only deep-cloned if the model actually forks.
+    context: Arc<Vec<Message>>,
     jobs: DelegateJobs,
     resources: Resources,
     handles: SessionHandles,
@@ -36,7 +39,7 @@ impl Delegate {
     pub fn new(
         provider: SavedProvider,
         tools: ToolBundle,
-        context: Vec<Message>,
+        context: Arc<Vec<Message>>,
         resources: Resources,
         handles: SessionHandles,
     ) -> Self {
@@ -210,7 +213,7 @@ impl Delegate {
         policy.push_str(&self.resources.prompt_section());
 
         let mut seed_history = if fork {
-            self.context.clone()
+            (*self.context).clone()
         } else {
             Vec::new()
         };
