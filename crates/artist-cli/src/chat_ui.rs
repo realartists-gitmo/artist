@@ -818,6 +818,20 @@ async fn run_loop(
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
                     && !input.text.trim().is_empty() =>
             {
+                // Enter on an open suggestion menu completes the selected item
+                // first, then sends it — Tab completes only.
+                if !suggestions.is_empty() {
+                    apply_selected_suggestion(
+                        &mut input,
+                        suggestion_index,
+                        &slash_suggestions,
+                        &custom_suggestions,
+                        &extension_suggestions,
+                        &mcp_suggestions,
+                        &skill_range,
+                        &skill_suggestions,
+                    );
+                }
                 let display = input.text.clone();
                 let history_atoms = input.atoms.clone();
                 let expanded = input.take_expanded();
@@ -853,47 +867,16 @@ async fn run_loop(
                     && key.code == KeyCode::Tab
                     && !suggestions.is_empty() =>
             {
-                if let Some(command) = slash_suggestions.get(suggestion_index) {
-                    input.text = command.name.to_owned() + " ";
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let Some(command) = (!slash_suggestions.is_empty()
-                    || !custom_suggestions.is_empty())
-                .then(|| custom_suggestions.get(suggestion_index - slash_suggestions.len()))
-                .flatten()
-                {
-                    input.text = command.name.clone() + " ";
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let Some(command) = extension_suggestions
-                    .get(
-                        suggestion_index
-                            .saturating_sub(slash_suggestions.len() + custom_suggestions.len()),
-                    )
-                    .filter(|_| {
-                        !slash_suggestions.is_empty()
-                            || !custom_suggestions.is_empty()
-                            || !extension_suggestions.is_empty()
-                    })
-                {
-                    input.text = command.name.clone() + " ";
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let Some(completion) = mcp_suggestions.get(suggestion_index) {
-                    input.text = completion.clone();
-                    if completion == "/mcp status" || completion.split_whitespace().count() == 3 {
-                        // Complete commands can be submitted immediately; actions still
-                        // awaiting a server retain a trailing space.
-                    } else {
-                        input.text.push(' ');
-                    }
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let (Some(range), Some(skill)) =
-                    (skill_range.clone(), skill_suggestions.get(suggestion_index))
-                {
-                    input.replace_range(range, &format!("${}", skill.name));
-                }
+                apply_selected_suggestion(
+                    &mut input,
+                    suggestion_index,
+                    &slash_suggestions,
+                    &custom_suggestions,
+                    &extension_suggestions,
+                    &mcp_suggestions,
+                    &skill_range,
+                    &skill_suggestions,
+                );
             }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press
@@ -2149,10 +2132,7 @@ fn render_with_panel(
     let panel_text = Text::from(
         panel
             .iter()
-            .enumerate()
-            .map(|(index, option)| {
-                Line::styled(option.clone(), panel_option_style(index, option, input))
-            })
+            .map(|option| Line::styled(option.clone(), panel_option_style(option)))
             .collect::<Vec<_>>(),
     );
     frame.render_widget(
@@ -2165,23 +2145,59 @@ fn render_with_panel(
     );
 }
 
-fn panel_option_style(index: usize, option: &str, input: &ChatInput) -> Style {
+/// Complete the currently-selected suggestion into `input`, returning true if
+/// one was applied. Shared by Tab (complete) and Enter (complete, then send).
+/// The suggestion lists are concatenated [slash][custom][extension] for the
+/// slash family, or a standalone mcp/skill list; empty lists yield `None` from
+/// `.get`, so the index simply falls through to the active family.
+#[allow(clippy::too_many_arguments)]
+fn apply_selected_suggestion(
+    input: &mut ChatInput,
+    index: usize,
+    slash: &[&slash_commands::SlashCommand],
+    custom: &[&crate::custom_commands::CustomCommand],
+    extension: &[&artist_extensions::CommandDeclaration],
+    mcp: &[String],
+    skill_range: &Option<std::ops::Range<usize>>,
+    skills: &[&artist_agent::AvailableSkill],
+) -> bool {
+    if let Some(command) = slash.get(index) {
+        input.text = command.name.to_owned() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(command) = custom.get(index.saturating_sub(slash.len())) {
+        input.text = command.name.clone() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(command) = extension.get(index.saturating_sub(slash.len() + custom.len())) {
+        input.text = command.name.clone() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(completion) = mcp.get(index) {
+        input.text = completion.clone();
+        // A fully-specified command can be sent as-is; a partial one keeps a
+        // trailing space so the user (or Enter) can still add an argument.
+        if completion != "/mcp status" && completion.split_whitespace().count() != 3 {
+            input.text.push(' ');
+        }
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let (Some(range), Some(skill)) = (skill_range.clone(), skills.get(index)) {
+        input.replace_range(range, &format!("${}", skill.name));
+    } else {
+        return false;
+    }
+    true
+}
+
+fn panel_option_style(option: &str) -> Style {
+    // The selected suggestion is marked with a leading "› "; only it is
+    // highlighted. (Previously index 0 was also highlighted, so navigating away
+    // left two items blue.)
     if option.trim_start().starts_with('›') {
-        Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
     } else if option.contains("[x]") {
         Style::default().fg(Color::Green)
-    } else if index == 0
-        && (input.text.starts_with('/')
-            || (option.starts_with('$')
-                && skill_completion_range(&input.text, input.cursor).is_some()))
-    {
-        Style::default().fg(Color::Blue)
-    } else if index == 0 {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     }
@@ -2478,18 +2494,11 @@ mod tests {
 
     #[test]
     fn interactive_selection_uses_color() {
-        let input = ChatInput::default();
-        let selected = panel_option_style(1, "› model", &input);
+        let selected = panel_option_style("› model");
         assert_eq!(selected.fg, Some(Color::Blue));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(
-            panel_option_style(0, "Select model", &input).fg,
-            Some(Color::Cyan)
-        );
-        assert_eq!(
-            panel_option_style(2, "  [x] branch", &input).fg,
-            Some(Color::Green)
-        );
+        assert_eq!(panel_option_style("Select model").fg, Some(Color::Gray));
+        assert_eq!(panel_option_style("  [x] branch").fg, Some(Color::Green));
     }
 
     #[test]
@@ -2518,7 +2527,8 @@ mod tests {
                 render_with_panel(
                     frame,
                     &input,
-                    &["/help  Show commands".into(), "/model  Select model".into()],
+                    // The selected suggestion carries a leading "› " marker.
+                    &["› /help  Show commands".into(), "/model  Select model".into()],
                     &Line::default(),
                     false,
                 )
