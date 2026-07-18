@@ -127,9 +127,38 @@ pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ARTIST_CONFIG_DIR") {
         return Ok(PathBuf::from(path).join("providers.toml"));
     }
-    Ok(dirs::config_dir()
-        .context("could not find user config directory")?
-        .join("artist/providers.toml"))
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let root = home.join(".artist");
+    migrate_legacy_root(&root)?;
+    Ok(root.join("providers.toml"))
+}
+
+/// Move the pre-.artist global state into the conventional Artist home once.
+/// Existing files in the destination win; legacy-only files are copied across.
+fn migrate_legacy_root(root: &Path) -> Result<()> {
+    let Some(config) = dirs::config_dir() else { return Ok(()); };
+    let legacy = config.join("artist");
+    if !legacy.is_dir() || legacy == root { return Ok(()); }
+    if !root.exists() {
+        fs::rename(&legacy, root).or_else(|_| copy_tree(&legacy, root))?;
+        return Ok(());
+    }
+    copy_tree(&legacy, root)
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            if !to.exists() { copy_tree(&from, &to)?; }
+        } else if !to.exists() {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

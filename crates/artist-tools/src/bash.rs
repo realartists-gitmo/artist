@@ -311,12 +311,34 @@ impl BashTool {
         let reader_cursor = cursor.clone();
         std::thread::spawn(move || {
             let mut bytes = [0u8; 4096];
+            // Carry an incomplete trailing UTF-8 sequence across reads so a
+            // multi-byte char split at a 4096-byte boundary isn't corrupted
+            // into replacement characters.
+            let mut carry: Vec<u8> = Vec::new();
             while let Ok(count) = reader.read(&mut bytes) {
                 if count == 0 {
                     break;
                 }
+                let mut buf = std::mem::take(&mut carry);
+                buf.extend_from_slice(&bytes[..count]);
+                let decoded = match std::str::from_utf8(&buf) {
+                    Ok(valid) => valid.to_owned(),
+                    Err(error) => {
+                        let valid_up_to = error.valid_up_to();
+                        let mut piece =
+                            std::str::from_utf8(&buf[..valid_up_to]).unwrap().to_owned();
+                        match error.error_len() {
+                            // Incomplete sequence at the tail: hold it for the
+                            // next read.
+                            None => carry = buf[valid_up_to..].to_vec(),
+                            // Genuinely invalid bytes: emit replacements now.
+                            Some(_) => piece.push_str(&String::from_utf8_lossy(&buf[valid_up_to..])),
+                        }
+                        piece
+                    }
+                };
                 let mut text = sink.lock().unwrap_or_else(|poison| poison.into_inner());
-                text.push_str(&String::from_utf8_lossy(&bytes[..count]));
+                text.push_str(&decoded);
                 if text.len() > SESSION_CAP {
                     let mut drain = text.len() - SESSION_CAP;
                     while drain < text.len() && !text.is_char_boundary(drain) {

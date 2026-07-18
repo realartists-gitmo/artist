@@ -156,8 +156,15 @@ pub async fn run(
             let model_index = match model {
                 Some(slug) => catalog
                     .iter()
-                    .position(|candidate| candidate.slug == slug)
-                    .with_context(|| format!("model `{slug}` is not selectable"))?,
+                    .position(|candidate| candidate.slug.eq_ignore_ascii_case(slug))
+                    .with_context(|| {
+                        let available = catalog
+                            .iter()
+                            .map(|model| model.slug.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("model `{slug}` is not selectable; available: {available}")
+                    })?,
                 None => pick_model(&catalog, current_model, &mut draw)?
                     .context("model selection cancelled")?,
             };

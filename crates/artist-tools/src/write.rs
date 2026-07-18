@@ -18,7 +18,7 @@ impl Tool for WriteTool {
     type Args = WriteArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically create or overwrite a complete project-relative file.".into()
+        "Create or fully overwrite a project-relative file; use read+edit for targeted changes.".into()
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})

@@ -469,7 +469,7 @@ impl FileToolManager {
             let line_idx = start + i;
             if view.lines.get(line_idx).is_some() {
                 let anchor = visible_anchors[line_idx].clone();
-                rendered.push_str(&format!("{} | {}\n", anchor, line));
+                rendered.push_str(&format!("{}: {}\n", anchor, line));
                 structured.push(AnchoredLine {
                     line_number: line_idx + 1,
                     anchor,
@@ -522,7 +522,7 @@ impl FileToolManager {
         for (i, line) in lines.iter().enumerate() {
             if view.lines.get(i).is_some() {
                 let anchor = visible_anchors[i].clone();
-                rendered.push_str(&format!("{} | {}\n", anchor, line));
+                rendered.push_str(&format!("{}: {}\n", anchor, line));
                 structured.push(AnchoredLine {
                     line_number: i + 1,
                     anchor,
@@ -818,6 +818,9 @@ impl FileToolManager {
             })
         });
 
+        // Inserted lines take the file's dominant terminator so a CRLF file
+        // doesn't end up with mixed line endings.
+        let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
         let mut result = content;
         for op in &resolved {
             match &op.kind {
@@ -833,18 +836,18 @@ impl FileToolManager {
                     );
                 }
                 OpKind::InsertBefore { content } => {
-                    let to_insert = if content.ends_with('\n') || content.ends_with("\r\n") {
+                    let to_insert = if content.ends_with('\n') {
                         content.clone()
                     } else {
-                        format!("{}\n", content)
+                        format!("{content}{newline}")
                     };
                     result.insert_str(op.byte_start, &to_insert);
                 }
                 OpKind::InsertAfter { content } => {
-                    let to_insert = if content.ends_with('\n') || content.ends_with("\r\n") {
+                    let to_insert = if content.ends_with('\n') {
                         content.clone()
                     } else {
-                        format!("{}\n", content)
+                        format!("{content}{newline}")
                     };
                     result.insert_str(op.byte_start, &to_insert);
                 }
@@ -934,9 +937,10 @@ impl FileToolManager {
         let clean = clean_owned.as_str();
         let packed = issued.get(clean).cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "anchor '{}' was not issued for this file. Re-read the file to get current mnemonic anchors.",
+                "'{}' is not an issued anchor for this file. It looks like line content, not an anchor. Use the anchor token before the colon from the latest read (for example, `abc` from `abc: content`), or re-read the file to get current mnemonic anchors.",
                 visible
             )
+
         })?;
         let full_hash = binding_full(&packed).to_owned();
         if view.lines.iter().any(|line| line.full_hash == full_hash) {
@@ -1381,7 +1385,7 @@ mod tests {
             .lines()
             .next()
             .unwrap()
-            .split('|')
+            .split(':')
             .next()
             .unwrap()
             .trim()

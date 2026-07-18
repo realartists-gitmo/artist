@@ -395,9 +395,19 @@ impl StreamMatcher {
         if let Some(name) = tool_name {
             entry.0 = Some(name.to_owned());
         }
+        // Scan only the newly-appended tail plus a bounded overlap, not the
+        // whole accumulator every delta (which was O(N^2) in time and
+        // allocation as tool args stream — e.g. a large file written via edit).
+        // A match spanning further back is caught by tool_call_complete's full
+        // scan when the call finishes.
+        const OVERLAP: usize = 1024;
+        let mut scan_from = entry.1.len().saturating_sub(OVERLAP);
         entry.1.push_str(delta);
+        while scan_from > 0 && !entry.1.is_char_boundary(scan_from) {
+            scan_from -= 1;
+        }
         let tool = entry.0.clone();
-        let haystack = entry.1.clone();
+        let haystack = entry.1[scan_from..].to_owned();
         self.match_args(&haystack, tool.as_deref(), armed)
     }
 

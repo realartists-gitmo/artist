@@ -27,10 +27,8 @@ struct Frontmatter {
 
 pub fn discover(workspace: &Path, diagnostics: &mut Vec<String>) -> BTreeMap<String, Skill> {
     let mut roots = Vec::new();
-    if let Some(config) = dirs::config_dir() {
-        roots.push(config.join("artist/skills"));
-    }
     if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".artist/skills"));
         roots.push(home.join(".agents/skills"));
     }
     let start = workspace

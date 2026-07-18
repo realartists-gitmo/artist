@@ -24,7 +24,7 @@ impl Tool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace lines using mnemonic anchors returned by read. Never use line numbers."
+        "Atomically replace lines using ANCHORs from the latest read."
             .into()
     }
     fn parameters(&self) -> Value {

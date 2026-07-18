@@ -71,7 +71,14 @@ pub(crate) fn apply_selection(
     let model = models
         .iter()
         .find(|model| model.slug == slug)
-        .with_context(|| format!("model `{slug}` is not selectable"))?;
+        .with_context(|| {
+            let available = models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("model `{slug}` is not selectable; available: {available}")
+        })?;
     let reasoning = reasoning.or(model.default_reasoning_level.as_deref());
     if let Some(effort) = reasoning
         && !model
@@ -79,7 +86,15 @@ pub(crate) fn apply_selection(
             .iter()
             .any(|level| level.effort == effort)
     {
-        bail!("reasoning effort `{effort}` is not supported by model `{slug}`");
+        let supported = model
+            .supported_reasoning_levels
+            .iter()
+            .map(|level| level.effort.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "reasoning effort `{effort}` is not supported by model `{slug}`; supported: {supported}"
+        );
     }
     provider.model = Some(model.slug.clone());
     provider.reasoning_effort = reasoning.map(str::to_owned);

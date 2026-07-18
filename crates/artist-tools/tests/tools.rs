@@ -36,7 +36,7 @@ async fn reads_then_edits_with_mnemonic_anchor() {
         .lines()
         .nth(1)
         .unwrap()
-        .split('|')
+        .split(':')
         .next()
         .unwrap()
         .trim();
@@ -132,7 +132,7 @@ async fn stale_anchor_requires_a_fresh_read() {
         .lines()
         .nth(1)
         .unwrap()
-        .split('|')
+        .split(':')
         .next()
         .unwrap()
         .trim();
@@ -163,7 +163,7 @@ async fn edit_temp_symlink_cannot_escape_workspace() {
         .lines()
         .next()
         .unwrap()
-        .split('|')
+        .split(':')
         .next()
         .unwrap()
         .trim();

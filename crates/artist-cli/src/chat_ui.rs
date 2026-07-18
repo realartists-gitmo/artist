@@ -1933,8 +1933,28 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
     )
 }
 
+/// Whether the terminal has a light background, from `COLORFGBG` (`fg;bg`, and
+/// some emulators `fg;default;bg`). A trailing field of 7 (light gray) or 15
+/// (white) means a light background. Defaults to dark when unset/unknown.
+fn terminal_is_light() -> bool {
+    std::env::var("COLORFGBG")
+        .ok()
+        .and_then(|value| {
+            value
+                .rsplit(';')
+                .next()
+                .and_then(|bg| bg.trim().parse::<u8>().ok())
+        })
+        .map(|bg| matches!(bg, 7 | 15))
+        .unwrap_or(false)
+}
+
 fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
-    let mut style = glamour::Style::Dark.config();
+    let mut style = if terminal_is_light() {
+        glamour::Style::Light.config()
+    } else {
+        glamour::Style::Dark.config()
+    };
     style.document.margin = Some(0);
     let rendered = glamour::Renderer::new()
         .with_style_config(style)
@@ -2195,7 +2215,9 @@ fn panel_option_style(option: &str) -> Style {
     // highlighted. (Previously index 0 was also highlighted, so navigating away
     // left two items blue.)
     if option.trim_start().starts_with('›') {
-        Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
     } else if option.contains("[x]") {
         Style::default().fg(Color::Green)
     } else {
@@ -2528,7 +2550,10 @@ mod tests {
                     frame,
                     &input,
                     // The selected suggestion carries a leading "› " marker.
-                    &["› /help  Show commands".into(), "/model  Select model".into()],
+                    &[
+                        "› /help  Show commands".into(),
+                        "/model  Select model".into(),
+                    ],
                     &Line::default(),
                     false,
                 )

@@ -25,8 +25,8 @@ pub(crate) struct CustomCommand {
 /// built-in command names always win (a custom `/help.md` is ignored).
 pub(crate) fn discover(project: &Path) -> Vec<CustomCommand> {
     let mut roots = Vec::new();
-    if let Some(config) = dirs::config_dir() {
-        roots.push(config.join("artist/commands"));
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".artist/commands"));
     }
     roots.push(project.join(".artist/commands"));
     let mut commands: Vec<CustomCommand> = Vec::new();

@@ -188,7 +188,7 @@ Expose four tools (names are suggestions):
 
 **Critical instruction for the model** (also available as `hashline_tools::ANCHOR_USAGE`):
 
-> Use only the bare mnemonic token before ` | `. For the rendered line `time | beta`, pass anchor `"time"` (not `"time | beta"`).
+> Use only the bare mnemonic token before `: `. For the rendered line `time: beta`, pass anchor `"time"` (not `"time: beta"`).
 
 Edit ops:
 
