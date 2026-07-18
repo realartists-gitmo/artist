@@ -85,6 +85,10 @@ async fn run() -> Result<()> {
                     login::chatgpt(&mut store).await?;
                     store.save(&path)?;
                 }
+                (None, Some(ProviderAction::Add)) => {
+                    login::add_provider(&mut store)?;
+                    store.save(&path)?;
+                }
                 (None, Some(ProviderAction::List)) => list(&store),
                 (None, Some(ProviderAction::Set)) => {
                     set_default(&mut store)?;
@@ -94,7 +98,7 @@ async fn run() -> Result<()> {
                     test_selected(&mut store, &path).await?;
                     store.save(&path)?;
                 }
-                _ => bail!("choose --login chatgpt or list, set, or test"),
+                _ => bail!("choose --login chatgpt, or add, list, set, or test"),
             }
         }
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -109,7 +113,19 @@ async fn run() -> Result<()> {
             let mut scratch = store.providers[selected].clone();
             scratch.model = global.model.clone();
             scratch.reasoning_effort = global.reasoning_effort.clone();
-            models::select(&mut scratch).await?;
+            // The interactive catalog is Codex-shaped; API-key backends expose
+            // their own model lists, so enter the slug directly for those.
+            if scratch.kind.is_api_key() {
+                let model = prompt::text("Model slug", global.model.as_deref())?;
+                scratch.model = Some(model);
+                let effort = prompt::text(
+                    "Reasoning effort (blank for provider default)",
+                    global.reasoning_effort.as_deref(),
+                )?;
+                scratch.reasoning_effort = (!effort.trim().is_empty()).then_some(effort);
+            } else {
+                models::select(&mut scratch).await?;
+            }
             settings::write_provider_defaults(
                 config_root,
                 scratch.model.as_deref(),
@@ -696,6 +712,15 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     let mut provider = store.providers[selected].clone();
     provider.model = global.model.clone();
     provider.reasoning_effort = global.reasoning_effort.clone();
+    // The raw test hits the ChatGPT/Codex Responses endpoint shape; for API-key
+    // backends the real check is a live turn.
+    if provider.kind.is_api_key() {
+        println!(
+            "{} is an API-key provider — run `artist -p \"hi\"` with it selected to verify the key.",
+            provider.name
+        );
+        return Ok(());
+    }
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
     test_provider::test(&provider).await?;

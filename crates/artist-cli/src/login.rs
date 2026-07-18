@@ -1,6 +1,6 @@
 use crate::store::ProviderStore;
 use anyhow::{Context, Result, bail};
-use llm_provider::{ChatGptOAuth, ProviderId, SavedProvider};
+use llm_provider::{ChatGptOAuth, ProviderId, ProviderKind, SavedProvider, Secret};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -32,6 +32,84 @@ pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
         auth,
     );
     println!("Logged in and saved ChatGPT.");
+    store.add(provider);
+    Ok(())
+}
+
+/// A backend the `provider add` flow knows how to pre-fill. The base URLs are
+/// hosts (the rig client appends its own path); the last entry lets the user
+/// point at any endpoint.
+pub struct KnownProvider {
+    pub label: &'static str,
+    pub base_url: &'static str,
+    pub kind: ProviderKind,
+    pub env_key: &'static str,
+}
+
+pub const KNOWN_PROVIDERS: &[KnownProvider] = &[
+    KnownProvider {
+        label: "xAI (Grok)",
+        base_url: "https://api.x.ai",
+        kind: ProviderKind::OpenAi,
+        env_key: "XAI_API_KEY",
+    },
+    KnownProvider {
+        label: "OpenAI (API key)",
+        base_url: "https://api.openai.com",
+        kind: ProviderKind::OpenAi,
+        env_key: "OPENAI_API_KEY",
+    },
+    KnownProvider {
+        label: "Anthropic (Claude)",
+        base_url: "https://api.anthropic.com",
+        kind: ProviderKind::Anthropic,
+        env_key: "ANTHROPIC_API_KEY",
+    },
+    KnownProvider {
+        label: "Google Gemini",
+        base_url: "https://generativelanguage.googleapis.com",
+        kind: ProviderKind::Gemini,
+        env_key: "GEMINI_API_KEY",
+    },
+    KnownProvider {
+        label: "Custom (OpenAI Responses-compatible endpoint)",
+        base_url: "",
+        kind: ProviderKind::OpenAi,
+        env_key: "",
+    },
+];
+
+/// Interactively add an API-key provider: pick a backend, confirm name and base
+/// URL, and supply the key (from the provider's env var if set, else prompted).
+pub fn add_provider(store: &mut ProviderStore) -> Result<()> {
+    let labels: Vec<String> = KNOWN_PROVIDERS
+        .iter()
+        .map(|provider| provider.label.to_owned())
+        .collect();
+    let choice = &KNOWN_PROVIDERS[crate::prompt::select("Provider", &labels, 0)?];
+    let name = crate::prompt::text("Name", Some(choice.label))?;
+    let base_default = (!choice.base_url.is_empty()).then_some(choice.base_url);
+    let base_url = url::Url::parse(&crate::prompt::text("API base URL", base_default)?)
+        .context("invalid base URL")?;
+    let key = match (!choice.env_key.is_empty())
+        .then(|| std::env::var(choice.env_key).ok())
+        .flatten()
+    {
+        Some(key) => {
+            println!("Using {} from the environment.", choice.env_key);
+            key
+        }
+        None => crate::prompt::secret("API key")?,
+    };
+    let id = unique_id(store, &name);
+    let provider = SavedProvider::api_key(
+        ProviderId::new(id)?,
+        name,
+        choice.kind,
+        base_url,
+        Secret::new(key),
+    )?;
+    println!("Saved {} — set a model with `artist model`.", provider.name);
     store.add(provider);
     Ok(())
 }
