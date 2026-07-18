@@ -125,7 +125,7 @@ once per session (default) or once per user turn.
 
 ### Declarative rules
 
-Markdown files in `~/.config/artist/rules/`, `~/.agents/rules/`,
+Markdown files in `~/.artist/rules/`, `~/.agents/rules/`,
 `<project>/.artist/rules/`, or `<project>/.agents/rules/` (later scopes
 shadow earlier by name; hot-reloaded between turns via an mtime
 fingerprint). Scaffold one with `artist rules new <name>`.
@@ -294,13 +294,40 @@ leave the tree. On stale/unknown anchors the model must re-read then retry
   `/rewind`, `/rules`, `/help`, extension-declared commands, and `!` bang
   commands routed to the persistent input shell — plus **custom commands**:
   markdown prompt templates in
-  `<project>/.artist/commands/*.md` or `~/.config/artist/commands/` with
+  `<project>/.artist/commands/*.md` or `~/.artist/commands/` with
   optional frontmatter (`description`) and `$ARGUMENTS` expansion; they
   join the completion menu (built-in names always win).
 - **Maintenance:** `artist rules new`, `artist sessions list|render|gc`.
 - Status bar `Context` segment shows current-context tokens *and* the
   session's cumulative total, so tool loops and TTSR retries aren't
   misread.
+
+## Configuration
+
+Global state lives in `~/.artist/` (override with `$ARTIST_CONFIG_DIR`); a
+one-time migration moves a pre-existing `~/.config/artist/` in, preferring
+destination files on conflict so a partial home is never clobbered
+(`store.rs`). `providers.toml` holds provider identity, secrets, the status
+bar, and the base `disabled_tools`.
+
+Overridable behaviour is layered through **`settings.toml`**, resolved from a
+global `~/.artist/settings.toml` and a project `<repo>/.artist/settings.toml`,
+plus an optional highest-precedence override layer (CLI/session):
+
+```toml
+model = "gpt-5-codex"        # override the active account's model
+reasoning_effort = "high"    # override reasoning effort
+
+[permissions]
+deny = ["write", "edit"]     # tools the agent may not use
+```
+
+Resolution rules (`settings.rs`): **scalars** (`model`, `reasoning_effort`)
+take the highest-precedence layer that sets them (override > project >
+global); **restriction lists** (`permissions.deny`) are **unioned** with each
+other and with `providers.toml`'s `disabled_tools`, so a project can tighten
+access but never silently loosen it. Model/reasoning overrides apply to a
+throwaway provider clone per session — never persisted back to `providers.toml`.
 
 ## Auth, providers, MCP
 

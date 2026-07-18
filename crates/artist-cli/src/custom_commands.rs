@@ -1,5 +1,5 @@
 //! User-defined slash commands: markdown prompt templates discovered from
-//! `~/.config/artist/commands/` and `<project>/.artist/commands/`.
+//! `~/.artist/commands/` and `<project>/.artist/commands/`.
 //!
 //! A command file is `<name>.md` with optional YAML frontmatter
 //! (`description`); the body is the prompt template. `$ARGUMENTS` in the

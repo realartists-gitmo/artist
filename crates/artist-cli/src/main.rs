@@ -11,6 +11,7 @@ mod login;
 mod models;
 mod prompt;
 mod sessions;
+mod settings;
 mod slash_commands;
 mod startup_splash;
 mod status_bar;
@@ -113,10 +114,20 @@ async fn run() -> Result<()> {
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
+            let project = std::env::current_dir().context("find current project directory")?;
+            // Layered settings (global ~/.artist + project .artist) resolve the
+            // model/reasoning overrides and the effective tool denylist.
+            let effective = settings::load_effective(
+                config_root,
+                &project,
+                &settings::Overrides::default(),
+                &store.disabled_tools,
+            )?;
             // Catch a missing model here, before the TUI takes over — otherwise
             // it only surfaces as an agent error on the first prompt, forcing a
-            // quit → `artist model` → relaunch.
-            if store.providers[selected].model.is_none() {
+            // quit → `artist model` → relaunch. A settings override counts as a
+            // model, so this only fires when nothing supplies one.
+            if store.providers[selected].model.is_none() && effective.model.is_none() {
                 bail!("no model selected — run `artist model` to choose one first");
             }
             // Resolve an interactive resume before entering inline TUI mode so the
@@ -124,7 +135,6 @@ async fn run() -> Result<()> {
             // Draw the startup UI before loading models, extensions, indexes, or
             // servers, then initialize integrations concurrently below.
             let sessions = SessionStore::new(config_root);
-            let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let terminal = chat_ui::start_terminal(resumed.is_none(), cli.prompt.is_some())?;
             let extension_control = extension_control::ExtensionControl::default();
@@ -157,6 +167,7 @@ async fn run() -> Result<()> {
                     extension_control: &extension_control,
                     rules_engine: &rules_engine,
                     rules_handle: &rules_handle,
+                    settings: &effective,
                 },
                 resumed,
                 cli.prompt,
@@ -247,6 +258,15 @@ async fn execute_prompt(
     let config_root = path.parent().context("providers path has no parent")?;
     let sessions = SessionStore::new(config_root);
     let project = std::env::current_dir().context("find current project directory")?;
+    let effective = settings::load_effective(
+        config_root,
+        &project,
+        &settings::Overrides::default(),
+        &store.disabled_tools,
+    )?;
+    // Session-scoped provider carrying the settings model/reasoning override
+    // (a throwaway clone, never persisted).
+    let session_provider = effective.apply_to(store.providers[selected].clone());
     let tools = tool_bundle(config_root, &project)?;
     let (active, events) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
@@ -288,14 +308,14 @@ async fn execute_prompt(
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
     let outcome = {
         let chat = artist_agent::stream_chat(
-            &store.providers[selected],
+            &session_provider,
             &agent_input,
             history,
             artist_agent::ToolContext {
                 native: &tools,
                 mcp,
                 extensions: Some(extensions),
-                disabled: &store.disabled_tools,
+                disabled: &effective.denied_tools,
             },
             handles,
             |event| {

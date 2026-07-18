@@ -336,6 +336,8 @@ struct ChatContext<'a> {
     extension_control: &'a crate::extension_control::ExtensionControl,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
+    /// Resolved layered settings: model/reasoning overrides and denied tools.
+    settings: &'a crate::settings::EffectiveSettings,
 }
 
 pub struct ChatResources<'a> {
@@ -347,6 +349,7 @@ pub struct ChatResources<'a> {
     pub extension_control: &'a crate::extension_control::ExtensionControl,
     pub rules_engine: &'a RulesEngine,
     pub rules_handle: &'a RulesHandle,
+    pub settings: &'a crate::settings::EffectiveSettings,
 }
 
 /// Compact inline viewport height: input(1) + borders(2) + status(1). The
@@ -449,6 +452,7 @@ pub async fn run(
                     extension_control,
                     rules_engine: resources.rules_engine,
                     rules_handle: resources.rules_handle,
+                    settings: resources.settings,
                 },
                 resumed,
                 initial_prompt,
@@ -563,10 +567,16 @@ async fn run_loop(
     let mut command_panel = Vec::new();
     let mut suggestion_index = 0usize;
     let mut suggestion_input = String::new();
+    // The provider the session actually runs with: the selected account plus
+    // any settings model/reasoning override, applied to a throwaway clone so
+    // the override is never persisted. Rebuilt when the account changes
+    // (`/accounts`) or before a turn (to carry a freshly-refreshed token).
+    let mut session_provider =
+        context.settings.apply_to(context.store.providers[context.provider_index].clone());
     if resumed_session {
         let footer = footer_line(
             &context.store.status_bar,
-            &context.store.providers[context.provider_index],
+            &session_provider,
             context.project,
             &status,
         );
@@ -643,7 +653,7 @@ async fn run_loop(
         };
         let footer = footer_line(
             &context.store.status_bar,
-            &context.store.providers[context.provider_index],
+            &session_provider,
             context.project,
             &status,
         );
@@ -740,6 +750,11 @@ async fn run_loop(
                         if let Some(new_index) = switch {
                             context.provider_index = new_index;
                             status.refresh(&context.store.status_bar, context.project);
+                            // The settings override still applies to whichever
+                            // account is now active.
+                            session_provider = context.settings.apply_to(
+                                context.store.providers[context.provider_index].clone(),
+                            );
                         }
                         panel
                     }
@@ -808,10 +823,15 @@ async fn run_loop(
                 {
                     let _ = context.store.save(context.store_path);
                 }
+                // Carry the just-refreshed token (and the settings override)
+                // into the request provider.
+                session_provider = context
+                    .settings
+                    .apply_to(context.store.providers[context.provider_index].clone());
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
-                        provider: &context.store.providers[context.provider_index],
+                        provider: &session_provider,
                         sessions: context.sessions,
                         project: context.project,
                         status_config: &context.store.status_bar,
@@ -819,7 +839,7 @@ async fn run_loop(
                         mcp: context.mcp,
                         extensions: context.extensions,
                         extension_control: context.extension_control,
-                        disabled_tools: &context.store.disabled_tools,
+                        disabled_tools: &context.settings.denied_tools,
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
