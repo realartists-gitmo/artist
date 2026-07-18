@@ -1280,20 +1280,6 @@ async fn submit(
         insert_blank(terminal)?;
     }
     insert_message(terminal, &prompt.display)?;
-    if status.context_capacity.is_none()
-        && context.status_config.items.contains(&StatusItem::Context)
-    {
-        status.context_capacity =
-            models::catalog(context.provider)
-                .await
-                .ok()
-                .and_then(|catalog| {
-                    catalog
-                        .iter()
-                        .find(|model| Some(&model.slug) == context.provider.model.as_ref())
-                        .and_then(|model| model.effective_context_window())
-                });
-    }
     let empty_input = ChatInput::default();
     let mut footer = footer_line(
         context.status_config,
@@ -1303,6 +1289,13 @@ async fn submit(
     );
     terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, false))?;
     terminal.show_cursor()?;
+    // The context-size readout needs the model catalog — a ~1s network call on
+    // the first turn (`context_capacity` is unset). Run it CONCURRENTLY with the
+    // streaming loop (polled as a select arm below) instead of blocking, so the
+    // input box stays live and the user can type/queue while it's in flight.
+    let mut catalog_fut = (status.context_capacity.is_none()
+        && context.status_config.items.contains(&StatusItem::Context))
+    .then(|| Box::pin(models::catalog(context.provider)));
     let mut response = String::new();
     let mut visible = String::new();
     let mut reasoning = String::new();
@@ -1384,6 +1377,23 @@ async fn submit(
     )?;
     while !task.is_finished() || !rx.is_empty() {
         tokio::select! {
+            // The context-size fetch resolves concurrently; update the readout
+            // when it lands. Disabled once done via the `if` guard.
+            catalog = async { catalog_fut.as_mut().unwrap().await }, if catalog_fut.is_some() => {
+                catalog_fut = None;
+                status.context_capacity = catalog.ok().and_then(|catalog| {
+                    catalog
+                        .iter()
+                        .find(|model| Some(&model.slug) == context.provider.model.as_ref())
+                        .and_then(|model| model.effective_context_window())
+                });
+                footer = footer_line(
+                    context.status_config,
+                    context.provider,
+                    context.project,
+                    status,
+                );
+            }
             _ = ticker.tick() => {
                 animation_frame = animation_frame.wrapping_add(1);
                 if context.extension_control.take_stop() {
