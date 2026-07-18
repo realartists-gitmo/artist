@@ -19,11 +19,16 @@ pub struct Manager {
     /// Abort handles for the per-status-item refresh loops, cancelled on drop
     /// so they don't leak their wasm instance across a Manager reload.
     status_tasks: Vec<tokio::task::AbortHandle>,
+    /// Event-forwarding tasks (one per instance). Each holds an `Arc<Instance>`
+    /// which keeps a bus sender alive, so `recv()` never returns `Closed` — the
+    /// task can only be stopped by aborting it, or it leaks its wasm instance
+    /// forever across every reload.
+    event_tasks: Vec<tokio::task::AbortHandle>,
 }
 
 impl Drop for Manager {
     fn drop(&mut self) {
-        for handle in &self.status_tasks {
+        for handle in self.status_tasks.iter().chain(&self.event_tasks) {
             handle.abort();
         }
     }
@@ -67,9 +72,10 @@ impl Manager {
             events,
             context,
             status_tasks: Vec::new(),
+            event_tasks: Vec::new(),
         };
         manager.status_tasks = manager.start_status_refresh();
-        manager.start_event_forwarding();
+        manager.event_tasks = manager.start_event_forwarding();
         manager
     }
 
@@ -147,11 +153,12 @@ impl Manager {
             .collect()
     }
 
-    fn start_event_forwarding(&self) {
+    fn start_event_forwarding(&self) -> Vec<tokio::task::AbortHandle> {
         let instances = self.instances.values().cloned().collect::<Vec<_>>();
+        let mut handles = Vec::new();
         for instance in instances {
             let mut receiver = self.events.subscribe();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 loop {
                     match receiver.recv().await {
                         Ok(json) => {
@@ -162,7 +169,9 @@ impl Manager {
                     }
                 }
             });
+            handles.push(task.abort_handle());
         }
+        handles
     }
 
     fn start_status_refresh(&self) -> Vec<tokio::task::AbortHandle> {

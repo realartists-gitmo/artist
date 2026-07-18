@@ -119,6 +119,7 @@ impl Tool for Delegate {
                     args.fork.unwrap_or(false),
                     args.model,
                     args.reasoning,
+                    false,
                 )
                 .await
             }
@@ -136,6 +137,7 @@ impl Tool for Delegate {
                                 args.fork.unwrap_or(false),
                                 args.model,
                                 args.reasoning,
+                                true,
                             )
                             .await
                             .map_err(|error| error.to_string())
@@ -183,6 +185,7 @@ impl Delegate {
         fork: bool,
         model: Option<String>,
         reasoning: Option<String>,
+        background: bool,
     ) -> Result<String, DelegateError> {
         let model = model
             .as_deref()
@@ -199,7 +202,7 @@ impl Delegate {
             prompt: prompt.clone(),
             read_only,
             fork,
-            background: false,
+            background,
         });
         let mut policy = if read_only {
             format!(

@@ -134,7 +134,11 @@ pub fn build(
                 // Ids come from the committed assistant ToolCall block, never
                 // from the capture event, so the pairing rig validates on
                 // replay always holds.
-                let position = unanswered
+                // Skip a result that matches no pending call (by id/call_id, or
+                // name) rather than defaulting to entry 0 and mis-pairing it
+                // with an unrelated call — that would emit history a provider
+                // rejects. Also covers the empty-`unanswered` case.
+                let Some(position) = unanswered
                     .iter()
                     .position(|(id, call_id, _)| {
                         result.tool_call_id.as_deref() == Some(id)
@@ -145,12 +149,9 @@ pub fn build(
                             .iter()
                             .position(|(_, _, name)| *name == result.name)
                     })
-                    .unwrap_or(0);
-                if unanswered.is_empty() {
-                    // Result with no committed call (shouldn't happen): skip
-                    // rather than emit history a provider would reject.
+                else {
                     continue;
-                }
+                };
                 let (id, call_id, _) = unanswered.remove(position);
                 pending_results.push(ToolResult {
                     id,

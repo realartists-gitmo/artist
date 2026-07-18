@@ -158,7 +158,16 @@ impl RulesHandle {
     /// once-semantics and injections survive process restarts (`-r`).
     pub fn restore_from_log(&self, events: &[Envelope]) {
         let mut state = self.lock();
-        for envelope in events {
+        // Rebuild from scratch so repeated restores (resume, rewind, fork) don't
+        // accumulate. Runtime `disabled` and the retry budget aren't derived
+        // from the log, so they're preserved.
+        state.fired.clear();
+        state.per_turn_fired.clear();
+        state.active_injections.clear();
+        state.hits.clear();
+        // Rewound/masked events are excluded — a fire hidden behind a
+        // `HistoryRewind` must not count as fired on resume.
+        for envelope in artist_session::visible_events(events) {
             match envelope.event() {
                 SessionEvent::RuleFired(fired) => {
                     let rule = RuleId(fired.rule.clone());

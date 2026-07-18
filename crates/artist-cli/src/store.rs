@@ -149,7 +149,10 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         let from = entry.path();
         let to = destination.join(entry.file_name());
         if from.is_dir() {
-            if !to.exists() { copy_tree(&from, &to)?; }
+            // Recurse even into an existing destination dir so legacy-only
+            // nested files merge in; the per-file guard below keeps destination
+            // files winning.
+            copy_tree(&from, &to)?;
         } else if !to.exists() {
             fs::copy(&from, &to)?;
         }
@@ -301,6 +304,28 @@ account_id = "acct"
         assert_eq!(
             fs::read_to_string(destination.join("nested/b.txt")).unwrap(),
             "nested\n"
+        );
+    }
+
+    #[test]
+    fn copy_tree_merges_into_existing_subdirectory() {
+        // When the destination subdir already exists, legacy-only files under
+        // it must still merge in (rather than the whole subtree being skipped).
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let destination = dir.path().join("dst");
+        write_file(&source.join("rules/legacy.md"), "legacy\n");
+        write_file(&destination.join("rules/kept.md"), "kept\n");
+
+        copy_tree(&source, &destination).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.join("rules/legacy.md")).unwrap(),
+            "legacy\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("rules/kept.md")).unwrap(),
+            "kept\n"
         );
     }
 

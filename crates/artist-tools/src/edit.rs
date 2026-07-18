@@ -69,7 +69,7 @@ impl Tool for EditTool {
             .iter()
             .filter(|line| !before_lines.contains(line.text.as_str()))
             .take(50)
-            .map(|line| format!("{} | {}", line.anchor, line.text))
+            .map(|line| format!("{}: {}", line.anchor, line.text))
             .collect::<Vec<_>>()
             .join("\n");
         Ok(output::head(

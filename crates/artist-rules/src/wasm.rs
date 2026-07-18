@@ -62,6 +62,11 @@ impl host::Host for HostState {
         self.kv.get(&key).cloned()
     }
     fn kv_set(&mut self, key: String, value: String) {
+        // Overwriting a key frees its previous value's bytes first, so the
+        // accounting reflects real usage instead of double-counting.
+        if let Some(old) = self.kv.remove(&key) {
+            self.kv_bytes = self.kv_bytes.saturating_sub(key.len() + old.len());
+        }
         let addition = key.len() + value.len();
         if self.kv_bytes + addition > KV_CAP_BYTES {
             // Evict arbitrary entries until it fits — bounded state, not a

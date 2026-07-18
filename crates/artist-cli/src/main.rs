@@ -323,11 +323,16 @@ async fn execute_prompt(
         source: "prompt".to_owned(),
     });
     let rules_engine = artist_rules::RulesEngine::discover(&project);
+    // Restore prior rule state (once-per-session fires, persistent injections)
+    // when resuming — the TUI path does this too; `-p` must match or a resumed
+    // session re-fires once-only rules.
+    let rules = artist_rules::state::RulesHandle::default();
+    rules.restore_from_log(&events);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
-        rules: artist_rules::state::RulesHandle::default(),
+        rules,
         rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
         attachments: active.attachments.clone(),
@@ -531,7 +536,9 @@ fn sessions_gc(
     dry_run: bool,
 ) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let cutoff = now.saturating_sub(older_than_days * 24 * 60 * 60 * 1000);
+    // Saturating throughout so a huge `--older-than-days` can't overflow the
+    // multiplication (panic in debug / wrap in release) before the subtraction.
+    let cutoff = now.saturating_sub(older_than_days.saturating_mul(24 * 60 * 60 * 1000));
     let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
         Default::default();
     for session in sessions.list()? {
@@ -757,7 +764,7 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
     let needs_refresh = provider
         .auth
         .expires_at()
-        .map_or(true, |expiry| expiry <= now.saturating_add(60));
+        .is_none_or(|expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
         return force_refresh(provider).await.map(|()| true);
     }

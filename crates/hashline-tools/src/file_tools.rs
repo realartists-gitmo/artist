@@ -31,6 +31,22 @@ fn normalize_replacement_content(content: &str) -> &str {
         .unwrap_or(content)
 }
 
+/// Re-terminate every line of inserted `content` with the file's dominant
+/// `newline` (and guarantee a trailing one), so a bare `\n` in the supplied
+/// content can't introduce mixed endings into a CRLF file. Empty content
+/// inserts a single blank line, matching the previous behaviour.
+fn normalize_insertion(content: &str, newline: &str) -> String {
+    if content.is_empty() {
+        return newline.to_owned();
+    }
+    let mut out = String::new();
+    for line in content.split_inclusive('\n') {
+        out.push_str(line.trim_end_matches(['\r', '\n']));
+        out.push_str(newline);
+    }
+    out
+}
+
 /// Byte-range information for a single line in the original content.
 /// The terminator (\n or \r\n) is kept separate so Replace/Insert
 /// operations can preserve the original line structure.
@@ -860,20 +876,19 @@ impl FileToolManager {
                     );
                 }
                 OpKind::InsertBefore { content } => {
-                    let to_insert = if content.ends_with('\n') {
-                        content.clone()
-                    } else {
-                        format!("{content}{newline}")
-                    };
-                    result.insert_str(op.byte_start, &to_insert);
+                    result.insert_str(op.byte_start, &normalize_insertion(content, newline));
                 }
                 OpKind::InsertAfter { content } => {
-                    let to_insert = if content.ends_with('\n') {
-                        content.clone()
+                    // On the final line without a trailing terminator, the
+                    // insertion point is the end of that line's text with no
+                    // separator — add one so `old` + `new` don't concatenate.
+                    let sep = if op.byte_start > 0 && !result[..op.byte_start].ends_with('\n') {
+                        newline
                     } else {
-                        format!("{content}{newline}")
+                        ""
                     };
-                    result.insert_str(op.byte_start, &to_insert);
+                    let insertion = format!("{sep}{}", normalize_insertion(content, newline));
+                    result.insert_str(op.byte_start, &insertion);
                 }
             }
         }
@@ -914,7 +929,7 @@ impl FileToolManager {
         for (i, line) in result_lines.iter().enumerate() {
             if final_view.lines.get(i).is_some() {
                 let anchor = visible_anchors[i].clone();
-                rendered.push_str(&format!("{} | {}\n", anchor, line));
+                rendered.push_str(&format!("{}: {}\n", anchor, line));
                 structured.push(AnchoredLine {
                     line_number: i + 1,
                     anchor,
@@ -1155,6 +1170,18 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_insertion_reterminates_and_normalizes_crlf() {
+        // A bare-LF-terminated line normalizes to the file's CRLF.
+        assert_eq!(normalize_insertion("// note\n", "\r\n"), "// note\r\n");
+        // Missing trailing terminator is added.
+        assert_eq!(normalize_insertion("a\nb", "\n"), "a\nb\n");
+        // Mixed input collapses to the file's terminator.
+        assert_eq!(normalize_insertion("a\r\nb\n", "\n"), "a\nb\n");
+        // Empty content inserts a single blank line.
+        assert_eq!(normalize_insertion("", "\r\n"), "\r\n");
+    }
 
     #[test]
     fn test_hash_to_base32() {
