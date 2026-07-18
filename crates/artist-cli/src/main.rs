@@ -654,7 +654,7 @@ fn default_index(store: &ProviderStore) -> Result<usize> {
         .context("default provider is missing")
 }
 
-async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
+pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

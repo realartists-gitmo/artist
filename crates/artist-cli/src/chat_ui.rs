@@ -747,6 +747,14 @@ async fn run_loop(
                     false,
                 )?;
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
+                // Refresh the access token at the turn boundary so a session
+                // that outlives the token lifetime keeps working instead of
+                // failing with an unrecoverable 401 (AUTH-1).
+                if crate::refresh_if_needed(&mut context.store.providers[context.provider_index])
+                    .await?
+                {
+                    let _ = context.store.save(context.store_path);
+                }
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
