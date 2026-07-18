@@ -308,15 +308,15 @@ Global state lives in `~/.artist/` (override with `$ARTIST_CONFIG_DIR`); a
 one-time migration moves a pre-existing `~/.config/artist/` in, preferring
 destination files on conflict so a partial home is never clobbered
 (`store.rs`). `providers.toml` holds provider identity, secrets, the status
-bar, and the base `disabled_tools`.
+bar, and the base `disabled_tools` — **not** model choice.
 
-Overridable behaviour is layered through **`settings.toml`**, resolved from a
-global `~/.artist/settings.toml` and a project `<repo>/.artist/settings.toml`,
-plus an optional highest-precedence override layer (CLI/session):
+Behaviour is layered through **`settings.toml`**, resolved from a global
+`~/.artist/settings.toml` and a project `<repo>/.artist/settings.toml`, plus an
+optional highest-precedence override layer (CLI/session):
 
 ```toml
-model = "gpt-5-codex"        # override the active account's model
-reasoning_effort = "high"    # override reasoning effort
+model = "gpt-5-codex"        # the model to use (sole home; moved out of providers.toml)
+reasoning_effort = "high"    # reasoning effort
 
 [permissions]
 deny = ["write", "edit"]     # tools the agent may not use
@@ -326,8 +326,15 @@ Resolution rules (`settings.rs`): **scalars** (`model`, `reasoning_effort`)
 take the highest-precedence layer that sets them (override > project >
 global); **restriction lists** (`permissions.deny`) are **unioned** with each
 other and with `providers.toml`'s `disabled_tools`, so a project can tighten
-access but never silently loosen it. Model/reasoning overrides apply to a
-throwaway provider clone per session — never persisted back to `providers.toml`.
+access but never silently loosen it.
+
+Model/reasoning are settings, not per-provider fields: `artist model` writes
+the global `settings.toml`, and a first launch after upgrade migrates any
+per-provider model out of `providers.toml` (which then drops the field on its
+next save — the `SavedProvider` fields are runtime-only carriers now,
+`skip_serializing`). At session time the resolved model/reasoning are applied
+to a throwaway provider clone, so switching accounts (`/accounts`) keeps the
+project's model and nothing settings-derived is ever persisted back.
 
 ## Auth, providers, MCP
 

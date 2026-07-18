@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use llm_provider::SavedProvider;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// The settings file name, used for both the global and project locations.
@@ -22,29 +22,36 @@ pub const SETTINGS_FILE: &str = "settings.toml";
 
 /// One settings layer, as read from a single `settings.toml`. Every field is
 /// optional so an absent field means "defer to a lower layer", not "reset".
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
-    /// Override the active provider's model for this scope.
-    #[serde(default)]
+    /// The model to use in this scope. This is the sole home for model choice
+    /// (moved out of `providers.toml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Override the reasoning effort for this scope.
-    #[serde(default)]
+    /// The reasoning effort in this scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
 }
 
 /// The access-policy section. Today the only primitive is a tool denylist; it
 /// is structured as its own table so richer policy can be added without
 /// reshaping the file.
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
     /// Tool names the agent may not use in this scope. Unioned with the global
     /// `disabled_tools` and across layers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+}
+
+impl Permissions {
+    fn is_empty(&self) -> bool {
+        self.deny.is_empty()
+    }
 }
 
 impl Settings {
@@ -60,6 +67,59 @@ impl Settings {
             Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
         }
     }
+
+    /// Write these settings atomically, creating the parent directory. Empty
+    /// fields are omitted so the file stays minimal.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        let text = toml::to_string_pretty(self).context("serialize settings")?;
+        let temp = path.with_extension("toml.tmp");
+        std::fs::write(&temp, text).with_context(|| format!("write {}", temp.display()))?;
+        std::fs::rename(&temp, path).with_context(|| format!("replace {}", path.display()))?;
+        Ok(())
+    }
+}
+
+/// Set the model/reasoning defaults in the global settings file
+/// (`<config_root>/settings.toml`), preserving any other settings already
+/// there. `None` clears the field. This is what `artist model` writes to.
+pub fn write_provider_defaults(
+    config_root: &Path,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<()> {
+    let path = config_root.join(SETTINGS_FILE);
+    let mut settings = Settings::load(&path)?;
+    settings.model = model.map(str::to_owned);
+    settings.reasoning_effort = reasoning_effort.map(str::to_owned);
+    settings.save(&path)
+}
+
+/// One-time move of a provider's model/reasoning (the pre-settings location in
+/// `providers.toml`) into the global settings file. It runs only when the
+/// settings file has no model/reasoning yet, so it is idempotent — once moved,
+/// `providers.toml` drops the fields on its next save and this becomes a no-op.
+/// Returns whether it wrote anything.
+pub fn migrate_provider_defaults(
+    config_root: &Path,
+    provider_model: Option<&str>,
+    provider_reasoning: Option<&str>,
+) -> Result<bool> {
+    if provider_model.is_none() && provider_reasoning.is_none() {
+        return Ok(false);
+    }
+    let path = config_root.join(SETTINGS_FILE);
+    let mut settings = Settings::load(&path)?;
+    if settings.model.is_some() || settings.reasoning_effort.is_some() {
+        return Ok(false);
+    }
+    settings.model = provider_model.map(str::to_owned);
+    settings.reasoning_effort = provider_reasoning.map(str::to_owned);
+    settings.save(&path)?;
+    Ok(true)
 }
 
 /// The highest-precedence layer: values from CLI flags or in-session changes
@@ -254,6 +314,57 @@ mod tests {
         assert_eq!(effective.model.as_deref(), Some("project"));
         assert_eq!(effective.reasoning_effort.as_deref(), Some("low"));
         assert_eq!(effective.denied_tools, ["edit", "bash", "write"]);
+    }
+
+    #[test]
+    fn migrate_provider_defaults_moves_then_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // First run moves the provider's model/reasoning into settings.
+        assert!(migrate_provider_defaults(root, Some("gpt-5"), Some("high")).unwrap());
+        let settings = Settings::load(&root.join(SETTINGS_FILE)).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("gpt-5"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+
+        // Second run is a no-op — settings already has a model.
+        assert!(!migrate_provider_defaults(root, Some("gpt-4"), None).unwrap());
+        let settings = Settings::load(&root.join(SETTINGS_FILE)).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn migrate_provider_defaults_noop_when_nothing_to_move() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!migrate_provider_defaults(dir.path(), None, None).unwrap());
+        assert!(!dir.path().join(SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn write_provider_defaults_preserves_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Seed a file that also carries a permissions denylist.
+        Settings::load(&root.join(SETTINGS_FILE)).unwrap();
+        std::fs::write(
+            root.join(SETTINGS_FILE),
+            "model = \"old\"\n[permissions]\ndeny = [\"bash\"]\n",
+        )
+        .unwrap();
+
+        write_provider_defaults(root, Some("new"), Some("low")).unwrap();
+
+        let settings = Settings::load(&root.join(SETTINGS_FILE)).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("new"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("low"));
+        // The denylist we didn't touch survives the round-trip.
+        assert_eq!(settings.permissions.deny, ["bash"]);
+    }
+
+    #[test]
+    fn empty_settings_serializes_to_nothing() {
+        // A default Settings must not emit stray empty tables/keys.
+        assert_eq!(toml::to_string_pretty(&Settings::default()).unwrap(), "");
     }
 
     #[test]

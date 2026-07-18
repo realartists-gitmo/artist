@@ -46,6 +46,17 @@ async fn run() -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
+    // Move any pre-settings per-provider model/reasoning (old `providers.toml`
+    // location) into the global `settings.toml`, then rewrite `providers.toml`
+    // without those fields. One-time and idempotent.
+    if let Ok(index) = default_index(&store) {
+        let model = store.providers[index].model.clone();
+        let reasoning = store.providers[index].reasoning_effort.clone();
+        if settings::migrate_provider_defaults(config_root, model.as_deref(), reasoning.as_deref())?
+        {
+            store.save(&path)?;
+        }
+    }
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
@@ -91,8 +102,19 @@ async fn run() -> Result<()> {
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
             }
-            models::select(&mut store.providers[selected]).await?;
-            store.save(&path)?;
+            // Pick against a scratch clone seeded with the current global
+            // settings (the model's real home), then persist the choice to
+            // `settings.toml` — never back into `providers.toml`.
+            let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
+            let mut scratch = store.providers[selected].clone();
+            scratch.model = global.model.clone();
+            scratch.reasoning_effort = global.reasoning_effort.clone();
+            models::select(&mut scratch).await?;
+            settings::write_provider_defaults(
+                config_root,
+                scratch.model.as_deref(),
+                scratch.reasoning_effort.as_deref(),
+            )?;
         }
         Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
             match args.action {
@@ -408,13 +430,18 @@ async fn extension_manager(
     control: extension_control::ExtensionControl,
 ) -> Result<Arc<artist_extensions::Manager>> {
     let project = std::env::current_dir().context("find current project directory")?;
-    let provider = default_index(store)
-        .ok()
-        .and_then(|i| store.providers.get(i));
+    // Model/reasoning come from the resolved settings now, not the provider.
+    let effective = settings::load_effective(
+        config_root,
+        &project,
+        &settings::Overrides::default(),
+        &store.disabled_tools,
+    )
+    .unwrap_or_default();
     let context = artist_extensions::ExtensionContext {
         project,
-        model: provider.and_then(|p| p.model.clone()),
-        reasoning: provider.and_then(|p| p.reasoning_effort.clone()),
+        model: effective.model.clone(),
+        reasoning: effective.reasoning_effort.clone(),
         agent_state: serde_json::json!({"state": "idle"}),
         recent_events: Vec::new(),
     };
@@ -662,10 +689,16 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
-    let provider = &store.providers[selected];
+    // The model lives in settings now, so hydrate the provider from the global
+    // settings before testing.
+    let config_root = path.parent().context("providers path has no parent")?;
+    let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
+    let mut provider = store.providers[selected].clone();
+    provider.model = global.model.clone();
+    provider.reasoning_effort = global.reasoning_effort.clone();
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
-    test_provider::test(provider).await?;
+    test_provider::test(&provider).await?;
     println!("OK");
     Ok(())
 }
