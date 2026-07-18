@@ -367,6 +367,20 @@ where
                 item = stream.next() => item,
             };
             let Some(item) = item else {
+                // Match any trailing text/reasoning below the coalesce threshold
+                // before the run completes.
+                if ttsr.finalize_reasoning() || ttsr.finalize_text() {
+                    let firing = ttsr.take_pending().expect("finalize stashed the firing");
+                    drop(stream);
+                    let (committed, _) = ttsr.committed();
+                    seed_history = committed;
+                    crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                    run_recorder.record(RunFinished::Cancelled);
+                    seed_prompt = reminder_message(&firing);
+                    retries_used += 1;
+                    retry = true;
+                    break;
+                }
                 run_recorder.record(RunFinished::Completed);
                 break;
             };

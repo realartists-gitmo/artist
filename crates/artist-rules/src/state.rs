@@ -109,6 +109,38 @@ impl RulesHandle {
         }
     }
 
+    /// Atomically claim a firing: if the rule is still armed (not already
+    /// fired, not disabled) record it exactly as [`mark_fired`](Self::mark_fired)
+    /// and return `true`; otherwise return `false` so a concurrent run's
+    /// duplicate claim is suppressed. Closes the check-then-act gap between a
+    /// separate `is_armed` and `mark_fired` when main + delegate runs share the
+    /// handle.
+    pub fn try_mark_fired(&self, firing: &Firing, fire: FirePolicy) -> bool {
+        let mut state = self.lock();
+        if state.fired.contains(&firing.rule) || state.disabled.contains(&firing.rule) {
+            return false;
+        }
+        state.fired.insert(firing.rule.clone());
+        if fire == FirePolicy::PerTurn {
+            state.per_turn_fired.insert(firing.rule.clone());
+        }
+        match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
+            Some((_, count)) => *count += 1,
+            None => state.hits.push((firing.rule.clone(), 1)),
+        }
+        if firing.persistence == Persistence::Session
+            && !state
+                .active_injections
+                .iter()
+                .any(|(rule, _)| *rule == firing.rule)
+        {
+            state
+                .active_injections
+                .push((firing.rule.clone(), firing.reminder.clone()));
+        }
+        true
+    }
+
     /// Active session-persistent reminders, for per-turn re-injection.
     pub fn injections(&self) -> Vec<(RuleId, String)> {
         self.lock().active_injections.clone()
@@ -211,6 +243,7 @@ mod tests {
         Firing {
             rule: RuleId(rule.into()),
             target: MatchTarget::AssistantText,
+            tool: None,
             matched: "x".into(),
             reminder: format!("reminder for {rule}"),
             persistence,

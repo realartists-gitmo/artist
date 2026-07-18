@@ -233,11 +233,6 @@ pub async fn stream_chat(
     {
         content.insert(0, UserContent::text(skill_section));
     }
-    let fork_context = Arc::new({
-        let mut context = seed_history.clone();
-        context.push(seed_prompt.clone());
-        context
-    });
     let mcp_tools = mcp.tools().await;
     // Per-run abort-retry budget: spans this turn's retries but is isolated
     // from concurrent delegate runs (each has its own counter).
@@ -246,8 +241,10 @@ pub async fn stream_chat(
     // the same server-side prefix cache — better hit rate, fewer billed tokens.
     let cache_key = prompt_cache_key(tools.project_root(), model);
     // The tool set is rebuilt for each retry attempt (fresh Delegate, etc.);
-    // the generic driver calls this once per attempt.
-    let make_tools = || -> Vec<Box<dyn rig_core::tool::ToolDyn>> {
+    // the generic driver calls this per attempt with the *current* fork context
+    // (seed history + prompt), so a `fork=true` delegate spawned after a TTSR
+    // retry sees the reminder-injected history, not the stale original turn.
+    let make_tools = |fork_context: Arc<Vec<Message>>| -> Vec<Box<dyn rig_core::tool::ToolDyn>> {
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
             Box::new(tools.read.clone()),
@@ -259,7 +256,7 @@ pub async fn stream_chat(
             Box::new(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
-                Arc::clone(&fork_context),
+                fork_context,
                 resources.clone(),
                 handles.clone(),
             )),
@@ -506,8 +503,15 @@ async fn run_retry_loop<C, F>(
 where
     C: CompletionClient,
     C::CompletionModel: 'static,
-    F: Fn() -> Vec<Box<dyn rig_core::tool::ToolDyn>>,
+    F: Fn(Arc<Vec<Message>>) -> Vec<Box<dyn rig_core::tool::ToolDyn>>,
 {
+    // How one stream attempt ended. `Err` (a callback or stream failure) is
+    // recorded as `RunFinished::Error` centrally, so no early return skips it.
+    enum Control {
+        Completed,
+        Cancelled,
+        Retry,
+    }
     let handles = run.handles;
     let visible_steering = handles.steering.clone();
     let tool_meta = ToolMeta::default();
@@ -521,11 +525,17 @@ where
             run.is_delegate,
             retries_used < run.retry_budget,
         );
+        // Fork context reflects the current seed (updated by TTSR retries).
+        let fork_context = Arc::new({
+            let mut context = seed_history.clone();
+            context.push(seed_prompt.clone());
+            context
+        });
         let agent = client
             .agent(run.model)
             .additional_params(run.params.clone())
             .preamble(run.system_prompt)
-            .tools(make_tools())
+            .tools(make_tools(fork_context))
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(
                 run_recorder.clone(),
@@ -545,24 +555,40 @@ where
         let mut stream = agent
             .stream_chat(seed_prompt.clone(), seed_history.clone())
             .await;
-        loop {
+        let control: Result<Control> = loop {
             let item = tokio::select! {
                 biased;
-                _ = handles.cancel.cancelled() => {
-                    run_recorder.record(RunFinished::Cancelled);
-                    return Ok(RunOutcome::Cancelled);
-                }
+                _ = handles.cancel.cancelled() => break Ok(Control::Cancelled),
                 item = stream.next() => item,
             };
             let Some(item) = item else {
-                run_recorder.record(RunFinished::Completed);
-                return Ok(RunOutcome::Completed);
+                // Stream ended: match any trailing text/reasoning that never hit
+                // the coalesce threshold (short trailing content without a
+                // newline would otherwise be missed).
+                if ttsr.finalize_reasoning() || ttsr.finalize_text() {
+                    let firing = ttsr.take_pending().expect("finalize stashed the firing");
+                    let (committed, _) = ttsr.committed();
+                    seed_history = committed;
+                    record_firing_events(&run_recorder, &ttsr, &firing);
+                    if let Err(error) = on_event(PromptEvent::RuleFired {
+                        rule: firing.rule.0.clone(),
+                        matched: firing.matched.clone(),
+                    }) {
+                        break Err(error);
+                    }
+                    run_recorder.record(RunFinished::Cancelled);
+                    seed_prompt = reminder_message(&firing);
+                    break Ok(Control::Retry);
+                }
+                break Ok(Control::Completed);
             };
             match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    on_event(PromptEvent::TextDelta(text.text))?;
+                    if let Err(error) = on_event(PromptEvent::TextDelta(text.text)) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta {
@@ -587,67 +613,97 @@ where
                         // `committed` includes the current seed prompt; the
                         // reminder becomes the new prompt.
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        if let Err(error) = on_event(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        }) {
+                            break Err(error);
+                        }
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
+                        break Ok(Control::Retry);
                     }
-                    on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?;
+                    if let Err(error) = on_event(PromptEvent::ReasoningSummaryDelta(reasoning)) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
                     },
-                )) => on_event(PromptEvent::ToolCall {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                    arguments: tool_call.function.arguments,
-                })?,
+                )) => {
+                    if let Err(error) = on_event(PromptEvent::ToolCall {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments,
+                    }) {
+                        break Err(error);
+                    }
+                }
                 Ok(MultiTurnStreamItem::ToolExecutionStart {
                     tool_call,
                     internal_call_id,
-                }) => on_event(PromptEvent::ToolExecutionStart {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                })?,
+                }) => {
+                    if let Err(error) = on_event(PromptEvent::ToolExecutionStart {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                    }) {
+                        break Err(error);
+                    }
+                }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                    on_event(PromptEvent::CompletionUsage {
+                    if let Err(error) = on_event(PromptEvent::CompletionUsage {
                         total_tokens: call.usage.total_tokens,
-                    })?;
+                    }) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    let mut images = 0usize;
+                    // The capture hook only sees result text; persist any images
+                    // here (the display path) into the attachment store and log
+                    // their references so history replay can reattach them.
+                    let mut image_blocks = Vec::new();
                     let content = tool_result
                         .content
                         .into_iter()
                         .filter_map(|item| match item {
                             ToolResultContent::Text(text) => Some(text.text),
-                            ToolResultContent::Image(_) => {
-                                images += 1;
+                            ToolResultContent::Image(image) => {
+                                if let Some(block) = artist_session::store_tool_image(
+                                    &image,
+                                    &handles.attachments,
+                                ) {
+                                    image_blocks.push(block);
+                                }
                                 None
                             }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let images = image_blocks.len();
+                    if !image_blocks.is_empty() {
+                        run_recorder.record(artist_session::ToolResultImagesEvent {
+                            internal_call_id: internal_call_id.clone(),
+                            images: image_blocks,
+                        });
+                    }
                     let content = visible_steering
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
-                    on_event(PromptEvent::ToolResult {
+                    if let Err(error) = on_event(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,
                         outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
                         duration_ms: meta.map(|(_, duration)| duration),
                         images,
-                    })?;
+                    }) {
+                        break Err(error);
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -662,20 +718,40 @@ where
                     {
                         seed_history = chat_history.clone();
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        if let Err(error) = on_event(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        }) {
+                            break Err(error);
+                        }
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
+                        break Ok(Control::Retry);
                     }
-                    run_recorder.record(RunFinished::Error {
-                        error: error.to_string(),
-                    });
-                    return Err(error).context("stream Artist agent");
+                    break Err(anyhow::Error::new(error).context("stream Artist agent"));
                 }
+            }
+        };
+        // Record the terminal event centrally so a callback failure can't leave
+        // the run un-finalized in the log.
+        match control {
+            Ok(Control::Completed) => {
+                run_recorder.record(RunFinished::Completed);
+                return Ok(RunOutcome::Completed);
+            }
+            Ok(Control::Cancelled) => {
+                run_recorder.record(RunFinished::Cancelled);
+                return Ok(RunOutcome::Cancelled);
+            }
+            Ok(Control::Retry) => {
+                retries_used += 1;
+                continue 'retry;
+            }
+            Err(error) => {
+                run_recorder.record(RunFinished::Error {
+                    error: error.to_string(),
+                });
+                return Err(error);
             }
         }
     }

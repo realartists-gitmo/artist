@@ -103,9 +103,12 @@ impl TtsrShared {
             .get(&firing.rule)
             .map(|compiled| compiled.rule.fire)
             .unwrap_or_default();
-        // Session-global bookkeeping (fired/hits/injection) always happens; the
-        // abort-and-retry only if this run still has budget, else inject-only.
-        self.handle.mark_fired(&firing, policy);
+        // Atomically claim the firing — if a concurrent run (a background
+        // delegate sharing this handle) already claimed it, suppress this one.
+        if !self.handle.try_mark_fired(&firing, policy) {
+            return false;
+        }
+        // Abort-and-retry only if this run still has budget, else inject-only.
         if !self.can_abort {
             return false;
         }
@@ -128,6 +131,29 @@ impl TtsrShared {
                 .matcher
                 .push_reasoning(delta, &|rule| self.armed(rule))
         };
+        match firing {
+            Some(firing) => self.fire(firing),
+            None => false,
+        }
+    }
+
+    /// Force a final match of any trailing reasoning buffered below the
+    /// coalesce threshold (call once the reasoning/turn stream ends). Returns
+    /// true when the driver must abort and retry.
+    pub fn finalize_reasoning(&self) -> bool {
+        let firing = self
+            .lock()
+            .matcher
+            .finalize_reasoning(&|rule| self.armed(rule));
+        match firing {
+            Some(firing) => self.fire(firing),
+            None => false,
+        }
+    }
+
+    /// As [`finalize_reasoning`](Self::finalize_reasoning), for assistant text.
+    pub fn finalize_text(&self) -> bool {
+        let firing = self.lock().matcher.finalize_text(&|rule| self.armed(rule));
         match firing {
             Some(firing) => self.fire(firing),
             None => false,

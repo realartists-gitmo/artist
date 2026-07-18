@@ -26,12 +26,15 @@ mod recorder;
 mod replay;
 
 pub use attachments::AttachmentStore;
-pub use convert::{assistant_to_blocks, blocks_to_assistant, blocks_to_user, user_to_blocks};
+pub use convert::{
+    assistant_to_blocks, blocks_to_assistant, blocks_to_user, store_tool_image,
+    tool_image_from_block, user_to_blocks,
+};
 pub use event::{
     ContentBlock, DelegateFinished, DelegateStarted, Envelope, HistoryCompact, HistoryRewind,
     LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection, RuleRetroFindings, RunFinished,
     RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, ToolOutcomeRecord,
-    ToolResultEvent, TurnUser,
+    ToolResultEvent, ToolResultImagesEvent, TurnUser,
 };
 pub use history::{HistoryOptions, build as build_history};
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};

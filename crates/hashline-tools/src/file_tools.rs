@@ -389,7 +389,7 @@ pub struct FileToolManager {
     /// text). Building a `FileView` reparses with tree-sitter for `.rs` files —
     /// expensive, and it runs on every read plus twice per edit on identical
     /// content, so caching avoids the repeated parse.
-    view_cache: HashMap<(bool, u64), FileView>,
+    view_cache: HashMap<(bool, u64), (String, FileView)>,
 }
 
 impl Default for FileToolManager {
@@ -418,8 +418,12 @@ impl FileToolManager {
     fn build_view(&mut self, text: &str, path: &Path) -> FileView {
         let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
         let key = (is_rust, compute_hash(text.as_bytes()));
-        if let Some(view) = self.view_cache.get(&key) {
-            return view.clone();
+        // Compare the stored source on a hit so a (astronomically unlikely) hash
+        // collision returns the right view rather than a stale one.
+        if let Some((cached_text, view)) = self.view_cache.get(&key) {
+            if cached_text == text {
+                return view.clone();
+            }
         }
         let view = FileView::from_text(text, path);
         // Bound the cache; views are content-addressed so a small ring is enough
@@ -427,7 +431,8 @@ impl FileToolManager {
         if self.view_cache.len() >= 16 {
             self.view_cache.clear();
         }
-        self.view_cache.insert(key, view.clone());
+        self.view_cache
+            .insert(key, (text.to_owned(), view.clone()));
         view
     }
 
