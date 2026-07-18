@@ -245,6 +245,9 @@ pub async fn stream_chat(
     // from concurrent delegate runs (each has its own counter).
     let retry_budget = handles.rules.retry_budget();
     let mut retries_used = 0u32;
+    // Stable per-project+model prompt-cache key so a session's turns route to
+    // the same server-side prefix cache — better hit rate, fewer billed tokens.
+    let cache_key = prompt_cache_key(tools.project_root(), model);
     'retry: loop {
         let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
         let run_recorder = handles.recorder.with_run(&run_id);
@@ -256,10 +259,11 @@ pub async fn stream_chat(
         );
 
         let mut builder = client.agent(model);
+        let mut params = json!({ "prompt_cache_key": cache_key.clone() });
         if let Some(effort) = &provider.reasoning_effort {
-            builder = builder
-                .additional_params(json!({"reasoning": {"effort": effort, "summary": "auto"}}));
+            params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
         }
+        builder = builder.additional_params(params);
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
             Box::new(tools.read.clone()),
@@ -452,6 +456,17 @@ pub async fn stream_chat(
 /// Log the rule.fired + rule.injection events and the reminder prompt (as a
 /// `turn.user{source:"rule"}` so history rebuilt from the log matches what
 /// the model was actually sent).
+/// A stable `prompt_cache_key` derived from the project root and model, so a
+/// project's turns route to the same server-side prefix cache. Deterministic
+/// across process runs (`DefaultHasher` uses fixed keys).
+pub(crate) fn prompt_cache_key(project_root: &std::path::Path, model: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    project_root.hash(&mut hasher);
+    model.hash(&mut hasher);
+    format!("artist-{:016x}", hasher.finish())
+}
+
 pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firing: &Firing) {
     recorder.record(RuleFired {
         rule: firing.rule.0.clone(),

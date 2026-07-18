@@ -223,6 +223,7 @@ impl Delegate {
         // from the main agent and any sibling delegates.
         let retry_budget = self.handles.rules.retry_budget();
         let mut retries_used = 0u32;
+        let cache_key = crate::prompt_cache_key(self.tools.project_root(), model);
         let output = loop {
             let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
             let run_recorder = recorder.with_run(&run_id);
@@ -233,10 +234,11 @@ impl Delegate {
                 retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
+            let mut params = json!({ "prompt_cache_key": cache_key.clone() });
             if let Some(effort) = &self.provider.reasoning_effort {
-                builder = builder
-                    .additional_params(json!({"reasoning":{"effort":effort,"summary":"auto"}}));
+                params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
             }
+            builder = builder.additional_params(params);
             let mut builder = builder
                 .tool(child_tools.read.clone())
                 .tool(child_tools.find.clone())
