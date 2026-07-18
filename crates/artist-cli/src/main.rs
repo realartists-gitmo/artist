@@ -86,7 +86,7 @@ async fn run() -> Result<()> {
                     store.save(&path)?;
                 }
                 (None, Some(ProviderAction::Add)) => {
-                    login::add_provider(&mut store)?;
+                    login::add_provider(&mut store).await?;
                     store.save(&path)?;
                 }
                 (None, Some(ProviderAction::List)) => list(&store),

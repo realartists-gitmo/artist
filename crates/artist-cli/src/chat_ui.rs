@@ -1407,7 +1407,7 @@ async fn handle_login(
     );
     ratatui::restore();
     let before = store.providers.len();
-    let outcome = crate::login::chatgpt(store).await;
+    let outcome = crate::login::add_provider(store).await;
     if outcome.is_ok() {
         let _ = store.save(store_path);
     }

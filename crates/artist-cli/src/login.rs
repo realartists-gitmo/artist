@@ -48,6 +48,13 @@ pub struct KnownProvider {
 
 pub const KNOWN_PROVIDERS: &[KnownProvider] = &[
     KnownProvider {
+        // OAuth, not an API key — `base_url`/`env_key` are unused for this one.
+        label: "ChatGPT (subscription login)",
+        base_url: "",
+        kind: ProviderKind::ChatGpt,
+        env_key: "",
+    },
+    KnownProvider {
         label: "xAI (Grok)",
         base_url: "https://api.x.ai",
         kind: ProviderKind::OpenAi,
@@ -115,14 +122,19 @@ pub const KNOWN_PROVIDERS: &[KnownProvider] = &[
     },
 ];
 
-/// Interactively add an API-key provider: pick a backend, confirm name and base
-/// URL, and supply the key (from the provider's env var if set, else prompted).
-pub fn add_provider(store: &mut ProviderStore) -> Result<()> {
+/// Interactively add a provider: pick a backend from one list — ChatGPT runs
+/// the subscription OAuth flow, everything else confirms name + base URL and
+/// takes an API key (from the backend's env var if set, else prompted).
+pub async fn add_provider(store: &mut ProviderStore) -> Result<()> {
     let labels: Vec<String> = KNOWN_PROVIDERS
         .iter()
         .map(|provider| provider.label.to_owned())
         .collect();
     let choice = &KNOWN_PROVIDERS[crate::prompt::select("Provider", &labels, 0)?];
+    // ChatGPT is subscription OAuth, not an API key.
+    if choice.kind == ProviderKind::ChatGpt {
+        return chatgpt(store).await;
+    }
     let name = crate::prompt::text("Name", Some(choice.label))?;
     let base_default = (!choice.base_url.is_empty()).then_some(choice.base_url);
     let base_url = url::Url::parse(&crate::prompt::text("API base URL", base_default)?)
