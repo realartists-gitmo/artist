@@ -528,7 +528,7 @@ fn skill_completions<'a>(
 
 async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
-    context: ChatContext<'_>,
+    mut context: ChatContext<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
     pending: Option<String>,
     mut status: StatusRuntime,
@@ -708,6 +708,46 @@ async fn run_loop(
                         context.rules_handle,
                         active.as_ref(),
                         action,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Sessions) => {
+                        handle_sessions(context.sessions, context.project, &active)
+                            .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
+                    }
+                    Ok(slash_commands::ParsedCommand::New) => {
+                        if let Some(old) = active.take() {
+                            old.close().await?;
+                        }
+                        history.clear();
+                        context.rules_handle.restore_from_log(&[]);
+                        status.session_tokens = 0;
+                        vec!["Started a fresh session — your next message begins it.".to_owned()]
+                    }
+                    Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
+                        context.sessions,
+                        context.project,
+                        &mut active,
+                        &mut history,
+                        context.rules_handle,
+                        id,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Accounts { id }) => {
+                        let (panel, switch) =
+                            handle_accounts(context.store, context.provider_index, id);
+                        if let Some(new_index) = switch {
+                            context.provider_index = new_index;
+                            status.refresh(&context.store.status_bar, context.project);
+                        }
+                        panel
+                    }
+                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
+                        &mut terminal,
+                        context.store,
+                        context.store_path,
+                        viewport_height,
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
@@ -1192,6 +1232,164 @@ async fn handle_rewind(
     input.cursor = input.text.len();
     input.atoms.clear();
     Ok(Vec::new())
+}
+
+/// `/sessions`: list this project's sessions, newest first, marking the active
+/// one. Read-only — switching is `/resume <id>`.
+fn handle_sessions(
+    sessions: &SessionStore,
+    project: &Path,
+    active: &Option<ActiveSession>,
+) -> Result<Vec<String>> {
+    let mut list = sessions.list_project(project)?;
+    if list.is_empty() {
+        return Ok(vec!["No sessions yet for this project.".to_owned()]);
+    }
+    // list_project is oldest-first; show newest first.
+    list.reverse();
+    let current = active.as_ref().map(|active| active.session.id.as_str());
+    let mut lines: Vec<String> = list
+        .iter()
+        .take(15)
+        .map(|session| {
+            let marker = if current == Some(session.id.as_str()) {
+                "*"
+            } else {
+                " "
+            };
+            let label = session.label.as_deref().unwrap_or("(no label)");
+            let mut preview = label.lines().next().unwrap_or("").to_owned();
+            if preview.chars().count() > 60 {
+                preview = preview.chars().take(59).chain(['\u{2026}']).collect();
+            }
+            format!("{marker} {}  {preview}", session.id)
+        })
+        .collect();
+    lines.push("Switch with /resume <id>.".to_owned());
+    Ok(lines)
+}
+
+/// `/resume [id]`: switch the active session to another one by id. Without an
+/// id, list the candidates. The current session is flushed and released first.
+async fn handle_resume(
+    sessions: &SessionStore,
+    project: &Path,
+    active: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
+    rules_handle: &RulesHandle,
+    id: Option<&str>,
+) -> Result<Vec<String>> {
+    let Some(id) = id else {
+        return handle_sessions(sessions, project, active);
+    };
+    if active.as_ref().map(|active| active.session.id.as_str()) == Some(id) {
+        return Ok(vec![format!("Already on session {id}.")]);
+    }
+    let (opened, events) = sessions
+        .open(id)
+        .with_context(|| format!("no such session: {id}"))?;
+    rules_handle.restore_from_log(&events);
+    *history = artist_session::build_history(
+        &events,
+        &opened.attachments,
+        &artist_session::HistoryOptions::default(),
+    )?;
+    let label = opened.session.label.clone();
+    if let Some(old) = active.replace(opened) {
+        old.close().await?;
+    }
+    Ok(vec![format!(
+        "Resumed session {id}{}.",
+        label
+            .as_deref()
+            .map(|label| format!(" — {label}"))
+            .unwrap_or_default()
+    )])
+}
+
+/// `/accounts [id]`: list logged-in accounts, or return the index to switch to.
+/// Returns the panel plus `Some(new_index)` when a switch was requested.
+fn handle_accounts(
+    store: &ProviderStore,
+    current: usize,
+    id: Option<&str>,
+) -> (Vec<String>, Option<usize>) {
+    let Some(id) = id else {
+        let mut lines: Vec<String> = store
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let marker = if index == current { "*" } else { " " };
+                let model = provider.model.as_deref().unwrap_or("no model");
+                format!("{marker} {}  {} ({model})", provider.id.as_str(), provider.name)
+            })
+            .collect();
+        lines.push("Switch with /accounts <id>, or add one with /login.".to_owned());
+        return (lines, None);
+    };
+    match store
+        .providers
+        .iter()
+        .position(|provider| provider.id.as_str() == id)
+    {
+        Some(index) if index == current => {
+            (vec![format!("Already using account {id}.")], None)
+        }
+        Some(index) => (
+            vec![format!(
+                "Switched to {} ({}).",
+                store.providers[index].id.as_str(),
+                store.providers[index].name
+            )],
+            Some(index),
+        ),
+        None => (
+            vec![format!("No such account: {id} — see /accounts for the list.")],
+            None,
+        ),
+    }
+}
+
+/// `/login`: run the ChatGPT OAuth flow for an additional account. The inline
+/// viewport and its input modes are suspended for the flow (which prints and
+/// opens a browser like standalone `artist login`), then restored.
+async fn handle_login(
+    terminal: &mut ratatui::DefaultTerminal,
+    store: &mut ProviderStore,
+    store_path: &Path,
+    viewport_height: u16,
+) -> Result<Vec<String>> {
+    finish_inline(terminal)?;
+    let _ = execute!(
+        std::io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+    let before = store.providers.len();
+    let outcome = crate::login::chatgpt(store).await;
+    if outcome.is_ok() {
+        let _ = store.save(store_path);
+    }
+    // Re-enter the inline viewport and re-arm the enhanced-key / paste modes
+    // the chat loop relies on.
+    *terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(viewport_height),
+    });
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
+    );
+    terminal.show_cursor()?;
+    match outcome {
+        Ok(()) if store.providers.len() > before => Ok(vec![
+            "Logged in and saved. Switch to it with /accounts.".to_owned(),
+        ]),
+        Ok(()) => Ok(vec!["Login completed.".to_owned()]),
+        Err(error) => Ok(vec![format!("Login failed: {error:#}")]),
+    }
 }
 
 fn resize_and_draw(

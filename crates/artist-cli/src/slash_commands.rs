@@ -43,6 +43,31 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/rules [scan|dry-run <file>|enable <rule>|disable <rule>]",
     },
     SlashCommand {
+        name: "/new",
+        description: "Start a fresh session (the current one is kept)",
+        usage: "/new",
+    },
+    SlashCommand {
+        name: "/sessions",
+        description: "List this project's sessions",
+        usage: "/sessions",
+    },
+    SlashCommand {
+        name: "/resume",
+        description: "Switch to another session by id",
+        usage: "/resume [id]",
+    },
+    SlashCommand {
+        name: "/accounts",
+        description: "List logged-in accounts, or switch to one by id",
+        usage: "/accounts [id]",
+    },
+    SlashCommand {
+        name: "/login",
+        description: "Log in to another ChatGPT account",
+        usage: "/login",
+    },
+    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -75,6 +100,16 @@ pub(crate) enum ParsedCommand<'a> {
         fork: bool,
     },
     Rules(RulesAction<'a>),
+    /// Start a fresh session.
+    New,
+    /// List this project's sessions.
+    Sessions,
+    /// Switch to another session; without an id, list the candidates.
+    Resume { id: Option<&'a str> },
+    /// List logged-in accounts, or switch to one by id.
+    Accounts { id: Option<&'a str> },
+    /// Log in to another account.
+    Login,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,6 +221,33 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/rules [scan|dry-run <file>|enable <rule>|disable <rule>]",
         }),
+        ("/new", []) => Ok(ParsedCommand::New),
+        ("/new", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/new",
+        }),
+        ("/sessions", []) => Ok(ParsedCommand::Sessions),
+        ("/sessions", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/sessions",
+        }),
+        ("/resume", []) => Ok(ParsedCommand::Resume { id: None }),
+        ("/resume", [id]) => Ok(ParsedCommand::Resume { id: Some(id) }),
+        ("/resume", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/resume [id]",
+        }),
+        ("/accounts", []) => Ok(ParsedCommand::Accounts { id: None }),
+        ("/accounts", [id]) => Ok(ParsedCommand::Accounts { id: Some(id) }),
+        ("/accounts", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/accounts [id]",
+        }),
+        ("/login", []) => Ok(ParsedCommand::Login),
+        ("/login", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/login",
+        }),
         _ => Err(ParseError::UnknownCommand(command)),
     })
 }
@@ -249,6 +311,11 @@ mod tests {
                 "/mcp",
                 "/rewind",
                 "/rules",
+                "/new",
+                "/sessions",
+                "/resume",
+                "/accounts",
+                "/login",
                 "/help",
                 "/quit"
             ]
@@ -336,8 +403,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_session_and_account_verbs() {
+        assert_eq!(parse("/new"), Some(Ok(ParsedCommand::New)));
+        assert_eq!(parse("/sessions"), Some(Ok(ParsedCommand::Sessions)));
+        assert_eq!(parse("/resume"), Some(Ok(ParsedCommand::Resume { id: None })));
+        assert_eq!(
+            parse("/resume abc123"),
+            Some(Ok(ParsedCommand::Resume { id: Some("abc123") }))
+        );
+        assert_eq!(
+            parse("/accounts"),
+            Some(Ok(ParsedCommand::Accounts { id: None }))
+        );
+        assert_eq!(
+            parse("/accounts chatgpt-2"),
+            Some(Ok(ParsedCommand::Accounts {
+                id: Some("chatgpt-2")
+            }))
+        );
+        assert_eq!(parse("/login"), Some(Ok(ParsedCommand::Login)));
+        assert!(matches!(
+            parse("/new now"),
+            Some(Err(ParseError::InvalidUsage { .. }))
+        ));
+        assert!(matches!(
+            parse("/login extra"),
+            Some(Err(ParseError::InvalidUsage { .. }))
+        ));
+    }
+
+    #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 9);
+        assert_eq!(completions("/").len(), 14);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model", "/mcp"]
