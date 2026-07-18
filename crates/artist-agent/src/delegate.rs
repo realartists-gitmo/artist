@@ -236,7 +236,9 @@ impl Delegate {
             let mut builder = client.agent(model).preamble(&policy);
             let mut params = json!({ "prompt_cache_key": cache_key.clone() });
             if let Some(effort) = &self.provider.reasoning_effort {
-                params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+                // Summaries off (TOK-5) — subagent reasoning is never surfaced,
+                // so a summary was pure token waste here.
+                params["reasoning"] = json!({ "effort": effort });
             }
             builder = builder.additional_params(params);
             let mut builder = builder

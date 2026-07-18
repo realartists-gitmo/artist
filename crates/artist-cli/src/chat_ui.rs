@@ -296,6 +296,22 @@ struct SubmitResult {
     /// Text the user typed into the streaming box but never submitted, carried
     /// back so it isn't wiped when the turn ends.
     leftover_input: ChatInput,
+    /// The turn failed with an authentication error (AUTH-2). The run loop
+    /// force-refreshes the access token so a resend can succeed.
+    auth_expired: bool,
+}
+
+/// Whether an error chain looks like an expired/invalid access token — a 401,
+/// an explicit unauthorized, or an OAuth `invalid_grant`. Used to distinguish a
+/// recoverable auth failure (refresh + resend) from a real error.
+fn is_auth_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("401")
+        || text.contains("unauthorized")
+        || text.contains("invalid_grant")
+        || text.contains("invalid_token")
+        || text.contains("token expired")
+        || text.contains("token_expired")
 }
 
 struct PendingDelivery {
@@ -776,6 +792,25 @@ async fn run_loop(
                 )
                 .await?;
                 viewport_height = result.viewport_height;
+                // AUTH-2: the turn 401'd, so the token is stale regardless of
+                // its recorded expiry. Force-refresh it now (non-blocking to the
+                // rest of the loop's state) so the user's resend succeeds.
+                if result.auth_expired {
+                    match crate::force_refresh(
+                        &mut context.store.providers[context.provider_index],
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = context.store.save(context.store_path);
+                            insert_status(&mut terminal, "  ✓ login refreshed")?;
+                        }
+                        Err(error) => insert_status(
+                            &mut terminal,
+                            &format!("  ⚠ couldn't refresh login: {error:#} — run `artist login`"),
+                        )?,
+                    }
+                }
                 // Restore anything typed into the box mid-stream but not sent,
                 // so finishing a turn no longer wipes an in-progress draft.
                 if !result.leftover_input.text.is_empty() {
@@ -1660,10 +1695,23 @@ async fn submit(
     )?;
     // Stream failures keep the chat open: surface the error inline instead
     // of tearing down the UI.
+    let mut auth_expired = false;
     if let Some(result) = stream_result
         && let Err(error) = result.and_then(|result| result)
     {
-        insert_message(terminal, &format!("Error: {error:#}"))?;
+        if is_auth_error(&error) {
+            // AUTH-2: a token that expired mid-turn (or was already stale).
+            // Flag it so the run loop force-refreshes the login; auto-resending
+            // isn't safe because tool calls in the failed turn may have already
+            // run, so ask the user to resend instead.
+            auth_expired = true;
+            insert_message(
+                terminal,
+                "Your login expired mid-turn — refreshing it now. Resend your message to continue.",
+            )?;
+        } else {
+            insert_message(terminal, &format!("Error: {error:#}"))?;
+        }
     }
     // A cancelled turn's accumulated text never reached a commit point;
     // preserve it in the log as a partial model turn so nothing is lost.
@@ -1706,6 +1754,7 @@ async fn submit(
             .collect(),
         delivered,
         leftover_input: steering_input,
+        auth_expired,
     })
 }
 

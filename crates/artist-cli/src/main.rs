@@ -677,12 +677,19 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
         .expires_at
         .map_or(true, |expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
-        provider.auth = ChatGptOAuth::default()
-            .refresh(&provider.auth)
-            .await
-            .context("refresh ChatGPT login")?
-            .auth;
-        return Ok(true);
+        return force_refresh(provider).await.map(|()| true);
     }
     Ok(false)
+}
+
+/// Refresh the access token unconditionally, ignoring `expires_at`. Used after
+/// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
+/// recorded expiry.
+pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
+    provider.auth = ChatGptOAuth::default()
+        .refresh(&provider.auth)
+        .await
+        .context("refresh ChatGPT login")?
+        .auth;
+    Ok(())
 }

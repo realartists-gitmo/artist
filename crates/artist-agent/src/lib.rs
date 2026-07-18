@@ -270,7 +270,10 @@ pub async fn stream_chat(
         let mut builder = client.agent(model);
         let mut params = json!({ "prompt_cache_key": cache_key.clone() });
         if let Some(effort) = &provider.reasoning_effort {
-            params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+            // No `summary` field: reasoning summaries are off (TOK-5) — they
+            // billed output tokens every turn. Reasoning-target stream rules
+            // match against raw reasoning deltas instead (handled in the loop).
+            params["reasoning"] = json!({ "effort": effort });
         }
         builder = builder.additional_params(params);
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
