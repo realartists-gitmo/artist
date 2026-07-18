@@ -85,8 +85,15 @@ async fn drive(
     let mut seed_prompt = Message::user(prompt);
     let mut seed_history: Vec<Message> = Vec::new();
     let mut fired = Vec::new();
+    let retry_budget = handle.retry_budget();
+    let mut retries_used = 0u32;
     loop {
-        let ttsr = TtsrShared::new(handle.clone(), Arc::clone(rules), false);
+        let ttsr = TtsrShared::new(
+            handle.clone(),
+            Arc::clone(rules),
+            false,
+            retries_used < retry_budget,
+        );
         let mut builder = AgentBuilder::new(model.clone()).tool(tool.clone());
         if let Some(steering) = steering {
             builder = builder.add_hook(SteeringHook(steering.clone()));
@@ -117,6 +124,7 @@ async fn drive(
                         seed_history = committed;
                         seed_prompt = reminder_message(&firing);
                         fired.push(firing);
+                        retries_used += 1;
                         retried = true;
                         break;
                     }
@@ -130,6 +138,7 @@ async fn drive(
                         seed_history = chat_history.clone();
                         seed_prompt = reminder_message(&firing);
                         fired.push(firing);
+                        retries_used += 1;
                         retried = true;
                         break;
                     }

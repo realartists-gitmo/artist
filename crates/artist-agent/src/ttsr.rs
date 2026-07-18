@@ -27,6 +27,11 @@ pub(crate) struct TtsrShared {
     rules: Arc<RuleSet>,
     /// True when this run is a delegate subagent (rule scope filtering).
     delegate: bool,
+    /// Whether this run may still abort-and-retry (budget not yet spent). The
+    /// count lives in the run's retry loop, which recreates `TtsrShared` each
+    /// iteration and passes the current verdict in; a firing past the budget
+    /// still records/injects but degrades to inject-only.
+    can_abort: bool,
     inner: Mutex<TtsrInner>,
 }
 
@@ -44,11 +49,17 @@ struct TtsrInner {
 }
 
 impl TtsrShared {
-    pub fn new(handle: RulesHandle, rules: Arc<RuleSet>, delegate: bool) -> Arc<Self> {
+    pub fn new(
+        handle: RulesHandle,
+        rules: Arc<RuleSet>,
+        delegate: bool,
+        can_abort: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             handle,
             rules: Arc::clone(&rules),
             delegate,
+            can_abort,
             inner: Mutex::new(TtsrInner {
                 matcher: StreamMatcher::new(rules),
                 committed: Vec::new(),
@@ -92,7 +103,10 @@ impl TtsrShared {
             .get(&firing.rule)
             .map(|compiled| compiled.rule.fire)
             .unwrap_or_default();
-        if !self.handle.record_firing(&firing, policy) {
+        // Session-global bookkeeping (fired/hits/injection) always happens; the
+        // abort-and-retry only if this run still has budget, else inject-only.
+        self.handle.mark_fired(&firing, policy);
+        if !self.can_abort {
             return false;
         }
         self.lock().pending = Some(firing);

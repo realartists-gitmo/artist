@@ -241,10 +241,19 @@ pub async fn stream_chat(
     let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
 
+    // Per-run abort-retry budget: spans this turn's retries but is isolated
+    // from concurrent delegate runs (each has its own counter).
+    let retry_budget = handles.rules.retry_budget();
+    let mut retries_used = 0u32;
     'retry: loop {
         let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
         let run_recorder = handles.recorder.with_run(&run_id);
-        let ttsr = TtsrShared::new(handles.rules.clone(), Arc::clone(&handles.rule_set), false);
+        let ttsr = TtsrShared::new(
+            handles.rules.clone(),
+            Arc::clone(&handles.rule_set),
+            false,
+            retries_used < retry_budget,
+        );
 
         let mut builder = client.agent(model);
         if let Some(effort) = &provider.reasoning_effort {
@@ -352,6 +361,7 @@ pub async fn stream_chat(
                         })?;
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
+                        retries_used += 1;
                         continue 'retry;
                     }
                     on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?;
@@ -426,6 +436,7 @@ pub async fn stream_chat(
                         })?;
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
+                        retries_used += 1;
                         continue 'retry;
                     }
                     run_recorder.record(RunFinished::Error {

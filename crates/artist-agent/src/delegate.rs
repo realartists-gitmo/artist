@@ -219,6 +219,10 @@ impl Delegate {
         };
         let mut seed_prompt = Message::user(&prompt);
 
+        // Per-run abort-retry budget: this delegate's own counter, isolated
+        // from the main agent and any sibling delegates.
+        let retry_budget = self.handles.rules.retry_budget();
+        let mut retries_used = 0u32;
         let output = loop {
             let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
             let run_recorder = recorder.with_run(&run_id);
@@ -226,6 +230,7 @@ impl Delegate {
                 self.handles.rules.clone(),
                 Arc::clone(&self.handles.rule_set),
                 true,
+                retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
             if let Some(effort) = &self.provider.reasoning_effort {
@@ -299,6 +304,7 @@ impl Delegate {
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
                             run_recorder.record(RunFinished::Cancelled);
                             seed_prompt = reminder_message(&firing);
+                            retries_used += 1;
                             retry = true;
                             break;
                         }
@@ -316,6 +322,7 @@ impl Delegate {
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
                             run_recorder.record(RunFinished::Cancelled);
                             seed_prompt = reminder_message(&firing);
+                            retries_used += 1;
                             retry = true;
                             break;
                         }

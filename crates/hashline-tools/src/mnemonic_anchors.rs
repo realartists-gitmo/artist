@@ -185,10 +185,7 @@ pub(crate) fn reconcile_handles(
             break;
         };
         let handle = word.to_owned();
-        state.insert(
-            handle.clone(),
-            pack_binding(&full_hashes[index]),
-        );
+        state.insert(handle.clone(), pack_binding(&full_hashes[index]));
         used.insert(handle.clone());
         primary_cursor = Some(slot);
         visible[index] = Some(handle);
@@ -217,10 +214,7 @@ pub(crate) fn reconcile_handles(
                 break candidate;
             }
         };
-        state.insert(
-            handle.clone(),
-            pack_binding(&full_hashes[index]),
-        );
+        state.insert(handle.clone(), pack_binding(&full_hashes[index]));
         used.insert(handle.clone());
         visible[index] = Some(handle);
     }
@@ -258,8 +252,7 @@ mod tests {
     fn only_initial_overflow_lines_receive_pairs() {
         let capacity = words().len();
         let full_hashes = hashes(capacity + 2);
-        let (state, visible) =
-            reconcile_handles(&HashMap::new(), &full_hashes, true);
+        let (state, visible) = reconcile_handles(&HashMap::new(), &full_hashes, true);
         assert_eq!(state.len(), capacity + 4);
         assert_eq!(
             visible.iter().filter(|value| value.contains(' ')).count(),
@@ -271,8 +264,7 @@ mod tests {
     fn freed_one_word_goes_to_new_line_without_changing_live_pair() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 1);
-        let (state, original_visible) =
-            reconcile_handles(&HashMap::new(), &original_hashes, true);
+        let (state, original_visible) = reconcile_handles(&HashMap::new(), &original_hashes, true);
         let deleted_handle = original_visible[0].clone();
         let surviving_pair = original_visible.last().unwrap().clone();
         assert!(!deleted_handle.contains(' '));
@@ -280,8 +272,7 @@ mod tests {
 
         let mut next_hashes = original_hashes[1..].to_vec();
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) =
-            reconcile_handles(&state, &next_hashes, true);
+        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true);
 
         assert_eq!(next_visible[capacity - 1], surviving_pair);
         assert_eq!(next_visible.last().unwrap(), &deleted_handle);
@@ -298,14 +289,12 @@ mod tests {
     fn live_pair_remains_stable_when_file_returns_below_capacity() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 1);
-        let (state, original_visible) =
-            reconcile_handles(&HashMap::new(), &original_hashes, true);
+        let (state, original_visible) = reconcile_handles(&HashMap::new(), &original_hashes, true);
         let surviving_pair = original_visible.last().unwrap().clone();
         assert!(surviving_pair.contains(' '));
 
         let next_hashes = original_hashes[1..].to_vec();
-        let (_, next_visible) =
-            reconcile_handles(&state, &next_hashes, true);
+        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true);
 
         assert_eq!(next_visible.last().unwrap(), &surviving_pair);
         assert_eq!(
@@ -320,14 +309,12 @@ mod tests {
     #[test]
     fn freed_primary_handle_waits_for_cursor_wrap() {
         let original_hashes = hashes(3);
-        let (state, original_visible) =
-            reconcile_handles(&HashMap::new(), &original_hashes, true);
+        let (state, original_visible) = reconcile_handles(&HashMap::new(), &original_hashes, true);
         let freed_handle = original_visible[0].clone();
 
         let mut next_hashes = original_hashes[1..].to_vec();
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) =
-            reconcile_handles(&state, &next_hashes, true);
+        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true);
 
         assert_eq!(next_visible[0], original_visible[1]);
         assert_eq!(next_visible[1], original_visible[2]);
@@ -339,15 +326,13 @@ mod tests {
     fn freed_secondary_handle_waits_for_cursor_wrap() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 3);
-        let (state, original_visible) =
-            reconcile_handles(&HashMap::new(), &original_hashes, true);
+        let (state, original_visible) = reconcile_handles(&HashMap::new(), &original_hashes, true);
         let freed_handle = original_visible[capacity].clone();
 
         let mut next_hashes = original_hashes[..capacity].to_vec();
         next_hashes.extend_from_slice(&original_hashes[capacity + 1..]);
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) =
-            reconcile_handles(&state, &next_hashes, true);
+        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true);
 
         assert_eq!(next_visible[capacity], original_visible[capacity + 1]);
         assert_eq!(next_visible[capacity + 1], original_visible[capacity + 2]);
