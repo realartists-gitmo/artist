@@ -47,11 +47,17 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         description: "Show available commands",
         usage: "/help",
     },
+    SlashCommand {
+        name: "/quit",
+        description: "Exit artist (or press esc / ctrl+c on an empty prompt)",
+        usage: "/quit",
+    },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParsedCommand<'a> {
     Help,
+    Quit,
     Skills,
     Tools,
     StatusBar,
@@ -99,6 +105,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
         ("/help", []) => Ok(ParsedCommand::Help),
+        ("/quit", []) => Ok(ParsedCommand::Quit),
+        ("/quit", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/quit",
+        }),
         ("/mcp", []) | ("/mcp", ["status"]) => Ok(ParsedCommand::Mcp {
             action: "status",
             server: None,
@@ -238,7 +249,8 @@ mod tests {
                 "/mcp",
                 "/rewind",
                 "/rules",
-                "/help"
+                "/help",
+                "/quit"
             ]
         );
         assert!(
@@ -325,7 +337,7 @@ mod tests {
 
     #[test]
     fn filters_completions_by_prefix_only() {
-        assert_eq!(completions("/").len(), 8);
+        assert_eq!(completions("/").len(), 9);
         assert_eq!(
             completions("/m").iter().map(|c| c.name).collect::<Vec<_>>(),
             ["/model", "/mcp"]

@@ -198,28 +198,14 @@ impl ChatInput {
 
     fn visual_lines(&self, inner_width: u16) -> u16 {
         let width = usize::from(inner_width.max(1));
-        let mut lines = self.text.split('\n').collect::<Vec<_>>();
-        let last = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
-        let previous = lines
-            .into_iter()
-            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-            .sum::<usize>();
-        (previous + last / width + 1) as u16
+        let (_, row) = wrap_end(&self.text, width);
+        (row + 1) as u16
     }
 
     fn cursor_position(&self, inner_width: u16) -> (u16, u16) {
         let width = usize::from(inner_width.max(1));
-        let prefix = &self.text[..self.cursor];
-        let mut lines = prefix.split('\n').collect::<Vec<_>>();
-        let current = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
-        let previous = lines
-            .into_iter()
-            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-            .sum::<usize>();
-        (
-            (current % width) as u16,
-            (previous + current / width) as u16,
-        )
+        let (col, row) = wrap_end(&self.text[..self.cursor], width);
+        (col as u16, row as u16)
     }
 }
 
@@ -307,6 +293,9 @@ struct SubmitResult {
     viewport_height: u16,
     queued: Vec<SubmittedPrompt>,
     delivered: Vec<String>,
+    /// Text the user typed into the streaming box but never submitted, carried
+    /// back so it isn't wiped when the turn ends.
+    leftover_input: ChatInput,
 }
 
 struct PendingDelivery {
@@ -344,16 +333,26 @@ pub struct ChatResources<'a> {
     pub rules_handle: &'a RulesHandle,
 }
 
+/// First-frame inline viewport height. Mirrors `resize_and_draw`'s formula for
+/// an empty input with the status footer present — input(1) + borders(2) +
+/// status(1), plus the splash block when shown. `start_terminal` and
+/// `run_loop`'s seed both use this so the first real draw matches the reserved
+/// height and no terminal re-init (a visible splash jump) fires on frame one.
+fn startup_viewport_height(show_splash: bool) -> u16 {
+    let base = 1 + 2 + 1;
+    if show_splash {
+        base + crate::startup_splash::HEIGHT + 1
+    } else {
+        base
+    }
+}
+
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
 pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
-    let height = if show_splash {
-        crate::startup_splash::HEIGHT + 3
-    } else {
-        3
-    };
+    let height = startup_viewport_height(show_splash);
     let mut terminal = ratatui::init_with_options(TerminalOptions {
         viewport: Viewport::Inline(height),
     });
@@ -372,6 +371,21 @@ pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::Defa
     })?;
     terminal.show_cursor()?;
     Ok(terminal)
+}
+
+/// Restores the terminal modes the chat UI enables (bracketed paste + the kitty
+/// keyboard-enhancement flags) on drop, so a panic or early `?` return can't
+/// leave the user's shell with paste mode on and the protocol still pushed —
+/// ratatui's own panic hook only restores raw mode and the alternate screen.
+struct TerminalModeGuard;
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            PopKeyboardEnhancementFlags
+        );
+    }
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -408,6 +422,8 @@ pub async fn run(
     );
     let result = match keyboard_result {
         Ok(()) => {
+            // Guard restores paste/keyboard modes on any exit, including panic.
+            let _mode_guard = TerminalModeGuard;
             run_loop(
                 terminal,
                 ChatContext {
@@ -431,11 +447,6 @@ pub async fn run(
         }
         Err(error) => Err(error.into()),
     };
-    let _ = execute!(
-        std::io::stdout(),
-        DisableBracketedPaste,
-        PopKeyboardEnhancementFlags
-    );
     ratatui::restore();
     result
 }
@@ -536,7 +547,7 @@ async fn run_loop(
         PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
     let mut pending = pending.map(SubmittedPrompt::from);
     let mut queued_prompts = VecDeque::new();
-    let mut viewport_height = 3;
+    let mut viewport_height = startup_viewport_height(!resumed_session);
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
     let mut suggestion_index = 0usize;
@@ -661,6 +672,13 @@ async fn run_loop(
                 };
             } else if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
+                    Ok(slash_commands::ParsedCommand::Quit) => {
+                        finish_inline(&mut terminal)?;
+                        if let Some(active) = active.take() {
+                            active.close().await?;
+                        }
+                        return Ok(());
+                    }
                     Ok(slash_commands::ParsedCommand::Rewind { target, fork }) => handle_rewind(
                         &mut terminal,
                         context.sessions,
@@ -752,6 +770,11 @@ async fn run_loop(
                 )
                 .await?;
                 viewport_height = result.viewport_height;
+                // Restore anything typed into the box mid-stream but not sent,
+                // so finishing a turn no longer wipes an in-progress draft.
+                if !result.leftover_input.text.is_empty() {
+                    input = result.leftover_input;
+                }
                 for delivered in result.delivered {
                     prompt_history.push(delivered, InputAtoms::default());
                 }
@@ -1160,7 +1183,10 @@ fn resize_and_draw(
         } else {
             0
         })
-        .max(viewport_floor);
+        .max(viewport_floor)
+        // Never reserve an inline viewport taller than the terminal itself,
+        // which ratatui cannot place (garbled reservation / scroll).
+        .min(terminal.size()?.height);
     if desired != *viewport_height {
         *viewport_height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
@@ -1660,6 +1686,7 @@ async fn submit(
             })
             .collect(),
         delivered,
+        leftover_input: steering_input,
     })
 }
 
@@ -1758,6 +1785,12 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             text_area.y,
             text_area.width.saturating_sub(2),
             text_area.height,
+        );
+        // Paint the whole rect first so wrapped-line slack gets the highlight
+        // background too, instead of a ragged bar hugging only the glyphs.
+        buffer.set_style(
+            highlighted_area,
+            Style::default().fg(Color::Black).bg(Color::White),
         );
         Paragraph::new(Text::styled(
             text,
@@ -1952,7 +1985,7 @@ fn insert_response(
 fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
     const FRAMES: [&str; 6] = ["▓", "▒", "░", " ", "░", "▒"];
     format!(
-        "  {} {phase} [{} elapsed]",
+        "  {} {phase} [{} elapsed] · esc to interrupt",
         FRAMES[frame % FRAMES.len()],
         format_elapsed(elapsed)
     )
@@ -2205,6 +2238,35 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
     }
 }
 
+/// Walk `text` under the exact rules `hard_wrap_input` uses, returning the
+/// (column, row) the cursor occupies after the final character. Both the input
+/// box height and the cursor position derive from this so they stay aligned
+/// with the rendered wrap — wide glyphs and exact-width boundaries used to
+/// drift when height/cursor were computed with independent modular math.
+fn wrap_end(text: &str, width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    let mut column = 0usize;
+    let mut row = 0usize;
+    for character in text.chars() {
+        if character == '\n' {
+            row += 1;
+            column = 0;
+            continue;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if column > 0 && column + character_width > width {
+            row += 1;
+            column = 0;
+        }
+        column += character_width;
+        if column == width {
+            row += 1;
+            column = 0;
+        }
+    }
+    (column, row)
+}
+
 fn hard_wrap_input(text: &str, width: u16) -> String {
     let width = usize::from(width.max(1));
     let mut output = String::with_capacity(text.len());
@@ -2412,7 +2474,7 @@ mod tests {
         );
         assert_eq!(
             status_line("thinking", std::time::Duration::ZERO, 0),
-            "  ▓ thinking [00:00 elapsed]"
+            "  ▓ thinking [00:00 elapsed] · esc to interrupt"
         );
         assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
     }

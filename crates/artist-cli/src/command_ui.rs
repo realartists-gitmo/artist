@@ -58,10 +58,21 @@ pub async fn run(
             context_capacity: None,
             model_changed: false,
         }),
+        ParsedCommand::Quit => Ok(CommandOutput {
+            lines: vec!["/quit exits artist".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Help => Ok(CommandOutput {
             lines: slash_commands::COMMANDS
                 .iter()
                 .map(|command| format!("{}  {}", command.usage, command.description))
+                .chain([
+                    "!<command>  run a shell command".to_owned(),
+                    "$<skill>  mention an Agent Skill by name".to_owned(),
+                    "esc / ctrl+c  interrupt a response — or quit on an empty prompt"
+                        .to_owned(),
+                ])
                 .collect(),
             context_capacity: None,
             model_changed: false,
