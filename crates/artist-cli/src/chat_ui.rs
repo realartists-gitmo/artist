@@ -333,18 +333,12 @@ pub struct ChatResources<'a> {
     pub rules_handle: &'a RulesHandle,
 }
 
-/// First-frame inline viewport height. Mirrors `resize_and_draw`'s formula for
-/// an empty input with the status footer present — input(1) + borders(2) +
-/// status(1), plus the splash block when shown. `start_terminal` and
-/// `run_loop`'s seed both use this so the first real draw matches the reserved
-/// height and no terminal re-init (a visible splash jump) fires on frame one.
-fn startup_viewport_height(show_splash: bool) -> u16 {
-    let base = 1 + 2 + 1;
-    if show_splash {
-        base + crate::startup_splash::HEIGHT + 1
-    } else {
-        base
-    }
+/// Compact inline viewport height: input(1) + borders(2) + status(1). The
+/// splash is printed into scrollback (see `start_terminal`), never reserved
+/// inside the viewport — so clearing it on the first message can't shrink and
+/// re-init the viewport (which showed as a blink).
+fn startup_viewport_height() -> u16 {
+    1 + 2 + 1
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
@@ -352,23 +346,24 @@ pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::Defa
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
-    let height = startup_viewport_height(show_splash);
     let mut terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(height),
+        viewport: Viewport::Inline(startup_viewport_height()),
     });
     terminal.draw(|frame| {
         if thinking {
             frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
         } else {
-            render_with_panel(
-                frame,
-                &ChatInput::default(),
-                &[],
-                &Line::default(),
-                show_splash,
-            );
+            render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), false);
         }
     })?;
+    // Print the splash into scrollback above the compact input viewport rather
+    // than reserving it inside — so it simply scrolls away as the chat grows and
+    // never forces a viewport resize.
+    if show_splash && !thinking {
+        terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
+            crate::startup_splash::render_buffer(buffer);
+        })?;
+    }
     terminal.show_cursor()?;
     Ok(terminal)
 }
@@ -547,7 +542,7 @@ async fn run_loop(
         PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
     let mut pending = pending.map(SubmittedPrompt::from);
     let mut queued_prompts = VecDeque::new();
-    let mut viewport_height = startup_viewport_height(!resumed_session);
+    let mut viewport_height = startup_viewport_height();
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
     let mut suggestion_index = 0usize;
@@ -636,7 +631,9 @@ async fn run_loop(
             context.project,
             &status,
         );
-        let show_splash = !resumed_session && history.is_empty();
+        // The splash lives in scrollback (printed once by start_terminal), so
+        // the viewport never reserves or clears it — no resize, no blink.
+        let show_splash = false;
         resize_and_draw(
             &mut terminal,
             &input,
