@@ -35,6 +35,17 @@ struct Session {
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Kill the PTY child on drop so persistent/background sessions don't
+        // leave orphan processes (and the reader thread, which loops until PTY
+        // EOF, then exits once the child is gone).
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
+}
+
 impl BashTool {
     pub fn new(workspace: Workspace) -> Self {
         Self {
@@ -205,8 +216,8 @@ impl BashTool {
         let cap = args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP);
         let mut child = process.spawn()?;
         let buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
-        let stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
-        let stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
+        let mut stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
+        let mut stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
         let timeout = Duration::from_secs(args.timeout.unwrap_or(120));
         let (status, exit_code) = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(result) => {
@@ -232,7 +243,18 @@ impl BashTool {
                 ("timedOut", None)
             }
         };
-        let _ = tokio::join!(stdout, stderr);
+        // Bound the wait for the pipes to close: a daemonizing grandchild that
+        // escaped the killed process group can hold stdout/stderr open forever,
+        // which would otherwise hang this call even though the child exited.
+        if tokio::time::timeout(Duration::from_secs(2), async {
+            let _ = tokio::join!(&mut stdout, &mut stderr);
+        })
+        .await
+        .is_err()
+        {
+            stdout.abort();
+            stderr.abort();
+        }
         let buffer = buffer.lock().await;
         let output = String::from_utf8_lossy(&buffer.0);
         Ok(format!(

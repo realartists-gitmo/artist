@@ -47,6 +47,9 @@ pub struct Recorder {
     lineage: String,
     run: Option<String>,
     watermark: Watermark,
+    /// Cleared by the writer task if an append ever fails; shared across all
+    /// derived recorders so the CLI can detect that the log is incomplete.
+    healthy: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Recorder {
@@ -57,7 +60,14 @@ impl Recorder {
             lineage: MAIN_LINEAGE.to_owned(),
             run: None,
             watermark: Watermark::default(),
+            healthy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// False once the writer task has failed to append an event — the on-disk
+    /// log is missing events, so history rebuilt from it is incomplete.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Record an event with this recorder's run + lineage. Never blocks;
@@ -141,6 +151,8 @@ pub fn spawn_writer(
         watermark.store(seq);
     }
     let task_watermark = watermark.clone();
+    let healthy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let task_healthy = healthy.clone();
     let handle = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut transcript_file = transcript.as_deref().and_then(|path| {
             std::fs::OpenOptions::new()
@@ -157,7 +169,14 @@ pub fn spawn_writer(
                     continue;
                 }
             };
-            let seq = writer.append(recorded.run.as_deref(), &recorded.lineage, &recorded.event)?;
+            let seq = match writer.append(recorded.run.as_deref(), &recorded.lineage, &recorded.event)
+            {
+                Ok(seq) => seq,
+                Err(error) => {
+                    task_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
             task_watermark.store(seq);
             if let Some(file) = &mut transcript_file {
                 let envelope = crate::event::Envelope {
@@ -184,6 +203,7 @@ pub fn spawn_writer(
             lineage: MAIN_LINEAGE.to_owned(),
             run: None,
             watermark,
+            healthy,
         },
         WriterTask { handle },
     )

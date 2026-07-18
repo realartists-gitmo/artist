@@ -1667,6 +1667,12 @@ async fn submit(
     // Rebuild the model-facing history from the log — the single source of
     // truth, including tool round-trips and any TTSR rule turns.
     active.recorder.flush().await;
+    if !active.recorder.is_healthy() {
+        insert_status(
+            terminal,
+            "  ⚠ session log write failed (disk full?) — history may be incomplete",
+        )?;
+    }
     *history = artist_session::build_history(
         &active.events()?,
         &active.attachments,

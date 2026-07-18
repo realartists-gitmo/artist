@@ -16,6 +16,17 @@ pub struct Manager {
     statuses: Arc<RwLock<HashMap<String, String>>>,
     events: EventBus,
     context: Arc<RwLock<ExtensionContext>>,
+    /// Abort handles for the per-status-item refresh loops, cancelled on drop
+    /// so they don't leak their wasm instance across a Manager reload.
+    status_tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl Drop for Manager {
+    fn drop(&mut self) {
+        for handle in &self.status_tasks {
+            handle.abort();
+        }
+    }
 }
 
 impl Manager {
@@ -49,14 +60,15 @@ impl Manager {
                 }),
             }
         }
-        let manager = Self {
+        let mut manager = Self {
             registry,
             instances,
             statuses: Default::default(),
             events,
             context,
+            status_tasks: Vec::new(),
         };
-        manager.start_status_refresh();
+        manager.status_tasks = manager.start_status_refresh();
         manager.start_event_forwarding();
         manager
     }
@@ -153,7 +165,8 @@ impl Manager {
         }
     }
 
-    fn start_status_refresh(&self) {
+    fn start_status_refresh(&self) -> Vec<tokio::task::AbortHandle> {
+        let mut handles = Vec::new();
         for (manifest, declaration) in self.registry.status_items() {
             let Some(instance) = self.instances.get(&manifest.id).cloned() else {
                 continue;
@@ -161,7 +174,7 @@ impl Manager {
             let cache = self.statuses.clone();
             let name = declaration.name.clone();
             let interval = declaration.refresh_ms.max(100);
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 loop {
                     if let Ok(value) = instance.status(&name).await {
                         cache
@@ -172,7 +185,9 @@ impl Manager {
                     tokio::time::sleep(Duration::from_millis(interval)).await;
                 }
             });
+            handles.push(task.abort_handle());
         }
+        handles
     }
 }
 
