@@ -369,6 +369,11 @@ pub struct FileToolManager {
     last_read_view: HashMap<String, FileView>,
     /// Set of pending stale-prefix confirmation keys.
     pending_confirmations: HashSet<PendingKey>,
+    /// Content-addressed cache of parsed views, keyed by (is_rust, xxh3 of the
+    /// text). Building a `FileView` reparses with tree-sitter for `.rs` files —
+    /// expensive, and it runs on every read plus twice per edit on identical
+    /// content, so caching avoids the repeated parse.
+    view_cache: HashMap<(bool, u64), FileView>,
 }
 
 impl Default for FileToolManager {
@@ -388,7 +393,26 @@ impl FileToolManager {
             issued_prefixes: HashMap::new(),
             last_read_view: HashMap::new(),
             pending_confirmations: HashSet::new(),
+            view_cache: HashMap::new(),
         }
+    }
+
+    /// Build a `FileView`, reusing a cached parse for identical content (same
+    /// text + `.rs`-ness) to skip the tree-sitter reparse.
+    fn build_view(&mut self, text: &str, path: &Path) -> FileView {
+        let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
+        let key = (is_rust, compute_hash(text.as_bytes()));
+        if let Some(view) = self.view_cache.get(&key) {
+            return view.clone();
+        }
+        let view = FileView::from_text(text, path);
+        // Bound the cache; views are content-addressed so a small ring is enough
+        // to cover a read followed by its edit(s).
+        if self.view_cache.len() >= 16 {
+            self.view_cache.clear();
+        }
+        self.view_cache.insert(key, view.clone());
+        view
     }
 
     pub fn config(&self) -> &FileToolConfig {
@@ -450,7 +474,7 @@ impl FileToolManager {
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 
-        let view = FileView::from_text(&content, path);
+        let view = self.build_view(&content, path);
         self.last_read_view.insert(norm.clone(), view.clone());
 
         let start = request.start_line.saturating_sub(1);
@@ -513,7 +537,7 @@ impl FileToolManager {
         tokio::fs::rename(&tmp_path, path).await?;
 
         let lines: Vec<&str> = request.content.lines().collect();
-        let view = FileView::from_text(&request.content, path);
+        let view = self.build_view(&request.content, path);
         self.last_read_view.insert(norm.clone(), view.clone());
 
         let visible_anchors = self.reconcile_path_anchors(&norm, &view, true);
@@ -562,7 +586,7 @@ impl FileToolManager {
         // 1. Snapshot: byte ranges for each line in the ORIGINAL content
         //    (preserves CRLF, tab characters, unrelated bytes).
         let line_ranges = line_byte_ranges(&content);
-        let snapshot_view = FileView::from_text(&content, path);
+        let snapshot_view = self.build_view(&content, path);
         // Allocate mnemonics for newly observed concurrent content while preserving
         // stale bindings until this edit is acknowledged successfully.
         let snapshot_anchors = self.reconcile_path_anchors(&norm, &snapshot_view, false);
@@ -880,7 +904,7 @@ impl FileToolManager {
         // preserve every surviving handle unchanged, and make freed one-word
         // handles available only to newly created lines.
         self.clear_pending_for_path(&norm);
-        let final_view = FileView::from_text(&result, path);
+        let final_view = self.build_view(&result, path);
         self.last_read_view.insert(norm.clone(), final_view.clone());
         let visible_anchors = self.reconcile_path_anchors(&norm, &final_view, true);
 

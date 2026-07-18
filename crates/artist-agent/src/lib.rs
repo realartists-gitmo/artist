@@ -222,16 +222,25 @@ pub async fn stream_chat(
 
     let resources = resources::Resources::discover(tools.project_root());
     let system_prompt = format!(
-        "{}{}{}\nCurrent working directory: {}",
+        "{}{}\nCurrent working directory: {}",
         include_str!("system_prompt.md"),
         resources.prompt_section(),
-        resources.explicit_skill_section(&input.text),
         tools.project_root().display()
     );
     handles.rules.note_user_turn();
 
     let mut seed_history = history;
     let mut seed_prompt = user_message(input);
+    // Skill instructions depend on what the user just typed, so ride them on
+    // the user turn instead of folding them into the (otherwise stable)
+    // preamble — that keeps the preamble a stable prompt-cache prefix so the
+    // history behind it can be reused turn to turn.
+    let skill_section = resources.explicit_skill_section(&input.text);
+    if !skill_section.is_empty()
+        && let Message::User { content } = &mut seed_prompt
+    {
+        content.insert(0, UserContent::text(skill_section));
+    }
     let fork_context = Arc::new({
         let mut context = seed_history.clone();
         context.push(seed_prompt.clone());
