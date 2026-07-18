@@ -1174,6 +1174,9 @@ fn resize_and_draw(
     viewport_floor: u16,
     show_splash: bool,
 ) -> Result<()> {
+    // A command panel hides the splash (see render_with_panel); keep the height
+    // math consistent so no blank splash rows are reserved behind the panel.
+    let show_splash = show_splash && panel.is_empty();
     let width = terminal.size()?.width.saturating_sub(2).max(1);
     let panel_height = if panel.is_empty() {
         0
@@ -1794,12 +1797,6 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
             text_area.width.saturating_sub(2),
             text_area.height,
         );
-        // Paint the whole rect first so wrapped-line slack gets the highlight
-        // background too, instead of a ragged bar hugging only the glyphs.
-        buffer.set_style(
-            highlighted_area,
-            Style::default().fg(Color::Black).bg(Color::White),
-        );
         Paragraph::new(Text::styled(
             text,
             Style::default().fg(Color::Black).bg(Color::White),
@@ -2145,7 +2142,14 @@ fn render_with_panel(
 ) {
     let area = frame.area();
     let status_height = (!footer.spans.is_empty()) as u16;
-    if show_splash && area.height >= crate::startup_splash::HEIGHT.saturating_add(3) {
+    // The splash is a startup affordance only. Suppress it whenever a command
+    // panel (e.g. /help) is open: a Paragraph doesn't clear its background, so
+    // the splash would otherwise bleed through the panel's empty cells and eat
+    // the rows the panel needs.
+    if show_splash
+        && panel.is_empty()
+        && area.height >= crate::startup_splash::HEIGHT.saturating_add(3)
+    {
         crate::startup_splash::render(
             frame,
             Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
