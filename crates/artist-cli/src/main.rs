@@ -658,9 +658,9 @@ fn list(store: &ProviderStore) {
             provider.name,
             provider
                 .auth
-                .email
-                .as_deref()
-                .unwrap_or(&provider.auth.account_id)
+                .email()
+                .or_else(|| provider.auth.account_id())
+                .unwrap_or("API key")
         );
     }
 }
@@ -718,6 +718,10 @@ fn default_index(store: &ProviderStore) -> Result<usize> {
 }
 
 pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
+    // API keys don't expire on our clock — nothing to refresh.
+    if provider.kind.is_api_key() {
+        return Ok(false);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -727,7 +731,7 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
     // The refresh response populates `expires_at`, so this self-corrects.
     let needs_refresh = provider
         .auth
-        .expires_at
+        .expires_at()
         .map_or(true, |expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
         return force_refresh(provider).await.map(|()| true);
@@ -739,6 +743,9 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
 /// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
 /// recorded expiry.
 pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
+    if provider.kind.is_api_key() {
+        bail!("API-key providers can't refresh — verify the key with `artist provider test`");
+    }
     provider.auth = ChatGptOAuth::default()
         .refresh(&provider.auth)
         .await

@@ -50,8 +50,8 @@ fn load_provider() -> Result<SavedProvider> {
 fn client(provider: &SavedProvider) -> Result<chatgpt::Client> {
     chatgpt::Client::builder()
         .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.auth.access_token.expose().to_owned(),
-            account_id: Some(provider.auth.account_id.clone()),
+            access_token: provider.auth.access_token().unwrap_or_default().to_owned(),
+            account_id: provider.auth.account_id().map(str::to_owned),
         })
         .base_url(provider.base_url.as_str())
         .originator("artist")

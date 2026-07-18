@@ -252,7 +252,7 @@ mod tests {
         let provider: SavedProvider = serde_json::from_value(serde_json::json!({
             "id":"x", "name":"x", "base_url":"https://example.com/",
             "model":"gpt-test", "reasoning_effort":"high",
-            "auth":{"access_token":"token","refresh_token":"refresh","account_id":"account"}
+            "auth":{"type":"chat_gpt","access_token":"token","refresh_token":"refresh","account_id":"account"}
         }))
         .unwrap();
         let segments = segments(
@@ -274,7 +274,7 @@ mod tests {
     fn appends_configured_cached_extension_values() {
         let provider: SavedProvider = serde_json::from_value(serde_json::json!({
             "id":"x", "name":"x", "base_url":"https://example.com/", "model":"m",
-            "auth":{"access_token":"t","refresh_token":"r","account_id":"a"}
+            "auth":{"type":"chat_gpt","access_token":"t","refresh_token":"r","account_id":"a"}
         }))
         .unwrap();
         let config = StatusBarConfig {

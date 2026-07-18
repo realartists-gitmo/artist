@@ -35,7 +35,7 @@ impl ProviderStore {
         let contents = fs::read_to_string(path).context("read providers.toml")?;
         let mut document: toml::Value =
             toml::from_str(&contents).context("parse providers.toml")?;
-        migrate_to_chatgpt_only(&mut document);
+        migrate_legacy_providers(&mut document);
         let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
         Ok(store)
@@ -81,7 +81,14 @@ impl ProviderStore {
     }
 }
 
-fn migrate_to_chatgpt_only(document: &mut toml::Value) {
+/// Bring a `providers.toml` up to the current schema. Pre-multi-provider
+/// ChatGPT rows predate the tagged `Auth` enum: their `[providers.auth]` table
+/// has no `type` key, so stamp `type = "chat_gpt"` to let it deserialize. The
+/// `kind` field defaults to `chat_gpt` via serde, so nothing to stamp there.
+///
+/// (This used to *strip* every API-key provider to force ChatGPT-only; now that
+/// multiple providers are supported again, it preserves them.)
+fn migrate_legacy_providers(document: &mut toml::Value) {
     let Some(table) = document.as_table_mut() else {
         return;
     };
@@ -90,34 +97,11 @@ fn migrate_to_chatgpt_only(document: &mut toml::Value) {
         .get_mut("providers")
         .and_then(toml::Value::as_array_mut)
     {
-        providers.retain(|provider| {
-            provider
-                .get("auth")
-                .and_then(|auth| auth.get("type"))
-                .and_then(toml::Value::as_str)
-                != Some("api_key")
-        });
-        let ids: Vec<String> = providers
-            .iter()
-            .filter_map(|provider| {
-                provider
-                    .get("id")
-                    .and_then(toml::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .collect();
-        let invalid_default = table
-            .get("default_provider")
-            .and_then(toml::Value::as_str)
-            .is_some_and(|id| !ids.iter().any(|candidate| candidate == id));
-        if invalid_default {
-            if let Some(first) = ids.first() {
-                table.insert(
-                    "default_provider".into(),
-                    toml::Value::String(first.clone()),
-                );
-            } else {
-                table.remove("default_provider");
+        for provider in providers.iter_mut() {
+            if let Some(auth) = provider.get_mut("auth").and_then(toml::Value::as_table_mut)
+                && !auth.contains_key("type")
+            {
+                auth.insert("type".into(), toml::Value::String("chat_gpt".into()));
             }
         }
     }
@@ -176,19 +160,20 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llm_provider::{Auth, SavedProvider, Secret};
+    use llm_provider::{Auth, ProviderKind, SavedProvider, Secret};
     #[test]
-    fn removes_legacy_api_key_providers() {
+    fn keeps_api_key_providers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("providers.toml");
         fs::write(
             &path,
-            r#"version = 1
+            r#"version = 2
 default_provider = "api"
 [[providers]]
 id = "api"
 name = "API"
 base_url = "https://api.example/v1/"
+kind = "open_ai"
 [providers.auth]
 type = "api_key"
 api_key = "secret"
@@ -196,8 +181,35 @@ api_key = "secret"
         )
         .unwrap();
         let store = ProviderStore::load(&path).unwrap();
-        assert!(store.providers.is_empty());
-        assert!(store.default_provider.is_none());
+        assert_eq!(store.providers.len(), 1);
+        assert_eq!(store.providers[0].kind, ProviderKind::OpenAi);
+        assert_eq!(store.providers[0].auth.api_key(), Some("secret"));
+    }
+
+    #[test]
+    fn stamps_type_on_legacy_chatgpt_row() {
+        // A pre-tagged-enum ChatGPT row: no `auth.type`, no `kind`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        fs::write(
+            &path,
+            r#"version = 1
+default_provider = "chatgpt"
+[[providers]]
+id = "chatgpt"
+name = "ChatGPT"
+base_url = "https://chatgpt.com/backend-api/codex/"
+[providers.auth]
+access_token = "a"
+refresh_token = "r"
+account_id = "acct"
+"#,
+        )
+        .unwrap();
+        let store = ProviderStore::load(&path).unwrap();
+        assert_eq!(store.providers.len(), 1);
+        assert_eq!(store.providers[0].kind, ProviderKind::ChatGpt);
+        assert_eq!(store.providers[0].auth.account_id(), Some("acct"));
     }
 
     #[test]
@@ -304,7 +316,7 @@ api_key = "secret"
         store.add(SavedProvider::chatgpt(
             ProviderId::new("one").unwrap(),
             "ChatGPT",
-            Auth {
+            Auth::ChatGpt {
                 access_token: Secret::new("access"),
                 refresh_token: Secret::new("refresh"),
                 account_id: "acct".into(),

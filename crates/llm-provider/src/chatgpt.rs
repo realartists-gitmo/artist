@@ -131,12 +131,17 @@ impl ChatGptOAuth {
     }
 
     pub async fn refresh(&self, auth: &Auth) -> Result<RefreshOutcome> {
-        let Auth {
+        let Auth::ChatGpt {
             refresh_token,
             account_id,
             email,
             ..
-        } = auth;
+        } = auth
+        else {
+            return Err(Error::InvalidConfig(
+                "token refresh applies only to ChatGPT credentials".into(),
+            ));
+        };
         let response = self
             .client
             .post(self.issuer.join("oauth/token")?)
@@ -232,7 +237,7 @@ fn auth_from_response(
             .as_secs()
             .saturating_add(seconds)
     });
-    Ok(Auth {
+    Ok(Auth::ChatGpt {
         access_token: Secret::new(access_token),
         refresh_token: Secret::new(refresh_token),
         account_id: identity.account_id,
@@ -334,11 +339,14 @@ mod tests {
             Some((&old_refresh, &account, &email)),
         )
         .unwrap();
-        let Auth {
+        let Auth::ChatGpt {
             account_id,
             email: actual_email,
             ..
-        } = auth;
+        } = auth
+        else {
+            panic!("expected ChatGpt auth");
+        };
         assert_eq!(account_id, account);
         assert_eq!(actual_email, email);
     }

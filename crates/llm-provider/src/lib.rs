@@ -14,5 +14,5 @@ pub use chatgpt::{
     RefreshOutcome,
 };
 pub use error::{Error, Result};
-pub use provider::{Auth, ProviderId, RequestAuth, SavedProvider};
+pub use provider::{Auth, ProviderId, ProviderKind, RequestAuth, SavedProvider};
 pub use secret::Secret;
