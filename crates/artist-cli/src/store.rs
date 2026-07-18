@@ -127,9 +127,50 @@ pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ARTIST_CONFIG_DIR") {
         return Ok(PathBuf::from(path).join("providers.toml"));
     }
-    Ok(dirs::config_dir()
-        .context("could not find user config directory")?
-        .join("artist/providers.toml"))
+    let home = dirs::home_dir().context("could not find home directory")?;
+    let root = home.join(".artist");
+    migrate_legacy_root(&root)?;
+    Ok(root.join("providers.toml"))
+}
+
+/// Move the pre-.artist global state into the conventional Artist home once.
+/// Existing files in the destination win; legacy-only files are copied across.
+fn migrate_legacy_root(root: &Path) -> Result<()> {
+    let Some(config) = dirs::config_dir() else {
+        return Ok(());
+    };
+    migrate_root_between(&config.join("artist"), root)
+}
+
+/// The migration mechanics, split out from the `dirs`-derived paths so the
+/// merge behaviour is unit-testable. When the destination is absent the legacy
+/// tree is moved wholesale (falling back to a copy across filesystems); when
+/// both exist, only legacy-only files are copied in — destination files always
+/// win, so a partially-migrated home is never clobbered.
+fn migrate_root_between(legacy: &Path, root: &Path) -> Result<()> {
+    if !legacy.is_dir() || legacy == root {
+        return Ok(());
+    }
+    if !root.exists() {
+        fs::rename(legacy, root).or_else(|_| copy_tree(legacy, root))?;
+        return Ok(());
+    }
+    copy_tree(legacy, root)
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        if from.is_dir() {
+            if !to.exists() { copy_tree(&from, &to)?; }
+        } else if !to.exists() {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -166,6 +207,89 @@ api_key = "secret"
         fs::write(&path, "version = 2\nproviders = []\n").unwrap();
         let store = ProviderStore::load(&path).unwrap();
         assert_eq!(store.status_bar, StatusBarConfig::default());
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_root_when_destination_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("config/artist");
+        let root = dir.path().join(".artist");
+        write_file(&legacy.join("providers.toml"), "version = 2\n");
+        write_file(&legacy.join("rules/one.md"), "rule\n");
+
+        migrate_root_between(&legacy, &root).unwrap();
+
+        assert!(!legacy.exists(), "legacy root should be moved away");
+        assert_eq!(
+            fs::read_to_string(root.join("providers.toml")).unwrap(),
+            "version = 2\n"
+        );
+        assert_eq!(fs::read_to_string(root.join("rules/one.md")).unwrap(), "rule\n");
+    }
+
+    #[test]
+    fn merges_legacy_only_files_without_overwriting_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("config/artist");
+        let root = dir.path().join(".artist");
+        // Destination already has providers.toml (must win) but no rules.
+        write_file(&root.join("providers.toml"), "version = 2\nkept = true\n");
+        write_file(&legacy.join("providers.toml"), "version = 1\nstale = true\n");
+        write_file(&legacy.join("rules/one.md"), "rule\n");
+
+        migrate_root_between(&legacy, &root).unwrap();
+
+        // Destination file preserved; legacy-only file copied in.
+        assert_eq!(
+            fs::read_to_string(root.join("providers.toml")).unwrap(),
+            "version = 2\nkept = true\n"
+        );
+        assert_eq!(fs::read_to_string(root.join("rules/one.md")).unwrap(), "rule\n");
+        // Legacy is left in place when merging (both existed).
+        assert!(legacy.exists());
+    }
+
+    #[test]
+    fn migration_is_a_noop_without_legacy_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("config/artist");
+        let root = dir.path().join(".artist");
+        write_file(&root.join("providers.toml"), "version = 2\n");
+
+        migrate_root_between(&legacy, &root).unwrap();
+
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read_to_string(root.join("providers.toml")).unwrap(),
+            "version = 2\n"
+        );
+    }
+
+    #[test]
+    fn copy_tree_recurses_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        let destination = dir.path().join("dst");
+        write_file(&source.join("a.txt"), "from-source\n");
+        write_file(&source.join("nested/b.txt"), "nested\n");
+        write_file(&destination.join("a.txt"), "from-destination\n");
+
+        copy_tree(&source, &destination).unwrap();
+
+        // Existing destination file wins; new files and subdirs are copied.
+        assert_eq!(
+            fs::read_to_string(destination.join("a.txt")).unwrap(),
+            "from-destination\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("nested/b.txt")).unwrap(),
+            "nested\n"
+        );
     }
 
     #[test]

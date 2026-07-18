@@ -12,22 +12,19 @@ pub struct AgentsFile {
 }
 
 pub fn discover(workspace: &Path, diagnostics: &mut Vec<String>) -> Vec<AgentsFile> {
-    discover_from(workspace, dirs::config_dir().as_deref(), diagnostics)
+    discover_from(workspace, dirs::home_dir().as_deref(), diagnostics)
 }
 
 pub(crate) fn discover_from(
     workspace: &Path,
-    config: Option<&Path>,
+    home: Option<&Path>,
     diagnostics: &mut Vec<String>,
 ) -> Vec<AgentsFile> {
     let mut files = Vec::new();
-    if let Some(config) = config {
-        load(
-            &config.join("artist/AGENTS.md"),
-            true,
-            &mut files,
-            diagnostics,
-        );
+    if let Some(home) = home {
+        // Global AGENTS.md lives under the Artist home (`~/.artist`), matching
+        // the rules/skills/commands roots — not the old `~/.config/artist`.
+        load(&home.join(".artist/AGENTS.md"), true, &mut files, diagnostics);
     }
     let start = git_root(workspace).unwrap_or_else(|| workspace.to_owned());
     for directory in ancestry(&start, workspace) {

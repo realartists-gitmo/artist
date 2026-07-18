@@ -2,7 +2,7 @@
 
 `hashline-tools` exposes stable, file-scoped mnemonic handles for line-oriented edits while retaining full content-derived hashes internally. Handle uniqueness is enforced across the entire file; no narrower region or read-window scope is used.
 
-Rendered file views use the compact form `anchor | line text`. The separator and line text are not part of the anchor: for `time | beta`, every edit operation must pass only `time` as the edit anchor. Results can include the constant `ANCHOR_USAGE` with this rule.
+Rendered file views use the compact form `anchor: line text`. The separator and line text are not part of the anchor: for `time: beta`, every edit operation must pass only `time` as the edit anchor. Results can include the constant `ANCHOR_USAGE` with this rule.
 
 Unchanged lines keep their handles when surrounding code moves. One-word handles are allocated first from the OpenAI-tokenizer-screened vocabulary in `mnemonic_words.txt`. Files larger than the one-word capacity use two-word handles only for newly encountered overflow lines.
 

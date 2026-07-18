@@ -149,11 +149,21 @@ impl SteeringQueue {
         true
     }
     pub fn mark_delivered(&mut self, message: &str) -> Option<String> {
-        if let Some(index) = self
+        // The steering handle delivers FIFO and this queue mirrors that
+        // order, so the delivered entry is the front one — matching by
+        // position keeps duplicate-content entries from desyncing the
+        // mirror. Content search is only a defensive fallback.
+        let front_matches = self
             .queued
-            .iter()
-            .position(|queued| queued.content == message)
-        {
+            .first()
+            .is_some_and(|entry| entry.content == message);
+        if let Some(index) = if front_matches {
+            Some(0)
+        } else {
+            self.queued
+                .iter()
+                .position(|queued| queued.content == message)
+        } {
             let display = self.queued.remove(index).display;
             self.selected = self.selected.and_then(|selected| {
                 if selected == index {

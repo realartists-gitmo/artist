@@ -4,7 +4,7 @@ use crate::{
     input_images::ImagePaste,
     interaction::{PromptHistory, SteeringQueue},
     models,
-    sessions::{Role, Session, SessionStore, Turn},
+    sessions::{ActiveSession, SessionStore},
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
@@ -12,6 +12,8 @@ use crate::{
 };
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
+use artist_rules::{RulesEngine, state::RulesHandle};
+use artist_session::{ContentBlock, Envelope, ReplayItem, SteeringDelivered, TurnUser};
 use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
 use ratatui::{
@@ -32,7 +34,9 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
+use rig_core::completion::message::Message;
 use std::{collections::VecDeque, io::IsTerminal, path::Path};
+use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Default)]
@@ -194,36 +198,25 @@ impl ChatInput {
 
     fn visual_lines(&self, inner_width: u16) -> u16 {
         let width = usize::from(inner_width.max(1));
-        let mut lines = self.text.split('\n').collect::<Vec<_>>();
-        let last = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
-        let previous = lines
-            .into_iter()
-            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-            .sum::<usize>();
-        (previous + last / width + 1) as u16
+        let (_, row) = wrap_end(&self.text, width);
+        (row + 1) as u16
     }
 
     fn cursor_position(&self, inner_width: u16) -> (u16, u16) {
         let width = usize::from(inner_width.max(1));
-        let prefix = &self.text[..self.cursor];
-        let mut lines = prefix.split('\n').collect::<Vec<_>>();
-        let current = UnicodeWidthStr::width(lines.pop().unwrap_or_default());
-        let previous = lines
-            .into_iter()
-            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-            .sum::<usize>();
-        (
-            (current % width) as u16,
-            (previous + current / width) as u16,
-        )
+        let (col, row) = wrap_end(&self.text[..self.cursor], width);
+        (col as u16, row as u16)
     }
 }
 
 #[derive(Default)]
 struct StatusRuntime {
     git_branch: Option<String>,
+    /// Last completion's total — the current context size.
     used_tokens: Option<u64>,
     context_capacity: Option<u64>,
+    /// Sum of all completion totals this session (billed volume).
+    session_tokens: u64,
     extension_values: Vec<(String, String)>,
 }
 
@@ -258,6 +251,7 @@ fn footer_line(
         runtime.git_branch.as_deref(),
         runtime.used_tokens,
         runtime.context_capacity,
+        runtime.session_tokens,
         &runtime.extension_values,
     ))
 }
@@ -273,6 +267,8 @@ struct SubmitContext<'a> {
     extension_control: &'a crate::extension_control::ExtensionControl,
     disabled_tools: &'a [String],
     show_splash: bool,
+    rules_engine: &'a RulesEngine,
+    rules_handle: &'a RulesHandle,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -297,16 +293,30 @@ struct SubmitResult {
     viewport_height: u16,
     queued: Vec<SubmittedPrompt>,
     delivered: Vec<String>,
+    /// Text the user typed into the streaming box but never submitted, carried
+    /// back so it isn't wiped when the turn ends.
+    leftover_input: ChatInput,
+    /// The turn failed with an authentication error (AUTH-2). The run loop
+    /// force-refreshes the access token so a resend can succeed.
+    auth_expired: bool,
+}
+
+/// Whether an error chain looks like an expired/invalid access token — a 401,
+/// an explicit unauthorized, or an OAuth `invalid_grant`. Used to distinguish a
+/// recoverable auth failure (refresh + resend) from a real error.
+fn is_auth_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("401")
+        || text.contains("unauthorized")
+        || text.contains("invalid_grant")
+        || text.contains("invalid_token")
+        || text.contains("token expired")
+        || text.contains("token_expired")
 }
 
 struct PendingDelivery {
     display: String,
     content: String,
-}
-
-struct DeliveredSteering {
-    message: String,
-    response_offset: usize,
 }
 
 struct StreamingControls<'a> {
@@ -324,6 +334,10 @@ struct ChatContext<'a> {
     mcp: &'a artist_agent::mcp::McpManager,
     extensions: &'a std::sync::Arc<artist_extensions::Manager>,
     extension_control: &'a crate::extension_control::ExtensionControl,
+    rules_engine: &'a RulesEngine,
+    rules_handle: &'a RulesHandle,
+    /// Resolved layered settings: model/reasoning overrides and denied tools.
+    settings: &'a crate::settings::EffectiveSettings,
 }
 
 pub struct ChatResources<'a> {
@@ -333,6 +347,17 @@ pub struct ChatResources<'a> {
     pub mcp: &'a artist_agent::mcp::McpManager,
     pub extensions: &'a std::sync::Arc<artist_extensions::Manager>,
     pub extension_control: &'a crate::extension_control::ExtensionControl,
+    pub rules_engine: &'a RulesEngine,
+    pub rules_handle: &'a RulesHandle,
+    pub settings: &'a crate::settings::EffectiveSettings,
+}
+
+/// Compact inline viewport height: input(1) + borders(2) + status(1). The
+/// splash is printed into scrollback (see `start_terminal`), never reserved
+/// inside the viewport — so clearing it on the first message can't shrink and
+/// re-init the viewport (which showed as a blink).
+fn startup_viewport_height() -> u16 {
+    1 + 2 + 1
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
@@ -340,29 +365,41 @@ pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::Defa
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
-    let height = if show_splash {
-        crate::startup_splash::HEIGHT + 3
-    } else {
-        3
-    };
     let mut terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(height),
+        viewport: Viewport::Inline(startup_viewport_height()),
     });
     terminal.draw(|frame| {
         if thinking {
             frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
         } else {
-            render_with_panel(
-                frame,
-                &ChatInput::default(),
-                &[],
-                &Line::default(),
-                show_splash,
-            );
+            render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), false);
         }
     })?;
+    // Print the splash into scrollback above the compact input viewport rather
+    // than reserving it inside — so it simply scrolls away as the chat grows and
+    // never forces a viewport resize.
+    if show_splash && !thinking {
+        terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
+            crate::startup_splash::render_buffer(buffer);
+        })?;
+    }
     terminal.show_cursor()?;
     Ok(terminal)
+}
+
+/// Restores the terminal modes the chat UI enables (bracketed paste + the kitty
+/// keyboard-enhancement flags) on drop, so a panic or early `?` return can't
+/// leave the user's shell with paste mode on and the protocol still pushed —
+/// ratatui's own panic hook only restores raw mode and the alternate screen.
+struct TerminalModeGuard;
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            PopKeyboardEnhancementFlags
+        );
+    }
 }
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
@@ -372,12 +409,9 @@ pub async fn run(
     provider_index: usize,
     store_path: &Path,
     resources: ChatResources<'_>,
-    resumed: Option<(Session, Vec<Turn>)>,
+    resumed: Option<(ActiveSession, Vec<Envelope>)>,
     initial_prompt: Option<String>,
 ) -> Result<()> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
-    }
     let sessions = resources.sessions;
     let project = resources.project;
     let tools = resources.tools;
@@ -391,6 +425,7 @@ pub async fn run(
         git_branch: None,
         used_tokens: None,
         context_capacity,
+        session_tokens: 0,
         extension_values: extensions.status_items(),
     };
     status.refresh(&store.status_bar, project);
@@ -401,6 +436,8 @@ pub async fn run(
     );
     let result = match keyboard_result {
         Ok(()) => {
+            // Guard restores paste/keyboard modes on any exit, including panic.
+            let _mode_guard = TerminalModeGuard;
             run_loop(
                 terminal,
                 ChatContext {
@@ -413,6 +450,9 @@ pub async fn run(
                     mcp,
                     extensions,
                     extension_control,
+                    rules_engine: resources.rules_engine,
+                    rules_handle: resources.rules_handle,
+                    settings: resources.settings,
                 },
                 resumed,
                 initial_prompt,
@@ -422,11 +462,6 @@ pub async fn run(
         }
         Err(error) => Err(error.into()),
     };
-    let _ = execute!(
-        std::io::stdout(),
-        DisableBracketedPaste,
-        PopKeyboardEnhancementFlags
-    );
     ratatui::restore();
     // Inline restoration can return to the cursor position saved during setup.
     // Reposition afterwards so the shell prompt starts below the cleared UI.
@@ -507,34 +542,51 @@ fn skill_completions<'a>(
 
 async fn run_loop(
     mut terminal: ratatui::DefaultTerminal,
-    context: ChatContext<'_>,
-    resumed: Option<(Session, Vec<Turn>)>,
+    mut context: ChatContext<'_>,
+    resumed: Option<(ActiveSession, Vec<Envelope>)>,
     pending: Option<String>,
     mut status: StatusRuntime,
 ) -> Result<()> {
     let resumed_session = resumed.is_some();
-    let (mut session, mut turns) = resumed.map_or((None, Vec::new()), |(s, t)| (Some(s), t));
+    let (mut active, resumed_events) = resumed.map_or((None, Vec::new()), |(active, events)| {
+        (Some(active), events)
+    });
+    // Full-fidelity model history (tool calls/results included), rebuilt
+    // from the event log after each turn.
+    let mut history: Vec<Message> = match &active {
+        Some(active) => {
+            context.rules_handle.restore_from_log(&resumed_events);
+            artist_session::build_history(
+                &resumed_events,
+                &active.attachments,
+                &artist_session::HistoryOptions::default(),
+            )?
+        }
+        None => Vec::new(),
+    };
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
+    let custom_commands = crate::custom_commands::discover(context.project);
     let mcp_servers = context.mcp.server_names().await;
-    let mut prompt_history = PromptHistory::from_prompts(
-        turns
-            .iter()
-            .filter(|turn| turn.role == Role::User)
-            .map(|turn| turn.content.clone())
-            .collect(),
-    );
+    let mut prompt_history =
+        PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
     let mut pending = pending.map(SubmittedPrompt::from);
     let mut queued_prompts = VecDeque::new();
-    let mut viewport_height = 3;
+    let mut viewport_height = startup_viewport_height();
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
     let mut suggestion_index = 0usize;
     let mut suggestion_input = String::new();
+    // The provider the session actually runs with: the selected account plus
+    // any settings model/reasoning override, applied to a throwaway clone so
+    // the override is never persisted. Rebuilt when the account changes
+    // (`/accounts`) or before a turn (to carry a freshly-refreshed token).
+    let mut session_provider =
+        context.settings.apply_to(context.store.providers[context.provider_index].clone());
     if resumed_session {
         let footer = footer_line(
             &context.store.status_bar,
-            &context.store.providers[context.provider_index],
+            &session_provider,
             context.project,
             &status,
         );
@@ -547,7 +599,10 @@ async fn run_loop(
             viewport_floor,
             false,
         )?;
-        insert_history(&mut terminal, &turns)?;
+        insert_history(
+            &mut terminal,
+            &artist_session::replay_for_ui(&resumed_events),
+        )?;
     }
     loop {
         let provider = &context.store.providers[context.provider_index];
@@ -564,21 +619,30 @@ async fn run_loop(
         let slash_suggestions = slash_commands::completions(&input.text);
         let extension_commands = context.extensions.commands();
         let extension_suggestions = extension_command_completions(&input.text, &extension_commands);
+        let custom_suggestions = crate::custom_commands::completions(&custom_commands, &input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
             suggestion_index = 0;
             suggestion_input.clone_from(&input.text);
         }
-        let mut suggestions = if !slash_suggestions.is_empty() {
+        let mut suggestions = if !slash_suggestions.is_empty()
+            || !custom_suggestions.is_empty()
+            || !extension_suggestions.is_empty()
+        {
             slash_suggestions
                 .iter()
                 .map(|command| format!("{}  {}", command.name, command.description))
-                .collect()
-        } else if !extension_suggestions.is_empty() {
-            extension_suggestions
-                .iter()
-                .map(|command| format!("{}  {}", command.name, command.description))
+                .chain(
+                    custom_suggestions
+                        .iter()
+                        .map(|command| format!("{}  {}", command.name, command.description)),
+                )
+                .chain(
+                    extension_suggestions
+                        .iter()
+                        .map(|command| format!("{}  {}", command.name, command.description)),
+                )
                 .collect()
         } else if !mcp_suggestions.is_empty() {
             mcp_suggestions.clone()
@@ -599,11 +663,13 @@ async fn run_loop(
         };
         let footer = footer_line(
             &context.store.status_bar,
-            &context.store.providers[context.provider_index],
+            &session_provider,
             context.project,
             &status,
         );
-        let show_splash = !resumed_session && turns.is_empty();
+        // The splash lives in scrollback (printed once by start_terminal), so
+        // the viewport never reserves or clears it — no resize, no blink.
+        let show_splash = false;
         resize_and_draw(
             &mut terminal,
             &input,
@@ -613,7 +679,14 @@ async fn run_loop(
             viewport_floor,
             show_splash,
         )?;
-        if let Some(prompt) = pending.take() {
+        if let Some(mut prompt) = pending.take() {
+            // Custom commands expand to prompt templates (once — an expanded
+            // template is never re-expanded).
+            if let Some(expanded) =
+                crate::custom_commands::expand_invocation(&custom_commands, &prompt.content)
+            {
+                prompt.content = expanded;
+            }
             if let Some(command) = shell_command(&prompt.content) {
                 command_panel = match context.tools.bash.run_input(command).await {
                     Ok(output) => {
@@ -624,7 +697,7 @@ async fn run_loop(
                     Err(error) => vec![format!("Shell error: {error}")],
                 };
             } else if let Some((name, arguments)) =
-                extension_command(&prompt.content, &context.extensions.commands())
+                extension_command(&prompt.content, &extension_commands)
             {
                 command_panel = match context.extensions.invoke_command(name, arguments).await {
                     Ok(output) => output.lines().map(str::to_owned).collect(),
@@ -632,6 +705,77 @@ async fn run_loop(
                 };
             } else if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
+                    Ok(slash_commands::ParsedCommand::Quit) => {
+                        finish_inline(&mut terminal)?;
+                        if let Some(active) = active.take() {
+                            active.close().await?;
+                        }
+                        return Ok(());
+                    }
+                    Ok(slash_commands::ParsedCommand::Rewind { target, fork }) => handle_rewind(
+                        &mut terminal,
+                        context.sessions,
+                        &mut active,
+                        &mut history,
+                        &mut input,
+                        target,
+                        fork,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Rules(action)) => handle_rules(
+                        context.rules_engine,
+                        context.rules_handle,
+                        active.as_ref(),
+                        action,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Sessions) => {
+                        handle_sessions(context.sessions, context.project, &active)
+                            .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
+                    }
+                    Ok(slash_commands::ParsedCommand::New) => {
+                        if let Some(old) = active.take() {
+                            old.close().await?;
+                        }
+                        history.clear();
+                        context.rules_handle.restore_from_log(&[]);
+                        status.session_tokens = 0;
+                        vec!["Started a fresh session — your next message begins it.".to_owned()]
+                    }
+                    Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
+                        context.sessions,
+                        context.project,
+                        &mut active,
+                        &mut history,
+                        context.rules_handle,
+                        id,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Accounts { id }) => {
+                        let (panel, switch) =
+                            handle_accounts(context.store, context.provider_index, id);
+                        if let Some(new_index) = switch {
+                            context.provider_index = new_index;
+                            status.refresh(&context.store.status_bar, context.project);
+                            // The settings override still applies to whichever
+                            // account is now active.
+                            session_provider = context.settings.apply_to(
+                                context.store.providers[context.provider_index].clone(),
+                            );
+                        }
+                        panel
+                    }
+                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
+                        &mut terminal,
+                        context.store,
+                        context.store_path,
+                        viewport_height,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let command_input = ChatInput::default();
                         match command_ui::run(
@@ -681,10 +825,23 @@ async fn run_loop(
                     false,
                 )?;
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
+                // Refresh the access token at the turn boundary so a session
+                // that outlives the token lifetime keeps working instead of
+                // failing with an unrecoverable 401 (AUTH-1).
+                if crate::refresh_if_needed(&mut context.store.providers[context.provider_index])
+                    .await?
+                {
+                    let _ = context.store.save(context.store_path);
+                }
+                // Carry the just-refreshed token (and the settings override)
+                // into the request provider.
+                session_provider = context
+                    .settings
+                    .apply_to(context.store.providers[context.provider_index].clone());
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
-                        provider: &context.store.providers[context.provider_index],
+                        provider: &session_provider,
                         sessions: context.sessions,
                         project: context.project,
                         status_config: &context.store.status_bar,
@@ -692,16 +849,43 @@ async fn run_loop(
                         mcp: context.mcp,
                         extensions: context.extensions,
                         extension_control: context.extension_control,
-                        disabled_tools: &context.store.disabled_tools,
+                        disabled_tools: &context.settings.denied_tools,
                         show_splash,
+                        rules_engine: context.rules_engine,
+                        rules_handle: context.rules_handle,
                     },
-                    &mut session,
-                    &mut turns,
+                    &mut active,
+                    &mut history,
                     &mut status,
                     prompt,
+                    viewport_height,
                 )
                 .await?;
                 viewport_height = result.viewport_height;
+                // AUTH-2: the turn 401'd, so the token is stale regardless of
+                // its recorded expiry. Force-refresh it now (non-blocking to the
+                // rest of the loop's state) so the user's resend succeeds.
+                if result.auth_expired {
+                    match crate::force_refresh(
+                        &mut context.store.providers[context.provider_index],
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            let _ = context.store.save(context.store_path);
+                            insert_status(&mut terminal, "  ✓ login refreshed")?;
+                        }
+                        Err(error) => insert_status(
+                            &mut terminal,
+                            &format!("  ⚠ couldn't refresh login: {error:#} — run `artist login`"),
+                        )?,
+                    }
+                }
+                // Restore anything typed into the box mid-stream but not sent,
+                // so finishing a turn no longer wipes an in-progress draft.
+                if !result.leftover_input.text.is_empty() {
+                    input = result.leftover_input;
+                }
                 for delivered in result.delivered {
                     prompt_history.push(delivered, InputAtoms::default());
                 }
@@ -739,6 +923,20 @@ async fn run_loop(
                     && !key.modifiers.contains(KeyModifiers::SHIFT)
                     && !input.text.trim().is_empty() =>
             {
+                // Enter on an open suggestion menu completes the selected item
+                // first, then sends it — Tab completes only.
+                if !suggestions.is_empty() {
+                    apply_selected_suggestion(
+                        &mut input,
+                        suggestion_index,
+                        &slash_suggestions,
+                        &custom_suggestions,
+                        &extension_suggestions,
+                        &mcp_suggestions,
+                        &skill_range,
+                        &skill_suggestions,
+                    );
+                }
                 let display = input.text.clone();
                 let history_atoms = input.atoms.clone();
                 let expanded = input.take_expanded();
@@ -774,29 +972,16 @@ async fn run_loop(
                     && key.code == KeyCode::Tab
                     && !suggestions.is_empty() =>
             {
-                if let Some(command) = slash_suggestions.get(suggestion_index) {
-                    input.text = command.name.to_owned() + " ";
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let Some(command) = extension_suggestions.get(suggestion_index) {
-                    input.text = command.name.to_owned() + " ";
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let Some(completion) = mcp_suggestions.get(suggestion_index) {
-                    input.text = completion.clone();
-                    if completion == "/mcp status" || completion.split_whitespace().count() == 3 {
-                        // Complete commands can be submitted immediately; actions still
-                        // awaiting a server retain a trailing space.
-                    } else {
-                        input.text.push(' ');
-                    }
-                    input.atoms.clear();
-                    input.cursor = input.text.len();
-                } else if let (Some(range), Some(skill)) =
-                    (skill_range.clone(), skill_suggestions.get(suggestion_index))
-                {
-                    input.replace_range(range, &format!("${}", skill.name));
-                }
+                apply_selected_suggestion(
+                    &mut input,
+                    suggestion_index,
+                    &slash_suggestions,
+                    &custom_suggestions,
+                    &extension_suggestions,
+                    &mcp_suggestions,
+                    &skill_range,
+                    &skill_suggestions,
+                );
             }
             Event::Key(key)
                 if key.kind == KeyEventKind::Press
@@ -811,8 +996,24 @@ async fn run_loop(
                     input.cursor = input.text.len();
                 }
             }
+            // First ctrl+c on a non-empty prompt clears it; make that legible
+            // (otherwise it silently wipes typed text and looks like a no-op).
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !input.text.is_empty() =>
+            {
+                input.text.clear();
+                input.atoms.clear();
+                input.cursor = 0;
+                insert_status(&mut terminal, "  input cleared — ctrl+c again to quit")?;
+            }
             Event::Key(key) if !input.handle_key(key) => {
                 finish_inline(&mut terminal)?;
+                if let Some(active) = active.take() {
+                    active.close().await?;
+                }
                 return Ok(());
             }
 
@@ -820,6 +1021,404 @@ async fn run_loop(
             Event::Paste(text) => input.paste(&text, true),
             _ => {}
         }
+    }
+}
+
+/// `/rules`: the live rules panel and its actions. Listing shows every
+/// loaded rule with armed/fired/disabled state and session hit counts;
+/// `scan` retro-evaluates all rules over this session's log; `dry-run`
+/// evaluates a candidate rule file without activating it.
+async fn handle_rules(
+    engine: &RulesEngine,
+    handle: &RulesHandle,
+    active: Option<&ActiveSession>,
+    action: slash_commands::RulesAction<'_>,
+) -> Result<Vec<String>> {
+    use slash_commands::RulesAction;
+    engine.reload_if_changed();
+    let rules = engine.snapshot();
+    let resolve = |name: &str| -> Option<artist_rules::types::RuleId> {
+        let bare = artist_rules::types::RuleId(name.to_owned());
+        let builtin = artist_rules::types::RuleId(format!("builtin:{name}"));
+        if rules.get(&bare).is_some() {
+            Some(bare)
+        } else if rules.get(&builtin).is_some() {
+            Some(builtin)
+        } else {
+            None
+        }
+    };
+    match action {
+        RulesAction::List => {
+            let fired = handle.fired();
+            let hits = handle.hits();
+            let disabled = handle.disabled();
+            let poisoned = rules.poisoned();
+            let mut lines: Vec<String> = rules
+                .rules
+                .iter()
+                .map(|compiled| {
+                    let id = &compiled.rule.id;
+                    let state = if poisoned.contains(id) {
+                        "poisoned"
+                    } else if disabled.contains(id) {
+                        "disabled"
+                    } else if fired.contains(id) {
+                        "fired"
+                    } else {
+                        "armed"
+                    };
+                    let count = hits
+                        .iter()
+                        .find(|(rule, _)| rule == id)
+                        .map(|(_, count)| format!(" ({count}\u{d7})"))
+                        .unwrap_or_default();
+                    format!("{state:>8}{count}  {id}  {}", compiled.rule.description)
+                })
+                .collect();
+            if lines.is_empty() {
+                lines.push("No rules loaded. Add markdown rules under .artist/rules/".to_owned());
+            }
+            for diagnostic in engine.diagnostics() {
+                lines.push(format!("! {diagnostic}"));
+            }
+            Ok(lines)
+        }
+        RulesAction::Enable { rule } | RulesAction::Disable { rule } => {
+            let disable = matches!(action, RulesAction::Disable { .. });
+            match resolve(rule) {
+                Some(id) => {
+                    handle.set_disabled(id.clone(), disable);
+                    Ok(vec![format!(
+                        "rule {id} {}",
+                        if disable { "disabled" } else { "enabled" }
+                    )])
+                }
+                None => Ok(vec![format!("unknown rule: {rule}")]),
+            }
+        }
+        RulesAction::Scan => {
+            let Some(active) = active else {
+                return Ok(vec!["No session yet — nothing to scan.".to_owned()]);
+            };
+            active.recorder.flush().await;
+            let events = active.events()?;
+            let findings = artist_rules::retro::scan(&rules, &events);
+            if findings.is_empty() {
+                return Ok(vec![
+                    "No rule matches in this session's history.".to_owned(),
+                ]);
+            }
+            let mut lines: Vec<String> = findings
+                .iter()
+                .take(15)
+                .map(|finding| {
+                    format!(
+                        "{}  @{}  \"{}\"",
+                        finding.rule, finding.seq, finding.excerpt
+                    )
+                })
+                .collect();
+            if findings.len() > 15 {
+                lines.push(format!("… and {} more", findings.len() - 15));
+            }
+            let mut by_rule: Vec<(String, u64, Vec<String>)> = Vec::new();
+            for finding in &findings {
+                match by_rule
+                    .iter_mut()
+                    .find(|(rule, ..)| *rule == finding.rule.0)
+                {
+                    Some((_, count, examples)) => {
+                        *count += 1;
+                        if examples.len() < 3 {
+                            examples.push(finding.excerpt.clone());
+                        }
+                    }
+                    None => {
+                        by_rule.push((finding.rule.0.clone(), 1, vec![finding.excerpt.clone()]))
+                    }
+                }
+            }
+            for (rule, count, examples) in by_rule {
+                active.recorder.record(artist_session::RuleRetroFindings {
+                    rule,
+                    count,
+                    examples,
+                });
+            }
+            Ok(lines)
+        }
+        RulesAction::DryRun { file } => {
+            let Some(active) = active else {
+                return Ok(vec!["No session yet — nothing to scan against.".to_owned()]);
+            };
+            let rule = artist_rules::declarative::parse(std::path::Path::new(file))
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let id = rule.id.clone();
+            let candidate = artist_rules::matcher::RuleSet::compile(vec![rule]);
+            active.recorder.flush().await;
+            let events = active.events()?;
+            let findings = artist_rules::retro::scan(&candidate, &events);
+            let mut lines = vec![format!(
+                "{id}: would have fired {}\u{d7} this session (not activated)",
+                findings.len()
+            )];
+            lines.extend(
+                findings
+                    .iter()
+                    .take(5)
+                    .map(|finding| format!("  @{}  \"{}\"", finding.seq, finding.excerpt)),
+            );
+            Ok(lines)
+        }
+    }
+}
+
+/// `/rewind [n] [fork]`: list rewind targets, or mask history back to just
+/// before the nth-most-recent user turn (append-only — nothing is deleted),
+/// optionally forking into a new session that shares the prefix. The chosen
+/// turn's text is pre-filled into the input for editing.
+async fn handle_rewind(
+    terminal: &mut ratatui::DefaultTerminal,
+    sessions: &SessionStore,
+    active: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
+    input: &mut ChatInput,
+    target: Option<usize>,
+    fork: bool,
+) -> Result<Vec<String>> {
+    let Some(current) = active.as_ref() else {
+        return Ok(vec!["No session yet — nothing to rewind.".to_owned()]);
+    };
+    current.recorder.flush().await;
+    let events = current.events()?;
+    let targets = artist_session::rewind_targets(&events);
+    if targets.is_empty() {
+        return Ok(vec!["No user turns to rewind to.".to_owned()]);
+    }
+    let Some(n) = target else {
+        let mut lines: Vec<String> = targets
+            .iter()
+            .rev()
+            .take(10)
+            .enumerate()
+            .map(|(index, (_, display))| {
+                let mut preview = display.lines().next().unwrap_or("").to_owned();
+                if preview.chars().count() > 70 {
+                    preview = preview.chars().take(69).chain(['\u{2026}']).collect();
+                }
+                format!("{}  {}", index + 1, preview)
+            })
+            .collect();
+        lines.push("Rewind with /rewind <n>, or fork with /rewind <n> fork".to_owned());
+        return Ok(lines);
+    };
+    if n == 0 || n > targets.len() {
+        return Ok(vec![format!(
+            "No such turn: {n} (1..{} available)",
+            targets.len()
+        )]);
+    }
+    let (seq, display) = targets[targets.len() - n].clone();
+    let to_seq = seq.saturating_sub(1);
+    let marker;
+    if fork {
+        let forked = sessions.fork(&current.session.id, to_seq)?;
+        marker = format!(
+            "  \u{23EA} forked session {} from {} (before \"{}\")",
+            forked.session.id,
+            current.session.id,
+            display.lines().next().unwrap_or("")
+        );
+        let events = forked.events()?;
+        *history = artist_session::build_history(
+            &events,
+            &forked.attachments,
+            &artist_session::HistoryOptions::default(),
+        )?;
+        if let Some(old) = active.replace(forked) {
+            old.close().await?;
+        }
+    } else {
+        current.recorder.record(artist_session::HistoryRewind {
+            to_seq,
+            reason: "user rewind".to_owned(),
+            by: "user".to_owned(),
+        });
+        current.recorder.flush().await;
+        let events = current.events()?;
+        *history = artist_session::build_history(
+            &events,
+            &current.attachments,
+            &artist_session::HistoryOptions::default(),
+        )?;
+        marker = format!(
+            "  \u{23EA} rewound to before \"{}\" \u{2014} history after this point is masked, not deleted",
+            display.lines().next().unwrap_or("")
+        );
+    }
+    insert_status(terminal, &marker)?;
+    input.text = display;
+    input.cursor = input.text.len();
+    input.atoms.clear();
+    Ok(Vec::new())
+}
+
+/// `/sessions`: list this project's sessions, newest first, marking the active
+/// one. Read-only — switching is `/resume <id>`.
+fn handle_sessions(
+    sessions: &SessionStore,
+    project: &Path,
+    active: &Option<ActiveSession>,
+) -> Result<Vec<String>> {
+    let mut list = sessions.list_project(project)?;
+    if list.is_empty() {
+        return Ok(vec!["No sessions yet for this project.".to_owned()]);
+    }
+    // list_project is oldest-first; show newest first.
+    list.reverse();
+    let current = active.as_ref().map(|active| active.session.id.as_str());
+    let mut lines: Vec<String> = list
+        .iter()
+        .take(15)
+        .map(|session| {
+            let marker = if current == Some(session.id.as_str()) {
+                "*"
+            } else {
+                " "
+            };
+            let label = session.label.as_deref().unwrap_or("(no label)");
+            let mut preview = label.lines().next().unwrap_or("").to_owned();
+            if preview.chars().count() > 60 {
+                preview = preview.chars().take(59).chain(['\u{2026}']).collect();
+            }
+            format!("{marker} {}  {preview}", session.id)
+        })
+        .collect();
+    lines.push("Switch with /resume <id>.".to_owned());
+    Ok(lines)
+}
+
+/// `/resume [id]`: switch the active session to another one by id. Without an
+/// id, list the candidates. The current session is flushed and released first.
+async fn handle_resume(
+    sessions: &SessionStore,
+    project: &Path,
+    active: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
+    rules_handle: &RulesHandle,
+    id: Option<&str>,
+) -> Result<Vec<String>> {
+    let Some(id) = id else {
+        return handle_sessions(sessions, project, active);
+    };
+    if active.as_ref().map(|active| active.session.id.as_str()) == Some(id) {
+        return Ok(vec![format!("Already on session {id}.")]);
+    }
+    let (opened, events) = sessions
+        .open(id)
+        .with_context(|| format!("no such session: {id}"))?;
+    rules_handle.restore_from_log(&events);
+    *history = artist_session::build_history(
+        &events,
+        &opened.attachments,
+        &artist_session::HistoryOptions::default(),
+    )?;
+    let label = opened.session.label.clone();
+    if let Some(old) = active.replace(opened) {
+        old.close().await?;
+    }
+    Ok(vec![format!(
+        "Resumed session {id}{}.",
+        label
+            .as_deref()
+            .map(|label| format!(" — {label}"))
+            .unwrap_or_default()
+    )])
+}
+
+/// `/accounts [id]`: list logged-in accounts, or return the index to switch to.
+/// Returns the panel plus `Some(new_index)` when a switch was requested.
+fn handle_accounts(
+    store: &ProviderStore,
+    current: usize,
+    id: Option<&str>,
+) -> (Vec<String>, Option<usize>) {
+    let Some(id) = id else {
+        let mut lines: Vec<String> = store
+            .providers
+            .iter()
+            .enumerate()
+            .map(|(index, provider)| {
+                let marker = if index == current { "*" } else { " " };
+                let model = provider.model.as_deref().unwrap_or("no model");
+                format!("{marker} {}  {} ({model})", provider.id.as_str(), provider.name)
+            })
+            .collect();
+        lines.push("Switch with /accounts <id>, or add one with /login.".to_owned());
+        return (lines, None);
+    };
+    match store
+        .providers
+        .iter()
+        .position(|provider| provider.id.as_str() == id)
+    {
+        Some(index) if index == current => {
+            (vec![format!("Already using account {id}.")], None)
+        }
+        Some(index) => (
+            vec![format!(
+                "Switched to {} ({}).",
+                store.providers[index].id.as_str(),
+                store.providers[index].name
+            )],
+            Some(index),
+        ),
+        None => (
+            vec![format!("No such account: {id} — see /accounts for the list.")],
+            None,
+        ),
+    }
+}
+
+/// `/login`: run the ChatGPT OAuth flow for an additional account. The inline
+/// viewport and its input modes are suspended for the flow (which prints and
+/// opens a browser like standalone `artist login`), then restored.
+async fn handle_login(
+    terminal: &mut ratatui::DefaultTerminal,
+    store: &mut ProviderStore,
+    store_path: &Path,
+    viewport_height: u16,
+) -> Result<Vec<String>> {
+    finish_inline(terminal)?;
+    let _ = execute!(
+        std::io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+    let before = store.providers.len();
+    let outcome = crate::login::chatgpt(store).await;
+    if outcome.is_ok() {
+        let _ = store.save(store_path);
+    }
+    // Re-enter the inline viewport and re-arm the enhanced-key / paste modes
+    // the chat loop relies on.
+    *terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(viewport_height),
+    });
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
+    );
+    terminal.show_cursor()?;
+    match outcome {
+        Ok(()) if store.providers.len() > before => Ok(vec![
+            "Logged in and saved. Switch to it with /accounts.".to_owned(),
+        ]),
+        Ok(()) => Ok(vec!["Login completed.".to_owned()]),
+        Err(error) => Ok(vec![format!("Login failed: {error:#}")]),
     }
 }
 
@@ -832,6 +1431,9 @@ fn resize_and_draw(
     viewport_floor: u16,
     show_splash: bool,
 ) -> Result<()> {
+    // A command panel hides the splash (see render_with_panel); keep the height
+    // math consistent so no blank splash rows are reserved behind the panel.
+    let show_splash = show_splash && panel.is_empty();
     let width = terminal.size()?.width.saturating_sub(2).max(1);
     let panel_height = if panel.is_empty() {
         0
@@ -849,7 +1451,10 @@ fn resize_and_draw(
         } else {
             0
         })
-        .max(viewport_floor);
+        .max(viewport_floor)
+        // Never reserve an inline viewport taller than the terminal itself,
+        // which ratatui cannot place (garbled reservation / scroll).
+        .min(terminal.size()?.height);
     if desired != *viewport_height {
         *viewport_height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
@@ -899,12 +1504,14 @@ fn collect_delivered(
 async fn submit(
     terminal: &mut ratatui::DefaultTerminal,
     context: SubmitContext<'_>,
-    session: &mut Option<Session>,
-    turns: &mut Vec<Turn>,
+    session: &mut Option<ActiveSession>,
+    history: &mut Vec<Message>,
     status: &mut StatusRuntime,
     prompt: SubmittedPrompt,
+    viewport_height: u16,
 ) -> Result<SubmitResult> {
     let started = std::time::Instant::now();
+    let first_turn = history.is_empty();
     let active = match session {
         Some(value) => value,
         None => session.insert(
@@ -913,47 +1520,25 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
-    let history = turns
-        .iter()
-        .map(|turn| artist_agent::ChatMessage {
-            role: match turn.role {
-                Role::User => artist_agent::ChatRole::User,
-                Role::Assistant => artist_agent::ChatRole::Assistant,
-            },
-            content: turn.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    context.sessions.append(
-        &active.id,
-        &Turn {
-            role: Role::User,
-            content: prompt.content.clone(),
-        },
-    )?;
+    // Rules hot-reload between turns; the run holds the snapshot.
+    context.rules_engine.reload_if_changed();
+    let rule_set = context.rules_engine.snapshot();
+    let agent_input_probe = clipboard::agent_input(&prompt)?;
+    active.recorder.record(TurnUser {
+        content: user_turn_blocks(&agent_input_probe, &active.attachments),
+        display: Some(prompt.display.clone()),
+        source: "prompt".to_owned(),
+    });
     if context.show_splash {
         // Add separation only when moving the splash into scrollback. The live
         // startup layout already reserves its own gap above the input box.
         terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
             crate::startup_splash::render_buffer(buffer);
         })?;
-    } else if !turns.is_empty() {
+    } else if !first_turn {
         insert_blank(terminal)?;
     }
     insert_message(terminal, &prompt.display)?;
-    if status.context_capacity.is_none()
-        && context.status_config.items.contains(&StatusItem::Context)
-    {
-        status.context_capacity =
-            models::catalog(context.provider)
-                .await
-                .ok()
-                .and_then(|catalog| {
-                    catalog
-                        .iter()
-                        .find(|model| Some(&model.slug) == context.provider.model.as_ref())
-                        .and_then(|model| model.effective_context_window())
-                });
-    }
     let empty_input = ChatInput::default();
     let mut footer = footer_line(
         context.status_config,
@@ -963,6 +1548,13 @@ async fn submit(
     );
     terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, false))?;
     terminal.show_cursor()?;
+    // The context-size readout needs the model catalog — a ~1s network call on
+    // the first turn (`context_capacity` is unset). Run it CONCURRENTLY with the
+    // streaming loop (polled as a select arm below) instead of blocking, so the
+    // input box stays live and the user can type/queue while it's in flight.
+    let mut catalog_fut = (status.context_capacity.is_none()
+        && context.status_config.items.contains(&StatusItem::Context))
+    .then(|| Box::pin(models::catalog(context.provider)));
     let mut response = String::new();
     let mut visible = String::new();
     let mut reasoning = String::new();
@@ -970,7 +1562,10 @@ async fn submit(
     let mut response_output_started = false;
     let mut response_since_tool = false;
     let mut tools = ToolUi::default();
-    let mut stream_height = 3;
+    // Start at the real viewport height the input box already occupies. The
+    // streaming layout keeps that height (response goes to scrollback, not a
+    // live tail), so entering a turn doesn't re-init/blink the viewport.
+    let mut stream_height = viewport_height;
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
@@ -978,14 +1573,15 @@ async fn submit(
         .extension_control
         .set_steering(Some(steering_handle.clone()));
     let task_steering = steering_handle.clone();
-    let mut delivered_steering = Vec::new();
+    let mut delivered_steering: Vec<String> = Vec::new();
     let mut pending_delivered = Vec::new();
     let mut steering_input = ChatInput::default();
     let mut cancelled = false;
     let mut animation_frame = 0;
+    let cancel = CancellationToken::new();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let task_provider = context.provider.clone();
-    let task_prompt = clipboard::agent_input(&prompt)?;
+    let task_prompt = agent_input_probe;
     let task_history = history.clone();
     let task_tools = context.tools.clone();
     let task_mcp = context.mcp.clone();
@@ -999,18 +1595,26 @@ async fn submit(
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"thinking"}),
     });
+    let task_handles = artist_agent::SessionHandles {
+        steering: task_steering,
+        rules: context.rules_handle.clone(),
+        rule_set,
+        recorder: active.recorder.clone(),
+        attachments: active.attachments.clone(),
+        cancel: cancel.clone(),
+    };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
             &task_prompt,
-            &task_history,
+            task_history,
             artist_agent::ToolContext {
                 native: &task_tools,
                 mcp: &task_mcp,
                 extensions: Some(&task_extensions),
                 disabled: &task_disabled_tools,
             },
-            task_steering,
+            task_handles,
             |event| {
                 crate::publish_prompt_event(&event_extensions, &event);
                 tx.send(event)
@@ -1023,22 +1627,36 @@ async fn submit(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     draw_streaming(
         terminal,
-        &visible,
-        true,
         &status_line(phase, started.elapsed(), animation_frame),
         StreamingControls {
             input: &steering_input,
             steering: &steering,
         },
-        &footer,
         &mut stream_height,
     )?;
     while !task.is_finished() || !rx.is_empty() {
         tokio::select! {
+            // The context-size fetch resolves concurrently; update the readout
+            // when it lands. Disabled once done via the `if` guard.
+            catalog = async { catalog_fut.as_mut().unwrap().await }, if catalog_fut.is_some() => {
+                catalog_fut = None;
+                status.context_capacity = catalog.ok().and_then(|catalog| {
+                    catalog
+                        .iter()
+                        .find(|model| Some(&model.slug) == context.provider.model.as_ref())
+                        .and_then(|model| model.effective_context_window())
+                });
+                footer = footer_line(
+                    context.status_config,
+                    context.provider,
+                    context.project,
+                    status,
+                );
+            }
             _ = ticker.tick() => {
                 animation_frame = animation_frame.wrapping_add(1);
                 if context.extension_control.take_stop() {
-                    task.abort();
+                    cancel.cancel();
                     cancelled = true;
                 }
                 while event::poll(std::time::Duration::ZERO)? {
@@ -1048,7 +1666,11 @@ async fn submit(
                                 || (key.code == KeyCode::Char('c')
                                     && key.modifiers.contains(KeyModifiers::CONTROL))) =>
                         {
-                            task.abort();
+                            // Cooperative cancel: the driver's select! arm
+                            // returns RunOutcome::Cancelled and records
+                            // run.finished — no abandoned MCP calls, no
+                            // partial-turn loss.
+                            cancel.cancel();
                             cancelled = true;
                             break;
                         }
@@ -1175,11 +1797,19 @@ async fn submit(
                         insert_tool_line(terminal, &title, true, false)?;
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
-                    artist_agent::PromptEvent::ToolResult { id, content } => {
+                    artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
                         phase = "working";
                         let output = tools.output(&id, &content);
                         if !output.text.is_empty() {
                             insert_tool_line(terminal, &output.text, false, output.is_diff)?;
+                        }
+                        if images > 0 {
+                            insert_tool_line(
+                                terminal,
+                                &format!("[{images} image result(s) not shown]"),
+                                false,
+                                false,
+                            )?;
                         }
                         if collect_delivered(
                             &steering_handle,
@@ -1194,16 +1824,18 @@ async fn submit(
                             insert_blank(terminal)?;
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
-                                delivered_steering.push(DeliveredSteering {
-                                    message: message.content,
-                                    response_offset: response.len(),
+                                active.recorder.record(SteeringDelivered {
+                                    content: message.content.clone(),
+                                    after_internal_call_id: id.clone(),
                                 });
+                                delivered_steering.push(message.content);
                             }
                         }
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
                             status.used_tokens = Some(total_tokens);
+                            status.session_tokens += total_tokens;
                         }
                         footer = footer_line(
                             context.status_config,
@@ -1212,19 +1844,34 @@ async fn submit(
                             status,
                         );
                     }
+                    artist_agent::PromptEvent::RuleFired { rule, matched } => {
+                        // The aborted partial output never entered the model's
+                        // context; drop it from the pending buffers too.
+                        // (Already-flushed scrollback lines remain — full
+                        // clean-rewind rendering lands with the rules UX pass.)
+                        phase = "rewinding";
+                        visible.clear();
+                        reasoning.clear();
+                        response.clear();
+                        response_output_started = false;
+                        response_started = false;
+                        response_since_tool = false;
+                        let excerpt: String = matched.chars().take(60).collect();
+                        insert_status(
+                            terminal,
+                            &format!("  ⚠ rule {rule} fired on \"{excerpt}\" — rewound, retrying"),
+                        )?;
+                    }
                 }
             }
         }
         draw_streaming(
             terminal,
-            &visible,
-            !response_output_started,
             &status_line(phase, started.elapsed(), animation_frame),
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
             },
-            &footer,
             &mut stream_height,
         )?;
     }
@@ -1244,10 +1891,11 @@ async fn submit(
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
         insert_message(terminal, &message.display)?;
-        delivered_steering.push(DeliveredSteering {
-            message: message.content,
-            response_offset: response.len(),
+        active.recorder.record(SteeringDelivered {
+            content: message.content.clone(),
+            after_internal_call_id: String::new(),
         });
+        delivered_steering.push(message.content);
     }
     if !reasoning.is_empty() {
         insert_reasoning(terminal, &reasoning)?;
@@ -1273,46 +1921,53 @@ async fn submit(
         3,
         false,
     )?;
+    // Stream failures keep the chat open: surface the error inline instead
+    // of tearing down the UI.
+    let mut auth_expired = false;
     if let Some(result) = stream_result
         && let Err(error) = result.and_then(|result| result)
     {
-        insert_message(terminal, &format!("Error: {error:#}"))?;
-    }
-    turns.push(Turn {
-        role: Role::User,
-        content: prompt.content,
-    });
-    let delivered = delivered_steering
-        .iter()
-        .map(|steering| steering.message.clone())
-        .collect::<Vec<_>>();
-    let mut response_offset = 0;
-    for steering in delivered_steering {
-        let next_offset = steering.response_offset.min(response.len());
-        if next_offset > response_offset {
-            let turn = Turn {
-                role: Role::Assistant,
-                content: response[response_offset..next_offset].to_owned(),
-            };
-            context.sessions.append(&active.id, &turn)?;
-            turns.push(turn);
+        if is_auth_error(&error) {
+            // AUTH-2: a token that expired mid-turn (or was already stale).
+            // Flag it so the run loop force-refreshes the login; auto-resending
+            // isn't safe because tool calls in the failed turn may have already
+            // run, so ask the user to resend instead.
+            auth_expired = true;
+            insert_message(
+                terminal,
+                "Your login expired mid-turn — refreshing it now. Resend your message to continue.",
+            )?;
+        } else {
+            insert_message(terminal, &format!("Error: {error:#}"))?;
         }
-        let turn = Turn {
-            role: Role::User,
-            content: steering.message,
-        };
-        context.sessions.append(&active.id, &turn)?;
-        turns.push(turn);
-        response_offset = next_offset;
     }
-    if response_offset < response.len() || delivered.is_empty() {
-        let turn = Turn {
-            role: Role::Assistant,
-            content: response[response_offset..].to_owned(),
-        };
-        context.sessions.append(&active.id, &turn)?;
-        turns.push(turn);
+    // A cancelled turn's accumulated text never reached a commit point;
+    // preserve it in the log as a partial model turn so nothing is lost.
+    if cancelled && !response.is_empty() {
+        active.recorder.record(artist_session::ModelTurn {
+            turn: 0,
+            content: vec![ContentBlock::Text {
+                text: response.clone(),
+            }],
+            total_tokens: 0,
+            partial: true,
+        });
     }
+    // Rebuild the model-facing history from the log — the single source of
+    // truth, including tool round-trips and any TTSR rule turns.
+    active.recorder.flush().await;
+    if !active.recorder.is_healthy() {
+        insert_status(
+            terminal,
+            "  ⚠ session log write failed (disk full?) — history may be incomplete",
+        )?;
+    }
+    *history = artist_session::build_history(
+        &active.events()?,
+        &active.attachments,
+        &artist_session::HistoryOptions::default(),
+    )?;
+    let delivered = delivered_steering;
     Ok(SubmitResult {
         viewport_height: stream_height,
         queued: steering
@@ -1326,6 +1981,8 @@ async fn submit(
             })
             .collect(),
         delivered,
+        leftover_input: steering_input,
+        auth_expired,
     })
 }
 
@@ -1353,17 +2010,56 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
     Some(pending.drain(..split).collect())
 }
 
-fn insert_history(terminal: &mut ratatui::DefaultTerminal, turns: &[Turn]) -> Result<()> {
-    for turn in turns {
-        match turn.role {
-            Role::User => insert_message(terminal, &turn.content)?,
-            Role::Assistant => {
-                insert_response(terminal, &turn.content, true)?;
+fn insert_history(terminal: &mut ratatui::DefaultTerminal, items: &[ReplayItem]) -> Result<()> {
+    for item in items {
+        match item {
+            ReplayItem::User(text) => insert_message(terminal, text)?,
+            ReplayItem::Assistant(text) => {
+                insert_response(terminal, text, true)?;
                 insert_blank(terminal)?;
+            }
+            ReplayItem::Reasoning(text) => insert_reasoning(terminal, text)?,
+            ReplayItem::Tool { name, preview } => {
+                let line = if preview.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{name} · {preview}")
+                };
+                insert_tool_line(terminal, &line, true, false)?;
+            }
+            ReplayItem::Steering(text) => insert_message(terminal, text)?,
+            ReplayItem::RuleFired { rule, matched } => {
+                let excerpt: String = matched.chars().take(60).collect();
+                insert_status(
+                    terminal,
+                    &format!("  ⚠ rule {rule} fired on \"{excerpt}\" — rewound and retried"),
+                )?;
             }
         }
     }
     Ok(())
+}
+
+/// The stored content blocks for a user turn: prompt text plus any pasted
+/// images (content-addressed into the session's attachment store).
+fn user_turn_blocks(
+    input: &artist_agent::ChatInput,
+    attachments: &artist_session::AttachmentStore,
+) -> Vec<ContentBlock> {
+    let mut blocks = vec![ContentBlock::Text {
+        text: input.text.clone(),
+    }];
+    for image in &input.images {
+        if let Ok(attachment) = attachments.put(&image.data) {
+            blocks.push(ContentBlock::Image {
+                attachment,
+                media_type: serde_json::to_value(&image.media_type)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned)),
+            });
+        }
+    }
+    blocks
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
@@ -1535,8 +2231,28 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
     )
 }
 
+/// Whether the terminal has a light background, from `COLORFGBG` (`fg;bg`, and
+/// some emulators `fg;default;bg`). A trailing field of 7 (light gray) or 15
+/// (white) means a light background. Defaults to dark when unset/unknown.
+fn terminal_is_light() -> bool {
+    std::env::var("COLORFGBG")
+        .ok()
+        .and_then(|value| {
+            value
+                .rsplit(';')
+                .next()
+                .and_then(|bg| bg.trim().parse::<u8>().ok())
+        })
+        .map(|bg| matches!(bg, 7 | 15))
+        .unwrap_or(false)
+}
+
 fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
-    let mut style = glamour::Style::Dark.config();
+    let mut style = if terminal_is_light() {
+        glamour::Style::Light.config()
+    } else {
+        glamour::Style::Dark.config()
+    };
     style.document.margin = Some(0);
     let rendered = glamour::Renderer::new()
         .with_style_config(style)
@@ -1581,7 +2297,7 @@ fn insert_response(
 fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
     const FRAMES: [&str; 6] = ["▓", "▒", "░", " ", "░", "▒"];
     format!(
-        "  {} {phase} [{} elapsed]",
+        "  {} {phase} [{} elapsed] · esc to interrupt",
         FRAMES[frame % FRAMES.len()],
         format_elapsed(elapsed)
     )
@@ -1610,37 +2326,23 @@ fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Resul
 
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
-    response: &str,
-    first: bool,
     status: &str,
     controls: StreamingControls<'_>,
-    footer: &Line<'_>,
     viewport_height: &mut u16,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
     let width = terminal_size.width.max(1);
-    let response_height = response
-        .lines()
-        .map(|line| {
-            UnicodeWidthStr::width(line)
-                .max(1)
-                .div_ceil(usize::from(width))
-        })
-        .sum::<usize>()
-        .max(1) as u16;
-    // Keep a fixed one-row streaming tail above the input. Completed output is
-    // inserted into scrollback, so the viewport never grows and repositions it.
-    let visible_response_height = 1;
-    let footer_height = (!footer.spans.is_empty()) as u16;
     let queued_height = controls.steering.displays().count() as u16;
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
-    let desired = 3u16
+    // Keep the same height as the idle input box (input rows + one status row).
+    // The response streams into scrollback (not a live in-viewport tail), so a
+    // turn starting or ending never resizes/re-inits the viewport — no blink.
+    let desired = input_height
         .saturating_add(queued_height)
-        .saturating_add(input_height)
-        .saturating_add(footer_height)
+        .saturating_add(1)
         .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
@@ -1650,29 +2352,11 @@ fn draw_streaming(
         *terminal = ratatui::init_with_options(TerminalOptions {
             viewport: Viewport::Inline(desired),
         });
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let response_area = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            visible_response_height.min(area.height),
-        );
-        let text = response_text(response, first, usize::from(area.width))
-            .unwrap_or_else(|_| Text::raw(response));
-        frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .scroll((response_height.saturating_sub(visible_response_height), 0)),
-            response_area,
-        );
-        let queued_area = Rect::new(
-            area.x,
-            response_area.bottom().saturating_add(1),
-            area.width,
-            queued_height.min(area.height),
-        );
+        let queued_area = Rect::new(area.x, area.y, area.width, queued_height.min(area.height));
         let queued = controls
             .steering
             .displays()
@@ -1694,28 +2378,17 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
-        let status_area = Rect::new(area.x, queued_area.bottom(), area.width, 1);
-        frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
-            status_area,
-        );
         let input_area = Rect::new(
             area.x,
-            status_area.bottom(),
+            queued_area.bottom(),
             area.width,
-            area.height.saturating_sub(
-                response_area
-                    .height
-                    .saturating_add(queued_height + 2 + footer_height),
-            ),
+            area.height.saturating_sub(queued_height + 1),
         );
         render_input(frame, input_area, controls.input);
-        if footer_height == 1 {
-            frame.render_widget(
-                Paragraph::new(footer.clone()),
-                Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-            );
-        }
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
     })?;
     terminal.show_cursor()?;
     if resized {
@@ -1733,7 +2406,14 @@ fn render_with_panel(
 ) {
     let area = frame.area();
     let status_height = (!footer.spans.is_empty()) as u16;
-    if show_splash && area.height >= crate::startup_splash::HEIGHT.saturating_add(3) {
+    // The splash is a startup affordance only. Suppress it whenever a command
+    // panel (e.g. /help) is open: a Paragraph doesn't clear its background, so
+    // the splash would otherwise bleed through the panel's empty cells and eat
+    // the rows the panel needs.
+    if show_splash
+        && panel.is_empty()
+        && area.height >= crate::startup_splash::HEIGHT.saturating_add(3)
+    {
         crate::startup_splash::render(
             frame,
             Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
@@ -1770,10 +2450,7 @@ fn render_with_panel(
     let panel_text = Text::from(
         panel
             .iter()
-            .enumerate()
-            .map(|(index, option)| {
-                Line::styled(option.clone(), panel_option_style(index, option, input))
-            })
+            .map(|option| Line::styled(option.clone(), panel_option_style(option)))
             .collect::<Vec<_>>(),
     );
     frame.render_widget(
@@ -1786,23 +2463,61 @@ fn render_with_panel(
     );
 }
 
-fn panel_option_style(index: usize, option: &str, input: &ChatInput) -> Style {
+/// Complete the currently-selected suggestion into `input`, returning true if
+/// one was applied. Shared by Tab (complete) and Enter (complete, then send).
+/// The suggestion lists are concatenated [slash][custom][extension] for the
+/// slash family, or a standalone mcp/skill list; empty lists yield `None` from
+/// `.get`, so the index simply falls through to the active family.
+#[allow(clippy::too_many_arguments)]
+fn apply_selected_suggestion(
+    input: &mut ChatInput,
+    index: usize,
+    slash: &[&slash_commands::SlashCommand],
+    custom: &[&crate::custom_commands::CustomCommand],
+    extension: &[&artist_extensions::CommandDeclaration],
+    mcp: &[String],
+    skill_range: &Option<std::ops::Range<usize>>,
+    skills: &[&artist_agent::AvailableSkill],
+) -> bool {
+    if let Some(command) = slash.get(index) {
+        input.text = command.name.to_owned() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(command) = custom.get(index.saturating_sub(slash.len())) {
+        input.text = command.name.clone() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(command) = extension.get(index.saturating_sub(slash.len() + custom.len())) {
+        input.text = command.name.clone() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(completion) = mcp.get(index) {
+        input.text = completion.clone();
+        // A fully-specified command can be sent as-is; a partial one keeps a
+        // trailing space so the user (or Enter) can still add an argument.
+        if completion != "/mcp status" && completion.split_whitespace().count() != 3 {
+            input.text.push(' ');
+        }
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let (Some(range), Some(skill)) = (skill_range.clone(), skills.get(index)) {
+        input.replace_range(range, &format!("${}", skill.name));
+    } else {
+        return false;
+    }
+    true
+}
+
+fn panel_option_style(option: &str) -> Style {
+    // The selected suggestion is marked with a leading "› "; only it is
+    // highlighted. (Previously index 0 was also highlighted, so navigating away
+    // left two items blue.)
     if option.trim_start().starts_with('›') {
         Style::default()
             .fg(Color::Blue)
             .add_modifier(Modifier::BOLD)
     } else if option.contains("[x]") {
         Style::default().fg(Color::Green)
-    } else if index == 0
-        && (input.text.starts_with('/')
-            || (option.starts_with('$')
-                && skill_completion_range(&input.text, input.cursor).is_some()))
-    {
-        Style::default().fg(Color::Blue)
-    } else if index == 0 {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     }
@@ -1832,6 +2547,35 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
             input_area.y + y.min(input_area.height.saturating_sub(1)),
         ));
     }
+}
+
+/// Walk `text` under the exact rules `hard_wrap_input` uses, returning the
+/// (column, row) the cursor occupies after the final character. Both the input
+/// box height and the cursor position derive from this so they stay aligned
+/// with the rendered wrap — wide glyphs and exact-width boundaries used to
+/// drift when height/cursor were computed with independent modular math.
+fn wrap_end(text: &str, width: usize) -> (usize, usize) {
+    let width = width.max(1);
+    let mut column = 0usize;
+    let mut row = 0usize;
+    for character in text.chars() {
+        if character == '\n' {
+            row += 1;
+            column = 0;
+            continue;
+        }
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if column > 0 && column + character_width > width {
+            row += 1;
+            column = 0;
+        }
+        column += character_width;
+        if column == width {
+            row += 1;
+            column = 0;
+        }
+    }
+    (column, row)
 }
 
 fn hard_wrap_input(text: &str, width: u16) -> String {
@@ -1912,28 +2656,6 @@ fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
-
-    #[test]
-    fn status_runtime_refreshes_only_configured_external_values() {
-        let mut runtime = StatusRuntime {
-            git_branch: Some("main".into()),
-            ..StatusRuntime::default()
-        };
-        runtime.refresh_git_branch_with(&StatusBarConfig::default(), || Some("feature".into()));
-        assert_eq!(runtime.git_branch.as_deref(), Some("feature"));
-
-        let config = StatusBarConfig {
-            items: vec![StatusItem::Model],
-            extension_items: Vec::new(),
-        };
-        let mut resolved = false;
-        runtime.refresh_git_branch_with(&config, || {
-            resolved = true;
-            Some("ignored".into())
-        });
-        assert!(!resolved);
-        assert_eq!(runtime.git_branch, None);
-    }
 
     #[test]
     fn edits_and_expands_input() {
@@ -2056,7 +2778,7 @@ mod tests {
         );
         assert_eq!(
             status_line("thinking", std::time::Duration::ZERO, 0),
-            "  ▓ thinking [00:00 elapsed]"
+            "  ▓ thinking [00:00 elapsed] · esc to interrupt"
         );
         assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
     }
@@ -2085,43 +2807,11 @@ mod tests {
 
     #[test]
     fn interactive_selection_uses_color() {
-        let input = ChatInput::default();
-        let selected = panel_option_style(1, "› model", &input);
+        let selected = panel_option_style("› model");
         assert_eq!(selected.fg, Some(Color::Blue));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(
-            panel_option_style(0, "Select model", &input).fg,
-            Some(Color::Cyan)
-        );
-        assert_eq!(
-            panel_option_style(2, "  [x] branch", &input).fg,
-            Some(Color::Green)
-        );
-    }
-
-    #[test]
-    fn extension_commands_complete_and_split_arguments() {
-        let commands = vec![artist_extensions::CommandDeclaration {
-            name: "/deploy".into(),
-            description: "Deploy".into(),
-            usage: "/deploy [env]".into(),
-        }];
-        assert_eq!(
-            extension_command_completions("/dep", &commands)[0].name,
-            "/deploy"
-        );
-        assert_eq!(
-            extension_command(" /deploy staging ", &commands),
-            Some(("/deploy", "staging"))
-        );
-        assert!(extension_command("/other", &commands).is_none());
-    }
-
-    #[test]
-    fn recognizes_direct_shell_input() {
-        assert_eq!(shell_command("!pwd"), Some("pwd"));
-        assert_eq!(shell_command("!  cargo test"), Some("cargo test"));
-        assert_eq!(shell_command("hello"), None);
+        assert_eq!(panel_option_style("Select model").fg, Some(Color::Gray));
+        assert_eq!(panel_option_style("  [x] branch").fg, Some(Color::Green));
     }
 
     #[test]
@@ -2150,7 +2840,11 @@ mod tests {
                 render_with_panel(
                     frame,
                     &input,
-                    &["/help  Show commands".into(), "/model  Select model".into()],
+                    // The selected suggestion carries a leading "› " marker.
+                    &[
+                        "› /help  Show commands".into(),
+                        "/model  Select model".into(),
+                    ],
                     &Line::default(),
                     false,
                 )

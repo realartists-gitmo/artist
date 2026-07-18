@@ -46,10 +46,43 @@ pub async fn run(
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
+        // Rewind needs session state and is dispatched in chat_ui before
+        // reaching here.
+        ParsedCommand::Rewind { .. } => Ok(CommandOutput {
+            lines: vec!["/rewind is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
+        ParsedCommand::Rules(_) => Ok(CommandOutput {
+            lines: vec!["/rules is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
+        // Session and account verbs need live session/store state and are
+        // dispatched in chat_ui before reaching here.
+        ParsedCommand::New
+        | ParsedCommand::Sessions
+        | ParsedCommand::Resume { .. }
+        | ParsedCommand::Accounts { .. }
+        | ParsedCommand::Login => Ok(CommandOutput {
+            lines: vec!["that command is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
+        ParsedCommand::Quit => Ok(CommandOutput {
+            lines: vec!["/quit exits artist".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Help => Ok(CommandOutput {
             lines: slash_commands::COMMANDS
                 .iter()
                 .map(|command| format!("{}  {}", command.usage, command.description))
+                .chain([
+                    "!<command>  run a shell command".to_owned(),
+                    "$<skill>  mention an Agent Skill by name".to_owned(),
+                    "esc / ctrl+c  interrupt a response — or quit on an empty prompt".to_owned(),
+                ])
                 .collect(),
             context_capacity: None,
             model_changed: false,
@@ -134,8 +167,15 @@ pub async fn run(
             let model_index = match model {
                 Some(slug) => catalog
                     .iter()
-                    .position(|candidate| candidate.slug == slug)
-                    .with_context(|| format!("model `{slug}` is not selectable"))?,
+                    .position(|candidate| candidate.slug.eq_ignore_ascii_case(slug))
+                    .with_context(|| {
+                        let available = catalog
+                            .iter()
+                            .map(|model| model.slug.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("model `{slug}` is not selectable; available: {available}")
+                    })?,
                 None => pick_model(&catalog, current_model, &mut draw)?
                     .context("model selection cancelled")?,
             };

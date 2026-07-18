@@ -15,9 +15,9 @@ pub struct Diagnostic {
 }
 
 pub fn default_root() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .context("platform has no config directory")?
-        .join("artist/extensions"))
+    Ok(dirs::home_dir()
+        .context("could not find home directory")?
+        .join(".artist/extensions"))
 }
 
 pub fn discover(root: &Path) -> (Vec<DiscoveredExtension>, Vec<Diagnostic>) {

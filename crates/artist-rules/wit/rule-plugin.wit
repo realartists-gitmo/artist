@@ -1,0 +1,52 @@
+package artist:rules@0.1.0;
+
+/// A programmable stream rule. Plugins sit behind a mandatory native
+/// prefilter (declared in the sibling `<name>.toml` manifest): the host
+/// only calls `on-event` after a prefilter pattern matched, so plugin
+/// quality can never slow the raw token stream.
+world rule-plugin {
+    /// Host capabilities. Deliberately small: no filesystem, no network,
+    /// no clock — plugins are pure matchers with bounded session state.
+    import host: interface {
+        /// Diagnostic line surfaced in `/rules` output.
+        log: func(message: string);
+        /// Plugin-scoped key/value state, kept for the life of the loaded
+        /// rule set (bounded by the host; oldest keys evicted).
+        kv-get: func(key: string) -> option<string>;
+        kv-set: func(key: string, value: string);
+    }
+
+    /// A prefilter hit the plugin is asked to judge.
+    record event {
+        /// `assistant-text` | `tool-args` | `reasoning-summary`.
+        target: string,
+        /// The matched excerpt (bounded by the host).
+        text: string,
+        /// Tool name for `tool-args` events.
+        tool: option<string>,
+        /// One-based model-call index within the current run.
+        turn: u32,
+    }
+
+    record firing {
+        /// Reminder injected on abort-and-retry (host caps the length).
+        reminder: string,
+        /// `session` (re-inject every turn) | `message` (retry prompt only).
+        persistence: string,
+    }
+
+    variant verdict {
+        /// Not a violation: the stream continues untouched.
+        pass,
+        /// Abort, inject, retry — full TTSR semantics.
+        fire(firing),
+    }
+
+    /// The rule id this plugin implements (sanity-checked against the
+    /// manifest at load).
+    export meta: func() -> string;
+
+    /// Judge one prefilter hit. Time-boxed and memory-capped by the host;
+    /// a trap or deadline poisons the plugin for the session.
+    export on-event: func(ev: event) -> verdict;
+}

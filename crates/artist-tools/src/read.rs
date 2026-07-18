@@ -21,9 +21,10 @@ impl Tool for ReadTool {
     type Args = ReadArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Read a project-relative text file with mnemonic line anchors. Call this before edit."
+        "Read a project-relative file. Each line renders as `ANCHOR: CONTENT` (for example, `abc: hello`). Use only the token before the colon as the `start`/`end` anchor in edit; the content after the colon is not an anchor."
             .into()
     }
+
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false})
     }
@@ -59,7 +60,7 @@ impl Tool for ReadTool {
         let mut output = String::new();
         let mut shown = 0;
         for line in &result.result.lines {
-            let rendered = format!("{} | {}\n", line.anchor, line.text);
+            let rendered = format!("{}: {}\n", line.anchor, line.text);
             if shown > 0 && output.len() + rendered.len() > READ_BYTES.saturating_sub(200) {
                 break;
             }

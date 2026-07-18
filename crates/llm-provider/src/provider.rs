@@ -52,9 +52,14 @@ pub struct SavedProvider {
     pub id: ProviderId,
     pub name: String,
     pub base_url: Url,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Model and reasoning effort are no longer persisted here — they live in
+    // `settings.toml` (global/project layered). These fields are runtime-only
+    // carriers, populated from the resolved settings; `default` still reads a
+    // value from a pre-migration `providers.toml`, and `skip_serializing`
+    // ensures it is never written back, so the field drops out on the next save.
+    #[serde(default, skip_serializing)]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub reasoning_effort: Option<String>,
     pub auth: Auth,
 }

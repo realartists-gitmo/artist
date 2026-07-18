@@ -9,16 +9,19 @@ use tokio::{
 use url::Url;
 
 pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:1455")
-        .await
-        .context("bind OAuth callback on port 1455")?;
+    // The callback port must stay 1455 to match the registered redirect URI, so
+    // a busy port can't be worked around — point the user at the likely cause.
+    let listener = TcpListener::bind("127.0.0.1:1455").await.context(
+        "OAuth callback port 1455 is in use — is another login (e.g. Codex) already running? Close it and retry",
+    )?;
     let redirect = Url::parse("http://localhost:1455/auth/callback")?;
     let oauth = ChatGptOAuth::default();
     let login = oauth.begin_login(redirect)?;
     println!(
-        "Open this link to log in with ChatGPT:\n\n{}\n",
+        "Opening your browser to log in with ChatGPT. If it doesn't open, visit:\n\n{}\n",
         login.authorize_url
     );
+    open_in_browser(login.authorize_url.as_str());
     let (code, state) = tokio::time::timeout(Duration::from_secs(300), receive_callback(listener))
         .await
         .context("login timed out after 5 minutes")??;
@@ -31,6 +34,23 @@ pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
     println!("Logged in and saved ChatGPT.");
     store.add(provider);
     Ok(())
+}
+
+/// Best-effort open of `url` in the user's browser; the printed link is the
+/// fallback if the platform opener isn't available.
+fn open_in_browser(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 async fn receive_callback(listener: TcpListener) -> Result<(String, String)> {

@@ -7,7 +7,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 #[cfg(test)]
 use crate::mnemonic_anchors::pack_binding;
-use crate::mnemonic_anchors::{binding_full, binding_guard, is_mnemonic_handle, reconcile_handles};
+use crate::mnemonic_anchors::{binding_full, reconcile_handles};
 
 /// Encode a 64-bit hash as 13 lowercase Crockford Base32 characters.
 fn hash_to_base32(mut hash: u64) -> String {
@@ -22,33 +22,6 @@ fn hash_to_base32(mut hash: u64) -> String {
 
 fn compute_hash(data: &[u8]) -> u64 {
     xxh3_64(data)
-}
-
-fn shortest_unique_prefix<'a>(
-    target: &str,
-    others: impl Iterator<Item = &'a str>,
-    min_len: usize,
-) -> String {
-    let target_chars: Vec<char> = target.chars().collect();
-    let other_chars: Vec<Vec<char>> = others.map(|s| s.chars().collect()).collect();
-    let max_len = target_chars.len();
-
-    for len in min_len..=max_len {
-        let prefix: String = target_chars[..len].iter().collect();
-        let matches = other_chars
-            .iter()
-            .filter(|oc| oc.len() >= len && oc[..len].iter().collect::<String>() == prefix)
-            .count();
-        if matches == 1 {
-            return prefix;
-        }
-    }
-    target.to_string()
-}
-
-fn short_hash(full: &str, lines: &[LineInfo]) -> String {
-    let others: Vec<&str> = lines.iter().map(|l| l.full_hash.as_str()).collect();
-    shortest_unique_prefix(full, others.into_iter(), 1)
 }
 
 fn normalize_replacement_content(content: &str) -> &str {
@@ -121,20 +94,6 @@ impl fmt::Display for ConfirmationRequired {
 }
 
 impl std::error::Error for ConfirmationRequired {}
-
-/// Internal result from anchor resolution.
-enum HashResolution {
-    /// The visible mnemonic resolved to a hidden full hash that is still current.
-    Resolved(String),
-    /// The old hidden hash is gone and its one-character-or-longer guard prefix
-    /// now uniquely matches a different current line.
-    StaleUnique {
-        candidate_hash: String,
-        candidate_anchor: String,
-        guard_prefix: String,
-        context: String,
-    },
-}
 
 #[derive(Debug, Clone)]
 struct LineInfo {
@@ -410,6 +369,11 @@ pub struct FileToolManager {
     last_read_view: HashMap<String, FileView>,
     /// Set of pending stale-prefix confirmation keys.
     pending_confirmations: HashSet<PendingKey>,
+    /// Content-addressed cache of parsed views, keyed by (is_rust, xxh3 of the
+    /// text). Building a `FileView` reparses with tree-sitter for `.rs` files —
+    /// expensive, and it runs on every read plus twice per edit on identical
+    /// content, so caching avoids the repeated parse.
+    view_cache: HashMap<(bool, u64), FileView>,
 }
 
 impl Default for FileToolManager {
@@ -429,7 +393,26 @@ impl FileToolManager {
             issued_prefixes: HashMap::new(),
             last_read_view: HashMap::new(),
             pending_confirmations: HashSet::new(),
+            view_cache: HashMap::new(),
         }
+    }
+
+    /// Build a `FileView`, reusing a cached parse for identical content (same
+    /// text + `.rs`-ness) to skip the tree-sitter reparse.
+    fn build_view(&mut self, text: &str, path: &Path) -> FileView {
+        let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
+        let key = (is_rust, compute_hash(text.as_bytes()));
+        if let Some(view) = self.view_cache.get(&key) {
+            return view.clone();
+        }
+        let view = FileView::from_text(text, path);
+        // Bound the cache; views are content-addressed so a small ring is enough
+        // to cover a read followed by its edit(s).
+        if self.view_cache.len() >= 16 {
+            self.view_cache.clear();
+        }
+        self.view_cache.insert(key, view.clone());
+        view
     }
 
     pub fn config(&self) -> &FileToolConfig {
@@ -471,27 +454,10 @@ impl FileToolManager {
             .iter()
             .map(|line| line.full_hash.clone())
             .collect();
-        let guard_prefixes: Vec<String> = view
-            .lines
-            .iter()
-            .map(|line| short_hash(&line.full_hash, &view.lines))
-            .collect();
         let existing = self.issued_prefixes.remove(path).unwrap_or_default();
-        let (state, visible) =
-            reconcile_handles(&existing, &full_hashes, &guard_prefixes, reclaim_dead);
+        let (state, visible) = reconcile_handles(&existing, &full_hashes, reclaim_dead);
         self.issued_prefixes.insert(path.to_string(), state);
         visible
-    }
-
-    fn anchor_for_full_hash(issued: &HashMap<String, String>, full_hash: &str) -> Option<String> {
-        issued
-            .iter()
-            .filter(|(anchor, packed)| {
-                is_mnemonic_handle(anchor) && binding_full(packed) == full_hash
-            })
-            .map(|(anchor, _)| anchor)
-            .min_by_key(|anchor| (anchor.split(' ').count(), anchor.len(), *anchor))
-            .cloned()
     }
 
     pub async fn read_file(&mut self, request: ReadFileRequest) -> Result<ReadFileResult> {
@@ -508,7 +474,7 @@ impl FileToolManager {
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 
-        let view = FileView::from_text(&content, path);
+        let view = self.build_view(&content, path);
         self.last_read_view.insert(norm.clone(), view.clone());
 
         let start = request.start_line.saturating_sub(1);
@@ -527,7 +493,7 @@ impl FileToolManager {
             let line_idx = start + i;
             if view.lines.get(line_idx).is_some() {
                 let anchor = visible_anchors[line_idx].clone();
-                rendered.push_str(&format!("{} | {}\n", anchor, line));
+                rendered.push_str(&format!("{}: {}\n", anchor, line));
                 structured.push(AnchoredLine {
                     line_number: line_idx + 1,
                     anchor,
@@ -571,7 +537,7 @@ impl FileToolManager {
         tokio::fs::rename(&tmp_path, path).await?;
 
         let lines: Vec<&str> = request.content.lines().collect();
-        let view = FileView::from_text(&request.content, path);
+        let view = self.build_view(&request.content, path);
         self.last_read_view.insert(norm.clone(), view.clone());
 
         let visible_anchors = self.reconcile_path_anchors(&norm, &view, true);
@@ -580,7 +546,7 @@ impl FileToolManager {
         for (i, line) in lines.iter().enumerate() {
             if view.lines.get(i).is_some() {
                 let anchor = visible_anchors[i].clone();
-                rendered.push_str(&format!("{} | {}\n", anchor, line));
+                rendered.push_str(&format!("{}: {}\n", anchor, line));
                 structured.push(AnchoredLine {
                     line_number: i + 1,
                     anchor,
@@ -620,7 +586,7 @@ impl FileToolManager {
         // 1. Snapshot: byte ranges for each line in the ORIGINAL content
         //    (preserves CRLF, tab characters, unrelated bytes).
         let line_ranges = line_byte_ranges(&content);
-        let snapshot_view = FileView::from_text(&content, path);
+        let snapshot_view = self.build_view(&content, path);
         // Allocate mnemonics for newly observed concurrent content while preserving
         // stale bindings until this edit is acknowledged successfully.
         let snapshot_anchors = self.reconcile_path_anchors(&norm, &snapshot_view, false);
@@ -795,30 +761,57 @@ impl FileToolManager {
             }
         }
 
-        // 5. Reject overlapping non-empty byte ranges for Delete/Replace.
+        // 5. Reject overlapping non-empty byte ranges for Delete/Replace, and
+        //    reject an insertion whose position falls *inside* another op's
+        //    Delete/Replace range. The latter is the subtle case: an insert is
+        //    an empty byte range, so it never trips the overlap check, yet
+        //    back-to-front application (step 6) runs the interior insert first,
+        //    growing the buffer, after which the range op drains stale snapshot
+        //    offsets and cuts the wrong bytes — silent corruption. Insertions at
+        //    a range boundary (== byte_start or == byte_end) stay legal: those
+        //    are the intended "insert immediately before/after the block" cases.
         for i in 0..resolved.len() {
             for j in (i + 1)..resolved.len() {
                 let a = &resolved[i];
                 let b = &resolved[j];
                 let a_empty = a.byte_start == a.byte_end;
                 let b_empty = b.byte_start == b.byte_end;
-                if a_empty || b_empty {
-                    continue;
-                }
-                let (al, ar) = if a.byte_start <= b.byte_start {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
-                if al.byte_end > ar.byte_start {
-                    bail!(
-                        "Overlapping byte ranges: [{}, {}) and [{}, {}) in '{}'",
-                        a.byte_start,
-                        a.byte_end,
-                        b.byte_start,
-                        b.byte_end,
-                        request.path,
-                    );
+                match (a_empty, b_empty) {
+                    // Two insertions never corrupt each other (handled by the
+                    // same-line-index compatibility check in step 4).
+                    (true, true) => {}
+                    // Two ranges: reject any overlap.
+                    (false, false) => {
+                        let (al, ar) = if a.byte_start <= b.byte_start {
+                            (a, b)
+                        } else {
+                            (b, a)
+                        };
+                        if al.byte_end > ar.byte_start {
+                            bail!(
+                                "Overlapping byte ranges: [{}, {}) and [{}, {}) in '{}'",
+                                a.byte_start,
+                                a.byte_end,
+                                b.byte_start,
+                                b.byte_end,
+                                request.path,
+                            );
+                        }
+                    }
+                    // One insertion, one range: reject only if the insert sits
+                    // strictly inside the range.
+                    _ => {
+                        let (ins, range) = if a_empty { (a, b) } else { (b, a) };
+                        if range.byte_start < ins.byte_start && ins.byte_start < range.byte_end {
+                            bail!(
+                                "Insertion at byte {} falls inside the range [{}, {}) of another operation in '{}'; split this into separate edits so the target is unambiguous",
+                                ins.byte_start,
+                                range.byte_start,
+                                range.byte_end,
+                                request.path,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -849,6 +842,9 @@ impl FileToolManager {
             })
         });
 
+        // Inserted lines take the file's dominant terminator so a CRLF file
+        // doesn't end up with mixed line endings.
+        let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
         let mut result = content;
         for op in &resolved {
             match &op.kind {
@@ -864,18 +860,18 @@ impl FileToolManager {
                     );
                 }
                 OpKind::InsertBefore { content } => {
-                    let to_insert = if content.ends_with('\n') || content.ends_with("\r\n") {
+                    let to_insert = if content.ends_with('\n') {
                         content.clone()
                     } else {
-                        format!("{}\n", content)
+                        format!("{content}{newline}")
                     };
                     result.insert_str(op.byte_start, &to_insert);
                 }
                 OpKind::InsertAfter { content } => {
-                    let to_insert = if content.ends_with('\n') || content.ends_with("\r\n") {
+                    let to_insert = if content.ends_with('\n') {
                         content.clone()
                     } else {
-                        format!("{}\n", content)
+                        format!("{content}{newline}")
                     };
                     result.insert_str(op.byte_start, &to_insert);
                 }
@@ -908,7 +904,7 @@ impl FileToolManager {
         // preserve every surviving handle unchanged, and make freed one-word
         // handles available only to newly created lines.
         self.clear_pending_for_path(&norm);
-        let final_view = FileView::from_text(&result, path);
+        let final_view = self.build_view(&result, path);
         self.last_read_view.insert(norm.clone(), final_view.clone());
         let visible_anchors = self.reconcile_path_anchors(&norm, &final_view, true);
 
@@ -940,89 +936,43 @@ impl FileToolManager {
         self.issued_prefixes.entry(path.to_string()).or_default()
     }
 
-    /// Resolve a model-facing mnemonic anchor for editing, handling the hidden
-    /// hash guard and stale-anchor confirmation gate.
+    /// Resolve a model-facing mnemonic anchor for editing. A mnemonic that no
+    /// longer maps to a current line is rejected outright — the caller must
+    /// re-read the file to get fresh anchors.
     fn resolve_hash_with_confirmation(
         &mut self,
         path: &str,
         visible: &str,
         view: &FileView,
-        request_fp: &str,
+        _request_fp: &str,
     ) -> Result<String> {
         let visible_owned = visible.trim().to_ascii_lowercase();
         let visible = visible_owned.as_str();
         let issued = self.path_prefixes_mut(path);
-        match Self::resolve_hash(issued, visible, view)? {
-            HashResolution::Resolved(full) => Ok(full),
-            HashResolution::StaleUnique {
-                candidate_hash,
-                candidate_anchor,
-                guard_prefix,
-                context,
-            } => {
-                let _ = (candidate_hash, guard_prefix);
-                let message = format!(
-                    "stale_anchor: anchor '{}' no longer resolves to the line that was read. Re-read the file before editing.\nCurrent candidate: {}\n{}",
-                    visible, candidate_anchor, context,
-                );
-                Err(anyhow::anyhow!(ConfirmationRequired {
-                    message,
-                    path: path.to_string(),
-                    visible_anchor: visible.to_string(),
-                    candidate_anchor,
-                    context,
-                    operation_fingerprint: request_fp.to_string(),
-                }))
-            }
-        }
+        Self::resolve_hash(issued, visible, view)
     }
 
     fn resolve_hash(
         issued: &mut HashMap<String, String>,
         visible: &str,
         view: &FileView,
-    ) -> Result<HashResolution> {
+    ) -> Result<String> {
         let clean_owned = visible.trim().to_ascii_lowercase();
         let clean = clean_owned.as_str();
         let packed = issued.get(clean).cloned().ok_or_else(|| {
             anyhow::anyhow!(
-                "anchor '{}' was not issued for this file. Re-read the file to get current mnemonic anchors.",
+                "'{}' is not an issued anchor for this file. It looks like line content, not an anchor. Use the anchor token before the colon from the latest read (for example, `abc` from `abc: content`), or re-read the file to get current mnemonic anchors.",
                 visible
             )
+
         })?;
         let full_hash = binding_full(&packed).to_owned();
         if view.lines.iter().any(|line| line.full_hash == full_hash) {
-            return Ok(HashResolution::Resolved(full_hash));
-        }
-
-        let guard_prefix = binding_guard(clean, &packed).to_owned();
-        let candidates: Vec<&LineInfo> = view
-            .lines
-            .iter()
-            .filter(|line| line.full_hash.starts_with(&guard_prefix))
-            .collect();
-        if candidates.len() == 1 {
-            let candidate = candidates[0];
-            let candidate_anchor = Self::anchor_for_full_hash(issued, &candidate.full_hash)
-                .context("current candidate did not receive a mnemonic anchor")?;
-            let context = render_context(view, candidate, issued);
-            return Ok(HashResolution::StaleUnique {
-                candidate_hash: candidate.full_hash.clone(),
-                candidate_anchor,
-                guard_prefix,
-                context,
-            });
-        }
-        if candidates.is_empty() {
-            bail!(
-                "anchor '{}' is stale and its hidden guard does not match any current line. Re-read the file.",
-                visible
-            );
+            return Ok(full_hash);
         }
         bail!(
-            "anchor '{}' is stale and its hidden guard is ambiguous (matches {} lines). Re-read the file.",
-            visible,
-            candidates.len()
+            "anchor '{}' is stale: it no longer resolves to a current line. Re-read the file to get fresh anchors before editing.",
+            visible
         );
     }
 
@@ -1202,29 +1152,6 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn render_context(view: &FileView, target: &LineInfo, issued: &HashMap<String, String>) -> String {
-    let idx = view
-        .lines
-        .iter()
-        .position(|line| line.full_hash == target.full_hash);
-    let Some(idx) = idx else {
-        return String::new();
-    };
-
-    let start = idx.saturating_sub(2);
-    let end = (idx + 3).min(view.lines.len());
-    let mut context = String::new();
-    for i in start..end {
-        if let Some(line) = view.lines.get(i) {
-            let anchor = FileToolManager::anchor_for_full_hash(issued, &line.full_hash)
-                .unwrap_or_else(|| "<unassigned>".to_string());
-            let marker = if i == idx { ">>> " } else { "    " };
-            context.push_str(&format!("{}{} | {}\n", marker, anchor, line.content));
-        }
-    }
-    context
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,17 +1169,6 @@ mod tests {
         assert_eq!(hash_to_base32(42), hash_to_base32(42));
         // Ensure different hashes produce different strings (likely)
         assert_ne!(hash_to_base32(0), hash_to_base32(1));
-    }
-
-    #[test]
-    fn test_shortest_unique_prefix() {
-        let target = "hello12345";
-        // others must include the target itself for correct uniqueness check
-        let others = vec![target, "world67890", "helping123", "helloworld"];
-        let prefix = shortest_unique_prefix(target, others.into_iter(), 5);
-        // "hello" is shared with "helloworld", so must extend to at least 6
-        assert!(prefix.len() >= 6);
-        assert!(target.starts_with(&prefix));
     }
 
     #[test]
@@ -1279,44 +1195,29 @@ mod tests {
     }
 
     #[test]
-    fn test_short_hash_unique() {
-        let lines = vec![
-            LineInfo {
-                full_hash: hash_to_base32(compute_hash(b"line 1")),
-                content: "line 1".into(),
-            },
-            LineInfo {
-                full_hash: hash_to_base32(compute_hash(b"line 2")),
-                content: "line 2".into(),
-            },
-        ];
-        let p1 = short_hash(&lines[0].full_hash, &lines);
-        let p2 = short_hash(&lines[1].full_hash, &lines);
-        assert_ne!(p1, p2);
-        assert!(lines[0].full_hash.starts_with(&p1));
-        assert!(lines[1].full_hash.starts_with(&p2));
-    }
-
-    #[test]
     fn test_resolve_hash_basic() {
         let path = Path::new("test.txt");
         let view = FileView::from_text("aaa\nbbb\nccc\n", path);
         let target = &view.lines[1];
-        let guard = short_hash(&target.full_hash, &view.lines);
 
         let mut issued = HashMap::new();
-        issued.insert("beta".to_string(), pack_binding(&target.full_hash, &guard));
+        issued.insert("beta".to_string(), pack_binding(&target.full_hash));
         let resolved =
             FileToolManager::resolve_hash(&mut issued, "beta", &view).expect("should resolve");
-        match resolved {
-            HashResolution::Resolved(full) => assert_eq!(full, target.full_hash),
-            HashResolution::StaleUnique { .. } => panic!("expected resolved, got stale"),
-        }
+        assert_eq!(resolved, target.full_hash);
     }
 
-    // -----------------------------------------------------------------------
-    // Stale-prefix confirmation gate tests
-    // -----------------------------------------------------------------------
+    #[test]
+    fn test_resolve_hash_stale_is_rejected() {
+        let path = Path::new("test.txt");
+        let view = FileView::from_text("aaa\nbbb\nccc\n", path);
+        let mut issued = HashMap::new();
+        // A mnemonic bound to a hash that isn't in the current view is stale
+        // and must be rejected (no candidate-matching gate anymore).
+        issued.insert("beta".to_string(), pack_binding("deadbeefdead0"));
+        let err = FileToolManager::resolve_hash(&mut issued, "beta", &view).unwrap_err();
+        assert!(err.to_string().contains("stale"));
+    }
 
     #[tokio::test]
     async fn replace_normalizes_one_trailing_line_terminator() {
@@ -1401,6 +1302,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_inside_delete_range_is_rejected_without_corruption() {
+        // Regression (COR-1): an insert whose position lands strictly inside a
+        // Delete/Replace range used to slip past validation (an insert is an
+        // empty byte range) and then corrupt the file when the range op drained
+        // stale offsets. It must now be rejected, leaving the file untouched.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("insert_in_range.txt");
+        let p = path.to_str().unwrap().to_string();
+        let original = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+        tokio::fs::write(&path, original).await.unwrap();
+
+        let mut mgr = FileToolManager::new();
+        let read = mgr
+            .read_file(ReadFileRequest {
+                path: p.clone(),
+                start_line: 1,
+                max_lines: None,
+            })
+            .await
+            .unwrap();
+        let alpha = read.lines[0].anchor.clone();
+        let gamma = read.lines[2].anchor.clone();
+        let epsilon = read.lines[4].anchor.clone();
+
+        let result = mgr
+            .edit_file(EditRequest {
+                path: p.clone(),
+                operations: vec![
+                    EditOperation::Delete {
+                        hash: alpha,
+                        end_hash: Some(epsilon),
+                    },
+                    EditOperation::InsertBefore {
+                        hash: gamma,
+                        content: "intruder".to_string(),
+                    },
+                ],
+            })
+            .await;
+
+        assert!(result.is_err(), "interior insert should be rejected");
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(after, original, "file must be left untouched on rejection");
+    }
+
+    #[tokio::test]
     async fn equal_position_insertions_preserve_request_order() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("same_offset_insertions.txt");
@@ -1438,221 +1385,6 @@ mod tests {
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(content, "alpha\nafter-alpha\nbefore-beta\nbeta\n");
     }
-    /// Helper to set up a stale scenario:
-    /// 1. Writes `content`, reads it (so `issued_prefixes` gains entries)
-    /// 2. Then *directly* injects a phony mapping so we control which
-    ///    visible-anchor maps to a now-vanished full-hash while the prefix
-    ///    coincides with a *different* line's current full hash.
-    ///
-    /// Returns (mgr, path_str, visible_prefix, candidate_full_hash, TempDir).
-    async fn setup_stale_scenario(
-        content: &str,
-    ) -> (FileToolManager, String, String, String, tempfile::TempDir) {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = tmpdir.path().join("stale_test.txt");
-        let p = path.to_str().unwrap().to_string();
-        tokio::fs::write(&path, content).await.unwrap();
-
-        let mut mgr = FileToolManager::new();
-        // Read to populate last_read_view + issued_prefixes
-        mgr.read_file(ReadFileRequest {
-            path: p.clone(),
-            start_line: 1,
-            max_lines: None,
-        })
-        .await
-        .unwrap();
-
-        // Determine the normalized path (as used internally by read_file)
-        let norm = normalize_path(&p, &FileToolConfig::default()).unwrap();
-
-        // Build a view of the CURRENT file content
-        let current_view = FileView::from_text(content, Path::new(&norm));
-        // Pick a line we will target (line 0) and replace its issued
-        // mnemonic binding with a vanished hidden hash that retains the line's
-        // current guard prefix.
-        let target_full = current_view.lines[0].full_hash.clone();
-        let visible = mgr
-            .read_file(ReadFileRequest {
-                path: norm.clone(),
-                start_line: 1,
-                max_lines: Some(1),
-            })
-            .await
-            .unwrap()
-            .lines[0]
-            .anchor
-            .clone();
-        let guard = short_hash(&target_full, &current_view.lines);
-        let bogus_hash = hash_to_base32(compute_hash(b"bogus line that never existed"));
-        mgr.path_prefixes_mut(&norm)
-            .insert(visible.clone(), pack_binding(&bogus_hash, &guard));
-        mgr.reconcile_path_anchors(&norm, &current_view, false);
-        let candidate_anchor =
-            FileToolManager::anchor_for_full_hash(mgr.path_prefixes_mut(&norm), &target_full)
-                .unwrap();
-
-        (mgr, norm, visible, candidate_anchor, tmpdir)
-    }
-
-    #[tokio::test]
-    async fn test_stale_first_attempt_no_write() {
-        let (mut mgr, path, prefix, candidate_hash, _tmpdir) =
-            setup_stale_scenario("some line data\nsecond\nthird\n").await;
-
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-
-        let cr: &ConfirmationRequired = err
-            .downcast_ref()
-            .expect("expected ConfirmationRequired error");
-        assert_eq!(cr.path, path);
-        assert_eq!(cr.visible_anchor, prefix);
-        assert_eq!(cr.candidate_anchor, candidate_hash);
-
-        // File must NOT have been modified
-        let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(content, "some line data\nsecond\nthird\n");
-    }
-
-    #[tokio::test]
-    #[ignore = "Artist requires a fresh read instead of retry confirmation"]
-    async fn test_stale_exact_retry_applies() {
-        let (mut mgr, path, prefix, _candidate, _tmpdir) =
-            setup_stale_scenario("some line data\nsecond\nthird\n").await;
-
-        // First attempt — store pending, get ConfirmationRequired
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-
-        // Retry exact same operation → should apply
-        let result = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap();
-        assert!(result.content.contains("replacement"));
-        let fc = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(fc.starts_with("replacement"));
-    }
-
-    #[tokio::test]
-    async fn test_stale_changed_operation_no_borrow() {
-        let (mut mgr, path, prefix, _candidate, _tmpdir) =
-            setup_stale_scenario("some line data\nsecond\nthird\n").await;
-
-        // First attempt
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-
-        // Second attempt with DIFFERENT content → different fingerprint,
-        // must NOT borrow the previous confirmation
-        let err2 = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "different_content".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            err2.downcast_ref::<ConfirmationRequired>().is_some(),
-            "changed operation must NOT reuse pending confirmation"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "Artist does not retain stale confirmation state"]
-    async fn test_stale_changed_candidate_invalidates() {
-        // The pending key includes the candidate hash, so a retry where
-        // the file changed to make the prefix match a *different* line
-        // produces a new candidate → a new pending key → ConfirmationRequired
-        // is returned again (not auto-approved).
-        //
-        // Here we verify this by setting up a stale scenario, storing a
-        // pending, then *directly removing* the pending and repeating.
-        // The second attempt should also return ConfirmationRequired
-        // (because there is no pending to borrow).
-        // This tests the conceptual requirement "changed candidate
-        // invalidates confirmation" – if the stored confirmation doesn't
-        // match the current state, the gate re-fires.
-        let (mut mgr, path, prefix, _candidate, _tmpdir) =
-            setup_stale_scenario("some line data\nsecond\nthird\n").await;
-
-        // First attempt — store pending
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-        assert!(!mgr.pending_confirmations.is_empty());
-
-        // Erase all pending – simulate that the candidate became stale
-        mgr.pending_confirmations.clear();
-
-        // Retry — pending is gone, so ConfirmationRequired again
-        let err2 = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            err2.downcast_ref::<ConfirmationRequired>().is_some(),
-            "without a matching pending, the gate should require confirmation again"
-        );
-    }
-
     #[tokio::test]
     async fn test_stale_relocation_no_gate() {
         // When the old full hash STILL exists (at a different position),
@@ -1677,7 +1409,7 @@ mod tests {
             .lines()
             .next()
             .unwrap()
-            .split('|')
+            .split(':')
             .next()
             .unwrap()
             .trim()
@@ -1702,98 +1434,6 @@ mod tests {
         assert!(result.content.contains("replaced moved"));
         let fc = tokio::fs::read_to_string(&p).await.unwrap();
         assert_eq!(fc, "second line\nthird line\nreplaced moved\n");
-    }
-
-    #[tokio::test]
-    #[ignore = "Artist does not retain stale confirmation state"]
-    async fn test_stale_reread_clears_gate() {
-        let (mut mgr, path, prefix, _candidate, _tmpdir) = setup_stale_scenario(
-            "some line data
-second
-third
-",
-        )
-        .await;
-
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: prefix,
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-        assert!(!mgr.pending_confirmations.is_empty());
-
-        // A full reread acknowledges the current view. It clears the stale
-        // confirmation and returns the current mnemonic for the line rather
-        // than reviving the retired stale mnemonic.
-        let reread = mgr
-            .read_file(ReadFileRequest {
-                path: path.clone(),
-                start_line: 1,
-                max_lines: None,
-            })
-            .await
-            .unwrap();
-        let refreshed_anchor = reread.lines[0].anchor.clone();
-
-        assert!(
-            mgr.pending_confirmations.is_empty(),
-            "read_file should clear pending confirmations"
-        );
-
-        let result = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: refreshed_anchor,
-                    content: "replacement".to_string(),
-                }],
-            })
-            .await
-            .unwrap();
-        assert!(result.content.contains("replacement"));
-    }
-
-    #[tokio::test]
-    #[ignore = "Artist requires a fresh read instead of retry confirmation"]
-    async fn test_stale_delete_retry() {
-        let (mut mgr, path, prefix, _candidate, _tmpdir) =
-            setup_stale_scenario("some line data\nsecond\nthird\n").await;
-
-        // First attempt with Delete
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Delete {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-
-        // Retry same Delete
-        let result = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Delete {
-                    end_hash: None,
-                    hash: prefix.clone(),
-                }],
-            })
-            .await
-            .unwrap();
-        assert_eq!(result.total_lines, 2);
-        let fc = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(fc, "second\nthird\n");
     }
 
     // -----------------------------------------------------------------------
@@ -1874,94 +1514,33 @@ third
     // Multi-operation no-borrow test (Requirement 2)
     // -----------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn test_multi_operation_no_borrow() {
-        let (mut mgr, path, prefix, _candidate, _tmpdir) = setup_stale_scenario(
-            "first
-second
-third
-",
-        )
-        .await;
-
-        // Obtain the already-issued mnemonic directly. A full reread here
-        // would acknowledge the current view and retire the first stale
-        // mnemonic, invalidating the scenario this test is meant to exercise.
-        let current_view = FileView::from_text(
-            "first
-second
-third
-",
-            Path::new(&path),
-        );
-        let third_full = current_view.lines[2].full_hash.clone();
-        let h3 = FileToolManager::anchor_for_full_hash(mgr.path_prefixes_mut(&path), &third_full)
-            .unwrap();
-
-        let guard3 = short_hash(&third_full, &current_view.lines);
-        let bogus3 = hash_to_base32(compute_hash(b"bogus third"));
-        mgr.path_prefixes_mut(&path)
-            .insert(h3.clone(), pack_binding(&bogus3, &guard3));
-        mgr.reconcile_path_anchors(&path, &current_view, false);
-
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![
-                    EditOperation::Replace {
-                        end_hash: None,
-                        hash: prefix.clone(),
-                        content: "new first".to_string(),
-                    },
-                    EditOperation::Replace {
-                        end_hash: None,
-                        hash: h3.clone(),
-                        content: "new third".to_string(),
-                    },
-                ],
-            })
-            .await
-            .unwrap_err();
-        assert!(err.downcast_ref::<ConfirmationRequired>().is_some());
-
-        let err2 = mgr
-            .edit_file(EditRequest {
-                path,
-                operations: vec![
-                    EditOperation::Replace {
-                        end_hash: None,
-                        hash: prefix,
-                        content: "new first".to_string(),
-                    },
-                    EditOperation::Replace {
-                        end_hash: None,
-                        hash: h3,
-                        content: "different third".to_string(),
-                    },
-                ],
-            })
-            .await
-            .unwrap_err();
-        assert!(
-            err2.downcast_ref::<ConfirmationRequired>().is_some(),
-            "changed multi-op request must not reuse pending confirmation"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Atomic failure test (Requirement 3)
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_atomic_failure_leaves_file_unchanged() {
-        // Use setup_stale_scenario for a reliable stale mapping
-        let (mut mgr, path, _prefix, _candidate, _tmpdir) =
-            setup_stale_scenario("keep\nkeep\nkeep\nkeep\n").await;
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("atomic.txt");
+        let p = path.to_str().unwrap().to_string();
+        tokio::fs::write(&path, "keep\nkeep\nkeep\nkeep\n")
+            .await
+            .unwrap();
 
-        // The stale edit attempt must fail before any write
+        let mut mgr = FileToolManager::new();
+        mgr.read_file(ReadFileRequest {
+            path: p.clone(),
+            start_line: 1,
+            max_lines: None,
+        })
+        .await
+        .unwrap();
+
+        // An edit referencing an anchor that was never issued must fail before
+        // any write touches disk.
         let err = mgr
             .edit_file(EditRequest {
-                path: path.clone(),
+                path: p.clone(),
                 operations: vec![EditOperation::Replace {
                     end_hash: None,
                     hash: "nonexistent".to_string(),
@@ -1970,13 +1549,9 @@ third
             })
             .await
             .unwrap_err();
-        // The edit fails because "nonexistent" doesn't match anything
-        assert!(
-            err.downcast_ref::<ConfirmationRequired>().is_none() || !err.to_string().is_empty(),
-            "edit must fail before writing to disk"
-        );
+        assert!(!err.to_string().is_empty(), "edit must fail before writing");
 
-        // File must be UNCHANGED (atomicity)
+        // File must be UNCHANGED (atomicity).
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(
             content, "keep\nkeep\nkeep\nkeep\n",
@@ -1988,69 +1563,9 @@ third
     // Full-hash collision detection (Requirement 6)
     // -----------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn test_stale_confirmation_exposes_candidate_mnemonic_not_hash() {
-        let (mut mgr, path, anchor, candidate_anchor, _tmpdir) =
-            setup_stale_scenario("line one\nline two\n").await;
-        let err = mgr
-            .edit_file(EditRequest {
-                path: path.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: anchor.clone(),
-                    content: "new".to_string(),
-                }],
-            })
-            .await
-            .unwrap_err();
-        let confirmation = err.downcast_ref::<ConfirmationRequired>().unwrap();
-        assert_eq!(confirmation.visible_anchor, anchor);
-        assert_eq!(confirmation.candidate_anchor, candidate_anchor);
-        assert!(is_mnemonic_handle(&confirmation.candidate_anchor));
-        assert!(!confirmation.message.contains("Candidate HASH"));
-    }
-
     // -----------------------------------------------------------------------
     // Prefix growth test (Requirement 6)
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_prefix_grows_on_collision() {
-        // When many lines share a common hash prefix, prefixes should grow
-        // to the minimum unique length.
-        let lines: Vec<LineInfo> = (0..5)
-            .map(|i| {
-                // Create lines whose hashes share the first few chars:
-                // we use the same base content but different numbers to
-                // force collisions on early prefixes.
-                let content = format!("identical prefix line {}", i);
-                LineInfo {
-                    full_hash: hash_to_base32(compute_hash(content.as_bytes())),
-                    content,
-                }
-            })
-            .collect();
-
-        let prefixes: Vec<String> = lines
-            .iter()
-            .map(|li| short_hash(&li.full_hash, &lines))
-            .collect();
-
-        // Every prefix must be unique
-        let mut sorted = prefixes.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            prefixes.len(),
-            "every short prefix must be unique"
-        );
-
-        // Hidden guard prefixes use the shortest unique prefix with a one-character floor.
-        for prefix in &prefixes {
-            assert!(!prefix.is_empty());
-        }
-    }
 
     // -----------------------------------------------------------------------
     // Duplicate determinism regression

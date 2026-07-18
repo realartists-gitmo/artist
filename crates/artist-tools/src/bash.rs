@@ -35,6 +35,17 @@ struct Session {
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Kill the PTY child on drop so persistent/background sessions don't
+        // leave orphan processes (and the reader thread, which loops until PTY
+        // EOF, then exits once the child is gone).
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
+    }
+}
+
 impl BashTool {
     pub fn new(workspace: Workspace) -> Self {
         Self {
@@ -92,7 +103,17 @@ impl BashTool {
 }
 
 fn clean_input_output(output: &str, command: Option<&str>) -> String {
-    let mut lines = output.lines().skip(2).peekable();
+    // The status header spans a variable number of lines — `status: <word>`,
+    // an optional `exitCode:` line for a finished child, then `sessionId:` —
+    // so consume through the `sessionId:` line rather than a fixed count, which
+    // used to leak the `exitCode:`/`sessionId:` line for completed commands.
+    let mut lines = output.lines();
+    for line in lines.by_ref() {
+        if line.starts_with("sessionId:") {
+            break;
+        }
+    }
+    let mut lines = lines.peekable();
     if let Some(command) = command
         && lines
             .peek()
@@ -195,8 +216,8 @@ impl BashTool {
         let cap = args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP);
         let mut child = process.spawn()?;
         let buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
-        let stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
-        let stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
+        let mut stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
+        let mut stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
         let timeout = Duration::from_secs(args.timeout.unwrap_or(120));
         let (status, exit_code) = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(result) => {
@@ -222,7 +243,18 @@ impl BashTool {
                 ("timedOut", None)
             }
         };
-        let _ = tokio::join!(stdout, stderr);
+        // Bound the wait for the pipes to close: a daemonizing grandchild that
+        // escaped the killed process group can hold stdout/stderr open forever,
+        // which would otherwise hang this call even though the child exited.
+        if tokio::time::timeout(Duration::from_secs(2), async {
+            let _ = tokio::join!(&mut stdout, &mut stderr);
+        })
+        .await
+        .is_err()
+        {
+            stdout.abort();
+            stderr.abort();
+        }
         let buffer = buffer.lock().await;
         let output = String::from_utf8_lossy(&buffer.0);
         Ok(format!(
@@ -301,12 +333,34 @@ impl BashTool {
         let reader_cursor = cursor.clone();
         std::thread::spawn(move || {
             let mut bytes = [0u8; 4096];
+            // Carry an incomplete trailing UTF-8 sequence across reads so a
+            // multi-byte char split at a 4096-byte boundary isn't corrupted
+            // into replacement characters.
+            let mut carry: Vec<u8> = Vec::new();
             while let Ok(count) = reader.read(&mut bytes) {
                 if count == 0 {
                     break;
                 }
+                let mut buf = std::mem::take(&mut carry);
+                buf.extend_from_slice(&bytes[..count]);
+                let decoded = match std::str::from_utf8(&buf) {
+                    Ok(valid) => valid.to_owned(),
+                    Err(error) => {
+                        let valid_up_to = error.valid_up_to();
+                        let mut piece =
+                            std::str::from_utf8(&buf[..valid_up_to]).unwrap().to_owned();
+                        match error.error_len() {
+                            // Incomplete sequence at the tail: hold it for the
+                            // next read.
+                            None => carry = buf[valid_up_to..].to_vec(),
+                            // Genuinely invalid bytes: emit replacements now.
+                            Some(_) => piece.push_str(&String::from_utf8_lossy(&buf[valid_up_to..])),
+                        }
+                        piece
+                    }
+                };
                 let mut text = sink.lock().unwrap_or_else(|poison| poison.into_inner());
-                text.push_str(&String::from_utf8_lossy(&bytes[..count]));
+                text.push_str(&decoded);
                 if text.len() > SESSION_CAP {
                     let mut drain = text.len() - SESSION_CAP;
                     while drain < text.len() && !text.is_char_boundary(drain) {
@@ -400,16 +454,33 @@ impl BashTool {
             .unwrap_or_else(|p| p.into_inner())
             .kill()?;
         tokio::time::sleep(Duration::from_millis(100)).await;
-        Ok(format!(
-            "status: stopped\nsessionId: {id}\n{}",
-            self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
-        ))
+        let output = self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?;
+        // Reap the map entry once the child is gone so long-lived processes
+        // don't accumulate dead sessions and their output buffers.
+        let exited = session
+            .child
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some();
+        let status = if exited {
+            self.sessions.remove(&id);
+            "stopped (session removed)"
+        } else {
+            "stopping"
+        };
+        Ok(format!("status: {status}\nsessionId: {id}\n{output}"))
     }
     fn list(&self) -> String {
         if self.sessions.is_empty() {
             return "sessions: []".into();
         }
-        self.sessions
+        // Exited sessions appear once (as a tombstone) and are then reaped.
+        let mut exited = Vec::new();
+        let lines = self
+            .sessions
             .iter()
             .map(|entry| {
                 let status = match entry
@@ -419,14 +490,21 @@ impl BashTool {
                     .unwrap_or_else(|p| p.into_inner())
                     .try_wait()
                 {
-                    Ok(Some(_)) => "exited",
+                    Ok(Some(_)) => {
+                        exited.push(entry.key().clone());
+                        "exited (removed)"
+                    }
                     Ok(None) => "running",
                     Err(_) => "unknown",
                 };
                 format!("{}\t{status}\t{}", entry.key(), entry.value().command)
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        for id in exited {
+            self.sessions.remove(&id);
+        }
+        lines
     }
     fn cwd(&self, input: Option<&str>) -> Result<std::path::PathBuf, ToolError> {
         Ok(match input {

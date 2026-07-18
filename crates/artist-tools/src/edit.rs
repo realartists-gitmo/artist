@@ -24,7 +24,7 @@ impl Tool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace lines using mnemonic anchors returned by read. Never use line numbers."
+        "Atomically replace lines using ANCHORs from the latest read."
             .into()
     }
     fn parameters(&self) -> Value {
@@ -62,11 +62,12 @@ impl Tool for EditTool {
             .unified_diff()
             .context_radius(3)
             .to_string();
+        let before_lines: std::collections::HashSet<&str> = before.lines().collect();
         let updates = result
             .result
             .lines
             .iter()
-            .filter(|line| !before.lines().any(|old| old == line.text))
+            .filter(|line| !before_lines.contains(line.text.as_str()))
             .take(50)
             .map(|line| format!("{} | {}", line.anchor, line.text))
             .collect::<Vec<_>>()

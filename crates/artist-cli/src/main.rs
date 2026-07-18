@@ -2,6 +2,7 @@ mod args;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
+mod custom_commands;
 mod extension_control;
 mod input_atoms;
 mod input_images;
@@ -10,6 +11,7 @@ mod login;
 mod models;
 mod prompt;
 mod sessions;
+mod settings;
 mod slash_commands;
 mod startup_splash;
 mod status_bar;
@@ -18,11 +20,11 @@ mod test_provider;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, LoginKind, ProviderAction};
+use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
-use sessions::{Role, SessionStore, Turn};
+use sessions::{ActiveSession, SessionStore};
 use std::{
     io::IsTerminal,
     sync::Arc,
@@ -33,7 +35,6 @@ use store::{ProviderStore, config_path};
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        ratatui::restore();
         eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
@@ -45,6 +46,17 @@ async fn run() -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
+    // Move any pre-settings per-provider model/reasoning (old `providers.toml`
+    // location) into the global `settings.toml`, then rewrite `providers.toml`
+    // without those fields. One-time and idempotent.
+    if let Ok(index) = default_index(&store) {
+        let model = store.providers[index].model.clone();
+        let reasoning = store.providers[index].reasoning_effort.clone();
+        if settings::migrate_provider_defaults(config_root, model.as_deref(), reasoning.as_deref())?
+        {
+            store.save(&path)?;
+        }
+    }
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
@@ -90,16 +102,61 @@ async fn run() -> Result<()> {
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
             }
-            models::select(&mut store.providers[selected]).await?;
-            store.save(&path)?;
+            // Pick against a scratch clone seeded with the current global
+            // settings (the model's real home), then persist the choice to
+            // `settings.toml` — never back into `providers.toml`.
+            let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
+            let mut scratch = store.providers[selected].clone();
+            scratch.model = global.model.clone();
+            scratch.reasoning_effort = global.reasoning_effort.clone();
+            models::select(&mut scratch).await?;
+            settings::write_provider_defaults(
+                config_root,
+                scratch.model.as_deref(),
+                scratch.reasoning_effort.as_deref(),
+            )?;
+        }
+        Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            match args.action {
+                RulesCommand::New { name } => scaffold_rule(&name)?,
+            }
+        }
+        Some(Command::Sessions(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            let sessions = SessionStore::new(config_root);
+            match args.action {
+                SessionsCommand::List => sessions_list(&sessions)?,
+                SessionsCommand::Render { id } => sessions_render(&sessions, &id)?,
+                SessionsCommand::Gc {
+                    keep,
+                    older_than_days,
+                    dry_run,
+                } => sessions_gc(&sessions, keep, older_than_days, dry_run)?,
+            }
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
             let selected = default_index(&store)?;
+            let project = std::env::current_dir().context("find current project directory")?;
+            // Layered settings (global ~/.artist + project .artist) resolve the
+            // model/reasoning overrides and the effective tool denylist.
+            let effective = settings::load_effective(
+                config_root,
+                &project,
+                &settings::Overrides::default(),
+                &store.disabled_tools,
+            )?;
+            // Catch a missing model here, before the TUI takes over — otherwise
+            // it only surfaces as an agent error on the first prompt, forcing a
+            // quit → `artist model` → relaunch. A settings override counts as a
+            // model, so this only fires when nothing supplies one.
+            if store.providers[selected].model.is_none() && effective.model.is_none() {
+                bail!("no model selected — run `artist model` to choose one first");
+            }
             // Resolve an interactive resume before entering inline TUI mode so the
             // selector cannot be painted underneath the splash and input viewport.
+            // Draw the startup UI before loading models, extensions, indexes, or
+            // servers, then initialize integrations concurrently below.
             let sessions = SessionStore::new(config_root);
-            let project = std::env::current_dir().context("find current project directory")?;
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let terminal = chat_ui::start_terminal(resumed.is_none(), cli.prompt.is_some())?;
             let extension_control = extension_control::ExtensionControl::default();
@@ -116,6 +173,8 @@ async fn run() -> Result<()> {
                 store.save(&path)?;
             }
             let tools = tool_bundle(config_root, &project)?;
+            let rules_engine = artist_rules::RulesEngine::discover(&project);
+            let rules_handle = artist_rules::state::RulesHandle::default();
             chat_ui::run(
                 terminal,
                 &mut store,
@@ -128,6 +187,9 @@ async fn run() -> Result<()> {
                     mcp: &mcp,
                     extensions: &extensions,
                     extension_control: &extension_control,
+                    rules_engine: &rules_engine,
+                    rules_handle: &rules_handle,
+                    settings: &effective,
                 },
                 resumed,
                 cli.prompt,
@@ -146,6 +208,10 @@ fn enter_positional_project(cli: &mut Cli) -> Result<()> {
     if path.is_dir() {
         std::env::set_current_dir(path)
             .with_context(|| format!("enter project directory {}", path.display()))?;
+        // The positional arg doubles as prompt-or-project-dir; say which it was
+        // so a one-word prompt that happens to be a directory name isn't
+        // silently swallowed.
+        eprintln!("opening project {}", path.display());
         cli.prompt = None;
     }
     Ok(())
@@ -155,13 +221,22 @@ fn load_resumed(
     sessions: &SessionStore,
     project: &std::path::Path,
     resume: Option<&str>,
-) -> Result<Option<(sessions::Session, Vec<Turn>)>> {
+) -> Result<Option<(ActiveSession, Vec<artist_session::Envelope>)>> {
     let Some(requested) = resume else {
         return Ok(None);
     };
     let mut available = sessions.list_project(project)?;
     available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-    let id = if requested.is_empty() {
+    // An unknown id shouldn't abort the launch — a typo or stale id falls back
+    // to the interactive picker instead of killing the process.
+    let requested_missing =
+        !requested.is_empty() && !available.iter().any(|session| session.id == requested);
+    if requested_missing {
+        eprintln!(
+            "session '{requested}' was not found in this project — pick one to resume instead"
+        );
+    }
+    let id = if requested.is_empty() || requested_missing {
         if available.is_empty() {
             bail!("no sessions found for {}", project.display());
         }
@@ -169,9 +244,14 @@ fn load_resumed(
             .iter()
             .map(|session| {
                 format!(
-                    "{}  {}",
+                    "{}  {}{}",
                     session.id,
-                    session.label.as_deref().unwrap_or("Untitled")
+                    session.label.as_deref().unwrap_or("Untitled"),
+                    session
+                        .parent
+                        .as_deref()
+                        .map(|parent| format!("  (fork of {parent})"))
+                        .unwrap_or_default()
                 )
             })
             .collect::<Vec<_>>();
@@ -179,12 +259,9 @@ fn load_resumed(
             .id
             .clone()
     } else {
-        if !available.iter().any(|session| session.id == requested) {
-            bail!("session {requested} was not found in this project");
-        }
         requested.to_owned()
     };
-    Ok(Some(sessions.load(&id)?))
+    Ok(Some(sessions.open(&id)?))
 }
 
 async fn execute_prompt(
@@ -203,80 +280,66 @@ async fn execute_prompt(
     let config_root = path.parent().context("providers path has no parent")?;
     let sessions = SessionStore::new(config_root);
     let project = std::env::current_dir().context("find current project directory")?;
+    let effective = settings::load_effective(
+        config_root,
+        &project,
+        &settings::Overrides::default(),
+        &store.disabled_tools,
+    )?;
+    // Session-scoped provider carrying the settings model/reasoning override
+    // (a throwaway clone, never persisted).
+    let session_provider = effective.apply_to(store.providers[selected].clone());
     let tools = tool_bundle(config_root, &project)?;
-    let (session, turns) = match resume {
-        Some("") => {
-            let mut available = sessions.list_project(&project)?;
-            available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-            if available.is_empty() {
-                bail!("no sessions found for {}", project.display());
-            }
-            let items = available
-                .iter()
-                .map(|session| {
-                    format!(
-                        "{}  {}",
-                        session.id,
-                        session.label.as_deref().unwrap_or("Untitled")
-                    )
-                })
-                .collect::<Vec<_>>();
-            let selected = prompt::select("Session to resume", &items, 0)?;
-            sessions.load(&available[selected].id)?
-        }
-        Some(id) => {
-            if !sessions
-                .list_project(&project)?
-                .iter()
-                .any(|session| session.id == id)
-            {
-                bail!("session {id} was not found in this project");
-            }
-            sessions.load(id)?
-        }
+    let (active, events) = match load_resumed(&sessions, &project, resume)? {
+        Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
-    let history = turns
-        .iter()
-        .map(|turn| artist_agent::ChatMessage {
-            role: match turn.role {
-                Role::User => artist_agent::ChatRole::User,
-                Role::Assistant => artist_agent::ChatRole::Assistant,
-            },
-            content: turn.content.clone(),
-        })
-        .collect::<Vec<_>>();
-    sessions.append(
-        &session.id,
-        &Turn {
-            role: Role::User,
-            content: input.to_owned(),
-        },
+    let history = artist_session::build_history(
+        &events,
+        &active.attachments,
+        &artist_session::HistoryOptions::default(),
     )?;
-    let styled = std::io::stdout().is_terminal();
-    let mut reasoning = false;
-    let mut response = String::new();
-    let agent_input = artist_agent::ChatInput::from(input.to_owned());
+    active.recorder.record(artist_session::TurnUser {
+        content: vec![artist_session::ContentBlock::Text {
+            text: input.to_owned(),
+        }],
+        display: None,
+        source: "prompt".to_owned(),
+    });
+    let rules_engine = artist_rules::RulesEngine::discover(&project);
     let steering = artist_agent::SteeringHandle::default();
-    extension_control.set_steering(Some(steering.clone()));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let handles = artist_agent::SessionHandles {
+        steering: steering.clone(),
+        rules: artist_rules::state::RulesHandle::default(),
+        rule_set: rules_engine.snapshot(),
+        recorder: active.recorder.clone(),
+        attachments: active.attachments.clone(),
+        cancel: cancel.clone(),
+    };
+    extension_control.set_steering(Some(steering));
     extensions
         .update_context(|context| context.agent_state = serde_json::json!({"state":"thinking"}));
     let _ = extensions.publish(artist_extensions::Event {
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"thinking"}),
     });
-    let stream_result = {
+    let styled = std::io::stdout().is_terminal();
+    let mut reasoning = false;
+    let mut response = String::new();
+    let agent_input = artist_agent::ChatInput::from(input.to_owned());
+    let outcome = {
         let chat = artist_agent::stream_chat(
-            &store.providers[selected],
+            &session_provider,
             &agent_input,
-            &history,
+            history,
             artist_agent::ToolContext {
                 native: &tools,
                 mcp,
                 extensions: Some(extensions),
-                disabled: &store.disabled_tools,
+                disabled: &effective.denied_tools,
             },
-            steering,
+            handles,
             |event| {
                 publish_prompt_event(extensions, &event);
                 use artist_agent::PromptEvent;
@@ -302,18 +365,25 @@ async fn execute_prompt(
                     PromptEvent::ToolExecutionStart { .. } => {}
                     PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
                     PromptEvent::CompletionUsage { .. } => {}
+                    PromptEvent::RuleFired { rule, matched } => {
+                        let excerpt: String = matched.chars().take(60).collect();
+                        eprintln!("rule {rule} fired on \"{excerpt}\" — rewound, retrying");
+                    }
                 }
                 output.flush()?;
                 Ok(())
             },
         );
+        // An extension may request a stop mid-run; that maps onto the
+        // cooperative cancellation token (the run records its cancelled
+        // state and preserves accumulated output as a partial turn).
         tokio::pin!(chat);
         loop {
             tokio::select! {
-                result = &mut chat => break Some(result),
+                result = &mut chat => break result,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                     if extension_control.take_stop() {
-                        break None;
+                        cancel.cancel();
                     }
                 }
             }
@@ -325,23 +395,26 @@ async fn execute_prompt(
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"idle"}),
     });
-    if let Some(result) = stream_result {
-        result?;
+    let outcome = outcome?;
+    if outcome == artist_agent::RunOutcome::Cancelled && !response.is_empty() {
+        active.recorder.record(artist_session::ModelTurn {
+            turn: 0,
+            content: vec![artist_session::ContentBlock::Text {
+                text: response.clone(),
+            }],
+            total_tokens: 0,
+            partial: true,
+        });
     }
     println!();
-    sessions.append(
-        &session.id,
-        &Turn {
-            role: Role::Assistant,
-            content: response,
-        },
-    )?;
+    let session_id = active.session.id.clone();
+    active.close().await?;
     for followup in extension_control.take_prompts() {
         Box::pin(execute_prompt(
             store,
             path,
             &followup,
-            Some(&session.id),
+            Some(&session_id),
             mcp,
             extensions,
             extension_control,
@@ -357,13 +430,18 @@ async fn extension_manager(
     control: extension_control::ExtensionControl,
 ) -> Result<Arc<artist_extensions::Manager>> {
     let project = std::env::current_dir().context("find current project directory")?;
-    let provider = default_index(store)
-        .ok()
-        .and_then(|i| store.providers.get(i));
+    // Model/reasoning come from the resolved settings now, not the provider.
+    let effective = settings::load_effective(
+        config_root,
+        &project,
+        &settings::Overrides::default(),
+        &store.disabled_tools,
+    )
+    .unwrap_or_default();
     let context = artist_extensions::ExtensionContext {
         project,
-        model: provider.and_then(|p| p.model.clone()),
-        reasoning: provider.and_then(|p| p.reasoning_effort.clone()),
+        model: effective.model.clone(),
+        reasoning: effective.reasoning_effort.clone(),
         agent_state: serde_json::json!({"state": "idle"}),
         recent_events: Vec::new(),
     };
@@ -384,6 +462,7 @@ fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_age
         PromptEvent::TextDelta(_) => Some("responding"),
         PromptEvent::ToolCall { .. } | PromptEvent::ToolExecutionStart { .. } => Some("working"),
         PromptEvent::ToolResult { .. } => Some("thinking"),
+        PromptEvent::RuleFired { .. } => Some("rewinding"),
         PromptEvent::CompletionUsage { .. } => None,
     };
     if let Some(state) = state {
@@ -394,6 +473,162 @@ fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_age
         kind: "prompt_event".into(),
         payload,
     });
+}
+
+fn sessions_list(sessions: &SessionStore) -> Result<()> {
+    let project = std::env::current_dir()?;
+    let mut entries = sessions.list_project(&project)?;
+    if entries.is_empty() {
+        println!("No sessions for {}", project.display());
+        return Ok(());
+    }
+    entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+    for session in entries {
+        let size = dir_size(session.dir());
+        println!(
+            "{}  {:>8}  {}{}",
+            session.id,
+            format_size(size),
+            session.label.as_deref().unwrap_or("Untitled"),
+            session
+                .parent
+                .as_deref()
+                .map(|parent| format!("  (fork of {parent})"))
+                .unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn sessions_render(sessions: &SessionStore, id: &str) -> Result<()> {
+    let (session, events) = sessions.peek(id)?;
+    let markdown = artist_session::render_markdown(&events);
+    std::fs::write(&session.transcript, &markdown)?;
+    println!("regenerated {}", session.transcript.display());
+    Ok(())
+}
+
+fn sessions_gc(
+    sessions: &SessionStore,
+    keep: usize,
+    older_than_days: u64,
+    dry_run: bool,
+) -> Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
+    let cutoff = now.saturating_sub(older_than_days * 24 * 60 * 60 * 1000);
+    let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
+        Default::default();
+    for session in sessions.list()? {
+        by_project
+            .entry(session.project.clone())
+            .or_default()
+            .push(session);
+    }
+    let mut removed = 0usize;
+    let mut reclaimed = 0u64;
+    for (_, mut entries) in by_project {
+        entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
+        for session in entries.into_iter().skip(keep) {
+            if session.created_at_ms >= cutoff {
+                continue;
+            }
+            let size = dir_size(session.dir());
+            removed += 1;
+            reclaimed += size;
+            if dry_run {
+                println!(
+                    "would delete {}  {:>8}  {}",
+                    session.id,
+                    format_size(size),
+                    session.label.as_deref().unwrap_or("Untitled")
+                );
+            } else {
+                sessions.remove(&session.id)?;
+                println!("deleted {}  {:>8}", session.id, format_size(size));
+            }
+        }
+    }
+    println!(
+        "{}{} session(s), {}",
+        if dry_run { "would delete " } else { "deleted " },
+        removed,
+        format_size(reclaimed)
+    );
+    Ok(())
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![dir.to_owned()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else {
+                total += metadata.len();
+            }
+        }
+    }
+    total
+}
+
+fn format_size(bytes: u64) -> String {
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1048575 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1048576.0),
+    }
+}
+
+/// `artist rules new <name>`: write a commented rule template into the
+/// project's .artist/rules/ directory.
+fn scaffold_rule(name: &str) -> Result<()> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !valid {
+        bail!("rule names are lowercase-kebab-case (got {name:?})");
+    }
+    let dir = std::env::current_dir()?.join(".artist/rules");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{name}.md"));
+    if path.exists() {
+        bail!("{} already exists", path.display());
+    }
+    let template = format!(
+        r#"---
+name: {name}
+description: One line describing what this rule catches
+# What to match against. Any of: assistant-text, tool-args, reasoning-summary.
+targets: [assistant-text]
+# Linear-time regexes; a match mid-stream aborts the request, injects the
+# reminder below, and retries from the same point.
+patterns:
+  - 'REPLACE ME'
+# Only for tool-args targets: restrict to these tools (empty = all).
+# tools: [write, edit, bash]
+# fire: once        # once per session (default) | per-turn
+# persistence: session  # keep reminding every turn (default) | message
+# scope: [main, delegate]
+---
+Write the reminder the model receives here. Say what NOT to do and what to
+do instead.
+"#
+    );
+    std::fs::write(&path, template)?;
+    println!("created {}", path.display());
+    println!(
+        "test it against a session with: /rules dry-run {}",
+        path.display()
+    );
+    Ok(())
 }
 
 fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Result<ToolBundle> {
@@ -432,7 +667,7 @@ fn list(store: &ProviderStore) {
 
 fn choose(store: &ProviderStore, label: &str) -> Result<usize> {
     if store.providers.is_empty() {
-        bail!("no providers saved; log in first");
+        bail!("no accounts saved — run `artist provider --login chatgpt` to sign in");
     }
     let items: Vec<_> = store.providers.iter().map(|p| p.name.clone()).collect();
     let default = store
@@ -454,18 +689,27 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
-    let provider = &store.providers[selected];
+    // The model lives in settings now, so hydrate the provider from the global
+    // settings before testing.
+    let config_root = path.parent().context("providers path has no parent")?;
+    let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
+    let mut provider = store.providers[selected].clone();
+    provider.model = global.model.clone();
+    provider.reasoning_effort = global.reasoning_effort.clone();
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
-    test_provider::test(provider).await?;
+    test_provider::test(&provider).await?;
     println!("OK");
     Ok(())
 }
 fn default_index(store: &ProviderStore) -> Result<usize> {
+    if store.providers.is_empty() {
+        bail!("no account configured — run `artist provider --login chatgpt` to sign in");
+    }
     let id = store
         .default_provider
         .as_ref()
-        .context("no default provider; run `artist provider set`")?;
+        .context("no default provider set — run `artist provider set` to choose one")?;
     store
         .providers
         .iter()
@@ -473,22 +717,32 @@ fn default_index(store: &ProviderStore) -> Result<usize> {
         .context("default provider is missing")
 }
 
-async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
+pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if provider
+    // A token with no known expiry is refreshed proactively rather than
+    // trusted forever — otherwise it silently rots into an unrecoverable 401.
+    // The refresh response populates `expires_at`, so this self-corrects.
+    let needs_refresh = provider
         .auth
         .expires_at
-        .is_some_and(|expiry| expiry <= now.saturating_add(60))
-    {
-        provider.auth = ChatGptOAuth::default()
-            .refresh(&provider.auth)
-            .await
-            .context("refresh ChatGPT login")?
-            .auth;
-        return Ok(true);
+        .map_or(true, |expiry| expiry <= now.saturating_add(60));
+    if needs_refresh {
+        return force_refresh(provider).await.map(|()| true);
     }
     Ok(false)
+}
+
+/// Refresh the access token unconditionally, ignoring `expires_at`. Used after
+/// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
+/// recorded expiry.
+pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
+    provider.auth = ChatGptOAuth::default()
+        .refresh(&provider.auth)
+        .await
+        .context("refresh ChatGPT login")?
+        .auth;
+    Ok(())
 }

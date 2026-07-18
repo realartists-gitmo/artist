@@ -425,5 +425,5 @@ pub fn content_hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-/// How models should use anchors returned in `anchor | line` views.
-pub const ANCHOR_USAGE: &str = "Use only the bare mnemonic token before ' | '. For the rendered line 'time | beta', pass anchor \"time\" (not \"time | beta\").";
+/// How models should use anchors returned in `anchor: line` views.
+pub const ANCHOR_USAGE: &str = "Use only the bare mnemonic token before ': '. For the rendered line 'time: beta', pass anchor \"time\" (not \"time: beta\").";

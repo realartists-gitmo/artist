@@ -125,6 +125,45 @@ impl artist::extension::host::Host for State {
     }
 }
 
+/// wasmtime 46's `Error` no longer implements `std::error::Error`; convert
+/// explicitly at the API boundary.
+fn wasm_err(error: wasmtime::Error) -> anyhow::Error {
+    anyhow::anyhow!("{error:#}")
+}
+
+const EXT_EPOCH_TICK_MILLIS: u64 = 100;
+/// Yield back to the async runtime after this many epoch ticks of uninterrupted
+/// guest execution, then re-arm. Extensions keep every capability; this only
+/// stops a spinning `.wasm` from hard-locking the harness — instead it yields
+/// periodically and the runtime stays responsive.
+const EXT_EPOCH_DEADLINE_TICKS: u64 = 1;
+
+/// Shared engine for every extension, with epoch interruption enabled and one
+/// background ticker driving all stores' deadlines. Mirrors the rules WASM tier.
+fn extension_engine() -> &'static Engine {
+    static ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    ENGINE.get_or_init(|| {
+        let mut config = Config::new();
+        config.wasm_component_model(true);
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).expect("extension wasmtime config");
+        let ticker = engine.weak();
+        std::thread::Builder::new()
+            .name("artist-ext-epoch".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(EXT_EPOCH_TICK_MILLIS));
+                    let Some(engine) = ticker.upgrade() else {
+                        return;
+                    };
+                    engine.increment_epoch();
+                }
+            })
+            .expect("spawn extension epoch ticker");
+        engine
+    })
+}
+
 pub struct Instance {
     store: Mutex<Store<State>>,
     bindings: ArtistExtension,
@@ -136,19 +175,19 @@ impl Instance {
         events: EventBus,
         control: Arc<dyn HostControl>,
     ) -> Result<Self> {
-        let mut config = Config::new();
-        config.async_support(true).wasm_component_model(true);
-        let engine = Engine::new(&config)?;
-        let component = Component::from_file(&engine, &extension.wasm)?;
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-        ArtistExtension::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s)?;
+        // async support is always on in wasmtime 46; the old toggle is gone.
+        let engine = extension_engine();
+        let component = Component::from_file(engine, &extension.wasm).map_err(wasm_err)?;
+        let mut linker = Linker::new(engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(wasm_err)?;
+        ArtistExtension::add_to_linker::<_, HasSelf<_>>(&mut linker, |s| s).map_err(wasm_err)?;
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stdio().inherit_env().inherit_network();
         #[cfg(unix)]
-        wasi.preopened_dir("/", "/", DirPerms::all(), FilePerms::all())?;
+        wasi.preopened_dir("/", "/", DirPerms::all(), FilePerms::all())
+            .map_err(wasm_err)?;
         let mut store = Store::new(
-            &engine,
+            engine,
             State {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
@@ -159,12 +198,20 @@ impl Instance {
                 events,
             },
         );
-        let bindings = ArtistExtension::instantiate_async(&mut store, &component, &linker).await?;
+        // Stability guard: on each deadline the guest yields to the async
+        // runtime and the deadline re-arms, so a spinning extension can't wedge
+        // the harness. Capability is unchanged.
+        store.set_epoch_deadline(EXT_EPOCH_DEADLINE_TICKS);
+        store.epoch_deadline_async_yield_and_update(EXT_EPOCH_DEADLINE_TICKS);
+        let bindings = ArtistExtension::instantiate_async(&mut store, &component, &linker)
+            .await
+            .map_err(wasm_err)?;
         let activation_context =
             serde_json::to_string(&*context.read().expect("extension context poisoned"))?;
         bindings
             .call_activate(&mut store, &activation_context)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)?;
         Ok(Self {
             store: Mutex::new(store),
@@ -175,26 +222,32 @@ impl Instance {
         let mut s = self.store.lock().await;
         self.bindings
             .call_invoke_tool(&mut *s, name, &arguments.to_string())
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn invoke_command(&self, name: &str, arguments: &str) -> Result<String> {
         let mut s = self.store.lock().await;
         self.bindings
             .call_invoke_command(&mut *s, name, arguments)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn status(&self, name: &str) -> Result<String> {
         let mut s = self.store.lock().await;
         self.bindings
             .call_status(&mut *s, name)
-            .await?
+            .await
+            .map_err(wasm_err)?
             .map_err(anyhow::Error::msg)
     }
     pub async fn event(&self, json: &str) -> Result<()> {
         let mut s = self.store.lock().await;
-        self.bindings.call_event(&mut *s, json).await?;
+        self.bindings
+            .call_event(&mut *s, json)
+            .await
+            .map_err(wasm_err)?;
         Ok(())
     }
 }
