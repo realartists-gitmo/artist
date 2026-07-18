@@ -109,4 +109,7 @@ pub struct Firing {
     pub matched: String,
     pub reminder: String,
     pub persistence: Persistence,
+    /// The rule's fire policy, carried so the event log can record whether a
+    /// firing was per-turn and reconstruct arming state on resume.
+    pub fire: FirePolicy,
 }

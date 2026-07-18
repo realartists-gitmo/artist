@@ -303,6 +303,7 @@ mod tests {
                     target: "assistant-text".into(),
                     matched: "mock data".into(),
                     turn: 2,
+                    per_turn: false,
                 }),
             ),
         ];

@@ -302,12 +302,22 @@ pub struct RuleFired {
     pub target: String,
     pub matched: String,
     pub turn: u32,
+    /// Whether the rule re-arms each user turn. Recorded so a resumed session
+    /// can re-arm per-turn rules instead of leaving them permanently fired.
+    /// Absent in pre-existing logs (treated as `false`, i.e. once-per-session).
+    #[serde(default)]
+    pub per_turn: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuleInjection {
     pub rule: String,
     pub reminder: String,
+    /// Whether this reminder persists for the whole session (vs the single
+    /// retry message). Recorded so resume only re-activates session-persistent
+    /// injections. Absent in pre-existing logs (treated as `false`).
+    #[serde(default)]
+    pub session_persistent: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

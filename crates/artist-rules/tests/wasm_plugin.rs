@@ -95,6 +95,7 @@ fn infinite_loop_traps_on_deadline_and_poisons() {
         matched: "INFINITE_LOOP strike zone".into(),
         reminder: String::new(),
         persistence: Default::default(),
+        fire: Default::default(),
     };
     let started = std::time::Instant::now();
     assert!(rules.verdict(firing.clone(), 1).is_none());
@@ -118,6 +119,7 @@ fn memory_bomb_hits_the_store_limit_and_poisons() {
         matched: "MEMORY_BOMB strike zone".into(),
         reminder: String::new(),
         persistence: Default::default(),
+        fire: Default::default(),
     };
     assert!(rules.verdict(firing, 1).is_none());
     assert_eq!(rules.poisoned(), vec![id]);

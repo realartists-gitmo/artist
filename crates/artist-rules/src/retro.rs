@@ -52,6 +52,7 @@ pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
                     matched: excerpt,
                     reminder: String::new(),
                     persistence: Default::default(),
+                    fire: Default::default(),
                 };
                 let Some(firing) = rules.verdict(firing, 0) else {
                     continue;

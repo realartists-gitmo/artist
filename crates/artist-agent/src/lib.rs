@@ -447,10 +447,12 @@ pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firin
         target: firing.target.as_str().to_owned(),
         matched: firing.matched.clone(),
         turn: ttsr.turn(),
+        per_turn: firing.fire == artist_rules::types::FirePolicy::PerTurn,
     });
     recorder.record(RuleInjection {
         rule: firing.rule.0.clone(),
         reminder: firing.reminder.clone(),
+        session_persistent: firing.persistence == artist_rules::types::Persistence::Session,
     });
     let reminder = reminder_message(firing);
     if let Message::User { content } = &reminder {

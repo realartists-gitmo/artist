@@ -220,6 +220,7 @@ impl WasmRule {
                         "message" => Persistence::Message,
                         _ => Persistence::Session,
                     },
+                    fire: firing.fire,
                 })
             }
             Err(_trap) => {

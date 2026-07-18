@@ -437,6 +437,7 @@ fn firing(compiled: &CompiledRule, target: MatchTarget, matched: String) -> Firi
         matched,
         reminder: compiled.rule.reminder.clone(),
         persistence: compiled.rule.persistence,
+        fire: compiled.rule.fire,
     }
 }
 

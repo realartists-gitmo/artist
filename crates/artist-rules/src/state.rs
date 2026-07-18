@@ -162,13 +162,25 @@ impl RulesHandle {
         for envelope in events {
             match envelope.event() {
                 SessionEvent::RuleFired(fired) => {
-                    state.fired.insert(RuleId(fired.rule.clone()));
+                    let rule = RuleId(fired.rule.clone());
+                    state.fired.insert(rule.clone());
+                    // Per-turn rules must land in `per_turn_fired` too, or
+                    // `note_user_turn` never re-arms them after a resume.
+                    if fired.per_turn {
+                        state.per_turn_fired.insert(rule);
+                    }
                     match state.hits.iter_mut().find(|(rule, _)| rule.0 == fired.rule) {
                         Some((_, count)) => *count += 1,
                         None => state.hits.push((RuleId(fired.rule), 1)),
                     }
                 }
                 SessionEvent::RuleInjection(injection) => {
+                    // Only session-persistent reminders re-activate on resume;
+                    // a one-shot `message` reminder must not become a permanent
+                    // every-turn injection.
+                    if !injection.session_persistent {
+                        continue;
+                    }
                     let rule = RuleId(injection.rule.clone());
                     if !state.active_injections.iter().any(|(id, _)| *id == rule) {
                         state
@@ -194,6 +206,7 @@ mod tests {
             matched: "x".into(),
             reminder: format!("reminder for {rule}"),
             persistence,
+            fire: FirePolicy::Once,
         }
     }
 
@@ -276,6 +289,7 @@ mod tests {
                     target: "assistant-text".into(),
                     matched: "x".into(),
                     turn: 1,
+                    per_turn: true,
                 })
                 .unwrap(),
             },
@@ -290,6 +304,7 @@ mod tests {
                 payload: serde_json::to_value(RuleInjection {
                     rule: "r".into(),
                     reminder: "don't".into(),
+                    session_persistent: true,
                 })
                 .unwrap(),
             },
@@ -298,5 +313,34 @@ mod tests {
         handle.restore_from_log(&events);
         assert!(!handle.is_armed(&RuleId("r".into())));
         assert_eq!(handle.injections().len(), 1);
+        // RACE-1: a restored per-turn rule must re-arm on the next user turn,
+        // not stay permanently disarmed.
+        handle.note_user_turn();
+        assert!(handle.is_armed(&RuleId("r".into())));
+    }
+
+    #[test]
+    fn restore_skips_message_persistence_injections() {
+        use artist_session::{RuleInjection, SCHEMA_VERSION};
+        // RACE-8: a one-shot `message` reminder logged pre-resume must not
+        // become a permanent every-turn injection.
+        let events = vec![Envelope {
+            v: SCHEMA_VERSION,
+            seq: 0,
+            ts: 0,
+            session: "s".into(),
+            run: None,
+            lineage: "main".into(),
+            kind: "rule.injection".into(),
+            payload: serde_json::to_value(RuleInjection {
+                rule: "r".into(),
+                reminder: "once".into(),
+                session_persistent: false,
+            })
+            .unwrap(),
+        }];
+        let handle = RulesHandle::default();
+        handle.restore_from_log(&events);
+        assert!(handle.injections().is_empty());
     }
 }
