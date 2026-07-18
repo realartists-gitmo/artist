@@ -20,7 +20,7 @@ use ratatui::{
     Frame, TerminalOptions, Viewport,
     buffer::Buffer,
     crossterm::{
-        cursor::{Hide, MoveTo},
+        cursor::{Hide, MoveTo, Show},
         event::{
             self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
             KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -463,6 +463,16 @@ pub async fn run(
         Err(error) => Err(error.into()),
     };
     ratatui::restore();
+    // Inline restoration can return to the cursor position saved during setup.
+    // Reposition afterwards so the shell prompt starts below the cleared UI.
+    if let Ok((_, height)) = ratatui::crossterm::terminal::size() {
+        let _ = execute!(
+            std::io::stdout(),
+            Show,
+            MoveTo(0, height.saturating_sub(1)),
+            Clear(ClearType::CurrentLine)
+        );
+    }
     result
 }
 
@@ -2149,20 +2159,22 @@ fn insert_tool_line(
     terminal.insert_before(height.max(1), |buffer| {
         let background = Style::default().bg(Color::Rgb(32, 32, 32));
         buffer.set_style(buffer.area, background);
-        // Keep the final cell non-empty so terminals without background-color
-        // erase support (notably herdr) cannot turn the shaded suffix black.
-        if buffer.area.width > 0 {
-            for y in buffer.area.y..buffer.area.bottom() {
-                buffer
-                    .cell_mut((buffer.area.right() - 1, y))
-                    .expect("tool panel cell")
-                    .set_symbol("\u{00a0}")
-                    .set_style(background);
-            }
-        }
         Paragraph::new(Text::from(text))
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
+        // Ratatui may optimize trailing ordinary spaces into an erase-to-EOL
+        // sequence. Terminals without background-color erase support (notably
+        // herdr) then paint those cells with the default black background.
+        // Make every blank panel cell explicit after Paragraph has rendered so
+        // the shaded background survives that optimization.
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
+                if cell.symbol() == " " {
+                    cell.set_symbol("\u{00a0}");
+                }
+            }
+        }
     })?;
     Ok(())
 }
@@ -2591,14 +2603,7 @@ fn hard_wrap_input(text: &str, width: u16) -> String {
     output
 }
 fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    clear_inline(terminal)?;
-    let bottom = terminal.size()?.height.saturating_sub(1);
-    execute!(
-        std::io::stdout(),
-        MoveTo(0, bottom),
-        Clear(ClearType::CurrentLine)
-    )?;
-    Ok(())
+    clear_inline(terminal)
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {

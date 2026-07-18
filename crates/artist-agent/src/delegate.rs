@@ -65,6 +65,9 @@ pub(crate) struct DelegateArgs {
     background: Option<bool>,
     task_id: Option<String>,
     wait_ms: Option<u64>,
+    model: Option<String>,
+    #[serde(alias = "reasoningLevel", alias = "reasoningEffort")]
+    reasoning: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -93,7 +96,9 @@ impl Tool for Delegate {
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
             "background":{"type":"boolean","default":false,"description":"Start the delegate and return immediately."},
             "taskId":{"type":"string"},
-            "waitMs":{"type":"integer","minimum":1,"maximum":30000}
+            "waitMs":{"type":"integer","minimum":1,"maximum":30000},
+            "model":{"type":"string","description":"Model slug for this subagent. Defaults to the main agent's model."},
+            "reasoning":{"type":"string","description":"Reasoning effort for this subagent. Defaults to the main agent's reasoning effort."}
         },"additionalProperties":false})
     }
 
@@ -113,6 +118,8 @@ impl Tool for Delegate {
                     prompt,
                     args.read_only.unwrap_or(true),
                     args.fork.unwrap_or(false),
+                    args.model,
+                    args.reasoning,
                 )
                 .await
             }
@@ -128,6 +135,8 @@ impl Tool for Delegate {
                                 task_prompt,
                                 args.read_only.unwrap_or(true),
                                 args.fork.unwrap_or(false),
+                                args.model,
+                                args.reasoning,
                             )
                             .await
                             .map_err(|error| error.to_string())
@@ -173,11 +182,12 @@ impl Delegate {
         prompt: String,
         read_only: bool,
         fork: bool,
+        model: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<String, DelegateError> {
-        let model = self
-            .provider
-            .model
+        let model = model
             .as_deref()
+            .or(self.provider.model.as_deref())
             .ok_or(DelegateError::MissingModel)?;
         let client = chatgpt::Client::builder()
             .api_key(chatgpt::ChatGPTAuth::AccessToken {
@@ -235,7 +245,12 @@ impl Delegate {
             );
             let mut builder = client.agent(model).preamble(&policy);
             let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-            if let Some(effort) = &self.provider.reasoning_effort {
+            // The subagent's own `reasoning` arg overrides the main agent's
+            // effort (main b9d9193); fall back to the provider default.
+            if let Some(effort) = reasoning
+                .as_deref()
+                .or(self.provider.reasoning_effort.as_deref())
+            {
                 // Summaries off (TOK-5) — subagent reasoning is never surfaced,
                 // so a summary was pure token waste here.
                 params["reasoning"] = json!({ "effort": effort });
@@ -364,4 +379,29 @@ fn shorten(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\n[truncated]", &value[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegate_args_accept_model_and_reasoning_overrides() {
+        let args: DelegateArgs = serde_json::from_value(json!({
+            "model": "gpt-5.1-codex-mini",
+            "reasoning": "high"
+        }))
+        .unwrap();
+
+        assert_eq!(args.model.as_deref(), Some("gpt-5.1-codex-mini"));
+        assert_eq!(args.reasoning.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn delegate_args_accept_reasoning_level_alias() {
+        let args: DelegateArgs =
+            serde_json::from_value(json!({"reasoningLevel": "medium"})).unwrap();
+
+        assert_eq!(args.reasoning.as_deref(), Some("medium"));
+    }
 }
