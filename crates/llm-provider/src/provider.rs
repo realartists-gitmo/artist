@@ -34,14 +34,22 @@ impl fmt::Debug for ProviderId {
 pub enum ProviderKind {
     /// OpenAI Responses API over a ChatGPT/Codex subscription (OAuth).
     ChatGpt,
-    /// OpenAI-compatible chat-completions over an API key and a base URL —
-    /// covers xAI/Grok, Groq, DeepSeek, OpenRouter, Together, Mistral,
-    /// Perplexity, and the plain OpenAI API.
+    /// OpenAI Responses API over an API key + base URL — the plain OpenAI API
+    /// and xAI/Grok (both expose `/v1/responses`).
     OpenAi,
     /// Anthropic (Claude): `x-api-key` header, `thinking` reasoning shape.
     Anthropic,
     /// Google Gemini.
     Gemini,
+    // OpenAI-compatible chat-completions backends (`/chat/completions`,
+    // top-level `reasoning_effort`). Each maps to its own rig client so
+    // provider-specific request quirks and default base URLs are respected.
+    Groq,
+    DeepSeek,
+    Together,
+    OpenRouter,
+    Mistral,
+    Perplexity,
 }
 
 impl ProviderKind {
@@ -49,6 +57,20 @@ impl ProviderKind {
     /// ChatGPT subscription OAuth flow.
     pub fn is_api_key(self) -> bool {
         !matches!(self, Self::ChatGpt)
+    }
+
+    /// Whether this backend speaks OpenAI chat-completions (top-level
+    /// `reasoning_effort`) rather than the Responses API.
+    pub fn is_chat_completions(self) -> bool {
+        matches!(
+            self,
+            Self::Groq
+                | Self::DeepSeek
+                | Self::Together
+                | Self::OpenRouter
+                | Self::Mistral
+                | Self::Perplexity
+        )
     }
 }
 
@@ -301,6 +323,28 @@ mod tests {
         let headers = provider.request_auth().unwrap().headers;
         assert_eq!(headers["x-api-key"], "sk-ant");
         assert!(!headers.contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn chat_completions_kind_round_trips_and_classifies() {
+        let provider = SavedProvider::api_key(
+            ProviderId::new("groq").unwrap(),
+            "Groq",
+            ProviderKind::Groq,
+            Url::parse("https://api.groq.com/openai/v1/").unwrap(),
+            Secret::new("gsk-1"),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&provider).unwrap();
+        assert!(json.contains("\"kind\":\"groq\""));
+        let back: SavedProvider = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, ProviderKind::Groq);
+        assert!(ProviderKind::Groq.is_chat_completions());
+        assert!(ProviderKind::DeepSeek.is_chat_completions());
+        // Responses-API and native backends are not chat-completions.
+        assert!(!ProviderKind::OpenAi.is_chat_completions());
+        assert!(!ProviderKind::Anthropic.is_chat_completions());
+        assert!(ProviderKind::Groq.is_api_key());
     }
 
     #[test]

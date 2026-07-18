@@ -244,13 +244,31 @@ impl Delegate {
                 drive_delegate(crate::build_chatgpt(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
             ProviderKind::OpenAi => {
-                drive_delegate(crate::build_openai_compatible(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+                drive_delegate(crate::build_openai_responses(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
             ProviderKind::Anthropic => {
                 drive_delegate(crate::build_anthropic(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
             ProviderKind::Gemini => {
                 drive_delegate(crate::build_gemini(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Groq => {
+                drive_delegate(crate::build_groq(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::DeepSeek => {
+                drive_delegate(crate::build_deepseek(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Together => {
+                drive_delegate(crate::build_together(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::OpenRouter => {
+                drive_delegate(crate::build_openrouter(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Mistral => {
+                drive_delegate(crate::build_mistral(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Perplexity => {
+                drive_delegate(crate::build_perplexity(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
         };
         recorder.record(DelegateFinished {

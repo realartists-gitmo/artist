@@ -347,11 +347,12 @@ token source); other backends are added with `artist provider add` (key from
 the provider's env var or a prompt). The agent's stream loop, TTSR, and capture
 hooks are all generic over rig's traits, so `stream_chat`/the delegate just
 dispatch on `ProviderKind` to build the right rig client and per-backend
-`additional_params` (`params_for`) — the streaming layer is unchanged. Vetted
-backends map 1:1 to a dedicated rig client: xAI/Grok and OpenAI (both via the
-Responses path with a base-URL override), Anthropic, and Gemini. Chat-
-completions-only providers (Groq, DeepSeek, Together, OpenRouter) are a
-follow-up — they need their own rig clients behind finer kinds.
+`additional_params` (`params_for`) — the streaming layer is unchanged. Each
+backend maps to a dedicated rig client: xAI/Grok and OpenAI over the Responses
+path (`reasoning.effort`); Anthropic (`x-api-key`, `thinking` budget); Gemini;
+and the OpenAI chat-completions family — Groq, DeepSeek, Together, OpenRouter,
+Mistral, Perplexity (`/chat/completions`, top-level `reasoning_effort`). Add any
+with `artist provider add`.
 
 MCP (`mcp.toml`, cached schemas, startup/manual/on-call
 activation) hardened: oversized tool output is wrapped in a **valid JSON

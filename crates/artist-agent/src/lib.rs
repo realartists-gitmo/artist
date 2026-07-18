@@ -35,7 +35,9 @@ use rig_core::{
     completion::message::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
-    providers::{anthropic, chatgpt, gemini, xai},
+    providers::{
+        anthropic, chatgpt, deepseek, gemini, groq, mistral, openrouter, perplexity, together, xai,
+    },
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
@@ -291,13 +293,31 @@ pub async fn stream_chat(
             run_retry_loop(build_chatgpt(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
         }
         ProviderKind::OpenAi => {
-            run_retry_loop(build_openai_compatible(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+            run_retry_loop(build_openai_responses(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
         }
         ProviderKind::Anthropic => {
             run_retry_loop(build_anthropic(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
         }
         ProviderKind::Gemini => {
             run_retry_loop(build_gemini(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Groq => {
+            run_retry_loop(build_groq(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::DeepSeek => {
+            run_retry_loop(build_deepseek(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Together => {
+            run_retry_loop(build_together(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::OpenRouter => {
+            run_retry_loop(build_openrouter(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Mistral => {
+            run_retry_loop(build_mistral(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Perplexity => {
+            run_retry_loop(build_perplexity(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
         }
     }
 }
@@ -323,6 +343,12 @@ pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
         ProviderKind::OpenAi => "openai",
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Gemini => "gemini",
+        ProviderKind::Groq => "groq",
+        ProviderKind::DeepSeek => "deepseek",
+        ProviderKind::Together => "together",
+        ProviderKind::OpenRouter => "openrouter",
+        ProviderKind::Mistral => "mistral",
+        ProviderKind::Perplexity => "perplexity",
     }
 }
 
@@ -348,8 +374,10 @@ pub(crate) fn params_for(
             }
             params
         }
+        // OpenAI/xAI Responses API: nested reasoning.effort (no prompt_cache_key
+        // — that's Codex-only).
         ProviderKind::OpenAi => match effort {
-            Some(effort) => json!({ "reasoning_effort": effort }),
+            Some(effort) => json!({ "reasoning": { "effort": effort } }),
             None => json!({}),
         },
         ProviderKind::Anthropic => match effort.map(thinking_budget) {
@@ -357,6 +385,13 @@ pub(crate) fn params_for(
             None => json!({}),
         },
         ProviderKind::Gemini => json!({}),
+        // Chat-completions backends: top-level reasoning_effort (honored by
+        // reasoning models; ignored otherwise).
+        _ if kind.is_chat_completions() => match effort {
+            Some(effort) => json!({ "reasoning_effort": effort }),
+            None => json!({}),
+        },
+        _ => json!({}),
     }
 }
 
@@ -381,15 +416,14 @@ pub(crate) fn build_chatgpt(provider: &SavedProvider) -> Result<chatgpt::Client>
         .context("build ChatGPT client")
 }
 
-/// One client for every OpenAI-compatible chat-completions backend (xAI/Grok,
-/// Groq, DeepSeek, OpenRouter, Together, …): rig's xAI client is a plain
-/// bearer-auth OpenAI-compatible client, pointed at the provider's base URL.
-pub(crate) fn build_openai_compatible(provider: &SavedProvider) -> Result<xai::Client> {
+/// The OpenAI/xAI Responses-API client (both expose `/v1/responses`), pointed
+/// at the provider's base URL.
+pub(crate) fn build_openai_responses(provider: &SavedProvider) -> Result<xai::Client> {
     xai::Client::builder()
         .api_key(provider.auth.api_key().unwrap_or_default())
         .base_url(provider.base_url.as_str())
         .build()
-        .context("build OpenAI-compatible client")
+        .context("build OpenAI Responses client")
 }
 
 pub(crate) fn build_anthropic(provider: &SavedProvider) -> Result<anthropic::Client> {
@@ -406,6 +440,56 @@ pub(crate) fn build_gemini(provider: &SavedProvider) -> Result<gemini::Client> {
         .base_url(provider.base_url.as_str())
         .build()
         .context("build Gemini client")
+}
+
+// OpenAI-compatible chat-completions backends, each on its own rig client so
+// provider-specific request handling and default base URLs are respected.
+pub(crate) fn build_groq(provider: &SavedProvider) -> Result<groq::Client> {
+    groq::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Groq client")
+}
+
+pub(crate) fn build_deepseek(provider: &SavedProvider) -> Result<deepseek::Client> {
+    deepseek::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build DeepSeek client")
+}
+
+pub(crate) fn build_together(provider: &SavedProvider) -> Result<together::Client> {
+    together::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Together client")
+}
+
+pub(crate) fn build_openrouter(provider: &SavedProvider) -> Result<openrouter::Client> {
+    openrouter::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build OpenRouter client")
+}
+
+pub(crate) fn build_mistral(provider: &SavedProvider) -> Result<mistral::Client> {
+    mistral::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Mistral client")
+}
+
+pub(crate) fn build_perplexity(provider: &SavedProvider) -> Result<perplexity::Client> {
+    perplexity::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Perplexity client")
 }
 
 /// Drive one agent run to completion (or cancellation), retrying in place when

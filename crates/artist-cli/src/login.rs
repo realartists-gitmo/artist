@@ -72,6 +72,42 @@ pub const KNOWN_PROVIDERS: &[KnownProvider] = &[
         env_key: "GEMINI_API_KEY",
     },
     KnownProvider {
+        label: "Groq",
+        base_url: "https://api.groq.com/openai/v1",
+        kind: ProviderKind::Groq,
+        env_key: "GROQ_API_KEY",
+    },
+    KnownProvider {
+        label: "DeepSeek",
+        base_url: "https://api.deepseek.com",
+        kind: ProviderKind::DeepSeek,
+        env_key: "DEEPSEEK_API_KEY",
+    },
+    KnownProvider {
+        label: "Together AI",
+        base_url: "https://api.together.xyz/v1",
+        kind: ProviderKind::Together,
+        env_key: "TOGETHER_API_KEY",
+    },
+    KnownProvider {
+        label: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        kind: ProviderKind::OpenRouter,
+        env_key: "OPENROUTER_API_KEY",
+    },
+    KnownProvider {
+        label: "Mistral",
+        base_url: "https://api.mistral.ai/v1",
+        kind: ProviderKind::Mistral,
+        env_key: "MISTRAL_API_KEY",
+    },
+    KnownProvider {
+        label: "Perplexity",
+        base_url: "https://api.perplexity.ai",
+        kind: ProviderKind::Perplexity,
+        env_key: "PERPLEXITY_API_KEY",
+    },
+    KnownProvider {
         label: "Custom (OpenAI Responses-compatible endpoint)",
         base_url: "",
         kind: ProviderKind::OpenAi,
