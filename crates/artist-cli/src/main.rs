@@ -184,7 +184,16 @@ fn load_resumed(
     };
     let mut available = sessions.list_project(project)?;
     available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-    let id = if requested.is_empty() {
+    // An unknown id shouldn't abort the launch — a typo or stale id falls back
+    // to the interactive picker instead of killing the process.
+    let requested_missing =
+        !requested.is_empty() && !available.iter().any(|session| session.id == requested);
+    if requested_missing {
+        eprintln!(
+            "session '{requested}' was not found in this project — pick one to resume instead"
+        );
+    }
+    let id = if requested.is_empty() || requested_missing {
         if available.is_empty() {
             bail!("no sessions found for {}", project.display());
         }
@@ -207,9 +216,6 @@ fn load_resumed(
             .id
             .clone()
     } else {
-        if !available.iter().any(|session| session.id == requested) {
-            bail!("session {requested} was not found in this project");
-        }
         requested.to_owned()
     };
     Ok(Some(sessions.open(&id)?))
@@ -604,7 +610,7 @@ fn list(store: &ProviderStore) {
 
 fn choose(store: &ProviderStore, label: &str) -> Result<usize> {
     if store.providers.is_empty() {
-        bail!("no providers saved; log in first");
+        bail!("no accounts saved — run `artist provider --login chatgpt` to sign in");
     }
     let items: Vec<_> = store.providers.iter().map(|p| p.name.clone()).collect();
     let default = store
@@ -634,10 +640,13 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     Ok(())
 }
 fn default_index(store: &ProviderStore) -> Result<usize> {
+    if store.providers.is_empty() {
+        bail!("no account configured — run `artist provider --login chatgpt` to sign in");
+    }
     let id = store
         .default_provider
         .as_ref()
-        .context("no default provider; run `artist provider set`")?;
+        .context("no default provider set — run `artist provider set` to choose one")?;
     store
         .providers
         .iter()

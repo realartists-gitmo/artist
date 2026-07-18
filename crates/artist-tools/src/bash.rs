@@ -92,7 +92,17 @@ impl BashTool {
 }
 
 fn clean_input_output(output: &str, command: Option<&str>) -> String {
-    let mut lines = output.lines().skip(2).peekable();
+    // The status header spans a variable number of lines — `status: <word>`,
+    // an optional `exitCode:` line for a finished child, then `sessionId:` —
+    // so consume through the `sessionId:` line rather than a fixed count, which
+    // used to leak the `exitCode:`/`sessionId:` line for completed commands.
+    let mut lines = output.lines();
+    for line in lines.by_ref() {
+        if line.starts_with("sessionId:") {
+            break;
+        }
+    }
+    let mut lines = lines.peekable();
     if let Some(command) = command
         && lines
             .peek()

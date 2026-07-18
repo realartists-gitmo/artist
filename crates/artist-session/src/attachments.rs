@@ -99,7 +99,14 @@ impl Write for TempFile {
 }
 
 fn tempfile_in(dir: &Path) -> Result<TempFile> {
-    let path = dir.join(format!(".tmp-{}", std::process::id()));
+    // The temp name must be unique per staging write, not just per process:
+    // the same store is shared across concurrent background delegates, so a
+    // pid-only name lets two simultaneous `put()`s truncate each other's file
+    // and publish torn bytes under a content-addressed name. A process-local
+    // atomic counter makes every concurrent writer's staging path distinct.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!(".tmp-{}-{}", std::process::id(), seq));
     let file =
         fs::File::create(&path).with_context(|| format!("create temp file {}", path.display()))?;
     Ok(TempFile {
