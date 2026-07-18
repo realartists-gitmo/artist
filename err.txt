@@ -1,2 +1,0 @@
-   Compiling artist-cli v0.1.0 (/home/adam/Projects/artist/crates/artist-cli)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.07s
