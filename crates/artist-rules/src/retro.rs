@@ -20,53 +20,74 @@ pub struct RetroFinding {
 /// tool-call arguments) with the given rule set. Rule-injection turns and
 /// masked (rewound/compacted) ranges are skipped.
 pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
-    let mut findings = Vec::new();
-    for envelope in visible_events(events) {
-        let SessionEvent::ModelTurn(turn) = envelope.event() else {
-            continue;
-        };
-        for block in &turn.content {
-            let matched = match block {
-                ContentBlock::Text { text } => {
-                    rules.scan_all(MatchTarget::AssistantText, text, None)
-                }
-                ContentBlock::ReasoningSummary { text, .. } => {
-                    rules.scan_all(MatchTarget::ReasoningSummary, text, None)
-                }
-                ContentBlock::ToolCall {
-                    name, arguments, ..
-                } => rules.scan_all(MatchTarget::ToolArgs, &arguments.to_string(), Some(name)),
-                _ => Vec::new(),
+    // Judging wasm plugins here would advance their state; snapshot + restore
+    // their KV so a dry-run scan never mutates live plugin state.
+    rules.with_isolated_wasm(|| {
+        let mut findings = Vec::new();
+        for envelope in visible_events(events) {
+            let SessionEvent::ModelTurn(turn) = envelope.event() else {
+                continue;
             };
-            let target = match block {
-                ContentBlock::Text { .. } => MatchTarget::AssistantText,
-                ContentBlock::ReasoningSummary { .. } => MatchTarget::ReasoningSummary,
-                _ => MatchTarget::ToolArgs,
-            };
-            for (rule, excerpt) in matched {
-                // Wasm-backed rules judge their prefilter hits in scans too,
-                // so a plugin's pass never shows up as a false finding.
-                let firing = crate::types::Firing {
-                    rule,
-                    target,
-                    matched: excerpt,
-                    reminder: String::new(),
-                    persistence: Default::default(),
-                    fire: Default::default(),
+            // Rule scope is keyed on the event's agent lineage, matching the
+            // live path (main-only rules skip delegate output and vice-versa).
+            let is_delegate = envelope.lineage != "main";
+            for block in &turn.content {
+                let (target, tool, matched) = match block {
+                    ContentBlock::Text { text } => (
+                        MatchTarget::AssistantText,
+                        None,
+                        rules.scan_all(MatchTarget::AssistantText, text, None),
+                    ),
+                    ContentBlock::ReasoningSummary { text, .. } => (
+                        MatchTarget::ReasoningSummary,
+                        None,
+                        rules.scan_all(MatchTarget::ReasoningSummary, text, None),
+                    ),
+                    ContentBlock::ToolCall {
+                        name, arguments, ..
+                    } => (
+                        MatchTarget::ToolArgs,
+                        Some(name.clone()),
+                        rules.scan_all(MatchTarget::ToolArgs, &arguments.to_string(), Some(name)),
+                    ),
+                    _ => continue,
                 };
-                let Some(firing) = rules.verdict(firing, 0) else {
-                    continue;
-                };
-                findings.push(RetroFinding {
-                    rule: firing.rule,
-                    target,
-                    seq: envelope.seq,
-                    excerpt: firing.matched,
-                });
+                for (rule, excerpt) in matched {
+                    if let Some(compiled) = rules.get(&rule) {
+                        let in_scope = if is_delegate {
+                            compiled.rule.scope.delegate
+                        } else {
+                            compiled.rule.scope.main
+                        };
+                        if !in_scope {
+                            continue;
+                        }
+                    }
+                    // Wasm-backed rules judge their prefilter hits in scans too,
+                    // so a plugin's pass never shows up as a false finding.
+                    let firing = crate::types::Firing {
+                        rule,
+                        target,
+                        tool: tool.clone(),
+                        matched: excerpt,
+                        reminder: String::new(),
+                        persistence: Default::default(),
+                        fire: Default::default(),
+                    };
+                    let Some(firing) = rules.verdict(firing, 0) else {
+                        continue;
+                    };
+                    findings.push(RetroFinding {
+                        rule: firing.rule,
+                        target,
+                        seq: envelope.seq,
+                        excerpt: firing.matched,
+                    });
+                }
             }
         }
-    }
-    findings
+        findings
+    })
 }
 
 #[cfg(test)]

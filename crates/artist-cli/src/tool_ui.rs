@@ -161,56 +161,19 @@ fn compact_output(name: &str, output: &str) -> String {
         ),
         "read" => format!(
             "Read {} lines",
-            output.lines().filter(|line| line.contains(" | ")).count()
+            output.lines().filter(|line| line.contains(": ")).count()
         ),
+        // The diff is already rendered with an anchor gutter by the edit/write
+        // tool, so show it as-is.
         "edit" | "write" => output
             .split_once("Diff:\n")
-            .map(|(_, diff)| numbered_diff(diff))
+            .map(|(_, diff)| diff.to_owned())
             .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
         "delegate" => compact_delegate_output(output),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
     }
 }
 
-fn numbered_diff(diff: &str) -> String {
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
-    let mut output = Vec::new();
-    for line in diff.lines() {
-        if line.starts_with("@@") {
-            let mut ranges = line.split_whitespace().skip(1);
-            old_line = diff_range_start(ranges.next()).unwrap_or(old_line);
-            new_line = diff_range_start(ranges.next()).unwrap_or(new_line);
-            continue;
-        }
-        if line.starts_with("---") || line.starts_with("+++") {
-            continue;
-        }
-        if line.starts_with('-') {
-            output.push(format!("{old_line:>4}      │ {line}"));
-            old_line += 1;
-        } else if line.starts_with('+') {
-            output.push(format!("     {new_line:>4} │ {line}"));
-            new_line += 1;
-        } else if line.starts_with(' ') {
-            output.push(format!("{old_line:>4} {new_line:>4} │ {line}"));
-            old_line += 1;
-            new_line += 1;
-        } else {
-            output.push(format!("          │ {line}"));
-        }
-    }
-    output.join("\n")
-}
-
-fn diff_range_start(range: Option<&str>) -> Option<usize> {
-    range?
-        .trim_start_matches(['-', '+'])
-        .split(',')
-        .next()?
-        .parse()
-        .ok()
-}
 
 fn compact_delegate_output(output: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(output) else {
@@ -340,10 +303,12 @@ mod tests {
             ),
             "Edited src/lib.rs"
         );
+        // The diff arrives already rendered with an anchor gutter by the tool;
+        // the UI shows the section verbatim.
         assert_eq!(
-            ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n")
+            ui.output("e", "Applied edit.\n\nDiff:\n alfa │ -old\ndelta │ +new")
                 .text,
-            "   1      │ -old\n        1 │ +new"
+            " alfa │ -old\ndelta │ +new"
         );
 
         ui.start("a".into(), "find", &serde_json::json!({"query":"a"}));
@@ -363,10 +328,6 @@ mod tests {
             )
             .text,
             "= Completed\nFound the bug."
-        );
-        assert_eq!(
-            numbered_diff("@@ -10,2 +20,2 @@\n context\n-old\n+new\n"),
-            "  10   20 │  context\n  11      │ -old\n       21 │ +new"
         );
         assert_eq!(
             truncate_delegate_text("1\n2\n3\n4\n5\n6\n7\n8\n9"),

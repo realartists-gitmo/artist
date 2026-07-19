@@ -27,7 +27,7 @@ use artist_session::{
 use artist_tools::ToolBundle;
 use base64::Engine;
 use futures::StreamExt;
-use llm_provider::SavedProvider;
+use llm_provider::{ProviderKind, SavedProvider};
 use rig_core::{
     OneOrMany,
     agent::MultiTurnStreamItem,
@@ -35,7 +35,9 @@ use rig_core::{
     completion::message::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
-    providers::chatgpt,
+    providers::{
+        anthropic, chatgpt, deepseek, gemini, groq, mistral, openrouter, perplexity, together, xai,
+    },
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use serde_json::json;
@@ -209,16 +211,6 @@ pub async fn stream_chat(
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let client = chatgpt::Client::builder()
-        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.auth.access_token.expose().to_owned(),
-            account_id: Some(provider.auth.account_id.clone()),
-        })
-        .base_url(provider.base_url.as_str())
-        .originator("artist")
-        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build ChatGPT client")?;
 
     let resources = resources::Resources::discover(tools.project_root());
     let system_prompt = format!(
@@ -229,7 +221,7 @@ pub async fn stream_chat(
     );
     handles.rules.note_user_turn();
 
-    let mut seed_history = history;
+    let seed_history = history;
     let mut seed_prompt = user_message(input);
     // Skill instructions depend on what the user just typed, so ride them on
     // the user turn instead of folding them into the (otherwise stable)
@@ -241,41 +233,18 @@ pub async fn stream_chat(
     {
         content.insert(0, UserContent::text(skill_section));
     }
-    let fork_context = Arc::new({
-        let mut context = seed_history.clone();
-        context.push(seed_prompt.clone());
-        context
-    });
-    let visible_steering = handles.steering.clone();
-    let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
-
     // Per-run abort-retry budget: spans this turn's retries but is isolated
     // from concurrent delegate runs (each has its own counter).
     let retry_budget = handles.rules.retry_budget();
-    let mut retries_used = 0u32;
     // Stable per-project+model prompt-cache key so a session's turns route to
     // the same server-side prefix cache — better hit rate, fewer billed tokens.
     let cache_key = prompt_cache_key(tools.project_root(), model);
-    'retry: loop {
-        let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
-        let run_recorder = handles.recorder.with_run(&run_id);
-        let ttsr = TtsrShared::new(
-            handles.rules.clone(),
-            Arc::clone(&handles.rule_set),
-            false,
-            retries_used < retry_budget,
-        );
-
-        let mut builder = client.agent(model);
-        let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-        if let Some(effort) = &provider.reasoning_effort {
-            // No `summary` field: reasoning summaries are off (TOK-5) — they
-            // billed output tokens every turn. Reasoning-target stream rules
-            // match against raw reasoning deltas instead (handled in the loop).
-            params["reasoning"] = json!({ "effort": effort });
-        }
-        builder = builder.additional_params(params);
+    // The tool set is rebuilt for each retry attempt (fresh Delegate, etc.);
+    // the generic driver calls this per attempt with the *current* fork context
+    // (seed history + prompt), so a `fork=true` delegate spawned after a TTSR
+    // retry sees the reminder-injected history, not the stale original turn.
+    let make_tools = |fork_context: Arc<Vec<Message>>| -> Vec<Box<dyn rig_core::tool::ToolDyn>> {
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
             Box::new(tools.read.clone()),
@@ -287,7 +256,7 @@ pub async fn stream_chat(
             Box::new(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
-                Arc::clone(&fork_context),
+                fork_context,
                 resources.clone(),
                 handles.clone(),
             )),
@@ -301,15 +270,272 @@ pub async fn stream_chat(
         if let Some(extensions) = tool_context.extensions {
             registered.extend(extensions.tools());
         }
-        registered.retain(|tool| {
-            !tool_context
-                .disabled
-                .iter()
-                .any(|name| name == &tool.name())
+        registered.retain(|tool| !tool_context.disabled.iter().any(|name| name == &tool.name()));
+        registered
+    };
+    let run = AgentRun {
+        model,
+        system_prompt: &system_prompt,
+        params: provider_params(provider, &cache_key),
+        handles: &handles,
+        retry_budget,
+        provider_label: provider_label(provider.kind),
+        reasoning_effort: provider.reasoning_effort.clone(),
+        is_delegate: false,
+    };
+    // Dispatch on the provider's backend. Each builds a distinct rig client
+    // type; all are driven through the same generic retry/stream loop.
+    match provider.kind {
+        ProviderKind::ChatGpt => {
+            run_retry_loop(build_chatgpt(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::OpenAi => {
+            run_retry_loop(build_openai_responses(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Anthropic => {
+            run_retry_loop(build_anthropic(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Gemini => {
+            run_retry_loop(build_gemini(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Groq => {
+            run_retry_loop(build_groq(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::DeepSeek => {
+            run_retry_loop(build_deepseek(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Together => {
+            run_retry_loop(build_together(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::OpenRouter => {
+            run_retry_loop(build_openrouter(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Mistral => {
+            run_retry_loop(build_mistral(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+        ProviderKind::Perplexity => {
+            run_retry_loop(build_perplexity(provider)?, run, &make_tools, seed_prompt, seed_history, &mut on_event).await
+        }
+    }
+}
+
+/// The immutable context a single agent run needs, shared across the retry
+/// loop. Bundled so the generic driver takes a sane number of arguments.
+struct AgentRun<'a> {
+    model: &'a str,
+    system_prompt: &'a str,
+    params: serde_json::Value,
+    handles: &'a SessionHandles,
+    retry_budget: u32,
+    provider_label: &'static str,
+    reasoning_effort: Option<String>,
+    /// Delegate runs pass `true` (the third `TtsrShared::new` flag); the main
+    /// agent passes `false`.
+    is_delegate: bool,
+}
+
+pub(crate) fn provider_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::ChatGpt => "chatgpt",
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Gemini => "gemini",
+        ProviderKind::Groq => "groq",
+        ProviderKind::DeepSeek => "deepseek",
+        ProviderKind::Together => "together",
+        ProviderKind::OpenRouter => "openrouter",
+        ProviderKind::Mistral => "mistral",
+        ProviderKind::Perplexity => "perplexity",
+    }
+}
+
+fn provider_params(provider: &SavedProvider, cache_key: &str) -> serde_json::Value {
+    params_for(provider.kind, provider.reasoning_effort.as_deref(), cache_key)
+}
+
+/// The per-backend `additional_params`. ChatGPT (Responses) takes a
+/// `prompt_cache_key` and nested `reasoning.effort`; OpenAI-compatible
+/// chat-completions take a top-level `reasoning_effort`; Anthropic maps effort
+/// to a thinking-token budget; Gemini manages thinking itself.
+pub(crate) fn params_for(
+    kind: ProviderKind,
+    effort: Option<&str>,
+    cache_key: &str,
+) -> serde_json::Value {
+    match kind {
+        ProviderKind::ChatGpt => {
+            let mut params = json!({ "prompt_cache_key": cache_key });
+            if let Some(effort) = effort {
+                // No `summary` field: reasoning summaries are off (TOK-5).
+                params["reasoning"] = json!({ "effort": effort });
+            }
+            params
+        }
+        // OpenAI/xAI Responses API: nested reasoning.effort (no prompt_cache_key
+        // — that's Codex-only).
+        ProviderKind::OpenAi => match effort {
+            Some(effort) => json!({ "reasoning": { "effort": effort } }),
+            None => json!({}),
+        },
+        ProviderKind::Anthropic => match effort.map(thinking_budget) {
+            Some(budget) => json!({ "thinking": { "type": "enabled", "budget_tokens": budget } }),
+            None => json!({}),
+        },
+        ProviderKind::Gemini => json!({}),
+        // Chat-completions backends: top-level reasoning_effort (honored by
+        // reasoning models; ignored otherwise).
+        _ if kind.is_chat_completions() => match effort {
+            Some(effort) => json!({ "reasoning_effort": effort }),
+            None => json!({}),
+        },
+        _ => json!({}),
+    }
+}
+
+fn thinking_budget(effort: &str) -> u64 {
+    match effort {
+        "minimal" | "low" => 4_096,
+        "high" | "max" => 24_576,
+        _ => 12_288,
+    }
+}
+
+pub(crate) fn build_chatgpt(provider: &SavedProvider) -> Result<chatgpt::Client> {
+    chatgpt::Client::builder()
+        .api_key(chatgpt::ChatGPTAuth::AccessToken {
+            access_token: provider.auth.access_token().unwrap_or_default().to_owned(),
+            account_id: provider.auth.account_id().map(str::to_owned),
+        })
+        .base_url(provider.base_url.as_str())
+        .originator("artist")
+        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("build ChatGPT client")
+}
+
+/// The OpenAI/xAI Responses-API client (both expose `/v1/responses`), pointed
+/// at the provider's base URL.
+pub(crate) fn build_openai_responses(provider: &SavedProvider) -> Result<xai::Client> {
+    xai::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build OpenAI Responses client")
+}
+
+pub(crate) fn build_anthropic(provider: &SavedProvider) -> Result<anthropic::Client> {
+    anthropic::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Anthropic client")
+}
+
+pub(crate) fn build_gemini(provider: &SavedProvider) -> Result<gemini::Client> {
+    gemini::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Gemini client")
+}
+
+// OpenAI-compatible chat-completions backends, each on its own rig client so
+// provider-specific request handling and default base URLs are respected.
+pub(crate) fn build_groq(provider: &SavedProvider) -> Result<groq::Client> {
+    groq::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Groq client")
+}
+
+pub(crate) fn build_deepseek(provider: &SavedProvider) -> Result<deepseek::Client> {
+    deepseek::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build DeepSeek client")
+}
+
+pub(crate) fn build_together(provider: &SavedProvider) -> Result<together::Client> {
+    together::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Together client")
+}
+
+pub(crate) fn build_openrouter(provider: &SavedProvider) -> Result<openrouter::Client> {
+    openrouter::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build OpenRouter client")
+}
+
+pub(crate) fn build_mistral(provider: &SavedProvider) -> Result<mistral::Client> {
+    mistral::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Mistral client")
+}
+
+pub(crate) fn build_perplexity(provider: &SavedProvider) -> Result<perplexity::Client> {
+    perplexity::Client::builder()
+        .api_key(provider.auth.api_key().unwrap_or_default())
+        .base_url(provider.base_url.as_str())
+        .build()
+        .context("build Perplexity client")
+}
+
+/// Drive one agent run to completion (or cancellation), retrying in place when
+/// a stream rule fires. Generic over the provider client `C` so every backend
+/// shares this loop; the streaming/hook layer is already provider-agnostic.
+async fn run_retry_loop<C, F>(
+    client: C,
+    run: AgentRun<'_>,
+    make_tools: &F,
+    mut seed_prompt: Message,
+    mut seed_history: Vec<Message>,
+    on_event: &mut impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome>
+where
+    C: CompletionClient,
+    C::CompletionModel: 'static,
+    F: Fn(Arc<Vec<Message>>) -> Vec<Box<dyn rig_core::tool::ToolDyn>>,
+{
+    // How one stream attempt ended. `Err` (a callback or stream failure) is
+    // recorded as `RunFinished::Error` centrally, so no early return skips it.
+    enum Control {
+        Completed,
+        Cancelled,
+        Retry,
+    }
+    let handles = run.handles;
+    let visible_steering = handles.steering.clone();
+    let tool_meta = ToolMeta::default();
+    let mut retries_used = 0u32;
+    'retry: loop {
+        let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
+        let run_recorder = handles.recorder.with_run(&run_id);
+        let ttsr = TtsrShared::new(
+            handles.rules.clone(),
+            Arc::clone(&handles.rule_set),
+            run.is_delegate,
+            retries_used < run.retry_budget,
+        );
+        // Fork context reflects the current seed (updated by TTSR retries).
+        let fork_context = Arc::new({
+            let mut context = seed_history.clone();
+            context.push(seed_prompt.clone());
+            context
         });
-        let agent = builder
-            .preamble(&system_prompt)
-            .tools(registered)
+        let agent = client
+            .agent(run.model)
+            .additional_params(run.params.clone())
+            .preamble(run.system_prompt)
+            .tools(make_tools(fork_context))
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(
                 run_recorder.clone(),
@@ -321,32 +547,48 @@ pub async fn stream_chat(
             .build();
 
         run_recorder.record(RunStarted {
-            provider: "chatgpt".to_owned(),
-            model: model.to_owned(),
-            reasoning_effort: provider.reasoning_effort.clone(),
+            provider: run.provider_label.to_owned(),
+            model: run.model.to_owned(),
+            reasoning_effort: run.reasoning_effort.clone(),
         });
 
         let mut stream = agent
             .stream_chat(seed_prompt.clone(), seed_history.clone())
             .await;
-        loop {
+        let control: Result<Control> = loop {
             let item = tokio::select! {
                 biased;
-                _ = handles.cancel.cancelled() => {
-                    run_recorder.record(RunFinished::Cancelled);
-                    return Ok(RunOutcome::Cancelled);
-                }
+                _ = handles.cancel.cancelled() => break Ok(Control::Cancelled),
                 item = stream.next() => item,
             };
             let Some(item) = item else {
-                run_recorder.record(RunFinished::Completed);
-                return Ok(RunOutcome::Completed);
+                // Stream ended: match any trailing text/reasoning that never hit
+                // the coalesce threshold (short trailing content without a
+                // newline would otherwise be missed).
+                if ttsr.finalize_reasoning() || ttsr.finalize_text() {
+                    let firing = ttsr.take_pending().expect("finalize stashed the firing");
+                    let (committed, _) = ttsr.committed();
+                    seed_history = committed;
+                    record_firing_events(&run_recorder, &ttsr, &firing);
+                    if let Err(error) = on_event(PromptEvent::RuleFired {
+                        rule: firing.rule.0.clone(),
+                        matched: firing.matched.clone(),
+                    }) {
+                        break Err(error);
+                    }
+                    run_recorder.record(RunFinished::Cancelled);
+                    seed_prompt = reminder_message(&firing);
+                    break Ok(Control::Retry);
+                }
+                break Ok(Control::Completed);
             };
             match item {
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    on_event(PromptEvent::TextDelta(text.text))?;
+                    if let Err(error) = on_event(PromptEvent::TextDelta(text.text)) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta {
@@ -371,67 +613,97 @@ pub async fn stream_chat(
                         // `committed` includes the current seed prompt; the
                         // reminder becomes the new prompt.
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        if let Err(error) = on_event(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        }) {
+                            break Err(error);
+                        }
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
+                        break Ok(Control::Retry);
                     }
-                    on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?;
+                    if let Err(error) = on_event(PromptEvent::ReasoningSummaryDelta(reasoning)) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
                     },
-                )) => on_event(PromptEvent::ToolCall {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                    arguments: tool_call.function.arguments,
-                })?,
+                )) => {
+                    if let Err(error) = on_event(PromptEvent::ToolCall {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments,
+                    }) {
+                        break Err(error);
+                    }
+                }
                 Ok(MultiTurnStreamItem::ToolExecutionStart {
                     tool_call,
                     internal_call_id,
-                }) => on_event(PromptEvent::ToolExecutionStart {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                })?,
+                }) => {
+                    if let Err(error) = on_event(PromptEvent::ToolExecutionStart {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                    }) {
+                        break Err(error);
+                    }
+                }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                    on_event(PromptEvent::CompletionUsage {
+                    if let Err(error) = on_event(PromptEvent::CompletionUsage {
                         total_tokens: call.usage.total_tokens,
-                    })?;
+                    }) {
+                        break Err(error);
+                    }
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
-                    let mut images = 0usize;
+                    // The capture hook only sees result text; persist any images
+                    // here (the display path) into the attachment store and log
+                    // their references so history replay can reattach them.
+                    let mut image_blocks = Vec::new();
                     let content = tool_result
                         .content
                         .into_iter()
                         .filter_map(|item| match item {
                             ToolResultContent::Text(text) => Some(text.text),
-                            ToolResultContent::Image(_) => {
-                                images += 1;
+                            ToolResultContent::Image(image) => {
+                                if let Some(block) = artist_session::store_tool_image(
+                                    &image,
+                                    &handles.attachments,
+                                ) {
+                                    image_blocks.push(block);
+                                }
                                 None
                             }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    let images = image_blocks.len();
+                    if !image_blocks.is_empty() {
+                        run_recorder.record(artist_session::ToolResultImagesEvent {
+                            internal_call_id: internal_call_id.clone(),
+                            images: image_blocks,
+                        });
+                    }
                     let content = visible_steering
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
-                    on_event(PromptEvent::ToolResult {
+                    if let Err(error) = on_event(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,
                         outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
                         duration_ms: meta.map(|(_, duration)| duration),
                         images,
-                    })?;
+                    }) {
+                        break Err(error);
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -446,20 +718,40 @@ pub async fn stream_chat(
                     {
                         seed_history = chat_history.clone();
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        if let Err(error) = on_event(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        }) {
+                            break Err(error);
+                        }
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
+                        break Ok(Control::Retry);
                     }
-                    run_recorder.record(RunFinished::Error {
-                        error: error.to_string(),
-                    });
-                    return Err(error).context("stream Artist agent");
+                    break Err(anyhow::Error::new(error).context("stream Artist agent"));
                 }
+            }
+        };
+        // Record the terminal event centrally so a callback failure can't leave
+        // the run un-finalized in the log.
+        match control {
+            Ok(Control::Completed) => {
+                run_recorder.record(RunFinished::Completed);
+                return Ok(RunOutcome::Completed);
+            }
+            Ok(Control::Cancelled) => {
+                run_recorder.record(RunFinished::Cancelled);
+                return Ok(RunOutcome::Cancelled);
+            }
+            Ok(Control::Retry) => {
+                retries_used += 1;
+                continue 'retry;
+            }
+            Err(error) => {
+                run_recorder.record(RunFinished::Error {
+                    error: error.to_string(),
+                });
+                return Err(error);
             }
         }
     }

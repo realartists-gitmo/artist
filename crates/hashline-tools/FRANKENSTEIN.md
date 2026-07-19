@@ -119,7 +119,7 @@ let out = coord.read_file(&actor, ReadFileRequest {
     start_line: 1,
     max_lines: None, // None = whole file; partial reads keep tombstones
 }).await?;
-// out.result.content  → "time | fn main() {\n..."
+// out.result.content  → "time: fn main() {\n..."
 // out.result.lines    → structured { line_number, anchor, text }
 // out.content_hash    → whole-file BLAKE3 hex
 // show ANCHOR_USAGE to the model
@@ -181,7 +181,7 @@ Expose four tools (names are suggestions):
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `read_file` | `path`, optional `start_line`, `max_lines` | `content` (`anchor \| line` text), `lines[]`, `content_hash`, `total_lines`, `anchor_usage` |
+| `read_file` | `path`, optional `start_line`, `max_lines` | `content` (`anchor: line` text), `lines[]`, `content_hash`, `total_lines`, `anchor_usage` |
 | `write_file` | `path`, `content`, `condition` (`absent` \| `any` \| `{content_hash}`) | same as read view + hash |
 | `edit_file` | `path`, `operations[]` | before/after anchored views, new `content_hash` |
 | `delete_file` | `path`, `expected_hash` | ok / hash mismatch |

@@ -85,6 +85,10 @@ async fn run() -> Result<()> {
                     login::chatgpt(&mut store).await?;
                     store.save(&path)?;
                 }
+                (None, Some(ProviderAction::Add)) => {
+                    login::add_provider(&mut store).await?;
+                    store.save(&path)?;
+                }
                 (None, Some(ProviderAction::List)) => list(&store),
                 (None, Some(ProviderAction::Set)) => {
                     set_default(&mut store)?;
@@ -94,7 +98,7 @@ async fn run() -> Result<()> {
                     test_selected(&mut store, &path).await?;
                     store.save(&path)?;
                 }
-                _ => bail!("choose --login chatgpt or list, set, or test"),
+                _ => bail!("choose --login chatgpt, or add, list, set, or test"),
             }
         }
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -109,7 +113,19 @@ async fn run() -> Result<()> {
             let mut scratch = store.providers[selected].clone();
             scratch.model = global.model.clone();
             scratch.reasoning_effort = global.reasoning_effort.clone();
-            models::select(&mut scratch).await?;
+            // The interactive catalog is Codex-shaped; API-key backends expose
+            // their own model lists, so enter the slug directly for those.
+            if scratch.kind.is_api_key() {
+                let model = prompt::text("Model slug", global.model.as_deref())?;
+                scratch.model = Some(model);
+                let effort = prompt::text(
+                    "Reasoning effort (blank for provider default)",
+                    global.reasoning_effort.as_deref(),
+                )?;
+                scratch.reasoning_effort = (!effort.trim().is_empty()).then_some(effort);
+            } else {
+                models::select(&mut scratch).await?;
+            }
             settings::write_provider_defaults(
                 config_root,
                 scratch.model.as_deref(),
@@ -307,11 +323,16 @@ async fn execute_prompt(
         source: "prompt".to_owned(),
     });
     let rules_engine = artist_rules::RulesEngine::discover(&project);
+    // Restore prior rule state (once-per-session fires, persistent injections)
+    // when resuming — the TUI path does this too; `-p` must match or a resumed
+    // session re-fires once-only rules.
+    let rules = artist_rules::state::RulesHandle::default();
+    rules.restore_from_log(&events);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
-        rules: artist_rules::state::RulesHandle::default(),
+        rules,
         rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
         attachments: active.attachments.clone(),
@@ -515,7 +536,9 @@ fn sessions_gc(
     dry_run: bool,
 ) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let cutoff = now.saturating_sub(older_than_days * 24 * 60 * 60 * 1000);
+    // Saturating throughout so a huge `--older-than-days` can't overflow the
+    // multiplication (panic in debug / wrap in release) before the subtraction.
+    let cutoff = now.saturating_sub(older_than_days.saturating_mul(24 * 60 * 60 * 1000));
     let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
         Default::default();
     for session in sessions.list()? {
@@ -658,9 +681,9 @@ fn list(store: &ProviderStore) {
             provider.name,
             provider
                 .auth
-                .email
-                .as_deref()
-                .unwrap_or(&provider.auth.account_id)
+                .email()
+                .or_else(|| provider.auth.account_id())
+                .unwrap_or("API key")
         );
     }
 }
@@ -696,6 +719,15 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     let mut provider = store.providers[selected].clone();
     provider.model = global.model.clone();
     provider.reasoning_effort = global.reasoning_effort.clone();
+    // The raw test hits the ChatGPT/Codex Responses endpoint shape; for API-key
+    // backends the real check is a live turn.
+    if provider.kind.is_api_key() {
+        println!(
+            "{} is an API-key provider — run `artist -p \"hi\"` with it selected to verify the key.",
+            provider.name
+        );
+        return Ok(());
+    }
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
     test_provider::test(&provider).await?;
@@ -718,6 +750,10 @@ fn default_index(store: &ProviderStore) -> Result<usize> {
 }
 
 pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
+    // API keys don't expire on our clock — nothing to refresh.
+    if provider.kind.is_api_key() {
+        return Ok(false);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -727,8 +763,8 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
     // The refresh response populates `expires_at`, so this self-corrects.
     let needs_refresh = provider
         .auth
-        .expires_at
-        .map_or(true, |expiry| expiry <= now.saturating_add(60));
+        .expires_at()
+        .is_none_or(|expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
         return force_refresh(provider).await.map(|()| true);
     }
@@ -739,6 +775,9 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
 /// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
 /// recorded expiry.
 pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
+    if provider.kind.is_api_key() {
+        bail!("API-key providers can't refresh — verify the key with `artist provider test`");
+    }
     provider.auth = ChatGptOAuth::default()
         .refresh(&provider.auth)
         .await

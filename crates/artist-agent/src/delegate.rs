@@ -7,15 +7,14 @@ use crate::{
     resources::Resources,
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
-use artist_session::{DelegateFinished, DelegateStarted, RunFinished, RunStarted};
+use artist_session::{DelegateFinished, DelegateStarted, Recorder, RunFinished, RunStarted};
 use artist_tools::{TOOL_POLICY, ToolBundle};
 use futures::StreamExt;
-use llm_provider::SavedProvider;
+use llm_provider::{ProviderKind, SavedProvider};
 use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
     completion::Message,
-    providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamingChat},
     tool::Tool,
 };
@@ -120,6 +119,7 @@ impl Tool for Delegate {
                     args.fork.unwrap_or(false),
                     args.model,
                     args.reasoning,
+                    false,
                 )
                 .await
             }
@@ -137,6 +137,7 @@ impl Tool for Delegate {
                                 args.fork.unwrap_or(false),
                                 args.model,
                                 args.reasoning,
+                                true,
                             )
                             .await
                             .map_err(|error| error.to_string())
@@ -184,21 +185,13 @@ impl Delegate {
         fork: bool,
         model: Option<String>,
         reasoning: Option<String>,
+        background: bool,
     ) -> Result<String, DelegateError> {
         let model = model
             .as_deref()
             .or(self.provider.model.as_deref())
-            .ok_or(DelegateError::MissingModel)?;
-        let client = chatgpt::Client::builder()
-            .api_key(chatgpt::ChatGPTAuth::AccessToken {
-                access_token: self.provider.auth.access_token.expose().to_owned(),
-                account_id: Some(self.provider.auth.account_id.clone()),
-            })
-            .base_url(self.provider.base_url.as_str())
-            .originator("artist")
-            .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+            .ok_or(DelegateError::MissingModel)?
+            .to_owned();
         let actor = format!("delegate-{}", uuid::Uuid::new_v4().simple());
         let child_tools = self
             .tools
@@ -209,7 +202,7 @@ impl Delegate {
             prompt: prompt.clone(),
             read_only,
             fork,
-            background: false,
+            background,
         });
         let mut policy = if read_only {
             format!(
@@ -222,149 +215,235 @@ impl Delegate {
         };
         policy.push_str(&self.resources.prompt_section());
 
-        let mut seed_history = if fork {
+        let seed_history = if fork {
             (*self.context).clone()
         } else {
             Vec::new()
         };
-        let mut seed_prompt = Message::user(&prompt);
-
-        // Per-run abort-retry budget: this delegate's own counter, isolated
-        // from the main agent and any sibling delegates.
-        let retry_budget = self.handles.rules.retry_budget();
-        let mut retries_used = 0u32;
-        let cache_key = crate::prompt_cache_key(self.tools.project_root(), model);
-        let output = loop {
-            let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
-            let run_recorder = recorder.with_run(&run_id);
-            let ttsr = TtsrShared::new(
-                self.handles.rules.clone(),
-                Arc::clone(&self.handles.rule_set),
-                true,
-                retries_used < retry_budget,
-            );
-            let mut builder = client.agent(model).preamble(&policy);
-            let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-            // The subagent's own `reasoning` arg overrides the main agent's
-            // effort (main b9d9193); fall back to the provider default.
-            if let Some(effort) = reasoning
-                .as_deref()
-                .or(self.provider.reasoning_effort.as_deref())
-            {
-                // Summaries off (TOK-5) — subagent reasoning is never surfaced,
-                // so a summary was pure token waste here.
-                params["reasoning"] = json!({ "effort": effort });
+        let seed_prompt = Message::user(&prompt);
+        // The subagent's own `reasoning` arg overrides the main agent's effort
+        // (main b9d9193); fall back to the provider default.
+        let effort = reasoning
+            .as_deref()
+            .or(self.provider.reasoning_effort.as_deref());
+        let cache_key = crate::prompt_cache_key(self.tools.project_root(), &model);
+        let ctx = DelegateRun {
+            model: &model,
+            policy: &policy,
+            params: crate::params_for(self.provider.kind, effort, &cache_key),
+            child_tools: &child_tools,
+            read_only,
+            resources: &self.resources,
+            handles: &self.handles,
+            recorder: &recorder,
+            provider_label: crate::provider_label(self.provider.kind),
+            reasoning_effort: effort.map(str::to_owned),
+        };
+        // Dispatch on the provider's backend (same set as the main agent); the
+        // subagent inherits the session's provider.
+        let build = |error: anyhow::Error| DelegateError::Failed(error.to_string());
+        let output = match self.provider.kind {
+            ProviderKind::ChatGpt => {
+                drive_delegate(crate::build_chatgpt(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
-            builder = builder.additional_params(params);
-            let mut builder = builder
-                .tool(child_tools.read.clone())
-                .tool(child_tools.find.clone())
-                .tool(child_tools.grep.clone())
-                .tool(self.resources.skill_tool())
-                .add_hook(CaptureHook::new(
-                    run_recorder.clone(),
-                    self.handles.attachments.clone(),
-                    ToolMeta::default(),
-                ))
-                .add_hook(TtsrHook(Arc::clone(&ttsr)));
-            if !read_only {
-                builder = builder
-                    .tool(child_tools.bash.clone())
-                    .tool(child_tools.edit.clone())
-                    .tool(child_tools.write.clone());
+            ProviderKind::OpenAi => {
+                drive_delegate(crate::build_openai_responses(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
-            let agent = builder.default_max_turns(usize::MAX).build();
-            run_recorder.record(RunStarted {
-                provider: "chatgpt".to_owned(),
-                model: model.to_owned(),
-                reasoning_effort: self.provider.reasoning_effort.clone(),
-            });
-
-            let mut stream = agent
-                .stream_chat(seed_prompt.clone(), seed_history.clone())
-                .await;
-            // Text of the current model turn; the last turn's text is the
-            // delegate's answer (matching the non-streaming `chat` output).
-            let mut turn_text = String::new();
-            let mut retry = false;
-            loop {
-                let item = tokio::select! {
-                    biased;
-                    _ = self.handles.cancel.cancelled() => {
-                        run_recorder.record(RunFinished::Cancelled);
-                        recorder.record(DelegateFinished { outcome: "cancelled".into() });
-                        return Err(DelegateError::Failed("cancelled".into()));
-                    }
-                    item = stream.next() => item,
-                };
-                let Some(item) = item else {
-                    run_recorder.record(RunFinished::Completed);
-                    break;
-                };
-                match item {
-                    Ok(MultiTurnStreamItem::CompletionCall(_)) => turn_text.clear(),
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Text(text),
-                    )) => turn_text.push_str(&text.text),
-                    Ok(MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ReasoningDelta {
-                            // Match summary (`id: None`) and raw (`id: Some`)
-                            // reasoning alike; raw deltas were dropped before,
-                            // so reasoning-target rules missed them.
-                            id: _,
-                            reasoning,
-                        },
-                    )) => {
-                        if ttsr.push_reasoning(&reasoning) {
-                            let firing = ttsr.take_pending().expect("reasoning firing stashed");
-                            drop(stream);
-                            let (committed, _) = ttsr.committed();
-                            seed_history = committed;
-                            crate::record_firing_events(&run_recorder, &ttsr, &firing);
-                            run_recorder.record(RunFinished::Cancelled);
-                            seed_prompt = reminder_message(&firing);
-                            retries_used += 1;
-                            retry = true;
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        if let Some(firing) = ttsr.take_pending()
-                            && let rig_core::agent::StreamingError::Prompt(boxed) = &error
-                            && let rig_core::completion::PromptError::PromptCancelled {
-                                chat_history,
-                                ..
-                            } = boxed.as_ref()
-                        {
-                            seed_history = chat_history.clone();
-                            crate::record_firing_events(&run_recorder, &ttsr, &firing);
-                            run_recorder.record(RunFinished::Cancelled);
-                            seed_prompt = reminder_message(&firing);
-                            retries_used += 1;
-                            retry = true;
-                            break;
-                        }
-                        run_recorder.record(RunFinished::Error {
-                            error: error.to_string(),
-                        });
-                        recorder.record(DelegateFinished {
-                            outcome: "error".into(),
-                        });
-                        return Err(DelegateError::Failed(error.to_string()));
-                    }
-                }
+            ProviderKind::Anthropic => {
+                drive_delegate(crate::build_anthropic(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
-            if retry {
-                continue;
+            ProviderKind::Gemini => {
+                drive_delegate(crate::build_gemini(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
             }
-            break turn_text;
+            ProviderKind::Groq => {
+                drive_delegate(crate::build_groq(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::DeepSeek => {
+                drive_delegate(crate::build_deepseek(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Together => {
+                drive_delegate(crate::build_together(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::OpenRouter => {
+                drive_delegate(crate::build_openrouter(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Mistral => {
+                drive_delegate(crate::build_mistral(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
+            ProviderKind::Perplexity => {
+                drive_delegate(crate::build_perplexity(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?
+            }
         };
         recorder.record(DelegateFinished {
             outcome: "completed".into(),
         });
         Ok(shorten(&output, 50 * 1024))
     }
+}
+
+/// Immutable context for one delegate run, shared across its retry loop.
+struct DelegateRun<'a> {
+    model: &'a str,
+    policy: &'a str,
+    params: Value,
+    child_tools: &'a ToolBundle,
+    read_only: bool,
+    resources: &'a Resources,
+    handles: &'a SessionHandles,
+    recorder: &'a Recorder,
+    provider_label: &'static str,
+    reasoning_effort: Option<String>,
+}
+
+/// Drive a subagent to its answer, generic over the provider client `C` (so
+/// every backend shares this loop). Returns the last model turn's text.
+async fn drive_delegate<C>(
+    client: C,
+    ctx: DelegateRun<'_>,
+    mut seed_prompt: Message,
+    mut seed_history: Vec<Message>,
+) -> Result<String, DelegateError>
+where
+    C: CompletionClient,
+    C::CompletionModel: 'static,
+{
+    let handles = ctx.handles;
+    let recorder = ctx.recorder;
+    // Per-run abort-retry budget: this delegate's own counter, isolated from
+    // the main agent and any sibling delegates.
+    let retry_budget = handles.rules.retry_budget();
+    let mut retries_used = 0u32;
+    let output = loop {
+        let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
+        let run_recorder = recorder.with_run(&run_id);
+        let ttsr = TtsrShared::new(
+            handles.rules.clone(),
+            Arc::clone(&handles.rule_set),
+            true,
+            retries_used < retry_budget,
+        );
+        let mut builder = client
+            .agent(ctx.model)
+            .preamble(ctx.policy)
+            .additional_params(ctx.params.clone())
+            .tool(ctx.child_tools.read.clone())
+            .tool(ctx.child_tools.find.clone())
+            .tool(ctx.child_tools.grep.clone())
+            .tool(ctx.resources.skill_tool())
+            .add_hook(CaptureHook::new(
+                run_recorder.clone(),
+                handles.attachments.clone(),
+                ToolMeta::default(),
+            ))
+            .add_hook(TtsrHook(Arc::clone(&ttsr)));
+        if !ctx.read_only {
+            builder = builder
+                .tool(ctx.child_tools.bash.clone())
+                .tool(ctx.child_tools.edit.clone())
+                .tool(ctx.child_tools.write.clone());
+        }
+        let agent = builder.default_max_turns(usize::MAX).build();
+        run_recorder.record(RunStarted {
+            provider: ctx.provider_label.to_owned(),
+            model: ctx.model.to_owned(),
+            reasoning_effort: ctx.reasoning_effort.clone(),
+        });
+
+        let mut stream = agent
+            .stream_chat(seed_prompt.clone(), seed_history.clone())
+            .await;
+        // Text of the current model turn; the last turn's text is the
+        // delegate's answer (matching the non-streaming `chat` output).
+        let mut turn_text = String::new();
+        let mut retry = false;
+        loop {
+            let item = tokio::select! {
+                biased;
+                _ = handles.cancel.cancelled() => {
+                    run_recorder.record(RunFinished::Cancelled);
+                    recorder.record(DelegateFinished { outcome: "cancelled".into() });
+                    return Err(DelegateError::Failed("cancelled".into()));
+                }
+                item = stream.next() => item,
+            };
+            let Some(item) = item else {
+                // Match any trailing text/reasoning below the coalesce threshold
+                // before the run completes.
+                if ttsr.finalize_reasoning() || ttsr.finalize_text() {
+                    let firing = ttsr.take_pending().expect("finalize stashed the firing");
+                    drop(stream);
+                    let (committed, _) = ttsr.committed();
+                    seed_history = committed;
+                    crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                    run_recorder.record(RunFinished::Cancelled);
+                    seed_prompt = reminder_message(&firing);
+                    retries_used += 1;
+                    retry = true;
+                    break;
+                }
+                run_recorder.record(RunFinished::Completed);
+                break;
+            };
+            match item {
+                Ok(MultiTurnStreamItem::CompletionCall(_)) => turn_text.clear(),
+                Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                    text,
+                ))) => turn_text.push_str(&text.text),
+                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                    StreamedAssistantContent::ReasoningDelta {
+                        // Match summary (`id: None`) and raw (`id: Some`)
+                        // reasoning alike; raw deltas were dropped before,
+                        // so reasoning-target rules missed them.
+                        id: _,
+                        reasoning,
+                    },
+                )) => {
+                    if ttsr.push_reasoning(&reasoning) {
+                        let firing = ttsr.take_pending().expect("reasoning firing stashed");
+                        drop(stream);
+                        let (committed, _) = ttsr.committed();
+                        seed_history = committed;
+                        crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                        run_recorder.record(RunFinished::Cancelled);
+                        seed_prompt = reminder_message(&firing);
+                        retries_used += 1;
+                        retry = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    if let Some(firing) = ttsr.take_pending()
+                        && let rig_core::agent::StreamingError::Prompt(boxed) = &error
+                        && let rig_core::completion::PromptError::PromptCancelled {
+                            chat_history,
+                            ..
+                        } = boxed.as_ref()
+                    {
+                        seed_history = chat_history.clone();
+                        crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                        run_recorder.record(RunFinished::Cancelled);
+                        seed_prompt = reminder_message(&firing);
+                        retries_used += 1;
+                        retry = true;
+                        break;
+                    }
+                    run_recorder.record(RunFinished::Error {
+                        error: error.to_string(),
+                    });
+                    recorder.record(DelegateFinished {
+                        outcome: "error".into(),
+                    });
+                    return Err(DelegateError::Failed(error.to_string()));
+                }
+            }
+        }
+        if retry {
+            continue;
+        }
+        break turn_text;
+    };
+    Ok(output)
 }
 
 fn required<T>(value: Option<T>, name: &str) -> Result<T, DelegateError> {

@@ -80,6 +80,9 @@ pub enum LoginKind {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderAction {
+    /// Add an API-key provider (xAI/Grok, Anthropic, Gemini, an
+    /// OpenAI-compatible endpoint, …) interactively.
+    Add,
     List,
     Set,
     Test,
@@ -91,6 +94,7 @@ mod tests {
     #[test]
     fn parses_requested_forms() {
         assert!(Cli::try_parse_from(["artist", "provider", "--login", "chatgpt"]).is_ok());
+        assert!(Cli::try_parse_from(["artist", "provider", "add"]).is_ok());
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
         assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));

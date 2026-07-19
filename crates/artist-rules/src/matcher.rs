@@ -67,6 +67,21 @@ impl TargetMatcher {
     fn is_empty(&self) -> bool {
         self.origins.is_empty()
     }
+}
+
+/// The trailing `window` bytes of `haystack`, snapped to a char boundary.
+fn window_tail(haystack: &str, window: usize) -> &str {
+    if haystack.len() <= window {
+        return haystack;
+    }
+    let start = haystack.len() - window;
+    let start = (start..=haystack.len())
+        .find(|index| haystack.is_char_boundary(*index))
+        .unwrap_or(haystack.len());
+    &haystack[start..]
+}
+
+impl TargetMatcher {
 
     /// Find the first armed rule whose pattern matches `haystack`.
     fn find(
@@ -91,7 +106,11 @@ impl TargetMatcher {
             {
                 continue;
             }
-            if let Some(found) = compiled.regexes[regex_index].find(haystack) {
+            // The shared buffer is sized to the *max* window across rules; limit
+            // each rule to the tail of its own `window` so a small-window rule
+            // can't match text beyond it.
+            let slice = window_tail(haystack, compiled.rule.window);
+            if let Some(found) = compiled.regexes[regex_index].find(slice) {
                 let mut excerpt = found.as_str().to_owned();
                 if excerpt.len() > EXCERPT_CAP {
                     excerpt.truncate(
@@ -162,6 +181,45 @@ impl RuleSet {
         let _ = turn;
         Some(firing)
     }
+
+    /// Run a scan closure without persisting wasm plugin state: snapshot every
+    /// plugin's KV, run, restore — so `/rules scan` / `/rules dry-run` don't
+    /// advance stateful plugins. No-op without the wasm feature.
+    #[cfg(feature = "wasm")]
+    pub fn with_isolated_wasm<T>(&self, scan: impl FnOnce() -> T) -> T {
+        let saved: Vec<_> = self
+            .wasm
+            .values()
+            .map(|plugin| (Arc::clone(plugin), plugin.snapshot_kv()))
+            .collect();
+        let result = scan();
+        for (plugin, snapshot) in saved {
+            plugin.restore_kv(snapshot);
+        }
+        result
+    }
+
+    /// See the wasm-enabled variant — a plain passthrough without plugins.
+    #[cfg(not(feature = "wasm"))]
+    pub fn with_isolated_wasm<T>(&self, scan: impl FnOnce() -> T) -> T {
+        scan()
+    }
+
+    /// Carry over each plugin's KV from a previous rule set (matched by id) so a
+    /// hot-reload preserves wasm session state for plugins that still exist,
+    /// instead of resetting every plugin whenever any rule file changes.
+    #[cfg(feature = "wasm")]
+    pub fn inherit_wasm_kv(&self, previous: &RuleSet) {
+        for (id, plugin) in &self.wasm {
+            if let Some(old) = previous.wasm.get(id) {
+                plugin.restore_kv(old.snapshot_kv());
+            }
+        }
+    }
+
+    /// See the wasm-enabled variant — a no-op without plugins.
+    #[cfg(not(feature = "wasm"))]
+    pub fn inherit_wasm_kv(&self, _previous: &RuleSet) {}
 
     /// Poisoned plugin ids (for the `/rules` panel).
     pub fn poisoned(&self) -> Vec<RuleId> {
@@ -373,7 +431,48 @@ impl StreamMatcher {
         }
         let found = matcher.find(rules, &window.buffer, None, armed);
         window.settle();
-        found.map(|(compiled, excerpt)| firing(&compiled, target, excerpt))
+        found.map(|(compiled, excerpt)| firing(&compiled, target, excerpt, None))
+    }
+
+    /// Force a final evaluation of any un-settled text buffer. Call at the end
+    /// of a model turn so trailing content shorter than the coalesce threshold
+    /// and without a newline still gets matched.
+    pub fn finalize_text(&mut self, armed: &dyn Fn(&RuleId) -> bool) -> Option<Firing> {
+        Self::finalize_windowed(
+            &mut self.text,
+            &self.rules.text,
+            &self.rules.rules,
+            MatchTarget::AssistantText,
+            armed,
+        )
+    }
+
+    /// As [`finalize_text`](Self::finalize_text), for the reasoning stream.
+    pub fn finalize_reasoning(&mut self, armed: &dyn Fn(&RuleId) -> bool) -> Option<Firing> {
+        Self::finalize_windowed(
+            &mut self.reasoning,
+            &self.rules.reasoning,
+            &self.rules.rules,
+            MatchTarget::ReasoningSummary,
+            armed,
+        )
+    }
+
+    fn finalize_windowed(
+        window: &mut Window,
+        matcher: &TargetMatcher,
+        rules: &[Arc<CompiledRule>],
+        target: MatchTarget,
+        armed: &dyn Fn(&RuleId) -> bool,
+    ) -> Option<Firing> {
+        // Only when there's un-settled content — otherwise everything already
+        // ran through `push_windowed` and re-matching would double-fire.
+        if matcher.is_empty() || window.pending == 0 {
+            return None;
+        }
+        let found = matcher.find(rules, &window.buffer, None, armed);
+        window.settle();
+        found.map(|(compiled, excerpt)| firing(&compiled, target, excerpt, None))
     }
 
     /// Feed a streamed tool-call argument fragment. `tool_name` is present on
@@ -436,14 +535,20 @@ impl StreamMatcher {
         self.rules
             .tool_args
             .find(&self.rules.rules, haystack, tool, armed)
-            .map(|(compiled, excerpt)| firing(&compiled, MatchTarget::ToolArgs, excerpt))
+            .map(|(compiled, excerpt)| firing(&compiled, MatchTarget::ToolArgs, excerpt, tool))
     }
 }
 
-fn firing(compiled: &CompiledRule, target: MatchTarget, matched: String) -> Firing {
+fn firing(
+    compiled: &CompiledRule,
+    target: MatchTarget,
+    matched: String,
+    tool: Option<&str>,
+) -> Firing {
     Firing {
         rule: compiled.rule.id.clone(),
         target,
+        tool: tool.map(str::to_owned),
         matched,
         reminder: compiled.rule.reminder.clone(),
         persistence: compiled.rule.persistence,

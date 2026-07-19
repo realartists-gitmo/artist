@@ -49,6 +49,7 @@ pub enum SessionEvent {
     TurnUser(TurnUser),
     ModelTurn(ModelTurn),
     ToolResult(ToolResultEvent),
+    ToolResultImages(ToolResultImagesEvent),
     SteeringDelivered(SteeringDelivered),
     DelegateStarted(DelegateStarted),
     DelegateFinished(DelegateFinished),
@@ -111,6 +112,7 @@ event_kinds!(
     (TurnUser, TurnUser, "turn.user"),
     (ModelTurn, ModelTurn, "model.turn"),
     (ToolResult, ToolResultEvent, "tool.result"),
+    (ToolResultImages, ToolResultImagesEvent, "tool.result.images"),
     (SteeringDelivered, SteeringDelivered, "steering.delivered"),
     (DelegateStarted, DelegateStarted, "delegate.started"),
     (DelegateFinished, DelegateFinished, "delegate.finished"),
@@ -234,6 +236,17 @@ pub struct ToolResultEvent {
     pub outcome: ToolOutcomeRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+/// Image content from a tool result. rig's capture hook only exposes the
+/// result *text*, so a tool that returns images (e.g. a screenshot MCP tool)
+/// records them here from the streaming display path, keyed by
+/// `internal_call_id`, and history replay reattaches them to the tool result.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ToolResultImagesEvent {
+    pub internal_call_id: String,
+    /// `ContentBlock::Image` references (bytes live in the attachment store).
+    pub images: Vec<ContentBlock>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

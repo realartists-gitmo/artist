@@ -246,19 +246,28 @@ fn rule_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Cheap fingerprint of every rules dir: (path, mtime, len) of each rule
-/// file, hashed structurally. Compared between turns to decide reload.
+/// artifact, hashed structurally. Compared between turns to decide reload.
 pub fn fingerprint(roots: &[PathBuf]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
+    let stamp = |file: &Path, hasher: &mut std::hash::DefaultHasher| {
+        file.hash(hasher);
+        if let Ok(metadata) = std::fs::metadata(file) {
+            metadata.len().hash(hasher);
+            if let Ok(modified) = metadata.modified() {
+                modified.hash(hasher);
+            }
+        }
+    };
     for root in roots {
         for file in rule_files(root) {
-            file.hash(&mut hasher);
-            if let Ok(metadata) = std::fs::metadata(&file) {
-                metadata.len().hash(&mut hasher);
-                if let Ok(modified) = metadata.modified() {
-                    modified.hash(&mut hasher);
-                }
-            }
+            stamp(&file, &mut hasher);
+        }
+        // WASM plugins reload too: hash each `.toml` manifest and its sibling
+        // `.wasm` so editing/replacing a plugin triggers a reload.
+        for manifest in wasm_manifests(root) {
+            stamp(&manifest, &mut hasher);
+            stamp(&manifest.with_extension("wasm"), &mut hasher);
         }
     }
     hasher.finish()

@@ -62,6 +62,11 @@ impl host::Host for HostState {
         self.kv.get(&key).cloned()
     }
     fn kv_set(&mut self, key: String, value: String) {
+        // Overwriting a key frees its previous value's bytes first, so the
+        // accounting reflects real usage instead of double-counting.
+        if let Some(old) = self.kv.remove(&key) {
+            self.kv_bytes = self.kv_bytes.saturating_sub(key.len() + old.len());
+        }
         let addition = key.len() + value.len();
         if self.kv_bytes + addition > KV_CAP_BYTES {
             // Evict arbitrary entries until it fits — bounded state, not a
@@ -176,6 +181,28 @@ impl WasmRule {
         self.poisoned.load(Ordering::Relaxed)
     }
 
+    /// Snapshot the host KV (the plugin's cross-call persistence) so a dry-run
+    /// scan can judge hits without permanently advancing stateful plugins.
+    pub fn snapshot_kv(&self) -> (HashMap<String, String>, usize) {
+        let instance = self
+            .instance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = instance.store.data();
+        (state.kv.clone(), state.kv_bytes)
+    }
+
+    /// Restore a [`snapshot_kv`](Self::snapshot_kv).
+    pub fn restore_kv(&self, snapshot: (HashMap<String, String>, usize)) {
+        let mut instance = self
+            .instance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = instance.store.data_mut();
+        state.kv = snapshot.0;
+        state.kv_bytes = snapshot.1;
+    }
+
     /// Ask the guest to judge a prefilter hit. `None` = pass (including
     /// every failure mode — a broken plugin silently stops firing and is
     /// poisoned for the session).
@@ -192,7 +219,7 @@ impl WasmRule {
         let event = Event {
             target: firing.target.as_str().to_owned(),
             text: firing.matched.clone(),
-            tool: None,
+            tool: firing.tool.clone(),
             turn,
         };
         match plugin.call_on_event(&mut *store, &event) {
@@ -214,6 +241,7 @@ impl WasmRule {
                 Some(RuleFiring {
                     rule: self.id.clone(),
                     target: firing.target,
+                    tool: firing.tool.clone(),
                     matched: firing.matched.clone(),
                     reminder,
                     persistence: match fire.persistence.as_str() {

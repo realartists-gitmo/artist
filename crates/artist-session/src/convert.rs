@@ -11,7 +11,7 @@ use base64::Engine as _;
 use rig_core::OneOrMany;
 use rig_core::completion::message::{
     AssistantContent, DocumentSourceKind, Image, ImageMediaType, Reasoning, ReasoningContent, Text,
-    ToolCall, ToolFunction, UserContent,
+    ToolCall, ToolFunction, ToolResultContent, UserContent,
 };
 
 use crate::attachments::AttachmentStore;
@@ -202,7 +202,11 @@ fn reasoning_to_blocks(reasoning: &Reasoning) -> Option<Vec<ContentBlock>> {
 }
 
 fn push_reasoning(out: &mut Vec<AssistantContent>, id: &Option<String>, item: ReasoningContent) {
+    // Only merge into the previous item when both carry the same *explicit* id —
+    // two adjacent id-less (`None`) reasoning items are distinct groups (e.g.
+    // Anthropic thinking blocks) and must not be collapsed into one.
     if let Some(AssistantContent::Reasoning(last)) = out.last_mut()
+        && id.is_some()
         && last.id == *id
     {
         last.content.push(item);
@@ -231,6 +235,29 @@ fn image_to_block(image: &Image, attachments: &AttachmentStore) -> Option<Vec<Co
         attachment,
         media_type: image.media_type.as_ref().map(media_type_str),
     }])
+}
+
+/// Store a tool-result image into the attachment store, returning its block
+/// reference (`None` for an unstorable/opaque image).
+pub fn store_tool_image(image: &Image, attachments: &AttachmentStore) -> Option<ContentBlock> {
+    image_to_block(image, attachments).and_then(|mut blocks| blocks.pop())
+}
+
+/// Rebuild a tool-result image from its stored `ContentBlock::Image` reference.
+pub fn tool_image_from_block(
+    block: &ContentBlock,
+    attachments: &AttachmentStore,
+) -> Option<ToolResultContent> {
+    let ContentBlock::Image {
+        attachment,
+        media_type,
+    } = block
+    else {
+        return None;
+    };
+    block_to_image(attachment, media_type.as_deref(), attachments)
+        .ok()
+        .map(ToolResultContent::Image)
 }
 
 fn block_to_image(

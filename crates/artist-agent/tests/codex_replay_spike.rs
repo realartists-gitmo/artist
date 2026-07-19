@@ -30,28 +30,49 @@ use rig_core::providers::chatgpt;
 use rig_core::streaming::{StreamedAssistantContent, StreamingChat};
 
 fn load_provider() -> Result<SavedProvider> {
+    // The config home is `~/.artist` (or $ARTIST_CONFIG_DIR), and the model now
+    // lives in settings.toml, not per-provider in providers.toml.
     let config_dir = std::env::var("ARTIST_CONFIG_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| dirs::config_dir().expect("config dir").join("artist"));
+        .unwrap_or_else(|_| dirs::home_dir().expect("home dir").join(".artist"));
     let contents = std::fs::read_to_string(config_dir.join("providers.toml"))
         .context("read providers.toml — log in with `artist provider --login chatgpt` first")?;
     #[derive(serde::Deserialize)]
     struct Store {
+        default_provider: Option<String>,
         providers: Vec<SavedProvider>,
     }
+    #[derive(serde::Deserialize)]
+    struct Settings {
+        model: Option<String>,
+    }
     let store: Store = toml::from_str(&contents)?;
-    store
-        .providers
-        .into_iter()
-        .find(|provider| provider.model.is_some())
-        .context("no provider with a selected model")
+    let model = std::fs::read_to_string(config_dir.join("settings.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Settings>(&text).ok())
+        .and_then(|settings| settings.model)
+        .context("no model in settings.toml — run `artist model` first")?;
+    let mut provider = match store.default_provider {
+        Some(id) => store
+            .providers
+            .into_iter()
+            .find(|provider| provider.id.as_str() == id)
+            .context("default provider missing from providers.toml")?,
+        None => store
+            .providers
+            .into_iter()
+            .next()
+            .context("no providers configured")?,
+    };
+    provider.model = Some(model);
+    Ok(provider)
 }
 
 fn client(provider: &SavedProvider) -> Result<chatgpt::Client> {
     chatgpt::Client::builder()
         .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.auth.access_token.expose().to_owned(),
-            account_id: Some(provider.auth.account_id.clone()),
+            access_token: provider.auth.access_token().unwrap_or_default().to_owned(),
+            account_id: provider.auth.account_id().map(str::to_owned),
         })
         .base_url(provider.base_url.as_str())
         .originator("artist")

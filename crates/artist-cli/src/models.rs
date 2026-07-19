@@ -208,7 +208,7 @@ mod tests {
     }
 
     fn provider() -> SavedProvider {
-        serde_json::from_value(serde_json::json!({"id":"x","name":"x","base_url":"https://example.com/","auth":{"access_token":"token","refresh_token":"refresh","account_id":"account"}})).unwrap()
+        serde_json::from_value(serde_json::json!({"id":"x","name":"x","base_url":"https://example.com/","auth":{"type":"chat_gpt","access_token":"token","refresh_token":"refresh","account_id":"account"}})).unwrap()
     }
 
     #[test]

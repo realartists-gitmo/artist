@@ -338,10 +338,23 @@ project's model and nothing settings-derived is ever persisted back.
 
 ## Auth, providers, MCP
 
-Unchanged in shape: Authorization Code + PKCE against the ChatGPT/Codex
-public client id (documented dependency risk), tokens in `0o600` TOML,
-JWT identity decoded without signature verification (acceptable given the
-token source). MCP (`mcp.toml`, cached schemas, startup/manual/on-call
+**Multiple backends.** A `SavedProvider` carries a `ProviderKind`
+(`chat_gpt` / `open_ai` / `anthropic` / `gemini`) and a tagged `Auth`
+(`chat_gpt` OAuth tokens, or an `api_key`). ChatGPT signs in via Authorization
+Code + PKCE against the ChatGPT/Codex public client id (tokens in `0o600` TOML,
+JWT identity decoded without signature verification — acceptable given the
+token source); other backends are added with `artist provider add` (key from
+the provider's env var or a prompt). The agent's stream loop, TTSR, and capture
+hooks are all generic over rig's traits, so `stream_chat`/the delegate just
+dispatch on `ProviderKind` to build the right rig client and per-backend
+`additional_params` (`params_for`) — the streaming layer is unchanged. Each
+backend maps to a dedicated rig client: xAI/Grok and OpenAI over the Responses
+path (`reasoning.effort`); Anthropic (`x-api-key`, `thinking` budget); Gemini;
+and the OpenAI chat-completions family — Groq, DeepSeek, Together, OpenRouter,
+Mistral, Perplexity (`/chat/completions`, top-level `reasoning_effort`). Add any
+with `artist provider add`.
+
+MCP (`mcp.toml`, cached schemas, startup/manual/on-call
 activation) hardened: oversized tool output is wrapped in a **valid JSON
 envelope** with an explicit `truncated` marker (never cut mid-byte), and
 server-map access degrades gracefully instead of panicking. The tool set

@@ -79,6 +79,15 @@ pub fn build(
     options: &HistoryOptions,
 ) -> Result<Vec<Message>> {
     let masks = resolve_masks(events, options.up_to_seq);
+    // Tool-result images are logged separately from the text-only capture event
+    // (rig's hook exposes only text); index them by internal_call_id to reattach.
+    let mut result_images: std::collections::HashMap<String, Vec<ContentBlock>> =
+        std::collections::HashMap::new();
+    for envelope in events {
+        if let SessionEvent::ToolResultImages(images) = envelope.event() {
+            result_images.insert(images.internal_call_id, images.images);
+        }
+    }
     let mut messages: Vec<Message> = Vec::new();
     // ToolCall blocks of the latest assistant turn not yet fully answered:
     // (provider id, call_id, tool name). Results matched in arrival order.
@@ -134,7 +143,11 @@ pub fn build(
                 // Ids come from the committed assistant ToolCall block, never
                 // from the capture event, so the pairing rig validates on
                 // replay always holds.
-                let position = unanswered
+                // Skip a result that matches no pending call (by id/call_id, or
+                // name) rather than defaulting to entry 0 and mis-pairing it
+                // with an unrelated call — that would emit history a provider
+                // rejects. Also covers the empty-`unanswered` case.
+                let Some(position) = unanswered
                     .iter()
                     .position(|(id, call_id, _)| {
                         result.tool_call_id.as_deref() == Some(id)
@@ -145,19 +158,25 @@ pub fn build(
                             .iter()
                             .position(|(_, _, name)| *name == result.name)
                     })
-                    .unwrap_or(0);
-                if unanswered.is_empty() {
-                    // Result with no committed call (shouldn't happen): skip
-                    // rather than emit history a provider would reject.
+                else {
                     continue;
-                }
+                };
                 let (id, call_id, _) = unanswered.remove(position);
+                // Reattach any images recorded for this result (from the display
+                // path) so an image-bearing tool result replays faithfully.
+                let mut items =
+                    vec![ToolResultContent::Text(Text::new(result.result.clone()))];
+                if let Some(blocks) = result_images.get(&result.internal_call_id) {
+                    items.extend(
+                        blocks
+                            .iter()
+                            .filter_map(|block| crate::tool_image_from_block(block, attachments)),
+                    );
+                }
                 pending_results.push(ToolResult {
                     id,
                     call_id,
-                    content: OneOrMany::one(ToolResultContent::Text(Text::new(
-                        result.result.clone(),
-                    ))),
+                    content: OneOrMany::many(items).expect("at least the result text"),
                 });
                 if unanswered.is_empty() {
                     flush_results(&mut messages, &mut unanswered, &mut pending_results);
@@ -226,7 +245,7 @@ mod tests {
     use super::*;
     use crate::event::{
         HistoryCompact, HistoryRewind, LegacyTurn, ModelTurn, SCHEMA_VERSION, ToolOutcomeRecord,
-        ToolResultEvent, TurnUser,
+        ToolResultEvent, ToolResultImagesEvent, TurnUser,
     };
 
     struct LogBuilder {
@@ -324,6 +343,40 @@ mod tests {
                 UserContent::ToolResult(result) => {
                     assert_eq!(result.id, "fc_1");
                     assert_eq!(result.call_id.as_deref(), Some("call_fc_1"));
+                }
+                other => panic!("expected tool result, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_images_reattach_on_replay() {
+        let (_dir, store) = attachments();
+        let attachment = store.put(b"\x89PNG\r\n\x1a\n fake image bytes").unwrap();
+        let mut log = LogBuilder::new();
+        log.push(user("screenshot the page"));
+        log.push(assistant_tool_call("fc_1", "screenshot"));
+        log.push(tool_result("screenshot", "captured"));
+        log.push(SessionEvent::ToolResultImages(ToolResultImagesEvent {
+            internal_call_id: "ic".into(),
+            images: vec![ContentBlock::Image {
+                attachment,
+                media_type: Some("png".into()),
+            }],
+        }));
+        log.push(assistant_text("done"));
+
+        let history = build(&log.events, &store, &HistoryOptions::default()).unwrap();
+        match &history[2] {
+            Message::User { content } => match content.first() {
+                UserContent::ToolResult(result) => {
+                    let images = result
+                        .content
+                        .iter()
+                        .filter(|item| matches!(item, ToolResultContent::Image(_)))
+                        .count();
+                    assert_eq!(images, 1, "the image should replay on the tool result");
                 }
                 other => panic!("expected tool result, got {other:?}"),
             },

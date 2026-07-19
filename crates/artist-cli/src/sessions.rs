@@ -245,8 +245,12 @@ impl SessionStore {
         if parent_attachments.is_dir() {
             let fork_attachments = dir.join("attachments");
             fs::create_dir_all(&fork_attachments)?;
-            for entry in fs::read_dir(&parent_attachments)?.flatten() {
-                let _ = fs::copy(entry.path(), fork_attachments.join(entry.file_name()));
+            for entry in fs::read_dir(&parent_attachments)? {
+                let entry = entry?;
+                fs::copy(entry.path(), fork_attachments.join(entry.file_name()))
+                    .with_context(|| {
+                        format!("copy forked attachment {}", entry.path().display())
+                    })?;
             }
         }
         let fork_events = EventLogReader::new(&dir).read_all()?;

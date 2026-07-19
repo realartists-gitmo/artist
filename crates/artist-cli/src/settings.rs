@@ -113,11 +113,19 @@ pub fn migrate_provider_defaults(
     }
     let path = config_root.join(SETTINGS_FILE);
     let mut settings = Settings::load(&path)?;
-    if settings.model.is_some() || settings.reasoning_effort.is_some() {
+    // Fill each field independently — an existing `model` (e.g. from an earlier
+    // `artist model`) must not block migrating a still-unset `reasoning_effort`.
+    let take_model = settings.model.is_none() && provider_model.is_some();
+    let take_reasoning = settings.reasoning_effort.is_none() && provider_reasoning.is_some();
+    if !take_model && !take_reasoning {
         return Ok(false);
     }
-    settings.model = provider_model.map(str::to_owned);
-    settings.reasoning_effort = provider_reasoning.map(str::to_owned);
+    if take_model {
+        settings.model = provider_model.map(str::to_owned);
+    }
+    if take_reasoning {
+        settings.reasoning_effort = provider_reasoning.map(str::to_owned);
+    }
     settings.save(&path)?;
     Ok(true)
 }

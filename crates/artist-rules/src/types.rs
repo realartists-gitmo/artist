@@ -105,6 +105,9 @@ pub const DEFAULT_WINDOW: usize = 4096;
 pub struct Firing {
     pub rule: RuleId,
     pub target: MatchTarget,
+    /// The tool name for a `tool-args` firing (passed to wasm plugins as
+    /// `event.tool`); `None` for text/reasoning targets.
+    pub tool: Option<String>,
     /// The matched excerpt (bounded), for the UI and the event log.
     pub matched: String,
     pub reminder: String,
