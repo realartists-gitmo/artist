@@ -23,7 +23,9 @@ split-debuginfo = "unpacked"
 
 [profile.release]
 rustflags = ["-Z", "threads=0"]
-incremental = true
+# Incremental release artifacts can produce missing LLVM-local symbols when
+# combined with parallel backend codegen, particularly in Wasmtime-heavy crates.
+incremental = false
 split-debuginfo = "unpacked"
 
 [profile.profiler]
