@@ -1628,6 +1628,7 @@ async fn submit(
     draw_streaming(
         terminal,
         &status_line(phase, started.elapsed(), animation_frame),
+        &footer,
         StreamingControls {
             input: &steering_input,
             steering: &steering,
@@ -1868,6 +1869,7 @@ async fn submit(
         draw_streaming(
             terminal,
             &status_line(phase, started.elapsed(), animation_frame),
+            &footer,
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
@@ -2327,6 +2329,7 @@ fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Resul
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
     status: &str,
+    footer: &Line<'_>,
     controls: StreamingControls<'_>,
     viewport_height: &mut u16,
 ) -> Result<()> {
@@ -2337,12 +2340,11 @@ fn draw_streaming(
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
-    // Keep the same height as the idle input box (input rows + one status row).
-    // The response streams into scrollback (not a live in-viewport tail), so a
-    // turn starting or ending never resizes/re-inits the viewport — no blink.
+    // Show the activity/cancel hint above the input while preserving the
+    // configured status bar on the bottom row.
     let desired = input_height
         .saturating_add(queued_height)
-        .saturating_add(1)
+        .saturating_add(2)
         .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
@@ -2378,15 +2380,25 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
-        let input_area = Rect::new(
+        let status_area = Rect::new(
             area.x,
             queued_area.bottom(),
             area.width,
-            area.height.saturating_sub(queued_height + 1),
+            area.height.saturating_sub(queued_height).min(1),
+        );
+        frame.render_widget(
+            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            status_area,
+        );
+        let input_area = Rect::new(
+            area.x,
+            status_area.bottom(),
+            area.width,
+            area.height.saturating_sub(queued_height + 2),
         );
         render_input(frame, input_area, controls.input);
         frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new(footer.clone()),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     })?;
