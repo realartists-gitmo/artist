@@ -15,15 +15,17 @@ pub(crate) enum StatusItem {
     Model,
     Reasoning,
     Context,
+    SessionTokens,
 }
 
 impl StatusItem {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ProjectDirectory,
         Self::GitBranch,
         Self::Model,
         Self::Reasoning,
         Self::Context,
+        Self::SessionTokens,
     ];
 
     pub fn label(self) -> &'static str {
@@ -32,7 +34,8 @@ impl StatusItem {
             Self::GitBranch => "Git branch",
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
-            Self::Context => "Context remaining / total",
+            Self::Context => "Context remaining",
+            Self::SessionTokens => "Session tokens",
         }
     }
 }
@@ -44,6 +47,7 @@ fn default_items() -> Vec<StatusItem> {
         StatusItem::Model,
         StatusItem::Reasoning,
         StatusItem::Context,
+        StatusItem::SessionTokens,
     ]
 }
 
@@ -109,10 +113,11 @@ pub(crate) fn segments(
                     .clone()
                     .unwrap_or_else(|| "default".into()),
                 StatusItem::Context => {
-                    // Current-context view (last request), plus the session's
-                    // cumulative billed volume so a long tool loop or TTSR
-                    // retries aren't misread as context size.
-                    let context = match (used_tokens, context_capacity) {
+                    // Current-context view (last request): how much of the
+                    // window is free. Cumulative session volume is a separate,
+                    // independently-toggleable `SessionTokens` cell so a long
+                    // tool loop or TTSR retries aren't misread as context size.
+                    match (used_tokens, context_capacity) {
                         (Some(used), Some(capacity)) if capacity > 0 => {
                             let remaining = context_remaining(used, capacity);
                             format!(
@@ -123,13 +128,9 @@ pub(crate) fn segments(
                         }
                         (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
                         _ => "—/—".into(),
-                    };
-                    if session_tokens > 0 {
-                        format!("{context} · {} total", format_tokens(session_tokens))
-                    } else {
-                        context
                     }
                 }
+                StatusItem::SessionTokens => format!("{} total", format_tokens(session_tokens)),
             },
         })
         .collect::<Vec<_>>();
@@ -262,12 +263,15 @@ mod tests {
             Some("main"),
             Some(25),
             Some(100),
-            0,
+            12_000,
             &[],
         );
         assert_eq!(segments[0].text, "project");
         assert_eq!(segments[1].text, "main");
+        // Context is the window view only — no cumulative total appended.
         assert_eq!(segments[4].text, "75%/100");
+        // Session token total is its own (independently toggleable) cell.
+        assert_eq!(segments[5].text, "12k total");
     }
 
     #[test]
