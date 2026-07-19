@@ -2131,7 +2131,12 @@ fn insert_tool_line(
     first: bool,
     is_diff: bool,
 ) -> Result<()> {
-    let prefix = if first { "  🛠  " } else { "    " };
+    // U+FE0F forces emoji presentation so the wrench renders as a full-width
+    // emoji rather than a narrow text glyph. The continuation indent is derived
+    // from the icon prefix's width so output lines line up under the title
+    // regardless of the icon's cell count (no hardcoded 4-space guess).
+    let icon_prefix = "  🛠\u{FE0F} ";
+    let indent = " ".repeat(icon_prefix.width());
     let width = usize::from(terminal.size()?.width.max(1));
     let text = content
         .lines()
@@ -2140,7 +2145,11 @@ fn insert_tool_line(
             // Tabs otherwise skip styled terminal cells. Tool lines are kept
             // to one terminal row so large diffs cannot dominate the UI.
             let line = line.replace('\t', "    ");
-            let line_prefix = if index == 0 { prefix } else { "    " };
+            let line_prefix = if first && index == 0 {
+                icon_prefix
+            } else {
+                indent.as_str()
+            };
             let line =
                 truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
             let diff_content = line
@@ -2665,6 +2674,17 @@ fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn tool_icon_uses_emoji_presentation_and_indent_aligns() {
+        // VS16 forces the wrench to a full-width (2-cell) emoji so it doesn't
+        // render as a narrow text glyph.
+        assert_eq!("🛠\u{FE0F}".width(), 2);
+        // The continuation indent matches the icon prefix width, so output
+        // lines align under the tool title regardless of the icon's cell count.
+        let icon = "  🛠\u{FE0F} ";
+        assert_eq!(icon.width(), " ".repeat(icon.width()).width());
+    }
 
     #[test]
     fn edits_and_expands_input() {
