@@ -241,7 +241,14 @@ impl Delegate {
         };
         // Dispatch on the provider's backend (same set as the main agent); the
         // subagent inherits the session's provider.
-        let build = |error: anyhow::Error| DelegateError::Failed(error.to_string());
+        // A client-build failure is still a delegate that finished — record the
+        // terminal event so it doesn't leave an orphaned DelegateStarted.
+        let build = |error: anyhow::Error| {
+            recorder.record(DelegateFinished {
+                outcome: "error".into(),
+            });
+            DelegateError::Failed(error.to_string())
+        };
         let output = match self.provider.kind {
             ProviderKind::ChatGpt => {
                 drive_delegate(crate::build_chatgpt(&self.provider).map_err(build)?, ctx, seed_prompt, seed_history).await?

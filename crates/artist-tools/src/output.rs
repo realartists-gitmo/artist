@@ -8,11 +8,13 @@ pub const OUTPUT_CAP: usize = 50 * 1024;
 /// anchor; the `+`/`-` prefix is preserved after the `│` so the TUI still colors
 /// the diff.
 pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]) -> String {
+    // `AnchoredLine`s are ordered by ascending `line_number`, so binary-search
+    // the gutter lookup to stay fast on large files.
     let anchor_at = |lines: &[AnchoredLine], number: usize| {
         lines
-            .iter()
-            .find(|line| line.line_number == number)
-            .map(|line| line.anchor.clone())
+            .binary_search_by_key(&number, |line| line.line_number)
+            .ok()
+            .map(|index| lines[index].anchor.clone())
             .unwrap_or_default()
     };
     let mut old_line = 0usize;

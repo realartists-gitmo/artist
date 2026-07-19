@@ -28,6 +28,30 @@ struct SessionState {
     hits: Vec<(RuleId, u32)>,
 }
 
+/// Shared firing bookkeeping under a held lock: mark the rule fired (once /
+/// per-turn), tally the hit, and activate a session-persistent injection.
+/// Used by both `mark_fired` and `try_mark_fired`.
+fn record_firing(state: &mut SessionState, firing: &Firing, fire: FirePolicy) {
+    state.fired.insert(firing.rule.clone());
+    if fire == FirePolicy::PerTurn {
+        state.per_turn_fired.insert(firing.rule.clone());
+    }
+    match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
+        Some((_, count)) => *count += 1,
+        None => state.hits.push((firing.rule.clone(), 1)),
+    }
+    if firing.persistence == Persistence::Session
+        && !state
+            .active_injections
+            .iter()
+            .any(|(rule, _)| *rule == firing.rule)
+    {
+        state
+            .active_injections
+            .push((firing.rule.clone(), firing.reminder.clone()));
+    }
+}
+
 /// Clonable handle to one session's rule state. Shared by the CLI, the TTSR
 /// hook inside the agent run, and delegate subagent runs (making
 /// once-per-session global across main + delegates).
@@ -87,26 +111,7 @@ impl RulesHandle {
     /// it is per-run state on the TTSR hook, so one run can't drain another's
     /// budget and a new user turn can't reset a mid-flight delegate's.
     pub fn mark_fired(&self, firing: &Firing, fire: FirePolicy) {
-        let mut state = self.lock();
-        state.fired.insert(firing.rule.clone());
-        if fire == FirePolicy::PerTurn {
-            state.per_turn_fired.insert(firing.rule.clone());
-        }
-        match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
-            Some((_, count)) => *count += 1,
-            None => state.hits.push((firing.rule.clone(), 1)),
-        }
-        if firing.persistence == Persistence::Session {
-            let already = state
-                .active_injections
-                .iter()
-                .any(|(rule, _)| *rule == firing.rule);
-            if !already {
-                state
-                    .active_injections
-                    .push((firing.rule.clone(), firing.reminder.clone()));
-            }
-        }
+        record_firing(&mut self.lock(), firing, fire);
     }
 
     /// Atomically claim a firing: if the rule is still armed (not already
@@ -120,24 +125,7 @@ impl RulesHandle {
         if state.fired.contains(&firing.rule) || state.disabled.contains(&firing.rule) {
             return false;
         }
-        state.fired.insert(firing.rule.clone());
-        if fire == FirePolicy::PerTurn {
-            state.per_turn_fired.insert(firing.rule.clone());
-        }
-        match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
-            Some((_, count)) => *count += 1,
-            None => state.hits.push((firing.rule.clone(), 1)),
-        }
-        if firing.persistence == Persistence::Session
-            && !state
-                .active_injections
-                .iter()
-                .any(|(rule, _)| *rule == firing.rule)
-        {
-            state
-                .active_injections
-                .push((firing.rule.clone(), firing.reminder.clone()));
-        }
+        record_firing(&mut state, firing, fire);
         true
     }
 

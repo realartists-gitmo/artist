@@ -201,6 +201,15 @@ impl SavedProvider {
             return Err(Error::InvalidConfig("API key cannot be empty".into()));
         }
         validate_base_url(&base_url)?;
+        // Ensure a trailing slash so `Url::join("models")` (and friends) append
+        // to the base path (e.g. `.../v1/`) instead of replacing its last
+        // segment. rig's own client tolerates either, but our metadata fetches
+        // use `Url::join`.
+        let mut base_url = base_url;
+        if !base_url.path().ends_with('/') {
+            let with_slash = format!("{}/", base_url.path());
+            base_url.set_path(&with_slash);
+        }
         Ok(Self {
             id,
             name: name.into(),
@@ -345,6 +354,24 @@ mod tests {
         assert!(!ProviderKind::OpenAi.is_chat_completions());
         assert!(!ProviderKind::Anthropic.is_chat_completions());
         assert!(ProviderKind::Groq.is_api_key());
+    }
+
+    #[test]
+    fn api_key_base_url_is_slash_terminated_so_join_appends() {
+        let provider = SavedProvider::api_key(
+            ProviderId::new("groq").unwrap(),
+            "Groq",
+            ProviderKind::Groq,
+            Url::parse("https://api.groq.com/openai/v1").unwrap(),
+            Secret::new("gsk"),
+        )
+        .unwrap();
+        assert_eq!(provider.base_url.as_str(), "https://api.groq.com/openai/v1/");
+        // Join appends to the path instead of dropping its last segment.
+        assert_eq!(
+            provider.base_url.join("models").unwrap().as_str(),
+            "https://api.groq.com/openai/v1/models"
+        );
     }
 
     #[test]
