@@ -24,13 +24,18 @@ struct Frontmatter {
     #[serde(flatten)]
     _other: BTreeMap<String, serde_yaml::Value>,
 }
-
 pub fn discover(workspace: &Path, diagnostics: &mut Vec<String>) -> BTreeMap<String, Skill> {
     let mut roots = Vec::new();
+    if let Some(config_root) = std::env::var_os("ARTIST_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|path| path.join("artist")))
+    {
+        roots.push(config_root.join("skills"));
+    }
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".artist/skills"));
         roots.push(home.join(".agents/skills"));
     }
+
     let start = workspace
         .ancestors()
         .find(|path| path.join(".git").exists())

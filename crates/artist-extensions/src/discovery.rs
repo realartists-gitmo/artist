@@ -15,9 +15,11 @@ pub struct Diagnostic {
 }
 
 pub fn default_root() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .context("could not find home directory")?
-        .join(".artist/extensions"))
+    let root = std::env::var_os("ARTIST_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|path| path.join("artist")))
+        .context("could not find config directory")?;
+    Ok(root.join("extensions"))
 }
 
 pub fn discover(root: &Path) -> (Vec<DiscoveredExtension>, Vec<Diagnostic>) {

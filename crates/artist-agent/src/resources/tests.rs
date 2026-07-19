@@ -21,7 +21,7 @@ fn agents_load_global_then_broad_to_specific() {
     std::fs::create_dir(repository.path().join(".git")).unwrap();
     let workspace = repository.path().join("packages/app");
     std::fs::create_dir_all(&workspace).unwrap();
-    write(&config.path().join(".artist/AGENTS.md"), "global");
+    write(&config.path().join("AGENTS.md"), "global");
     write(&repository.path().join("AGENTS.md"), "root");
     write(&repository.path().join("packages/AGENTS.md"), "package");
     write(&workspace.join("src/AGENTS.md"), "nested");

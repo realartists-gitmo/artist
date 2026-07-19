@@ -42,8 +42,13 @@ pub fn builtin_rules() -> Vec<DeclarativeRule> {
 /// (later shadows earlier).
 pub fn roots(workspace: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(config_root) = std::env::var_os("ARTIST_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|path| path.join("artist")))
+    {
+        roots.push(config_root.join("rules"));
+    }
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".artist/rules"));
         roots.push(home.join(".agents/rules"));
     }
     let start = workspace

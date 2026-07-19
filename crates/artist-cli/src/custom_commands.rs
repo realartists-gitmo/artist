@@ -1,5 +1,5 @@
 //! User-defined slash commands: markdown prompt templates discovered from
-//! `~/.artist/commands/` and `<project>/.artist/commands/`.
+//! `~/.config/artist/commands/` and `<project>/.artist/commands/`.
 //!
 //! A command file is `<name>.md` with optional YAML frontmatter
 //! (`description`); the body is the prompt template. `$ARGUMENTS` in the
@@ -25,8 +25,11 @@ pub(crate) struct CustomCommand {
 /// built-in command names always win (a custom `/help.md` is ignored).
 pub(crate) fn discover(project: &Path) -> Vec<CustomCommand> {
     let mut roots = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".artist/commands"));
+    if let Some(config_root) = std::env::var_os("ARTIST_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|path| path.join("artist")))
+    {
+        roots.push(config_root.join("commands"));
     }
     roots.push(project.join(".artist/commands"));
     let mut commands: Vec<CustomCommand> = Vec::new();

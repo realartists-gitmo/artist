@@ -125,7 +125,7 @@ once per session (default) or once per user turn.
 
 ### Declarative rules
 
-Markdown files in `~/.artist/rules/`, `~/.agents/rules/`,
+Markdown files in `~/.config/artist/rules/`, `~/.agents/rules/`,
 `<project>/.artist/rules/`, or `<project>/.agents/rules/` (later scopes
 shadow earlier by name; hot-reloaded between turns via an mtime
 fingerprint). Scaffold one with `artist rules new <name>`.
@@ -294,7 +294,7 @@ leave the tree. On stale/unknown anchors the model must re-read then retry
   `/rewind`, `/rules`, `/help`, extension-declared commands, and `!` bang
   commands routed to the persistent input shell — plus **custom commands**:
   markdown prompt templates in
-  `<project>/.artist/commands/*.md` or `~/.artist/commands/` with
+  `<project>/.artist/commands/*.md` or `~/.config/artist/commands/` with
   optional frontmatter (`description`) and `$ARGUMENTS` expansion; they
   join the completion menu (built-in names always win).
 - **Maintenance:** `artist rules new`, `artist sessions list|render|gc`.
@@ -304,14 +304,14 @@ leave the tree. On stale/unknown anchors the model must re-read then retry
 
 ## Configuration
 
-Global state lives in `~/.artist/` (override with `$ARTIST_CONFIG_DIR`); a
-one-time migration moves a pre-existing `~/.config/artist/` in, preferring
+Global state lives in `~/.config/artist/` (override with `$ARTIST_CONFIG_DIR`); a
+one-time migration moves a pre-existing `~/.artist/` in, preferring
 destination files on conflict so a partial home is never clobbered
 (`store.rs`). `providers.toml` holds provider identity, secrets, the status
 bar, and the base `disabled_tools` — **not** model choice.
 
 Behaviour is layered through **`settings.toml`**, resolved from a global
-`~/.artist/settings.toml` and a project `<repo>/.artist/settings.toml`, plus an
+`~/.config/artist/settings.toml` and a project `<repo>/.artist/settings.toml`, plus an
 optional highest-precedence override layer (CLI/session):
 
 ```toml

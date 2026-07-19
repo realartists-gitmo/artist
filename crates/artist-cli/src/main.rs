@@ -137,7 +137,7 @@ async fn run() -> Result<()> {
         None => {
             let selected = default_index(&store)?;
             let project = std::env::current_dir().context("find current project directory")?;
-            // Layered settings (global ~/.artist + project .artist) resolve the
+            // Layered settings (global ~/.config/artist + project .artist) resolve the
             // model/reasoning overrides and the effective tool denylist.
             let effective = settings::load_effective(
                 config_root,

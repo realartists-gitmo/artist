@@ -127,19 +127,20 @@ pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ARTIST_CONFIG_DIR") {
         return Ok(PathBuf::from(path).join("providers.toml"));
     }
-    let home = dirs::home_dir().context("could not find home directory")?;
-    let root = home.join(".artist");
+    let root = dirs::config_dir()
+        .context("could not find config directory")?
+        .join("artist");
     migrate_legacy_root(&root)?;
     Ok(root.join("providers.toml"))
 }
 
-/// Move the pre-.artist global state into the conventional Artist home once.
+/// Move the legacy `~/.artist` global state into the platform config directory.
 /// Existing files in the destination win; legacy-only files are copied across.
 fn migrate_legacy_root(root: &Path) -> Result<()> {
-    let Some(config) = dirs::config_dir() else {
+    let Some(home) = dirs::home_dir() else {
         return Ok(());
     };
-    migrate_root_between(&config.join("artist"), root)
+    migrate_root_between(&home.join(".artist"), root)
 }
 
 /// The migration mechanics, split out from the `dirs`-derived paths so the
@@ -165,7 +166,9 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         let from = entry.path();
         let to = destination.join(entry.file_name());
         if from.is_dir() {
-            if !to.exists() { copy_tree(&from, &to)?; }
+            if !to.exists() {
+                copy_tree(&from, &to)?;
+            }
         } else if !to.exists() {
             fs::copy(&from, &to)?;
         }
@@ -229,7 +232,10 @@ api_key = "secret"
             fs::read_to_string(root.join("providers.toml")).unwrap(),
             "version = 2\n"
         );
-        assert_eq!(fs::read_to_string(root.join("rules/one.md")).unwrap(), "rule\n");
+        assert_eq!(
+            fs::read_to_string(root.join("rules/one.md")).unwrap(),
+            "rule\n"
+        );
     }
 
     #[test]
@@ -239,7 +245,10 @@ api_key = "secret"
         let root = dir.path().join(".artist");
         // Destination already has providers.toml (must win) but no rules.
         write_file(&root.join("providers.toml"), "version = 2\nkept = true\n");
-        write_file(&legacy.join("providers.toml"), "version = 1\nstale = true\n");
+        write_file(
+            &legacy.join("providers.toml"),
+            "version = 1\nstale = true\n",
+        );
         write_file(&legacy.join("rules/one.md"), "rule\n");
 
         migrate_root_between(&legacy, &root).unwrap();
@@ -249,7 +258,10 @@ api_key = "secret"
             fs::read_to_string(root.join("providers.toml")).unwrap(),
             "version = 2\nkept = true\n"
         );
-        assert_eq!(fs::read_to_string(root.join("rules/one.md")).unwrap(), "rule\n");
+        assert_eq!(
+            fs::read_to_string(root.join("rules/one.md")).unwrap(),
+            "rule\n"
+        );
         // Legacy is left in place when merging (both existed).
         assert!(legacy.exists());
     }
