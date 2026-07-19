@@ -1564,7 +1564,6 @@ async fn submit(
     let mut response_started = false;
     let mut response_output_started = false;
     let mut response_since_tool = false;
-    let mut tool_block_open = false;
     let mut tools = ToolUi::default();
     // Start at the real viewport height the input box already occupies. The
     // streaming layout keeps that height (response goes to scrollback, not a
@@ -1799,11 +1798,7 @@ async fn submit(
                             reasoning.clear();
                         }
                         let title = tools.start(id, &name, &arguments);
-                        if tool_block_open {
-                            insert_blank(terminal)?;
-                        }
                         insert_tool_line(terminal, &title, true, false)?;
-                        tool_block_open = true;
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
@@ -1831,7 +1826,6 @@ async fn submit(
                         }
                         if output.batch_complete {
                             insert_blank(terminal)?;
-                            tool_block_open = false;
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
                                 active.recorder.record(SteeringDelivered {
