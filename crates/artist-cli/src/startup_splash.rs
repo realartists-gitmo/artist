@@ -20,29 +20,28 @@ const ART: [&str; HEIGHT as usize] = [
     " ▒▒▒▒▒▒▒▒ ▒▒▒▒▒        ▒▒▒▒▒  ▒▒▒▒▒ ▒▒▒▒▒▒     ▒▒▒▒▒",
 ];
 
-/// The transgender pride flag, top to bottom. Swap this table to retheme.
-const STRIPES: [(u8, u8, u8); 5] = [
-    (91, 206, 250),  // light blue
-    (245, 169, 184), // pink
-    (255, 255, 255), // white
-    (245, 169, 184), // pink
-    (91, 206, 250),  // light blue
-];
+const GRADIENT_START: (u8, u8, u8) = (64, 64, 64);
+const GRADIENT_END: (u8, u8, u8) = (255, 255, 255);
 
-/// The stripe covering `row`. Rows sample the flag at their midpoint, so an
-/// even art height splits symmetrically (8 rows → 2/1/2/1/2).
-fn stripe_color(row: usize) -> Color {
-    let t = (row as f32 + 0.5) / HEIGHT as f32;
-    let stripe = ((t * STRIPES.len() as f32) as usize).min(STRIPES.len() - 1);
-    let (r, g, b) = STRIPES[stripe];
-    Color::Rgb(r, g, b)
+/// Linearly interpolate the splash foreground from dark gray at the top to
+/// white at the bottom.
+fn gradient_color(row: usize) -> Color {
+    let t = row as f32 / (HEIGHT - 1) as f32;
+    let interpolate = |start: u8, end: u8| {
+        (start as f32 + (end as f32 - start as f32) * t).round() as u8
+    };
+    Color::Rgb(
+        interpolate(GRADIENT_START.0, GRADIENT_END.0),
+        interpolate(GRADIENT_START.1, GRADIENT_END.1),
+        interpolate(GRADIENT_START.2, GRADIENT_END.2),
+    )
 }
 
 fn splash_text() -> Text<'static> {
     Text::from(
         ART.iter()
             .enumerate()
-            .map(|(row, text)| Line::styled(*text, Style::default().fg(stripe_color(row))))
+            .map(|(row, text)| Line::styled(*text, Style::default().fg(gradient_color(row))))
             .collect::<Vec<_>>(),
     )
 }
@@ -64,21 +63,24 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn renders_art_as_symmetric_trans_flag_stripes() {
+    fn renders_art_with_dark_gray_to_white_gradient() {
         let mut terminal = Terminal::new(TestBackend::new(64, HEIGHT)).unwrap();
         terminal.draw(|frame| render(frame, frame.area())).unwrap();
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((22, 0)).unwrap().symbol(), "█");
-        let row = |y: u16| buffer.cell((22, y)).unwrap().fg;
-        let blue = Color::Rgb(91, 206, 250);
-        let pink = Color::Rgb(245, 169, 184);
-        let white = Color::Rgb(255, 255, 255);
-        // 8 rows → 2 blue, 1 pink, 2 white, 1 pink, 2 blue.
-        assert_eq!(
-            (0..HEIGHT).map(row).collect::<Vec<_>>(),
-            [blue, blue, pink, white, white, pink, blue, blue]
-        );
+        let colors = (0..HEIGHT)
+            .map(|y| buffer.cell((22, y)).unwrap().fg)
+            .collect::<Vec<_>>();
+
+        assert_eq!(colors.first(), Some(&Color::Rgb(64, 64, 64)));
+        assert_eq!(colors.last(), Some(&Color::Rgb(255, 255, 255)));
+        assert!(colors.windows(2).all(|pair| {
+            let (Color::Rgb(previous, _, _), Color::Rgb(next, _, _)) = (pair[0], pair[1]) else {
+                return false;
+            };
+            previous < next
+        }));
     }
 
     #[test]
