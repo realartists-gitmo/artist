@@ -27,9 +27,8 @@ const GRADIENT_END: (u8, u8, u8) = (255, 255, 255);
 /// white at the bottom.
 fn gradient_color(row: usize) -> Color {
     let t = row as f32 / (HEIGHT - 1) as f32;
-    let interpolate = |start: u8, end: u8| {
-        (start as f32 + (end as f32 - start as f32) * t).round() as u8
-    };
+    let interpolate =
+        |start: u8, end: u8| (start as f32 + (end as f32 - start as f32) * t).round() as u8;
     Color::Rgb(
         interpolate(GRADIENT_START.0, GRADIENT_END.0),
         interpolate(GRADIENT_START.1, GRADIENT_END.1),

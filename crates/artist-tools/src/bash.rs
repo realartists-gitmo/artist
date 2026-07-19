@@ -354,7 +354,9 @@ impl BashTool {
                             // next read.
                             None => carry = buf[valid_up_to..].to_vec(),
                             // Genuinely invalid bytes: emit replacements now.
-                            Some(_) => piece.push_str(&String::from_utf8_lossy(&buf[valid_up_to..])),
+                            Some(_) => {
+                                piece.push_str(&String::from_utf8_lossy(&buf[valid_up_to..]))
+                            }
                         }
                         piece
                     }

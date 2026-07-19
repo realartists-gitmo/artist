@@ -169,14 +169,14 @@ pub fn spawn_writer(
                     continue;
                 }
             };
-            let seq = match writer.append(recorded.run.as_deref(), &recorded.lineage, &recorded.event)
-            {
-                Ok(seq) => seq,
-                Err(error) => {
-                    task_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
-                    return Err(error);
-                }
-            };
+            let seq =
+                match writer.append(recorded.run.as_deref(), &recorded.lineage, &recorded.event) {
+                    Ok(seq) => seq,
+                    Err(error) => {
+                        task_healthy.store(false, std::sync::atomic::Ordering::Relaxed);
+                        return Err(error);
+                    }
+                };
             task_watermark.store(seq);
             if let Some(file) = &mut transcript_file {
                 let envelope = crate::event::Envelope {

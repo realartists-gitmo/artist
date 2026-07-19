@@ -581,8 +581,9 @@ async fn run_loop(
     // any settings model/reasoning override, applied to a throwaway clone so
     // the override is never persisted. Rebuilt when the account changes
     // (`/accounts`) or before a turn (to carry a freshly-refreshed token).
-    let mut session_provider =
-        context.settings.apply_to(context.store.providers[context.provider_index].clone());
+    let mut session_provider = context
+        .settings
+        .apply_to(context.store.providers[context.provider_index].clone());
     if resumed_session {
         let footer = footer_line(
             &context.store.status_bar,
@@ -762,9 +763,9 @@ async fn run_loop(
                             status.refresh(&context.store.status_bar, context.project);
                             // The settings override still applies to whichever
                             // account is now active.
-                            session_provider = context.settings.apply_to(
-                                context.store.providers[context.provider_index].clone(),
-                            );
+                            session_provider = context
+                                .settings
+                                .apply_to(context.store.providers[context.provider_index].clone());
                         }
                         panel
                     }
@@ -866,10 +867,8 @@ async fn run_loop(
                 // its recorded expiry. Force-refresh it now (non-blocking to the
                 // rest of the loop's state) so the user's resend succeeds.
                 if result.auth_expired {
-                    match crate::force_refresh(
-                        &mut context.store.providers[context.provider_index],
-                    )
-                    .await
+                    match crate::force_refresh(&mut context.store.providers[context.provider_index])
+                        .await
                     {
                         Ok(()) => {
                             let _ = context.store.save(context.store_path);
@@ -1352,7 +1351,11 @@ fn handle_accounts(
             .map(|(index, provider)| {
                 let marker = if index == current { "*" } else { " " };
                 let model = provider.model.as_deref().unwrap_or("no model");
-                format!("{marker} {}  {} ({model})", provider.id.as_str(), provider.name)
+                format!(
+                    "{marker} {}  {} ({model})",
+                    provider.id.as_str(),
+                    provider.name
+                )
             })
             .collect();
         lines.push("Switch with /accounts <id>, or add one with /login.".to_owned());
@@ -1363,9 +1366,7 @@ fn handle_accounts(
         .iter()
         .position(|provider| provider.id.as_str() == id)
     {
-        Some(index) if index == current => {
-            (vec![format!("Already using account {id}.")], None)
-        }
+        Some(index) if index == current => (vec![format!("Already using account {id}.")], None),
         Some(index) => (
             vec![format!(
                 "Switched to {} ({}).",
@@ -1375,7 +1376,9 @@ fn handle_accounts(
             Some(index),
         ),
         None => (
-            vec![format!("No such account: {id} — see /accounts for the list.")],
+            vec![format!(
+                "No such account: {id} — see /accounts for the list."
+            )],
             None,
         ),
     }
@@ -1561,6 +1564,7 @@ async fn submit(
     let mut response_started = false;
     let mut response_output_started = false;
     let mut response_since_tool = false;
+    let mut tool_block_open = false;
     let mut tools = ToolUi::default();
     // Start at the real viewport height the input box already occupies. The
     // streaming layout keeps that height (response goes to scrollback, not a
@@ -1795,7 +1799,11 @@ async fn submit(
                             reasoning.clear();
                         }
                         let title = tools.start(id, &name, &arguments);
+                        if tool_block_open {
+                            insert_blank(terminal)?;
+                        }
                         insert_tool_line(terminal, &title, true, false)?;
+                        tool_block_open = true;
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
@@ -1823,6 +1831,7 @@ async fn submit(
                         }
                         if output.batch_complete {
                             insert_blank(terminal)?;
+                            tool_block_open = false;
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
                                 active.recorder.record(SteeringDelivered {

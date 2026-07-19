@@ -24,8 +24,7 @@ impl Tool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace lines using ANCHORs from the latest read."
-            .into()
+        "Atomically replace lines using ANCHORs from the latest read.".into()
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"replacements":{"type":"array","items":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"},"content":{"type":"string"}},"required":["start","content"],"additionalProperties":false},"minItems":1}},"required":["path","replacements"],"additionalProperties":false})

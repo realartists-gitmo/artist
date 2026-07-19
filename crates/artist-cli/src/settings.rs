@@ -1,4 +1,4 @@
-//! Layered configuration merged from a global `~/.artist/settings.toml`, a
+//! Layered configuration merged from a global `~/.config/artist/settings.toml`, a
 //! project `<repo>/.artist/settings.toml`, and an optional highest-precedence
 //! override layer (CLI flags / in-session changes).
 //!
@@ -60,9 +60,7 @@ impl Settings {
     /// because silently ignoring a typo'd policy would be worse than failing.
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(text) => {
-                toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
-            }
+            Ok(text) => toml::from_str(&text).with_context(|| format!("parse {}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
         }
@@ -205,7 +203,10 @@ pub fn load_effective(
     let global = Settings::load(&config_root.join(SETTINGS_FILE))?;
     let project = Settings::load(&project.join(".artist").join(SETTINGS_FILE))?;
     Ok(EffectiveSettings::resolve(
-        &global, &project, overrides, base_denied,
+        &global,
+        &project,
+        overrides,
+        base_denied,
     ))
 }
 
@@ -243,8 +244,7 @@ mod tests {
     fn project_scalar_overrides_global() {
         let global = from_str("model = \"global-model\"\nreasoning_effort = \"low\"\n");
         let project = from_str("model = \"project-model\"\n");
-        let effective =
-            EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
         // Project wins for model; global fills in the unset reasoning.
         assert_eq!(effective.model.as_deref(), Some("project-model"));
         assert_eq!(effective.reasoning_effort.as_deref(), Some("low"));
@@ -386,8 +386,7 @@ mod tests {
         // union only adds. `write` stays denied even though the project omits it.
         let global = from_str("[permissions]\ndeny = [\"write\"]\n");
         let project = from_str("model = \"m\"\n");
-        let effective =
-            EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
         assert!(effective.denied_tools.iter().any(|t| t == "write"));
     }
 }

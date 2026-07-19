@@ -844,7 +844,11 @@ impl FileToolManager {
 
         // Inserted lines take the file's dominant terminator so a CRLF file
         // doesn't end up with mixed line endings.
-        let newline = if content.contains("\r\n") { "\r\n" } else { "\n" };
+        let newline = if content.contains("\r\n") {
+            "\r\n"
+        } else {
+            "\n"
+        };
         let mut result = content;
         for op in &resolved {
             match &op.kind {

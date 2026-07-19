@@ -105,9 +105,13 @@ pub(crate) enum ParsedCommand<'a> {
     /// List this project's sessions.
     Sessions,
     /// Switch to another session; without an id, list the candidates.
-    Resume { id: Option<&'a str> },
+    Resume {
+        id: Option<&'a str>,
+    },
     /// List logged-in accounts, or switch to one by id.
-    Accounts { id: Option<&'a str> },
+    Accounts {
+        id: Option<&'a str>,
+    },
     /// Log in to another account.
     Login,
 }
@@ -406,7 +410,10 @@ mod tests {
     fn parses_session_and_account_verbs() {
         assert_eq!(parse("/new"), Some(Ok(ParsedCommand::New)));
         assert_eq!(parse("/sessions"), Some(Ok(ParsedCommand::Sessions)));
-        assert_eq!(parse("/resume"), Some(Ok(ParsedCommand::Resume { id: None })));
+        assert_eq!(
+            parse("/resume"),
+            Some(Ok(ParsedCommand::Resume { id: None }))
+        );
         assert_eq!(
             parse("/resume abc123"),
             Some(Ok(ParsedCommand::Resume { id: Some("abc123") }))
