@@ -192,6 +192,17 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     .await;
     assert!(bounded.len() < 300);
     assert!(bounded.contains("truncated: true"));
+
+    let timed_out = call(
+        &bash,
+        json!({"mode":"exec","command":"sleep 5","timeout":1}),
+    )
+    .await;
+    assert!(timed_out.contains("status: timedOut"));
+    assert!(
+        timed_out.contains("timeout: command exceeded 1s and was terminated"),
+        "timeout result should clearly explain what happened: {timed_out}"
+    );
     let started = call(&bash, json!({"mode":"start","command":"read line; echo got:$line","sessionId":"shell","waitMs":10})).await;
     assert!(started.contains("sessionId: shell"));
     let sent = call(
