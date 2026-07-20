@@ -1443,7 +1443,7 @@ fn resize_and_draw(
     } else {
         panel.len() as u16 + 2
     };
-    let status_height = (!footer.spans.is_empty()) as u16;
+    let status_height = wrapped_line_height(footer, terminal.size()?.width);
     let desired = input
         .visual_lines(width)
         .saturating_add(2)
@@ -1908,6 +1908,26 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
+    // Stream failures keep the chat open. Render them before the elapsed-time
+    // result so the result remains the last line above the input box.
+    let mut auth_expired = false;
+    if let Some(result) = stream_result
+        && let Err(error) = result.and_then(|result| result)
+    {
+        if is_auth_error(&error) {
+            // AUTH-2: a token that expired mid-turn (or was already stale).
+            // Flag it so the run loop force-refreshes the login; auto-resending
+            // isn't safe because tool calls in the failed turn may have already
+            // run, so ask the user to resend instead.
+            auth_expired = true;
+            insert_error(
+                terminal,
+                "Your login expired mid-turn — refreshing it now. Resend your message to continue.",
+            )?;
+        } else {
+            insert_error(terminal, &format!("Error: {error:#}"))?;
+        }
+    }
     insert_blank(terminal)?;
     insert_status(
         terminal,
@@ -1926,26 +1946,6 @@ async fn submit(
         3,
         false,
     )?;
-    // Stream failures keep the chat open: surface the error inline instead
-    // of tearing down the UI.
-    let mut auth_expired = false;
-    if let Some(result) = stream_result
-        && let Err(error) = result.and_then(|result| result)
-    {
-        if is_auth_error(&error) {
-            // AUTH-2: a token that expired mid-turn (or was already stale).
-            // Flag it so the run loop force-refreshes the login; auto-resending
-            // isn't safe because tool calls in the failed turn may have already
-            // run, so ask the user to resend instead.
-            auth_expired = true;
-            insert_message(
-                terminal,
-                "Your login expired mid-turn — refreshing it now. Resend your message to continue.",
-            )?;
-        } else {
-            insert_message(terminal, &format!("Error: {error:#}"))?;
-        }
-    }
     // A cancelled turn's accumulated text never reached a commit point;
     // preserve it in the log as a partial model turn so nothing is lost.
     if cancelled && !response.is_empty() {
@@ -2093,6 +2093,32 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
         ))
         .wrap(Wrap { trim: false })
         .render(highlighted_area, buffer);
+    })?;
+    Ok(())
+}
+fn insert_error(terminal: &mut ratatui::DefaultTerminal, message: &str) -> Result<()> {
+    let width = usize::from(terminal.size()?.width.max(1));
+    let height = message
+        .lines()
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
+        .sum::<usize>()
+        .max(1) as u16;
+    terminal.insert_before(height, |buffer| {
+        let style = Style::default().fg(Color::White).bg(Color::Red);
+        buffer.set_style(buffer.area, style);
+        Paragraph::new(Text::styled(message, style))
+            .wrap(Wrap { trim: false })
+            .render(buffer.area, buffer);
+        // Keep the background visible in terminals that do not support
+        // background-color erase by making blank cells explicit.
+        for y in buffer.area.y..buffer.area.bottom() {
+            for x in buffer.area.x..buffer.area.right() {
+                let cell = buffer.cell_mut((x, y)).expect("error panel cell");
+                if cell.symbol() == " " {
+                    cell.set_symbol("\u{00a0}");
+                }
+            }
+        }
     })?;
     Ok(())
 }
@@ -2675,6 +2701,10 @@ fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+    // A terminal resize can move an inline viewport before ratatui has observed
+    // the new dimensions. Refresh its area first; otherwise we clear from the
+    // viewport's stale pre-resize row and leave duplicate input boxes behind.
+    terminal.autoresize()?;
     let top = terminal.get_frame().area().y;
     execute!(
         std::io::stdout(),
