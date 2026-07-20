@@ -158,7 +158,8 @@ async fn run() -> Result<()> {
             // servers, then initialize integrations concurrently below.
             let sessions = SessionStore::new(config_root);
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
-            let terminal = chat_ui::start_terminal(resumed.is_none(), cli.prompt.is_some())?;
+            let show_splash = resumed.is_none() && cli.prompt.is_none();
+            let terminal = chat_ui::start_terminal(show_splash, cli.prompt.is_some())?;
             let extension_control = extension_control::ExtensionControl::default();
             let mut refreshed_provider = store.providers[selected].clone();
             let (mcp, extensions, refreshed) = tokio::join!(
@@ -193,6 +194,7 @@ async fn run() -> Result<()> {
                 },
                 resumed,
                 cli.prompt,
+                show_splash,
             )
             .await?;
         }

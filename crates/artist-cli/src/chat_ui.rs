@@ -450,6 +450,7 @@ pub async fn run(
     resources: ChatResources<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
     initial_prompt: Option<String>,
+    show_splash: bool,
 ) -> Result<()> {
     let sessions = resources.sessions;
     let project = resources.project;
@@ -495,6 +496,7 @@ pub async fn run(
                 },
                 resumed,
                 initial_prompt,
+                show_splash,
                 status,
             )
             .await
@@ -584,6 +586,7 @@ async fn run_loop(
     mut context: ChatContext<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
     pending: Option<String>,
+    mut show_splash: bool,
     mut status: StatusRuntime,
 ) -> Result<()> {
     let resumed_session = resumed.is_some();
@@ -637,6 +640,7 @@ async fn run_loop(
             &footer,
             &mut viewport_height,
             viewport_floor,
+            false,
             false,
         )?;
         insert_history(
@@ -706,9 +710,12 @@ async fn run_loop(
             context.project,
             &status,
         );
-        // The splash lives in scrollback (printed once by start_terminal), so
-        // the viewport never reserves or clears it — no resize, no blink.
-        let show_splash = false;
+        // The splash is stored in scrollback until the first prompt. If Ratatui
+        // clears the screen to repair a horizontal shrink, resize_and_draw puts
+        // it back above the inline viewport.
+        let splash_visible = show_splash && pending.is_none();
+        // The splash itself lives above the viewport rather than inside it.
+        let render_splash = false;
         resize_and_draw(
             &mut terminal,
             &input,
@@ -716,9 +723,11 @@ async fn run_loop(
             &footer,
             &mut viewport_height,
             viewport_floor,
-            show_splash,
+            render_splash,
+            splash_visible,
         )?;
         if let Some(mut prompt) = pending.take() {
+            show_splash = false;
             // Custom commands expand to prompt templates (once — an expanded
             // template is never re-expanded).
             if let Some(expanded) =
@@ -835,6 +844,7 @@ async fn run_loop(
                                     &mut viewport_height,
                                     3,
                                     false,
+                                    false,
                                 )
                             },
                         )
@@ -867,6 +877,7 @@ async fn run_loop(
                     &footer,
                     &mut viewport_height,
                     3,
+                    false,
                     false,
                 )?;
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
@@ -1478,12 +1489,15 @@ fn resize_and_draw(
     viewport_height: &mut u16,
     viewport_floor: u16,
     show_splash: bool,
+    restore_scrollback_splash: bool,
 ) -> Result<()> {
     // A command panel hides the splash (see render_with_panel); keep the height
     // math consistent so no blank splash rows are reserved behind the panel.
     let show_splash = show_splash && panel.is_empty();
     let terminal_size = terminal.size()?;
-    let width_changed = terminal.get_frame().area().width != terminal_size.width;
+    let previous_width = terminal.get_frame().area().width;
+    let width_changed = previous_width != terminal_size.width;
+    let width_shrank = terminal_size.width < previous_width;
     let width = terminal_size.width.saturating_sub(2).max(1);
     let panel_height = if panel.is_empty() {
         0
@@ -1512,6 +1526,11 @@ fn resize_and_draw(
         terminal.autoresize()?;
         *viewport_height = desired;
         terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
+        if width_shrank && restore_scrollback_splash {
+            terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
+                crate::startup_splash::render_buffer(buffer);
+            })?;
+        }
         terminal.show_cursor()?;
     } else if desired != *viewport_height {
         *viewport_height = desired;
@@ -1999,6 +2018,7 @@ async fn submit(
         &footer,
         &mut stream_viewport.height,
         3,
+        false,
         false,
     )?;
     // A cancelled turn's accumulated text never reached a commit point;
