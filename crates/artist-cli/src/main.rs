@@ -253,7 +253,7 @@ fn load_resumed(
                 )
             })
             .collect::<Vec<_>>();
-        available[prompt::select("Session to resume", &items, 0)?]
+        available[prompt::select_paged("Session to resume", &items, 0, 10)?]
             .id
             .clone()
     } else {
