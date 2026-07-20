@@ -284,6 +284,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dashmap",
+ "dirs 6.0.0",
  "fff-search",
  "globset",
  "hashline-tools",

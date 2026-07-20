@@ -33,14 +33,18 @@ impl Workspace {
             state.join("locks"),
         )?;
         let picker = SharedFilePicker::default();
+        let broad_root = is_broad_root(&root);
         FilePicker::new_with_shared_state(
             picker.clone(),
             SharedFrecency::default(),
             FilePickerOptions {
                 base_path: root.to_string_lossy().into_owned(),
                 mode: FFFMode::Ai,
-                enable_content_indexing: true,
-                watch: true,
+                // Watching and content indexing an entire home directory or file
+                // system root is both expensive and explicitly rejected by FFF.
+                // Keep the path index available while disabling those features.
+                enable_content_indexing: !broad_root,
+                watch: !broad_root,
                 follow_symlinks: false,
                 ..Default::default()
             },
@@ -133,9 +137,29 @@ impl Workspace {
     }
 }
 
+fn is_broad_root(root: &Path) -> bool {
+    if root.parent().is_none() {
+        return true;
+    }
+
+    dirs::home_dir()
+        .and_then(|home| std::fs::canonicalize(home).ok())
+        .is_some_and(|home| home == root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn identifies_file_system_and_home_roots() {
+        let file_system_root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        assert!(is_broad_root(file_system_root));
+
+        if let Some(home) = dirs::home_dir().and_then(|path| std::fs::canonicalize(path).ok()) {
+            assert!(is_broad_root(&home));
+        }
+    }
+
     #[test]
     fn rejects_escape_and_absolute_paths() {
         let root = tempfile::tempdir().unwrap();

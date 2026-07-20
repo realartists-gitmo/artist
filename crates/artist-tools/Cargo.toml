@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 dashmap = "6"
+dirs = "6"
 fff-search = "0.9.7-nightly.fce72fa"
 globset = "0.4"
 nix = { version = "0.29", features = ["signal"] }
