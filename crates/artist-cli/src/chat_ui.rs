@@ -2216,6 +2216,22 @@ fn truncate_display_line(line: &str, width: usize) -> String {
     output
 }
 
+fn fill_panel_background(buffer: &mut Buffer) {
+    // A printable, one-column blank prevents ratatui's backend from replacing a
+    // run of trailing spaces with EraseToEndOfLine. NBSP is still treated as
+    // whitespace by some terminal layers, while the blank braille pattern is a
+    // regular glyph and therefore reliably carries its cell background.
+    const EXPLICIT_BLANK: &str = "\u{2800}";
+    for y in buffer.area.y..buffer.area.bottom() {
+        for x in buffer.area.x..buffer.area.right() {
+            let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
+            if cell.symbol() == " " {
+                cell.set_symbol(EXPLICIT_BLANK);
+            }
+        }
+    }
+}
+
 fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
@@ -2263,18 +2279,10 @@ fn insert_tool_line(
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
         // Ratatui may optimize trailing ordinary spaces into an erase-to-EOL
-        // sequence. Terminals without background-color erase support (notably
-        // herdr) then paint those cells with the default black background.
-        // Make every blank panel cell explicit after Paragraph has rendered so
-        // the shaded background survives that optimization.
-        for y in buffer.area.y..buffer.area.bottom() {
-            for x in buffer.area.x..buffer.area.right() {
-                let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
-                if cell.symbol() == " " {
-                    cell.set_symbol("\u{00a0}");
-                }
-            }
-        }
+        // sequence, which paints with the default background in terminals that
+        // do not support background-color erase (notably herdr). Emit a real
+        // blank glyph in every otherwise-empty panel cell instead.
+        fill_panel_background(buffer);
     })?;
     Ok(())
 }
@@ -2947,6 +2955,17 @@ mod tests {
         assert_eq!(truncate_display_line("abcdef", 5), "abcd…");
         assert_eq!(truncate_display_line("ab界cd", 5), "ab界…");
         assert_eq!(truncate_display_line("short", 8), "short");
+    }
+    #[test]
+    fn panel_background_uses_printable_blank_cells() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.cell_mut((1, 0)).unwrap().set_symbol("x");
+
+        fill_panel_background(&mut buffer);
+
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "\u{2800}");
+        assert_eq!(buffer.cell((1, 0)).unwrap().symbol(), "x");
+        assert_eq!(buffer.cell((3, 0)).unwrap().symbol(), "\u{2800}");
     }
 
     #[test]
