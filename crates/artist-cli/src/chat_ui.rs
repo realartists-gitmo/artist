@@ -1470,7 +1470,9 @@ fn resize_and_draw(
     // A command panel hides the splash (see render_with_panel); keep the height
     // math consistent so no blank splash rows are reserved behind the panel.
     let show_splash = show_splash && panel.is_empty();
-    let width = terminal.size()?.width.saturating_sub(2).max(1);
+    let terminal_size = terminal.size()?;
+    let width_changed = terminal.get_frame().area().width != terminal_size.width;
+    let width = terminal_size.width.saturating_sub(2).max(1);
     let panel_height = if panel.is_empty() {
         0
     } else {
@@ -1491,7 +1493,15 @@ fn resize_and_draw(
         // Never reserve an inline viewport taller than the terminal itself,
         // which ratatui cannot place (garbled reservation / scroll).
         .min(terminal.size()?.height);
-    if desired != *viewport_height {
+    if width_changed {
+        // A terminal width change only changes the existing viewport's area.
+        // Do not recreate `Viewport::Inline`: terminal reflow can commit the
+        // previous composer rows into scrollback, producing duplicate boxes.
+        terminal.autoresize()?;
+        *viewport_height = desired;
+        terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
+        terminal.show_cursor()?;
+    } else if desired != *viewport_height {
         *viewport_height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
         clear_inline(terminal)?;
@@ -2422,6 +2432,7 @@ fn draw_streaming(
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
+    let width_changed = terminal.get_frame().area().width != terminal_size.width;
     let width = terminal_size.width.max(1);
     let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
@@ -2436,8 +2447,16 @@ fn draw_streaming(
         .saturating_add(1)
         .saturating_add(footer_height)
         .min(terminal_size.height);
-    let resized = desired != viewport.height && viewport.observe_terminal(terminal_size);
-    if resized {
+    let resized =
+        !width_changed && desired != viewport.height && viewport.observe_terminal(terminal_size);
+    if width_changed {
+        // Width changes are handled by resizing and repainting the existing
+        // viewport. Reinitializing an inline viewport during terminal reflow
+        // leaves its former borders behind in scrollback.
+        terminal.autoresize()?;
+        viewport.height = desired;
+        viewport.observe_terminal(terminal_size);
+    } else if resized {
         viewport.height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
         clear_inline(terminal)?;
