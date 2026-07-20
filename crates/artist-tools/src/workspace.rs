@@ -40,11 +40,13 @@ impl Workspace {
             FilePickerOptions {
                 base_path: root.to_string_lossy().into_owned(),
                 mode: FFFMode::Ai,
-                // Watching and content indexing an entire home directory or file
-                // system root is both expensive and explicitly rejected by FFF.
-                // Keep the path index available while disabling those features.
+                // FFF requires explicit opt-in before scanning a home directory or
+                // file-system root. Avoid the expensive watcher and content index
+                // there, but retain the path index used by the find tool.
                 enable_content_indexing: !broad_root,
                 watch: !broad_root,
+                enable_fs_root_scanning: broad_root,
+                enable_home_dir_scanning: broad_root,
                 follow_symlinks: false,
                 ..Default::default()
             },
