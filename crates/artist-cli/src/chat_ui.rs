@@ -1941,10 +1941,11 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started)?;
     }
-    // Stream failures keep the chat open. Render them before the elapsed-time
-    // result so the result remains the last line above the input box.
+    // Compose the failure and elapsed time as one transcript block. This mirrors
+    // component-based TUIs (Codex/Pi), where related rows are laid out together
+    // instead of relying on the ordering of successive inline insertions.
     let mut auth_expired = false;
-    if let Some(result) = stream_result
+    let error_message = if let Some(result) = stream_result
         && let Err(error) = result.and_then(|result| result)
     {
         if is_auth_error(&error) {
@@ -1953,23 +1954,22 @@ async fn submit(
             // isn't safe because tool calls in the failed turn may have already
             // run, so ask the user to resend instead.
             auth_expired = true;
-            insert_error(
-                terminal,
-                "Your login expired mid-turn — refreshing it now. Resend your message to continue.",
-            )?;
+            Some(
+                "Your login expired mid-turn — refreshing it now. Resend your message to continue."
+                    .to_owned(),
+            )
         } else {
-            insert_error(terminal, &format!("Error: {error:#}"))?;
+            Some(format!("Error: {error:#}"))
         }
-    }
-    insert_blank(terminal)?;
-    insert_status(
-        terminal,
-        &if cancelled {
-            format!("  stopped · {}", format_elapsed(started.elapsed()))
-        } else {
-            format!("  {}", format_elapsed(started.elapsed()))
-        },
-    )?;
+    } else {
+        None
+    };
+    let elapsed_status = if cancelled {
+        format!("  stopped · {}", format_elapsed(started.elapsed()))
+    } else {
+        format!("  {}", format_elapsed(started.elapsed()))
+    };
+    insert_turn_result(terminal, error_message.as_deref(), &elapsed_status)?;
     resize_and_draw(
         terminal,
         &ChatInput::default(),
@@ -2129,29 +2129,55 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
     })?;
     Ok(())
 }
-fn insert_error(terminal: &mut ratatui::DefaultTerminal, message: &str) -> Result<()> {
+fn insert_turn_result(
+    terminal: &mut ratatui::DefaultTerminal,
+    error: Option<&str>,
+    status: &str,
+) -> Result<()> {
     let width = usize::from(terminal.size()?.width.max(1));
-    let height = message
-        .lines()
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
-        .sum::<usize>()
-        .max(1) as u16;
-    terminal.insert_before(height, |buffer| {
-        let style = Style::default().fg(Color::White).bg(Color::Red);
-        buffer.set_style(buffer.area, style);
-        Paragraph::new(Text::styled(message, style))
-            .wrap(Wrap { trim: false })
-            .render(buffer.area, buffer);
-        // Keep the background visible in terminals that do not support
-        // background-color erase by making blank cells explicit.
-        for y in buffer.area.y..buffer.area.bottom() {
-            for x in buffer.area.x..buffer.area.right() {
-                let cell = buffer.cell_mut((x, y)).expect("error panel cell");
-                if cell.symbol() == " " {
-                    cell.set_symbol("\u{00a0}");
+    let error_height = error.map_or(0, |message| {
+        message
+            .lines()
+            .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(width))
+            .sum::<usize>()
+            .max(1) as u16
+    });
+    // Keep one spacer between a provider error and the stopwatch. A successful
+    // turn retains the existing blank row before its stopwatch.
+    let total_height = error_height.saturating_add(2);
+    terminal.insert_before(total_height, |buffer| {
+        if let Some(message) = error {
+            let area = Rect::new(
+                buffer.area.x,
+                buffer.area.y,
+                buffer.area.width,
+                error_height,
+            );
+            let style = Style::default().fg(Color::White).bg(Color::Red);
+            buffer.set_style(area, style);
+            Paragraph::new(Text::styled(message, style))
+                .wrap(Wrap { trim: false })
+                .render(area, buffer);
+            // Make blank cells explicit for terminals without background-color
+            // erase support, so the red panel spans the complete row.
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let cell = buffer.cell_mut((x, y)).expect("error panel cell");
+                    if cell.symbol() == " " {
+                        cell.set_symbol("\u{00a0}");
+                    }
                 }
             }
         }
+        let status_area = Rect::new(
+            buffer.area.x,
+            buffer.area.bottom().saturating_sub(1),
+            buffer.area.width,
+            1,
+        );
+        Paragraph::new(status)
+            .style(Style::default().fg(Color::DarkGray))
+            .render(status_area, buffer);
     })?;
     Ok(())
 }
