@@ -2760,15 +2760,18 @@ fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 }
 
 fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
-    // A terminal resize can move an inline viewport before ratatui has observed
-    // the new dimensions. Refresh its area first; otherwise we clear from the
-    // viewport's stale pre-resize row and leave duplicate input boxes behind.
+    // Preserve both positions: shrinking/growing the terminal can move the
+    // inline viewport in either direction. Clearing only from the post-resize
+    // top leaves whichever part of the old viewport sits above it in scrollback,
+    // which appears as duplicated input boxes after resizing back.
+    let old_top = terminal.get_frame().area().y;
     terminal.autoresize()?;
-    let top = terminal.get_frame().area().y;
+    let new_top = terminal.get_frame().area().y;
+    let clear_from = old_top.min(new_top);
     execute!(
         std::io::stdout(),
         Hide,
-        MoveTo(0, top),
+        MoveTo(0, clear_from),
         Clear(ClearType::FromCursorDown)
     )?;
     Ok(())
