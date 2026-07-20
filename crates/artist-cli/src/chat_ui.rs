@@ -2538,11 +2538,12 @@ fn wrapped_footer(line: &Line<'_>, width: u16) -> Text<'static> {
 }
 
 fn wrapped_line_height(line: &Line<'_>, width: u16) -> u16 {
-    wrapped_footer(line, width)
-        .lines
-        .len()
-        .try_into()
-        .unwrap_or(u16::MAX)
+    // Keep the footer to one physical row. Letting its wrapped height resize the
+    // inline viewport on every width-change is what causes terminal reflow to
+    // commit old composer borders into scrollback. The footer is secondary
+    // information and is clipped horizontally at very narrow widths, while the
+    // input box itself can resize in place with the terminal.
+    u16::from(!line.spans.is_empty() && width > 0)
 }
 
 fn render_with_panel(
@@ -3032,7 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_wraps_and_reserves_rows_at_narrow_widths() {
+    fn status_bar_stays_one_row_at_narrow_widths() {
         let backend = TestBackend::new(6, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         let footer = Line::styled(
@@ -3044,10 +3045,9 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "m");
-        assert_eq!(buffer.cell((0, 4)).unwrap().symbol(), "|");
-        assert_eq!(buffer.cell((0, 5)).unwrap().symbol(), "c");
-        assert_eq!(buffer.cell((0, 3)).unwrap().bg, Color::Gray);
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((0, 4)).unwrap().symbol(), "└");
+        assert_eq!(buffer.cell((0, 5)).unwrap().symbol(), "m");
         assert_eq!(buffer.cell((0, 5)).unwrap().bg, Color::Gray);
     }
 
