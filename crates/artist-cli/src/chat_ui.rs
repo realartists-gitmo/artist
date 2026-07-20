@@ -617,6 +617,9 @@ async fn run_loop(
     let mut viewport_height = startup_viewport_height();
     let mut viewport_floor = 3;
     let mut command_panel = Vec::new();
+    // Tool selection can change during the session; keep the effective denylist
+    // live rather than holding the startup settings snapshot forever.
+    let mut denied_tools = context.settings.denied_tools.clone();
     let mut suggestion_index = 0usize;
     let mut suggestion_input = String::new();
     // The provider the session actually runs with: the selected account plus
@@ -825,6 +828,7 @@ async fn run_loop(
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
+                        let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
                         let command_input = ChatInput::default();
                         match command_ui::run(
                             context.store,
@@ -851,6 +855,19 @@ async fn run_loop(
                         .await
                         {
                             Ok(output) => {
+                                if tools_changed {
+                                    let config_root = context
+                                        .store_path
+                                        .parent()
+                                        .context("providers path has no parent")?;
+                                    denied_tools = crate::settings::load_effective(
+                                        config_root,
+                                        context.project,
+                                        &crate::settings::Overrides::default(),
+                                        &context.store.disabled_tools,
+                                    )?
+                                    .denied_tools;
+                                }
                                 if output.model_changed {
                                     status.context_capacity = output.context_capacity;
                                     status.used_tokens = None;
@@ -906,7 +923,7 @@ async fn run_loop(
                         mcp: context.mcp,
                         extensions: context.extensions,
                         extension_control: context.extension_control,
-                        disabled_tools: &context.settings.denied_tools,
+                        disabled_tools: &denied_tools,
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
