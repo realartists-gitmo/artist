@@ -208,10 +208,6 @@ fn enter_positional_project(cli: &mut Cli) -> Result<()> {
     if path.is_dir() {
         std::env::set_current_dir(path)
             .with_context(|| format!("enter project directory {}", path.display()))?;
-        // The positional arg doubles as prompt-or-project-dir; say which it was
-        // so a one-word prompt that happens to be a directory name isn't
-        // silently swallowed.
-        eprintln!("opening project {}", path.display());
         cli.prompt = None;
     }
     Ok(())
