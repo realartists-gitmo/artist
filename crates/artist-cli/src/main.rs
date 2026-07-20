@@ -244,7 +244,11 @@ fn load_resumed(
                 format!(
                     "{}  {}{}",
                     session.id,
-                    session.label.as_deref().unwrap_or("Untitled"),
+                    session
+                        .label
+                        .as_deref()
+                        .and_then(|label| label.lines().next())
+                        .unwrap_or("Untitled"),
                     session
                         .parent
                         .as_deref()
