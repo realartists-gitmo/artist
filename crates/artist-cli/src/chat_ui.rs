@@ -29,7 +29,7 @@ use ratatui::{
         execute,
         terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
     },
-    layout::Rect,
+    layout::{Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
@@ -322,6 +322,39 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+}
+
+struct StreamingViewport {
+    height: u16,
+    terminal_size: (u16, u16),
+    resize_changed_at: Option<std::time::Instant>,
+}
+
+impl StreamingViewport {
+    fn new(height: u16, terminal_size: Size) -> Self {
+        Self {
+            height,
+            terminal_size: (terminal_size.width, terminal_size.height),
+            resize_changed_at: None,
+        }
+    }
+
+    fn observe_terminal(&mut self, size: Size) -> bool {
+        let size = (size.width, size.height);
+        if size != self.terminal_size {
+            self.terminal_size = size;
+            self.resize_changed_at = Some(std::time::Instant::now());
+            return false;
+        }
+        let Some(changed_at) = self.resize_changed_at else {
+            return true;
+        };
+        if changed_at.elapsed() < std::time::Duration::from_millis(250) {
+            return false;
+        }
+        self.resize_changed_at = None;
+        true
+    }
 }
 
 struct ChatContext<'a> {
@@ -1565,10 +1598,10 @@ async fn submit(
     let mut response_output_started = false;
     let mut response_since_tool = false;
     let mut tools = ToolUi::default();
-    // Start at the real viewport height the input box already occupies. The
-    // streaming layout keeps that height (response goes to scrollback, not a
-    // live tail), so entering a turn doesn't re-init/blink the viewport.
-    let mut stream_height = viewport_height;
+    // Keep the existing viewport on entry so starting a turn does not blink.
+    // Width-driven height changes are debounced while the terminal is moving.
+    let terminal_size = terminal.size()?;
+    let mut stream_viewport = StreamingViewport::new(viewport_height, terminal_size);
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
@@ -1636,7 +1669,7 @@ async fn submit(
             input: &steering_input,
             steering: &steering,
         },
-        &mut stream_height,
+        &mut stream_viewport,
     )?;
     while !task.is_finished() || !rx.is_empty() {
         tokio::select! {
@@ -1877,7 +1910,7 @@ async fn submit(
                 input: &steering_input,
                 steering: &steering,
             },
-            &mut stream_height,
+            &mut stream_viewport,
         )?;
     }
     let stream_result = if cancelled {
@@ -1942,7 +1975,7 @@ async fn submit(
         &ChatInput::default(),
         &[],
         &footer,
-        &mut stream_height,
+        &mut stream_viewport.height,
         3,
         false,
     )?;
@@ -1974,7 +2007,7 @@ async fn submit(
     )?;
     let delivered = delivered_steering;
     Ok(SubmitResult {
-        viewport_height: stream_height,
+        viewport_height: stream_viewport.height,
         queued: steering
             .take()
             .into_iter()
@@ -2360,7 +2393,7 @@ fn draw_streaming(
     status: &str,
     footer: &Line<'_>,
     controls: StreamingControls<'_>,
-    viewport_height: &mut u16,
+    viewport: &mut StreamingViewport,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
     let width = terminal_size.width.max(1);
@@ -2377,9 +2410,9 @@ fn draw_streaming(
         .saturating_add(1)
         .saturating_add(footer_height)
         .min(terminal_size.height);
-    let resized = desired != *viewport_height;
+    let resized = desired != viewport.height && viewport.observe_terminal(terminal_size);
     if resized {
-        *viewport_height = desired;
+        viewport.height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
         clear_inline(terminal)?;
         *terminal = ratatui::init_with_options(TerminalOptions {
