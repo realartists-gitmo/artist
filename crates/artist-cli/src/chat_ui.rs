@@ -2338,16 +2338,18 @@ fn draw_streaming(
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
     let width = terminal_size.width.max(1);
+    let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
     // Show the activity/cancel hint above the input while preserving the
-    // configured status bar on the bottom row.
+    // configured status bar at the bottom.
     let desired = input_height
         .saturating_add(queued_height)
-        .saturating_add(2)
+        .saturating_add(1)
+        .saturating_add(footer_height)
         .min(terminal_size.height);
     let resized = desired != *viewport_height;
     if resized {
@@ -2397,12 +2399,18 @@ fn draw_streaming(
             area.x,
             status_area.bottom(),
             area.width,
-            area.height.saturating_sub(queued_height + 2),
+            area.height
+                .saturating_sub(queued_height + 1 + footer_height),
         );
         render_input(frame, input_area, controls.input);
         frame.render_widget(
-            Paragraph::new(footer.clone()),
-            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+            Paragraph::new(wrapped_footer(footer, area.width)),
+            Rect::new(
+                area.x,
+                area.bottom().saturating_sub(footer_height),
+                area.width,
+                footer_height,
+            ),
         );
     })?;
     terminal.show_cursor()?;
@@ -2410,6 +2418,46 @@ fn draw_streaming(
         execute!(std::io::stdout(), EndSynchronizedUpdate)?;
     }
     Ok(())
+}
+
+fn wrapped_footer(line: &Line<'_>, width: u16) -> Text<'static> {
+    if line.spans.is_empty() || width == 0 {
+        return Text::default();
+    }
+    let width = usize::from(width);
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    let mut used: usize = 0;
+    for span in &line.spans {
+        let mut chunk = String::new();
+        for character in span.content.chars() {
+            let character_width = character.width().unwrap_or(0);
+            if used > 0 && used.saturating_add(character_width) > width {
+                if !chunk.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
+                }
+                lines.push(Line::from(std::mem::take(&mut spans)).style(line.style));
+                used = 0;
+            }
+            chunk.push(character);
+            used = used.saturating_add(character_width);
+        }
+        if !chunk.is_empty() {
+            spans.push(Span::styled(chunk, span.style));
+        }
+    }
+    if !spans.is_empty() {
+        lines.push(Line::from(spans).style(line.style));
+    }
+    Text::from(lines)
+}
+
+fn wrapped_line_height(line: &Line<'_>, width: u16) -> u16 {
+    wrapped_footer(line, width)
+        .lines
+        .len()
+        .try_into()
+        .unwrap_or(u16::MAX)
 }
 
 fn render_with_panel(
@@ -2420,7 +2468,7 @@ fn render_with_panel(
     show_splash: bool,
 ) {
     let area = frame.area();
-    let status_height = (!footer.spans.is_empty()) as u16;
+    let status_height = wrapped_line_height(footer, area.width);
     // The splash is a startup affordance only. Suppress it whenever a command
     // panel (e.g. /help) is open: a Paragraph doesn't clear its background, so
     // the splash would otherwise bleed through the panel's empty cells and eat
@@ -2434,10 +2482,15 @@ fn render_with_panel(
             Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
         );
     }
-    if status_height == 1 {
+    if status_height > 0 {
         frame.render_widget(
-            Paragraph::new(footer.clone()),
-            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+            Paragraph::new(wrapped_footer(footer, area.width)),
+            Rect::new(
+                area.x,
+                area.bottom().saturating_sub(status_height),
+                area.width,
+                status_height,
+            ),
         );
     }
     let input_height = input
@@ -2884,6 +2937,26 @@ mod tests {
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
         assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "m");
         assert_eq!(buffer.cell((0, 3)).unwrap().bg, Color::Gray);
+    }
+
+    #[test]
+    fn status_bar_wraps_and_reserves_rows_at_narrow_widths() {
+        let backend = TestBackend::new(6, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let footer = Line::styled(
+            "model | branch",
+            Style::default().fg(Color::Black).bg(Color::Gray),
+        );
+        terminal
+            .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer, false))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "m");
+        assert_eq!(buffer.cell((0, 4)).unwrap().symbol(), "|");
+        assert_eq!(buffer.cell((0, 5)).unwrap().symbol(), "c");
+        assert_eq!(buffer.cell((0, 3)).unwrap().bg, Color::Gray);
+        assert_eq!(buffer.cell((0, 5)).unwrap().bg, Color::Gray);
     }
 
     #[test]
