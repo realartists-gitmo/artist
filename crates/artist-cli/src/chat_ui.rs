@@ -327,7 +327,7 @@ struct StreamingControls<'a> {
 struct StreamingViewport {
     height: u16,
     terminal_size: (u16, u16),
-    resize_changed_at: Option<std::time::Instant>,
+    resize_locked: bool,
 }
 
 impl StreamingViewport {
@@ -335,25 +335,20 @@ impl StreamingViewport {
         Self {
             height,
             terminal_size: (terminal_size.width, terminal_size.height),
-            resize_changed_at: None,
+            resize_locked: false,
         }
     }
 
-    fn observe_terminal(&mut self, size: Size) -> bool {
+    fn can_resize_viewport(&mut self, size: Size) -> bool {
         let size = (size.width, size.height);
         if size != self.terminal_size {
             self.terminal_size = size;
-            self.resize_changed_at = Some(std::time::Instant::now());
-            return false;
+            // Recreating an inline viewport after the host terminal moves it can
+            // scroll old frames into view. Keep its height fixed for the rest of
+            // this streaming turn; the normal post-turn redraw will size it once.
+            self.resize_locked = true;
         }
-        let Some(changed_at) = self.resize_changed_at else {
-            return true;
-        };
-        if changed_at.elapsed() < std::time::Duration::from_millis(250) {
-            return false;
-        }
-        self.resize_changed_at = None;
-        true
+        !self.resize_locked
     }
 }
 
@@ -639,10 +634,9 @@ async fn run_loop(
         )?;
     }
     loop {
-        let provider = &context.store.providers[context.provider_index];
         context.extensions.update_context(|extension_context| {
-            extension_context.model = provider.model.clone();
-            extension_context.reasoning = provider.reasoning_effort.clone();
+            extension_context.model = session_provider.model.clone();
+            extension_context.reasoning = session_provider.reasoning_effort.clone();
         });
         status.extension_values = context.extensions.status_items();
         // Prompt execution can change any external status (notably the checked-out
@@ -839,6 +833,13 @@ async fn run_loop(
                                 if output.model_changed {
                                     status.context_capacity = output.context_capacity;
                                     status.used_tokens = None;
+                                    // command_ui persists the selection in the store, while
+                                    // the footer and subsequent request use this effective
+                                    // per-session clone. Rebuild it immediately so /model
+                                    // updates both without requiring an account switch.
+                                    session_provider = context.settings.apply_to(
+                                        context.store.providers[context.provider_index].clone(),
+                                    );
                                 }
                                 output.lines
                             }
@@ -2440,7 +2441,6 @@ fn draw_streaming(
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
-    let width_changed = terminal.get_frame().area().width != terminal_size.width;
     let width = terminal_size.width.max(1);
     let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
@@ -2455,16 +2455,8 @@ fn draw_streaming(
         .saturating_add(1)
         .saturating_add(footer_height)
         .min(terminal_size.height);
-    let resized =
-        !width_changed && desired != viewport.height && viewport.observe_terminal(terminal_size);
-    if width_changed {
-        // Width changes are handled by resizing and repainting the existing
-        // viewport. Reinitializing an inline viewport during terminal reflow
-        // leaves its former borders behind in scrollback.
-        terminal.autoresize()?;
-        viewport.height = desired;
-        viewport.observe_terminal(terminal_size);
-    } else if resized {
+    let resized = desired != viewport.height && viewport.can_resize_viewport(terminal_size);
+    if resized {
         viewport.height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
         clear_inline(terminal)?;
@@ -2868,6 +2860,15 @@ mod tests {
         assert_eq!(input.text, "a\n");
         input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(input.text, "a");
+    }
+
+    #[test]
+    fn streaming_viewport_stays_locked_after_terminal_resize() {
+        let mut viewport = StreamingViewport::new(6, Size::new(80, 24));
+        assert!(viewport.can_resize_viewport(Size::new(80, 24)));
+        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
+        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
+        assert_eq!(viewport.height, 6);
     }
 
     #[test]
