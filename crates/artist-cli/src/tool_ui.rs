@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 
@@ -7,78 +7,111 @@ const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 #[derive(Default)]
 pub struct ToolUi {
     calls: HashMap<String, CallState>,
+    order: VecDeque<String>,
     pending: HashSet<String>,
 }
 
 pub struct ToolOutput {
-    pub text: String,
-    pub is_diff: bool,
+    pub lines: Vec<ToolLine>,
     pub batch_complete: bool,
+}
+
+pub struct ToolLine {
+    pub text: String,
+    pub first: bool,
+    pub is_diff: bool,
 }
 
 struct CallState {
     name: String,
-    output_started: bool,
-    displayed_bytes: usize,
+    title: String,
+    title_displayed: bool,
+    completed_output: Option<(String, bool)>,
 }
 
 impl ToolUi {
-    pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> String {
-        let title = title(name, arguments);
+    /// Registers a call and returns its title only when it is the next transcript slot.
+    /// Later calls run concurrently, but remain buffered behind earlier call output.
+    pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> Option<String> {
+        let show_now = self.order.is_empty();
+        let call_title = title(name, arguments);
         self.pending.insert(id.clone());
+        self.order.push_back(id.clone());
         self.calls.insert(
             id,
             CallState {
                 name: name.to_owned(),
-                output_started: false,
-                displayed_bytes: 0,
+                title: call_title.clone(),
+                title_displayed: show_now,
+                completed_output: None,
             },
         );
-        title
+        show_now.then_some(call_title)
     }
 
-    /// Formats a bounded output chunk. Future streaming tools can call this
-    /// repeatedly without allowing tool output to dominate the transcript.
+    /// Stores a completed result in its call slot, then emits every contiguous
+    /// ready slot in call order. Results may arrive in any execution order.
     pub fn output(&mut self, id: &str, chunk: &str) -> ToolOutput {
         let call = self
             .calls
             .entry(id.to_owned())
             .or_insert_with(|| CallState {
                 name: "tool".into(),
-                output_started: false,
-                displayed_bytes: 0,
+                title: "Tool".into(),
+                title_displayed: true,
+                completed_output: None,
             });
         let compact = compact_output(&call.name, chunk);
-        let remaining = DISPLAY_OUTPUT_LIMIT.saturating_sub(call.displayed_bytes);
-        if remaining == 0 {
-            self.pending.remove(id);
-            return ToolOutput {
-                text: String::new(),
-                is_diff: false,
-                batch_complete: self.pending.is_empty(),
-            };
-        }
-        let mut end = compact.len().min(remaining);
+        let mut end = compact.len().min(DISPLAY_OUTPUT_LIMIT);
         while end > 0 && !compact.is_char_boundary(end) {
             end -= 1;
         }
         let was_truncated = end < compact.len();
-        let prefix = if matches!(call.name.as_str(), "edit" | "write") || call.output_started {
-            ""
-        } else {
-            "= "
-        };
-        call.output_started = true;
-        call.displayed_bytes += end;
-        self.pending.remove(id);
-        ToolOutput {
-            text: format!(
+        let is_diff = matches!(call.name.as_str(), "edit" | "write");
+        let prefix = if is_diff { "" } else { "= " };
+        call.completed_output = Some((
+            format!(
                 "{prefix}{}{}",
                 &compact[..end],
                 if was_truncated { "…" } else { "" }
             ),
-            is_diff: matches!(call.name.as_str(), "edit" | "write"),
-            batch_complete: self.pending.is_empty(),
+            is_diff,
+        ));
+        self.pending.remove(id);
+
+        let mut lines = Vec::new();
+        while let Some(front_id) = self.order.front().cloned() {
+            let Some(front) = self.calls.get_mut(&front_id) else {
+                self.order.pop_front();
+                continue;
+            };
+            let Some((text, is_diff)) = front.completed_output.take() else {
+                break;
+            };
+            if !text.is_empty() {
+                lines.push(ToolLine {
+                    text,
+                    first: false,
+                    is_diff,
+                });
+            }
+            self.order.pop_front();
+            self.calls.remove(&front_id);
+            if let Some(next_id) = self.order.front()
+                && let Some(next) = self.calls.get_mut(next_id)
+                && !next.title_displayed
+            {
+                next.title_displayed = true;
+                lines.push(ToolLine {
+                    text: next.title.clone(),
+                    first: true,
+                    is_diff: false,
+                });
+            }
+        }
+        ToolOutput {
+            lines,
+            batch_complete: self.pending.is_empty() && self.order.is_empty(),
         }
     }
 }
@@ -313,23 +346,25 @@ fn humanize(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn formats_standard_tool_titles_and_compact_output() {
         let mut ui = ToolUi::default();
         assert_eq!(
             ui.start("f".into(), "find", &serde_json::json!({"query":"config"})),
-            "Searched files for “config”"
+            Some("Searched files for “config”".into())
         );
         let first = ui.output("f", "src/config.rs\nconfig.toml");
-        assert_eq!(first.text, "= Found 2 files");
+        assert_eq!(first.lines[0].text, "= Found 2 files");
         assert!(first.batch_complete);
+
         assert_eq!(
             ui.start(
                 "w".into(),
                 "web_search",
                 &serde_json::json!({"query":"rust async runtimes"})
             ),
-            "Web searched for “rust async runtimes”"
+            Some("Web searched for “rust async runtimes”".into())
         );
         ui.output("w", "results");
         assert_eq!(
@@ -338,18 +373,14 @@ mod tests {
                 "edit",
                 &serde_json::json!({"path":"src/lib.rs"})
             ),
-            "Edited src/lib.rs"
+            Some("Edited src/lib.rs".into())
         );
         assert_eq!(
             ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n")
+                .lines[0]
                 .text,
             "   1      │ -old\n        1 │ +new"
         );
-
-        ui.start("a".into(), "find", &serde_json::json!({"query":"a"}));
-        ui.start("b".into(), "find", &serde_json::json!({"query":"b"}));
-        assert!(!ui.output("a", "a.rs").batch_complete);
-        assert!(ui.output("b", "b.rs").batch_complete);
 
         ui.start(
             "d".into(),
@@ -361,7 +392,8 @@ mod tests {
                 "d",
                 r#"{"taskId":"delegate-1","status":"completed","output":"Found the bug."}"#,
             )
-            .text,
+            .lines[0]
+                .text,
             "= Completed\nFound the bug."
         );
         assert_eq!(
@@ -372,5 +404,30 @@ mod tests {
             truncate_delegate_text("1\n2\n3\n4\n5\n6\n7\n8\n9"),
             "1\n2\n3\n4\n5\n6\n7\n8\n…"
         );
+    }
+
+    #[test]
+    fn emits_concurrent_calls_and_results_in_call_order() {
+        let mut ui = ToolUi::default();
+        assert!(
+            ui.start("a".into(), "find", &serde_json::json!({"query":"a"}))
+                .is_some()
+        );
+        assert!(
+            ui.start("b".into(), "find", &serde_json::json!({"query":"b"}))
+                .is_none()
+        );
+
+        let early_second = ui.output("b", "b.rs");
+        assert!(early_second.lines.is_empty());
+        assert!(!early_second.batch_complete);
+
+        let released = ui.output("a", "a.rs");
+        assert!(released.batch_complete);
+        assert_eq!(released.lines.len(), 3);
+        assert_eq!(released.lines[0].text, "= Found 1 files");
+        assert_eq!(released.lines[1].text, "Searched files for “b”");
+        assert!(released.lines[1].first);
+        assert_eq!(released.lines[2].text, "= Found 1 files");
     }
 }

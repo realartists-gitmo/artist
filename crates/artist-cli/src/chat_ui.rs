@@ -1871,15 +1871,16 @@ async fn submit(
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                         }
-                        let title = tools.start(id, &name, &arguments);
-                        insert_tool_line(terminal, &title, true, false)?;
+                        if let Some(title) = tools.start(id, &name, &arguments) {
+                            insert_tool_line(terminal, &title, true, false)?;
+                        }
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
                         phase = "working";
                         let output = tools.output(&id, &content);
-                        if !output.text.is_empty() {
-                            insert_tool_line(terminal, &output.text, false, output.is_diff)?;
+                        for line in output.lines {
+                            insert_tool_line(terminal, &line.text, line.first, line.is_diff)?;
                         }
                         if images > 0 {
                             insert_tool_line(
