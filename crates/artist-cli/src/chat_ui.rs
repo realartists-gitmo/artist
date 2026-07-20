@@ -238,6 +238,17 @@ impl StatusRuntime {
     }
 }
 
+fn provider_with_session_selection(
+    provider: SavedProvider,
+    session_provider: &SavedProvider,
+) -> SavedProvider {
+    SavedProvider {
+        model: session_provider.model.clone(),
+        reasoning_effort: session_provider.reasoning_effort.clone(),
+        ..provider
+    }
+}
+
 fn footer_line(
     config: &StatusBarConfig,
     provider: &SavedProvider,
@@ -833,13 +844,12 @@ async fn run_loop(
                                 if output.model_changed {
                                     status.context_capacity = output.context_capacity;
                                     status.used_tokens = None;
-                                    // command_ui persists the selection in the store, while
-                                    // the footer and subsequent request use this effective
-                                    // per-session clone. Rebuild it immediately so /model
-                                    // updates both without requiring an account switch.
-                                    session_provider = context.settings.apply_to(
-                                        context.store.providers[context.provider_index].clone(),
-                                    );
+                                    // `/model` is an explicit in-session override, including
+                                    // when startup settings supplied model defaults. Use the
+                                    // newly persisted choice directly rather than reapplying
+                                    // those defaults over it.
+                                    session_provider =
+                                        context.store.providers[context.provider_index].clone();
                                 }
                                 output.lines
                             }
@@ -868,11 +878,12 @@ async fn run_loop(
                 {
                     let _ = context.store.save(context.store_path);
                 }
-                // Carry the just-refreshed token (and the settings override)
-                // into the request provider.
-                session_provider = context
-                    .settings
-                    .apply_to(context.store.providers[context.provider_index].clone());
+                // Carry refreshed account credentials into the request without
+                // clobbering a model/reasoning choice made via `/model`.
+                session_provider = provider_with_session_selection(
+                    context.store.providers[context.provider_index].clone(),
+                    &session_provider,
+                );
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
