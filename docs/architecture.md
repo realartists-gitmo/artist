@@ -321,6 +321,10 @@ conditionally generated only when the relevant tools are registered.
 - Status bar `Context` shows remaining context versus capacity; the separate
   `Session tokens` item shows cumulative request volume. `/statusbar` can toggle
   and reorder them independently.
+- Tool transcript rows use per-built-in glyphs. Extension tools may set optional
+  UI metadata in their manifest (`icon = "🚀"` inside `[[tools]]`); icons must be
+  a printable one- or two-column glyph. Missing or invalid icons fall back to
+  `🛠` without affecting the model-facing tool schema.
 
 ## Configuration
 

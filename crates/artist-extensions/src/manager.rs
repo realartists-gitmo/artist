@@ -92,6 +92,19 @@ impl Manager {
             .collect()
     }
 
+    /// UI metadata for tools backed by a live extension instance.
+    pub fn tool_icons(&self) -> HashMap<String, String> {
+        self.registry
+            .tools()
+            .filter(|(manifest, _)| self.instances.contains_key(&manifest.id))
+            .filter_map(|(_, tool)| {
+                tool.icon
+                    .as_ref()
+                    .map(|icon| (tool.name.clone(), icon.clone()))
+            })
+            .collect()
+    }
+
     pub fn commands(&self) -> Vec<crate::CommandDeclaration> {
         self.registry
             .commands()

@@ -23,6 +23,10 @@ pub struct Manifest {
 pub struct ToolDeclaration {
     pub name: String,
     pub description: String,
+    /// Optional one-cell or emoji glyph used by Artist's transcript UI.
+    /// Rendering validates it and falls back to the default tool icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     #[serde(default = "empty_schema")]
     pub parameters: serde_json::Value,
 }
@@ -76,5 +80,32 @@ impl Manifest {
             }
         }
         Ok(manifest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_icons_are_optional_manifest_metadata() {
+        let manifest: Manifest = toml::from_str(
+            r#"
+id = "demo"
+
+[[tools]]
+name = "deploy"
+description = "Deploy the project"
+icon = "🚀"
+
+[[tools]]
+name = "inspect"
+description = "Inspect the project"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.tools[0].icon.as_deref(), Some("🚀"));
+        assert_eq!(manifest.tools[1].icon, None);
     }
 }
