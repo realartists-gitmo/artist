@@ -2,6 +2,7 @@ mod args;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
+mod compaction;
 mod custom_commands;
 mod extension_control;
 mod input_atoms;

@@ -763,6 +763,26 @@ async fn run_loop(
                         }
                         return Ok(());
                     }
+                    Ok(slash_commands::ParsedCommand::Compact) => match active.as_ref() {
+                        None => vec!["No active session to compact.".to_owned()],
+                        Some(current) => {
+                            match crate::compaction::compact(current, &session_provider).await {
+                                Ok(Some(result)) => {
+                                    history = result.history;
+                                    status.used_tokens = None;
+                                    vec![format!(
+                                        "Compacted {} older session events; preserved the {} most recent turns.",
+                                        result.compacted_events,
+                                        crate::compaction::PRESERVE_RECENT_TURNS
+                                    )]
+                                }
+                                Ok(None) => {
+                                    vec!["Not enough older history to compact yet.".to_owned()]
+                                }
+                                Err(error) => vec![format!("Compaction failed: {error:#}")],
+                            }
+                        }
+                    },
                     Ok(slash_commands::ParsedCommand::Rewind { target, fork }) => handle_rewind(
                         &mut terminal,
                         context.sessions,
@@ -1614,6 +1634,23 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
+    // Compact before recording the pending prompt so it remains verbatim and
+    // outside the masked historical range.
+    if crate::compaction::should_compact(status.used_tokens, status.context_capacity) {
+        insert_message(terminal, "Compacting older context…")?;
+        if let Some(result) = crate::compaction::compact(active, context.provider).await? {
+            *history = result.history;
+            status.used_tokens = None;
+            insert_message(
+                terminal,
+                &format!(
+                    "Compacted {} older session events; preserved the {} most recent turns.",
+                    result.compacted_events,
+                    crate::compaction::PRESERVE_RECENT_TURNS
+                ),
+            )?;
+        }
+    }
     // Rules hot-reload between turns; the run holds the snapshot.
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
@@ -1642,13 +1679,12 @@ async fn submit(
     );
     terminal.draw(|frame| render_with_panel(frame, &empty_input, &[], &footer, false))?;
     terminal.show_cursor()?;
-    // The context-size readout needs the model catalog — a ~1s network call on
-    // the first turn (`context_capacity` is unset). Run it CONCURRENTLY with the
-    // streaming loop (polled as a select arm below) instead of blocking, so the
-    // input box stays live and the user can type/queue while it's in flight.
-    let mut catalog_fut = (status.context_capacity.is_none()
-        && context.status_config.items.contains(&StatusItem::Context))
-    .then(|| Box::pin(models::catalog(context.provider)));
+    // Context capacity drives automatic compaction as well as the optional
+    // status readout. Fetch it concurrently on the first turn.
+    let mut catalog_fut = status
+        .context_capacity
+        .is_none()
+        .then(|| Box::pin(models::catalog(context.provider)));
     let mut response = String::new();
     let mut visible = String::new();
     let mut reasoning = String::new();
