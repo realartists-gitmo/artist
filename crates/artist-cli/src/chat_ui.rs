@@ -333,7 +333,7 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
-    tool_gap: bool,
+    transcript_gap: bool,
 }
 
 struct StreamingViewport {
@@ -1650,6 +1650,7 @@ async fn submit(
     let mut response_started = false;
     let mut response_output_started = false;
     let mut response_since_tool = false;
+    let mut transcript_gap = false;
     let mut tools = ToolUi::default();
     // Keep the existing viewport on entry so starting a turn does not blink.
     // Width-driven height changes are debounced while the terminal is moving.
@@ -1720,7 +1721,7 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
-            tool_gap: false,
+            transcript_gap: false,
         },
         &mut stream_viewport,
     )?;
@@ -1851,6 +1852,7 @@ async fn submit(
                         if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
+                            transcript_gap = true;
                         }
                         if !response_started {
                             response_started = true;
@@ -1862,6 +1864,7 @@ async fn submit(
                         while let Some(line) = take_visible_line(&mut visible, width) {
                             insert_response(terminal, &line, !response_output_started)?;
                             response_output_started = true;
+                            transcript_gap = true;
                         }
                     }
                     artist_agent::PromptEvent::ReasoningSummaryDelta(delta) => {
@@ -1877,14 +1880,17 @@ async fn submit(
                                 visible.clear();
                             }
                             insert_blank(terminal)?;
+                            transcript_gap = false;
                             response_since_tool = false;
                         }
                         if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
+                            transcript_gap = true;
                         }
                         if let Some(title) = tools.start(id, &name, &arguments) {
                             insert_tool_line(terminal, &title, true, false)?;
+                            transcript_gap = true;
                         }
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
@@ -1893,6 +1899,7 @@ async fn submit(
                         let output = tools.output(&id, &content);
                         for line in output.lines {
                             insert_tool_line(terminal, &line.text, line.first, line.is_diff)?;
+                            transcript_gap = true;
                         }
                         if images > 0 {
                             insert_tool_line(
@@ -1901,6 +1908,7 @@ async fn submit(
                                 false,
                                 false,
                             )?;
+                            transcript_gap = true;
                         }
                         if collect_delivered(
                             &steering_handle,
@@ -1913,8 +1921,10 @@ async fn submit(
                         }
                         if output.batch_complete {
                             insert_blank(terminal)?;
+                            transcript_gap = false;
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
+                                transcript_gap = true;
                                 active.recorder.record(SteeringDelivered {
                                     content: message.content.clone(),
                                     after_internal_call_id: id.clone(),
@@ -1952,6 +1962,7 @@ async fn submit(
                             terminal,
                             &format!("  ⚠ rule {rule} fired on \"{excerpt}\" — rewound, retrying"),
                         )?;
+                        transcript_gap = true;
                     }
                 }
             }
@@ -1963,7 +1974,7 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
-                tool_gap: tools.is_active(),
+                transcript_gap,
             },
             &mut stream_viewport,
         )?;
@@ -2418,12 +2429,12 @@ fn streaming_viewport_height(
     input_height: u16,
     queued_height: u16,
     footer_height: u16,
-    tool_gap: bool,
+    transcript_gap: bool,
     terminal_height: u16,
 ) -> u16 {
     input_height
         .saturating_add(queued_height)
-        .saturating_add(u16::from(tool_gap))
+        .saturating_add(u16::from(transcript_gap))
         .saturating_add(1)
         .saturating_add(footer_height)
         .min(terminal_height)
@@ -2470,7 +2481,7 @@ fn draw_streaming(
     let width = terminal_size.width.max(1);
     let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
-    let tool_gap_height = u16::from(controls.tool_gap);
+    let transcript_gap_height = u16::from(controls.transcript_gap);
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
@@ -2481,7 +2492,7 @@ fn draw_streaming(
         input_height,
         queued_height,
         footer_height,
-        controls.tool_gap,
+        controls.transcript_gap,
         terminal_size.height,
     );
     let resized = desired != viewport.height && viewport.can_resize_viewport(terminal_size);
@@ -2518,16 +2529,16 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
-        // While tools are running, keep one live blank row between their
-        // scrollback panel and the activity timer. On batch completion the
-        // existing committed spacer replaces it, so spacing never doubles.
-        let status_top = queued_area.bottom().saturating_add(tool_gap_height);
+        // Keep one live blank row between streamed transcript output and the
+        // activity timer. A committed spacer disables the live one, so tool
+        // completion and output transitions never double the spacing.
+        let status_top = queued_area.bottom().saturating_add(transcript_gap_height);
         let status_area = Rect::new(
             area.x,
             status_top,
             area.width,
             area.height
-                .saturating_sub(queued_height + tool_gap_height)
+                .saturating_sub(queued_height + transcript_gap_height)
                 .min(1),
         );
         frame.render_widget(
@@ -2539,7 +2550,7 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height
-                .saturating_sub(queued_height + tool_gap_height + 1 + footer_height),
+                .saturating_sub(queued_height + transcript_gap_height + 1 + footer_height),
         );
         render_input(frame, input_area, controls.input);
         frame.render_widget(
@@ -3019,14 +3030,14 @@ mod tests {
     }
 
     #[test]
-    fn running_tool_adds_exactly_one_live_viewport_gap() {
-        let without_tool = streaming_viewport_height(3, 0, 1, false, 20);
-        let with_tool = streaming_viewport_height(3, 0, 1, true, 20);
-        assert_eq!(with_tool, without_tool + 1);
+    fn streamed_transcript_adds_exactly_one_live_viewport_gap() {
+        let without_output = streaming_viewport_height(3, 0, 1, false, 20);
+        let with_output = streaming_viewport_height(3, 0, 1, true, 20);
+        assert_eq!(with_output, without_output + 1);
         assert_eq!(
             streaming_viewport_height(3, 0, 1, false, 20),
-            without_tool,
-            "completion removes the live gap before committing its spacer"
+            without_output,
+            "a committed spacer disables the live gap"
         );
     }
 
