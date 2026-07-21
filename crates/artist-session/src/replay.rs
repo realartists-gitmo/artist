@@ -288,8 +288,11 @@ pub fn render_markdown(events: &[Envelope]) -> String {
 mod tests {
     use super::*;
     use crate::event::{
-        ModelTurn, RuleFired, SCHEMA_VERSION, ToolOutcomeRecord, ToolResultEvent, TurnUser,
+        ConversationMessages, ModelTurn, RuleFired, SCHEMA_VERSION, ToolOutcomeRecord,
+        ToolResultEvent, TurnUser,
     };
+    use rig_core::OneOrMany;
+    use rig_core::completion::message::{Message, UserContent};
 
     fn envelope(seq: u64, lineage: &str, event: SessionEvent) -> Envelope {
         Envelope {
@@ -393,6 +396,104 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn migrated_native_batch_replays_legacy_once_and_new_messages_once() {
+        let events = vec![
+            envelope(
+                0,
+                "main",
+                SessionEvent::TurnUser(TurnUser {
+                    content: vec![ContentBlock::Text { text: "old".into() }],
+                    display: None,
+                    source: "prompt".into(),
+                }),
+            ),
+            envelope(
+                1,
+                "main",
+                SessionEvent::ConversationMessages(ConversationMessages {
+                    messages: vec![
+                        Message::user("old"),
+                        Message::assistant("old answer"),
+                        Message::user("new"),
+                        Message::assistant("new answer"),
+                    ],
+                    reset: true,
+                    display_from: 2,
+                }),
+            ),
+        ];
+
+        assert_eq!(
+            replay_for_ui(&events),
+            vec![
+                ReplayItem::User("old".into()),
+                ReplayItem::User("new".into()),
+                ReplayItem::Assistant("new answer".into()),
+            ]
+        );
+        assert_eq!(user_prompts(&events), vec!["old", "new"]);
+    }
+
+    #[test]
+    fn replay_uses_only_the_display_text_of_a_multi_part_user_prompt() {
+        let prompt = Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::text("internal skill instructions"),
+                UserContent::text("actual prompt"),
+            ])
+            .unwrap(),
+        };
+        let events = vec![envelope(
+            0,
+            "main",
+            SessionEvent::ConversationMessages(ConversationMessages {
+                messages: vec![prompt],
+                reset: false,
+                display_from: 0,
+            }),
+        )];
+
+        assert_eq!(
+            replay_for_ui(&events),
+            vec![ReplayItem::User("actual prompt".into())]
+        );
+    }
+
+    #[test]
+    fn reset_batch_replaces_resume_and_prompt_recall_state() {
+        let events = vec![
+            envelope(
+                0,
+                "main",
+                SessionEvent::ConversationMessages(ConversationMessages {
+                    messages: vec![Message::user("stale"), Message::assistant("old")],
+                    reset: false,
+                    display_from: 0,
+                }),
+            ),
+            envelope(
+                1,
+                "main",
+                SessionEvent::ConversationMessages(ConversationMessages {
+                    messages: vec![Message::user("replacement")],
+                    reset: true,
+                    display_from: 0,
+                }),
+            ),
+        ];
+
+        assert_eq!(
+            replay_for_ui(&events),
+            vec![ReplayItem::User("replacement".into())]
+        );
+        assert_eq!(user_prompts(&events), vec!["replacement"]);
+        assert_eq!(rewind_targets(&events), vec![(1, "replacement".into())]);
+        let markdown = render_markdown(&events);
+        assert!(!markdown.contains("stale"));
+        assert!(markdown.contains("replacement"));
     }
 
     #[test]
