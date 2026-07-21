@@ -1,6 +1,7 @@
 //! The Artist agent loop, built on Rig.
 
 mod capture;
+mod conversation;
 mod delegate;
 mod delegate_jobs;
 pub mod mcp;
@@ -16,13 +17,12 @@ pub use steering::SteeringHandle;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use artist_rules::matcher::RuleSet;
 use artist_rules::state::RulesHandle;
 use artist_rules::types::Firing;
 use artist_session::{
-    AttachmentStore, Recorder, RuleFired, RuleInjection, RunFinished, RunStarted,
-    ToolOutcomeRecord, TurnUser,
+    Recorder, RuleFired, RuleInjection, RunFinished, RunStarted, ToolOutcomeRecord,
 };
 use artist_tools::ToolBundle;
 use base64::Engine;
@@ -35,8 +35,9 @@ use rig_core::{
     completion::message::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
+    memory::{ConversationMemory, InMemoryConversationMemory},
     providers::chatgpt,
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
+    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt},
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -96,7 +97,8 @@ pub struct SessionHandles {
     pub rules: RulesHandle,
     pub rule_set: Arc<RuleSet>,
     pub recorder: Recorder,
-    pub attachments: AttachmentStore,
+    pub memory: Arc<dyn ConversationMemory>,
+    pub conversation_id: String,
     pub cancel: CancellationToken,
 }
 
@@ -107,7 +109,8 @@ impl Default for SessionHandles {
             rules: RulesHandle::default(),
             rule_set: Arc::new(RuleSet::compile(Vec::new())),
             recorder: Recorder::noop(),
-            attachments: AttachmentStore::new(std::env::temp_dir().join("artist-attachments")),
+            memory: Arc::new(InMemoryConversationMemory::new()),
+            conversation_id: "default".to_owned(),
             cancel: CancellationToken::new(),
         }
     }
@@ -192,13 +195,11 @@ pub struct ToolContext<'a> {
     pub disabled: &'a [String],
 }
 
-/// Executes one prompt with prior chat context and emits model output as it
-/// arrives. `history` carries full-fidelity rig messages (tool calls, tool
-/// results, reasoning) rebuilt from the session event log.
+/// Executes one prompt and emits model output as it arrives. Rig loads and
+/// persists the conversation through [`SessionHandles::memory`].
 pub async fn stream_chat(
     provider: &SavedProvider,
     input: &ChatInput,
-    history: Vec<Message>,
     tool_context: ToolContext<'_>,
     handles: SessionHandles,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
@@ -229,7 +230,12 @@ pub async fn stream_chat(
     );
     handles.rules.note_user_turn();
 
-    let mut seed_history = history;
+    let mut seed_history = handles
+        .memory
+        .load(&handles.conversation_id)
+        .await
+        .context("load conversation memory")?;
+    let durable_history_len = seed_history.len();
     let mut seed_prompt = user_message(input);
     // Skill instructions depend on what the user just typed, so ride them on
     // the user turn instead of folding them into the (otherwise stable)
@@ -307,15 +313,21 @@ pub async fn stream_chat(
                 .iter()
                 .any(|name| name == &tool.name())
         });
+        let persistence = conversation::PersistenceStatus::default();
+        let attempt_memory = conversation::AttemptMemory::new(
+            Arc::clone(&handles.memory),
+            handles.conversation_id.clone(),
+            seed_history.clone(),
+            durable_history_len,
+            persistence.clone(),
+        );
         let agent = builder
             .preamble(&system_prompt)
+            .memory(attempt_memory)
+            .conversation(handles.conversation_id.clone())
             .tools(registered)
             .add_hook(steering::SteeringHook(handles.steering.clone()))
-            .add_hook(CaptureHook::new(
-                run_recorder.clone(),
-                handles.attachments.clone(),
-                tool_meta.clone(),
-            ))
+            .add_hook(CaptureHook::new(tool_meta.clone()))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
             .default_max_turns(usize::MAX)
             .build();
@@ -326,23 +338,34 @@ pub async fn stream_chat(
             reasoning_effort: provider.reasoning_effort.clone(),
         });
 
-        let mut stream = agent
-            .stream_chat(seed_prompt.clone(), seed_history.clone())
-            .await;
+        let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
         loop {
             let item = tokio::select! {
                 biased;
+                item = stream.next() => item,
                 _ = handles.cancel.cancelled() => {
                     run_recorder.record(RunFinished::Cancelled);
                     return Ok(RunOutcome::Cancelled);
                 }
-                item = stream.next() => item,
             };
             let Some(item) = item else {
-                run_recorder.record(RunFinished::Completed);
-                return Ok(RunOutcome::Completed);
+                let error = anyhow!("Rig stream ended without a final response");
+                run_recorder.record(RunFinished::Error {
+                    error: error.to_string(),
+                });
+                return Err(error);
             };
             match item {
+                Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                    if let Err(error) = persistence.result() {
+                        run_recorder.record(RunFinished::Error {
+                            error: error.clone(),
+                        });
+                        return Err(anyhow!(error)).context("persist conversation memory");
+                    }
+                    run_recorder.record(RunFinished::Completed);
+                    return Ok(RunOutcome::Completed);
+                }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
@@ -465,9 +488,8 @@ pub async fn stream_chat(
     }
 }
 
-/// Log the rule.fired + rule.injection events and the reminder prompt (as a
-/// `turn.user{source:"rule"}` so history rebuilt from the log matches what
-/// the model was actually sent).
+/// Log rule bookkeeping; Rig conversation memory persists the reminder prompt
+/// when the retried run succeeds.
 /// A stable `prompt_cache_key` derived from the project root and model, so a
 /// project's turns route to the same server-side prefix cache. Deterministic
 /// across process runs (`DefaultHasher` uses fixed keys).
@@ -492,22 +514,6 @@ pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firin
         reminder: firing.reminder.clone(),
         session_persistent: firing.persistence == artist_rules::types::Persistence::Session,
     });
-    let reminder = reminder_message(firing);
-    if let Message::User { content } = &reminder {
-        recorder.record(TurnUser {
-            content: content
-                .iter()
-                .filter_map(|item| match item {
-                    UserContent::Text(text) => Some(artist_session::ContentBlock::Text {
-                        text: text.text.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            display: Some(format!("rule: {}", firing.rule)),
-            source: "rule".to_owned(),
-        });
-    }
 }
 
 pub(crate) fn user_message(input: &ChatInput) -> Message {
@@ -544,7 +550,6 @@ pub async fn stream_prompt(
     stream_chat(
         provider,
         &input,
-        Vec::new(),
         ToolContext {
             native: tools,
             mcp,

@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Interpretation:
-//! - Both phases pass → full-fidelity resume is viable as designed.
+//! - Both phases pass → Rig-native conversation-memory resume is viable.
 //! - Phase 2 fails on the replay request → enable the degrade path
 //!   (`HistoryOptions::drop_encrypted_reasoning = true` on cross-run replay)
 //!   and re-run; if that passes, resume keeps text + tool round-trips and
@@ -61,7 +61,7 @@ fn client(provider: &SavedProvider) -> Result<chatgpt::Client> {
 }
 
 /// Phase 1: run a turn that uses a tool, capturing the committed messages
-/// exactly the way `CaptureHook` → event log → history builder would.
+/// in the same generic message shape persisted by Rig conversation memory.
 /// Phase 2: build a brand-new client (simulating a fresh process) and send
 /// a follow-up referencing the tool output, with the captured history
 /// replayed verbatim.
@@ -94,7 +94,7 @@ async fn replayed_tool_history_is_accepted_cross_process() -> Result<()> {
         }
     }
 
-    // ---- Phase 1: capture committed history via a hook, like CaptureHook.
+    // ---- Phase 1: capture the Rig-native committed history.
     use std::sync::{Arc, Mutex};
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Message>>>);

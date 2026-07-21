@@ -1,17 +1,13 @@
-//! The capture hook: records committed model turns and tool results into
-//! the session event log, and stashes structured tool outcomes for the
-//! display stream.
+//! Captures structured tool outcomes for Artist's live display stream.
 //!
-//! Registered AFTER `SteeringHook` so the recorded tool-result text is the
-//! model-visible version (steering rewrites chain through the hook stack);
-//! `outcome` is rig's raw structured result regardless of rewrites.
-//! `observes` excludes all delta events — zero hot-path cost.
+//! Conversation persistence is owned by Rig's `ConversationMemory`; this hook
+//! only supplies metadata absent from Rig's streamed user items.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use artist_session::{AttachmentStore, ModelTurn, Recorder, ToolOutcomeRecord, ToolResultEvent};
+use artist_session::ToolOutcomeRecord;
 use rig_core::agent::{AgentHook, Flow, HookContext, StepEvent, StepEventKind};
 use rig_core::completion::CompletionModel;
 use rig_core::tool::ToolOutcome;
@@ -37,17 +33,13 @@ impl ToolMeta {
 }
 
 pub(crate) struct CaptureHook {
-    recorder: Recorder,
-    attachments: AttachmentStore,
     meta: ToolMeta,
     starts: Mutex<HashMap<String, Instant>>,
 }
 
 impl CaptureHook {
-    pub fn new(recorder: Recorder, attachments: AttachmentStore, meta: ToolMeta) -> Self {
+    pub fn new(meta: ToolMeta) -> Self {
         Self {
-            recorder,
-            attachments,
             meta,
             starts: Mutex::new(HashMap::new()),
         }
@@ -74,32 +66,11 @@ fn outcome_record(outcome: &ToolOutcome, result: &str) -> ToolOutcomeRecord {
 
 impl<M: CompletionModel> AgentHook<M> for CaptureHook {
     fn observes(&self, kind: StepEventKind) -> bool {
-        matches!(
-            kind,
-            StepEventKind::ModelTurnFinished | StepEventKind::ToolCall | StepEventKind::ToolResult
-        )
+        matches!(kind, StepEventKind::ToolCall | StepEventKind::ToolResult)
     }
 
     async fn on_event(&self, _context: &HookContext, event: StepEvent<'_, M>) -> Flow {
         match event {
-            // The canonical commit point: exactly what rig accepts into the
-            // run, including reasoning items and tool calls.
-            StepEvent::ModelTurnFinished {
-                turn,
-                content,
-                usage,
-            } => {
-                let blocks = content
-                    .iter()
-                    .flat_map(|item| artist_session::assistant_to_blocks(item, &self.attachments))
-                    .collect::<Vec<_>>();
-                self.recorder.record(ModelTurn {
-                    turn: turn as u32,
-                    content: blocks,
-                    total_tokens: usage.total_tokens,
-                    partial: false,
-                });
-            }
             StepEvent::ToolCall {
                 internal_call_id, ..
             } => {
@@ -128,16 +99,7 @@ impl<M: CompletionModel> AgentHook<M> for CaptureHook {
                     internal_call_id.to_owned(),
                     (record.clone(), duration_ms.unwrap_or(0)),
                 );
-                self.recorder.record(ToolResultEvent {
-                    internal_call_id: internal_call_id.to_owned(),
-                    tool_call_id: tool_call_id.map(str::to_owned),
-                    name: tool_name.to_owned(),
-                    arguments: serde_json::from_str(args)
-                        .unwrap_or_else(|_| serde_json::Value::String(args.to_owned())),
-                    result: result.to_owned(),
-                    outcome: record,
-                    duration_ms,
-                });
+                let _ = (tool_name, tool_call_id, args);
             }
             _ => {}
         }

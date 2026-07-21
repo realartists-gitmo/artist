@@ -261,11 +261,7 @@ impl Delegate {
                 .tool(child_tools.find.clone())
                 .tool(child_tools.grep.clone())
                 .tool(self.resources.skill_tool())
-                .add_hook(CaptureHook::new(
-                    run_recorder.clone(),
-                    self.handles.attachments.clone(),
-                    ToolMeta::default(),
-                ))
+                .add_hook(CaptureHook::new(ToolMeta::default()))
                 .add_hook(TtsrHook(Arc::clone(&ttsr)));
             if !read_only {
                 builder = builder
