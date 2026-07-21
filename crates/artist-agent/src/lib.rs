@@ -1,6 +1,7 @@
 //! The Artist agent loop, built on Rig.
 
 mod capture;
+pub mod compaction;
 mod delegate;
 mod delegate_jobs;
 pub mod mcp;
