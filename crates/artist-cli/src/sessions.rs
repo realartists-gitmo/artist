@@ -64,6 +64,7 @@ impl Session {
 pub struct ActiveSession {
     pub session: Session,
     pub recorder: Recorder,
+    pub memory: artist_session::SessionMemory,
     pub attachments: AttachmentStore,
     task: WriterTask,
 }
@@ -72,8 +73,15 @@ impl ActiveSession {
     /// Flush and release the session. Call after all recorder clones are
     /// dropped (i.e. after the last run finished).
     pub async fn close(self) -> Result<()> {
-        drop(self.recorder);
-        self.task.close().await
+        let Self {
+            recorder,
+            memory,
+            task,
+            ..
+        } = self;
+        drop(recorder);
+        drop(memory);
+        task.close().await
     }
 
     /// Current events on disk (flush the recorder first for read-your-writes).
@@ -412,9 +420,16 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
     let writer = EventLogWriter::open(&dir, &session.id)?;
     let attachments = AttachmentStore::new(dir.join("attachments"));
     let (recorder, task) = spawn_writer(writer, Some(session.transcript.clone()));
+    let memory = artist_session::SessionMemory::new(
+        session.id.clone(),
+        &dir,
+        recorder.clone(),
+        attachments.clone(),
+    );
     Ok(ActiveSession {
         session,
         recorder,
+        memory,
         attachments,
         task,
     })

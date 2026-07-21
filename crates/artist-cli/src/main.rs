@@ -292,22 +292,10 @@ async fn execute_prompt(
     // (a throwaway clone, never persisted).
     let session_provider = effective.apply_to(store.providers[selected].clone());
     let tools = tool_bundle(config_root, &project)?;
-    let (active, events) = match load_resumed(&sessions, &project, resume)? {
+    let (active, _) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
-    let history = artist_session::build_history(
-        &events,
-        &active.attachments,
-        &artist_session::HistoryOptions::default(),
-    )?;
-    active.recorder.record(artist_session::TurnUser {
-        content: vec![artist_session::ContentBlock::Text {
-            text: input.to_owned(),
-        }],
-        display: None,
-        source: "prompt".to_owned(),
-    });
     let rules_engine = artist_rules::RulesEngine::discover(&project);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -316,7 +304,8 @@ async fn execute_prompt(
         rules: artist_rules::state::RulesHandle::default(),
         rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
-        attachments: active.attachments.clone(),
+        memory: Arc::new(active.memory.clone()),
+        conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));
@@ -334,7 +323,6 @@ async fn execute_prompt(
         let chat = artist_agent::stream_chat(
             &session_provider,
             &agent_input,
-            history,
             artist_agent::ToolContext {
                 native: &tools,
                 mcp,
@@ -398,16 +386,7 @@ async fn execute_prompt(
         payload: serde_json::json!({"state":"idle"}),
     });
     let outcome = outcome?;
-    if outcome == artist_agent::RunOutcome::Cancelled && !response.is_empty() {
-        active.recorder.record(artist_session::ModelTurn {
-            turn: 0,
-            content: vec![artist_session::ContentBlock::Text {
-                text: response.clone(),
-            }],
-            total_tokens: 0,
-            partial: true,
-        });
-    }
+    let _ = outcome;
     println!();
     let session_id = active.session.id.clone();
     active.close().await?;

@@ -13,7 +13,7 @@ use crate::{
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
 use artist_rules::{RulesEngine, state::RulesHandle};
-use artist_session::{ContentBlock, Envelope, ReplayItem, SteeringDelivered, TurnUser};
+use artist_session::{Envelope, ReplayItem, SteeringDelivered};
 use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
 use ratatui::{
@@ -1618,11 +1618,6 @@ async fn submit(
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
     let agent_input_probe = clipboard::agent_input(&prompt)?;
-    active.recorder.record(TurnUser {
-        content: user_turn_blocks(&agent_input_probe, &active.attachments),
-        display: Some(prompt.display.clone()),
-        source: "prompt".to_owned(),
-    });
     if context.show_splash {
         // Add separation only when moving the splash into scrollback. The live
         // startup layout already reserves its own gap above the input box.
@@ -1675,7 +1670,6 @@ async fn submit(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let task_provider = context.provider.clone();
     let task_prompt = agent_input_probe;
-    let task_history = history.clone();
     let task_tools = context.tools.clone();
     let task_mcp = context.mcp.clone();
     let task_disabled_tools = context.disabled_tools.to_vec();
@@ -1693,14 +1687,14 @@ async fn submit(
         rules: context.rules_handle.clone(),
         rule_set,
         recorder: active.recorder.clone(),
-        attachments: active.attachments.clone(),
+        memory: std::sync::Arc::new(active.memory.clone()),
+        conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(
             &task_provider,
             &task_prompt,
-            task_history,
             artist_agent::ToolContext {
                 native: &task_tools,
                 mcp: &task_mcp,
@@ -2038,18 +2032,6 @@ async fn submit(
         false,
         false,
     )?;
-    // A cancelled turn's accumulated text never reached a commit point;
-    // preserve it in the log as a partial model turn so nothing is lost.
-    if cancelled && !response.is_empty() {
-        active.recorder.record(artist_session::ModelTurn {
-            turn: 0,
-            content: vec![ContentBlock::Text {
-                text: response.clone(),
-            }],
-            total_tokens: 0,
-            partial: true,
-        });
-    }
     // Rebuild the model-facing history from the log — the single source of
     // truth, including tool round-trips and any TTSR rule turns.
     active.recorder.flush().await;
@@ -2135,28 +2117,6 @@ fn insert_history(terminal: &mut ratatui::DefaultTerminal, items: &[ReplayItem])
         }
     }
     Ok(())
-}
-
-/// The stored content blocks for a user turn: prompt text plus any pasted
-/// images (content-addressed into the session's attachment store).
-fn user_turn_blocks(
-    input: &artist_agent::ChatInput,
-    attachments: &artist_session::AttachmentStore,
-) -> Vec<ContentBlock> {
-    let mut blocks = vec![ContentBlock::Text {
-        text: input.text.clone(),
-    }];
-    for image in &input.images {
-        if let Ok(attachment) = attachments.put(&image.data) {
-            blocks.push(ContentBlock::Image {
-                attachment,
-                media_type: serde_json::to_value(&image.media_type)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned)),
-            });
-        }
-    }
-    blocks
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
