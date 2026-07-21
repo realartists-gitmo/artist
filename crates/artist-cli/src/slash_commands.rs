@@ -38,6 +38,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/rewind [n] [fork]",
     },
     SlashCommand {
+        name: "/compact",
+        description: "Summarize old context while preserving recent work",
+        usage: "/compact [instructions]",
+    },
+    SlashCommand {
         name: "/rules",
         description: "Stream rules: list, scan the session, dry-run, toggle",
         usage: "/rules [scan|dry-run <file>|enable <rule>|disable <rule>]",
@@ -98,6 +103,9 @@ pub(crate) enum ParsedCommand<'a> {
         target: Option<usize>,
         fork: bool,
     },
+    Compact {
+        instructions: Option<&'a str>,
+    },
     Rules(RulesAction<'a>),
     /// Start a fresh session.
     New,
@@ -135,6 +143,15 @@ pub(crate) enum ParseError<'a> {
 
 /// Parses a complete slash command. Non-command input returns `None`.
 pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<'_>>> {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix("/compact")
+        && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+    {
+        let instructions = rest.trim();
+        return Some(Ok(ParsedCommand::Compact {
+            instructions: (!instructions.is_empty()).then_some(instructions),
+        }));
+    }
     let mut words = input.split_whitespace();
     let command = words.next()?;
     if !command.starts_with('/') {
@@ -313,6 +330,7 @@ mod tests {
                 "/tools",
                 "/mcp",
                 "/rewind",
+                "/compact",
                 "/rules",
                 "/new",
                 "/sessions",
@@ -356,6 +374,16 @@ mod tests {
                 model: Some("gpt-5"),
                 reasoning: Some("high")
             }))
+        );
+        assert_eq!(
+            parse("/compact focus on the parser and exact errors"),
+            Some(Ok(ParsedCommand::Compact {
+                instructions: Some("focus on the parser and exact errors")
+            }))
+        );
+        assert_eq!(
+            parse("/compact"),
+            Some(Ok(ParsedCommand::Compact { instructions: None }))
         );
         assert_eq!(parse("ordinary prompt"), None);
     }
