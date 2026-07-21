@@ -18,6 +18,7 @@
 //! ```
 
 mod attachments;
+mod compaction;
 mod convert;
 mod event;
 mod history;
@@ -26,6 +27,7 @@ mod recorder;
 mod replay;
 
 pub use attachments::AttachmentStore;
+pub use compaction::{CompactionCandidate, render_compaction_source, select_compaction_candidate};
 pub use convert::{assistant_to_blocks, blocks_to_assistant, blocks_to_user, user_to_blocks};
 pub use event::{
     ContentBlock, DelegateFinished, DelegateStarted, Envelope, HistoryCompact, HistoryRewind,
