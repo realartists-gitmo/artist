@@ -277,6 +277,7 @@ struct SubmitContext<'a> {
     extensions: &'a std::sync::Arc<artist_extensions::Manager>,
     extension_control: &'a crate::extension_control::ExtensionControl,
     disabled_tools: &'a [String],
+    compaction: crate::settings::CompactionConfig,
     show_splash: bool,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
@@ -776,6 +777,53 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Compact { instructions }) => {
+                        let Some(active_session) = active.as_ref() else {
+                            command_panel = vec!["Nothing to compact in a fresh session.".into()];
+                            continue;
+                        };
+                        let progress = ["Compacting context…".to_owned()];
+                        resize_and_draw(
+                            &mut terminal,
+                            &ChatInput::default(),
+                            &progress,
+                            &footer,
+                            &mut viewport_height,
+                            3,
+                            false,
+                            false,
+                        )?;
+                        match crate::compaction::compact(
+                            active_session,
+                            &session_provider,
+                            context.settings.compaction,
+                            instructions,
+                            "manual",
+                            status.used_tokens,
+                        )
+                        .await
+                        {
+                            Ok(Some(result)) => {
+                                let estimated_after =
+                                    artist_session::compaction::estimate_messages_tokens(
+                                        &result.history,
+                                    );
+                                history = result.history;
+                                status.used_tokens = Some(estimated_after);
+                                vec![format!(
+                                    "Compacted {} messages ({} tokens before; ~{} retained).",
+                                    result.summarized_messages,
+                                    result.tokens_before,
+                                    estimated_after
+                                )]
+                            }
+                            Ok(None) => vec![
+                                "Nothing to compact; the conversation fits inside the recent-context budget."
+                                    .into(),
+                            ],
+                            Err(error) => vec![format!("Compaction failed: {error:#}")],
+                        }
+                    }
                     Ok(slash_commands::ParsedCommand::Rules(action)) => handle_rules(
                         context.rules_engine,
                         context.rules_handle,
@@ -926,6 +974,7 @@ async fn run_loop(
                         extensions: context.extensions,
                         extension_control: context.extension_control,
                         disabled_tools: &denied_tools,
+                        compaction: context.settings.compaction,
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
@@ -1620,6 +1669,58 @@ async fn submit(
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
     let agent_input_probe = clipboard::agent_input(&prompt)?;
+    // A resumed session has no in-memory usage/capacity yet. Resolve capacity
+    // before its first new turn so threshold compaction still works after a
+    // process restart; fresh sessions keep the existing concurrent fetch.
+    if status.context_capacity.is_none()
+        && !history.is_empty()
+        && let Ok(catalog) = models::catalog(context.provider).await
+    {
+        status.context_capacity = catalog
+            .iter()
+            .find(|model| Some(&model.slug) == context.provider.model.as_ref())
+            .and_then(|model| model.effective_context_window());
+    }
+    let projected_tokens = crate::compaction::projected_context_tokens(
+        history,
+        status.used_tokens,
+        &prompt.content,
+        prompt.images.len(),
+    );
+    if let Some(capacity) = status.context_capacity
+        && crate::compaction::should_compact(projected_tokens, capacity, context.compaction)
+    {
+        insert_status(terminal, "  compacting context…")?;
+        match crate::compaction::compact(
+            active,
+            context.provider,
+            context.compaction,
+            None,
+            "threshold",
+            Some(projected_tokens),
+        )
+        .await
+        {
+            Ok(Some(result)) => {
+                let estimated_after =
+                    artist_session::compaction::estimate_messages_tokens(&result.history);
+                *history = result.history;
+                status.used_tokens = Some(estimated_after);
+                insert_status(
+                    terminal,
+                    &format!(
+                        "  compacted {} messages · ~{} tokens retained",
+                        result.summarized_messages, estimated_after
+                    ),
+                )?;
+            }
+            Ok(None) => {}
+            Err(error) => insert_status(
+                terminal,
+                &format!("  ⚠ automatic compaction failed: {error:#}"),
+            )?,
+        }
+    }
     if context.show_splash {
         // Add separation only when moving the splash into scrollback. The live
         // startup layout already reserves its own gap above the input box.
