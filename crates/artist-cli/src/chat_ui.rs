@@ -35,7 +35,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
 use rig_core::completion::message::Message;
-use std::{collections::VecDeque, io::IsTerminal, path::Path};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::IsTerminal,
+    path::Path,
+};
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -652,6 +656,7 @@ async fn run_loop(
         insert_history(
             &mut terminal,
             &artist_session::replay_for_ui(&resumed_events),
+            &context.extensions.tool_icons(),
         )?;
     }
     loop {
@@ -1753,7 +1758,7 @@ async fn submit(
     let mut response_output_started = false;
     let mut response_since_tool = false;
     let mut transcript_gap = false;
-    let mut tools = ToolUi::default();
+    let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
     // Keep the existing viewport on entry so starting a turn does not blink.
     // Width-driven height changes are debounced while the terminal is moving.
     let terminal_size = terminal.size()?;
@@ -1992,7 +1997,13 @@ async fn submit(
                             transcript_gap = false;
                         }
                         if let Some(title) = tools.start(id, &name, &arguments) {
-                            insert_tool_line(terminal, &title, true, false)?;
+                            insert_tool_line(
+                                terminal,
+                                &title.text,
+                                true,
+                                false,
+                                title.icon.as_deref(),
+                            )?;
                             transcript_gap = true;
                         }
                     }
@@ -2001,7 +2012,13 @@ async fn submit(
                         phase = "working";
                         let output = tools.output(&id, &content);
                         for line in output.lines {
-                            insert_tool_line(terminal, &line.text, line.first, line.is_diff)?;
+                            insert_tool_line(
+                                terminal,
+                                &line.text,
+                                line.first,
+                                line.is_diff,
+                                line.icon.as_deref(),
+                            )?;
                             transcript_gap = true;
                         }
                         if images > 0 {
@@ -2010,6 +2027,7 @@ async fn submit(
                                 &format!("[{images} image result(s) not shown]"),
                                 false,
                                 false,
+                                None,
                             )?;
                             transcript_gap = true;
                         }
@@ -2211,7 +2229,11 @@ fn take_plain_visible_line(pending: &mut String, width: usize) -> Option<String>
     Some(pending.drain(..split).collect())
 }
 
-fn insert_history(terminal: &mut ratatui::DefaultTerminal, items: &[ReplayItem]) -> Result<()> {
+fn insert_history(
+    terminal: &mut ratatui::DefaultTerminal,
+    items: &[ReplayItem],
+    custom_icons: &HashMap<String, String>,
+) -> Result<()> {
     for item in items {
         match item {
             ReplayItem::User(text) => insert_message(terminal, text)?,
@@ -2226,7 +2248,13 @@ fn insert_history(terminal: &mut ratatui::DefaultTerminal, items: &[ReplayItem])
                 } else {
                     format!("{name} · {preview}")
                 };
-                insert_tool_line(terminal, &line, true, false)?;
+                insert_tool_line(
+                    terminal,
+                    &line,
+                    true,
+                    false,
+                    crate::tool_ui::icon_for(name, custom_icons),
+                )?;
             }
             ReplayItem::Steering(text) => insert_message(terminal, text)?,
             ReplayItem::RuleFired { rule, matched } => {
@@ -2363,13 +2391,22 @@ fn fill_panel_background(buffer: &mut Buffer) {
     }
 }
 
+fn tool_prefix(first: bool, icon: Option<&str>) -> String {
+    if first {
+        format!("  {}  ", icon.unwrap_or("🛠"))
+    } else {
+        "    ".to_owned()
+    }
+}
+
 fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
     first: bool,
     is_diff: bool,
+    icon: Option<&str>,
 ) -> Result<()> {
-    let prefix = if first { "  🛠  " } else { "    " };
+    let prefix = tool_prefix(first, icon);
     let width = usize::from(terminal.size()?.width.max(1));
     let text = content
         .lines()
@@ -2378,7 +2415,7 @@ fn insert_tool_line(
             // Tabs otherwise skip styled terminal cells. Tool lines are kept
             // to one terminal row so large diffs cannot dominate the UI.
             let line = line.replace('\t', "    ");
-            let line_prefix = if index == 0 { prefix } else { "    " };
+            let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
             let line =
                 truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
             let diff_content = line
@@ -3218,6 +3255,9 @@ mod tests {
         assert_eq!(truncate_display_line("abcdef", 5), "abcd…");
         assert_eq!(truncate_display_line("ab界cd", 5), "ab界…");
         assert_eq!(truncate_display_line("short", 8), "short");
+        assert_eq!(tool_prefix(true, Some("$")), "  $  ");
+        assert_eq!(tool_prefix(true, None), "  🛠  ");
+        assert_eq!(tool_prefix(false, Some("$")), "    ");
     }
     #[test]
     fn panel_background_uses_printable_blank_cells() {

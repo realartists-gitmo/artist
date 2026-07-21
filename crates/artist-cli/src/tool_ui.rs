@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
+use unicode_width::UnicodeWidthStr;
 
 const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 
@@ -9,6 +10,7 @@ pub struct ToolUi {
     calls: HashMap<String, CallState>,
     order: VecDeque<String>,
     pending: HashSet<String>,
+    custom_icons: HashMap<String, String>,
 }
 
 pub struct ToolOutput {
@@ -16,25 +18,37 @@ pub struct ToolOutput {
     pub batch_complete: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct ToolLine {
     pub text: String,
     pub first: bool,
     pub is_diff: bool,
+    pub icon: Option<String>,
 }
 
 struct CallState {
     name: String,
     title: String,
+    icon: Option<String>,
     title_displayed: bool,
     completed_output: Option<(String, bool)>,
 }
 
 impl ToolUi {
+    pub fn with_icons(mut custom_icons: HashMap<String, String>) -> Self {
+        custom_icons.retain(|_, icon| valid_icon(icon));
+        Self {
+            custom_icons,
+            ..Self::default()
+        }
+    }
+
     /// Registers a call and returns its title only when it is the next transcript slot.
     /// Later calls run concurrently, but remain buffered behind earlier call output.
-    pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> Option<String> {
+    pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> Option<ToolLine> {
         let show_now = self.order.is_empty();
         let call_title = title(name, arguments);
+        let icon = icon_for(name, &self.custom_icons).map(str::to_owned);
         self.pending.insert(id.clone());
         self.order.push_back(id.clone());
         self.calls.insert(
@@ -42,11 +56,17 @@ impl ToolUi {
             CallState {
                 name: name.to_owned(),
                 title: call_title.clone(),
+                icon: icon.clone(),
                 title_displayed: show_now,
                 completed_output: None,
             },
         );
-        show_now.then_some(call_title)
+        show_now.then_some(ToolLine {
+            text: call_title,
+            first: true,
+            is_diff: false,
+            icon,
+        })
     }
 
     /// Stores a completed result in its call slot, then emits every contiguous
@@ -58,6 +78,7 @@ impl ToolUi {
             .or_insert_with(|| CallState {
                 name: "tool".into(),
                 title: "Tool".into(),
+                icon: None,
                 title_displayed: true,
                 completed_output: None,
             });
@@ -93,6 +114,7 @@ impl ToolUi {
                     text,
                     first: false,
                     is_diff,
+                    icon: None,
                 });
             }
             self.order.pop_front();
@@ -106,6 +128,7 @@ impl ToolUi {
                     text: next.title.clone(),
                     first: true,
                     is_diff: false,
+                    icon: next.icon.clone(),
                 });
             }
         }
@@ -114,6 +137,33 @@ impl ToolUi {
             batch_complete: self.pending.is_empty() && self.order.is_empty(),
         }
     }
+}
+
+pub fn icon_for<'a>(name: &str, custom_icons: &'a HashMap<String, String>) -> Option<&'a str> {
+    builtin_icon(name).or_else(|| custom_icons.get(name).map(String::as_str))
+}
+
+fn builtin_icon(name: &str) -> Option<&'static str> {
+    match name {
+        "bash" => Some("$"),
+        "delegate" => Some("♟"),
+        "edit" => Some("🖉"),
+        "find" => Some("🗁"),
+        "grep" => Some("⌕"),
+        "read" => Some("🕮"),
+        "skill" => Some("🗡"),
+        "write" => Some("🗎"),
+        _ => None,
+    }
+}
+
+fn valid_icon(icon: &str) -> bool {
+    !icon.is_empty()
+        && icon.chars().count() <= 8
+        && !icon
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        && matches!(UnicodeWidthStr::width(icon), 1..=2)
 }
 
 fn title(name: &str, arguments: &Value) -> String {
@@ -352,7 +402,12 @@ mod tests {
         let mut ui = ToolUi::default();
         assert_eq!(
             ui.start("f".into(), "find", &serde_json::json!({"query":"config"})),
-            Some("Searched files for “config”".into())
+            Some(ToolLine {
+                text: "Searched files for “config”".into(),
+                first: true,
+                is_diff: false,
+                icon: Some("🗁".into()),
+            })
         );
         let first = ui.output("f", "src/config.rs\nconfig.toml");
         assert_eq!(first.lines[0].text, "= Found 2 files");
@@ -364,7 +419,12 @@ mod tests {
                 "web_search",
                 &serde_json::json!({"query":"rust async runtimes"})
             ),
-            Some("Web searched for “rust async runtimes”".into())
+            Some(ToolLine {
+                text: "Web searched for “rust async runtimes”".into(),
+                first: true,
+                is_diff: false,
+                icon: None,
+            })
         );
         ui.output("w", "results");
         assert_eq!(
@@ -373,7 +433,12 @@ mod tests {
                 "edit",
                 &serde_json::json!({"path":"src/lib.rs"})
             ),
-            Some("Edited src/lib.rs".into())
+            Some(ToolLine {
+                text: "Edited src/lib.rs".into(),
+                first: true,
+                is_diff: false,
+                icon: Some("🖉".into()),
+            })
         );
         assert_eq!(
             ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n")
@@ -428,6 +493,47 @@ mod tests {
         assert_eq!(released.lines[0].text, "= Found 1 files");
         assert_eq!(released.lines[1].text, "Searched files for “b”");
         assert!(released.lines[1].first);
+        assert_eq!(released.lines[1].icon.as_deref(), Some("🗁"));
         assert_eq!(released.lines[2].text, "= Found 1 files");
+    }
+
+    #[test]
+    fn built_in_icons_are_stable() {
+        let icons = HashMap::new();
+        for (name, expected) in [
+            ("bash", "$"),
+            ("delegate", "♟"),
+            ("edit", "🖉"),
+            ("find", "🗁"),
+            ("grep", "⌕"),
+            ("read", "🕮"),
+            ("skill", "🗡"),
+            ("write", "🗎"),
+        ] {
+            assert_eq!(icon_for(name, &icons), Some(expected));
+        }
+        assert_eq!(icon_for("unknown", &icons), None);
+    }
+
+    #[test]
+    fn uses_valid_custom_icons_and_falls_back_for_invalid_ones() {
+        let mut ui = ToolUi::with_icons(HashMap::from([
+            ("deploy".into(), "🚀".into()),
+            ("broken".into(), "two words".into()),
+        ]));
+        assert_eq!(
+            ui.start("a".into(), "deploy", &serde_json::json!({}))
+                .unwrap()
+                .icon
+                .as_deref(),
+            Some("🚀")
+        );
+        ui.output("a", "done");
+        assert_eq!(
+            ui.start("b".into(), "broken", &serde_json::json!({}))
+                .unwrap()
+                .icon,
+            None
+        );
     }
 }
