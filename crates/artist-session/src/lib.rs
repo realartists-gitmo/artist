@@ -30,10 +30,10 @@ mod replay;
 pub use attachments::AttachmentStore;
 pub use convert::{assistant_to_blocks, blocks_to_assistant, blocks_to_user, user_to_blocks};
 pub use event::{
-    ContentBlock, ConversationMessages, DelegateFinished, DelegateStarted, Envelope, HistoryRewind,
-    LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection, RuleRetroFindings, RunFinished,
-    RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, ToolOutcomeRecord,
-    ToolResultEvent, TurnUser,
+    ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished, DelegateStarted,
+    Envelope, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection,
+    RuleRetroFindings, RunFinished, RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent,
+    SteeringDelivered, ToolOutcomeRecord, ToolResultEvent, TurnUser,
 };
 pub use history::{HistoryOptions, build as build_history};
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};

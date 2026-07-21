@@ -53,6 +53,7 @@ pub enum SessionEvent {
     DelegateStarted(DelegateStarted),
     DelegateFinished(DelegateFinished),
     ConversationMessages(ConversationMessages),
+    ConversationCompacted(ConversationCompacted),
     HistoryRewind(HistoryRewind),
     LegacyTurn(LegacyTurn),
     RuleFired(RuleFired),
@@ -118,6 +119,11 @@ event_kinds!(
         ConversationMessages,
         ConversationMessages,
         "conversation.messages"
+    ),
+    (
+        ConversationCompacted,
+        ConversationCompacted,
+        "conversation.compacted"
     ),
     (HistoryRewind, HistoryRewind, "history.rewind"),
     (LegacyTurn, LegacyTurn, "legacy.turn"),
@@ -287,6 +293,21 @@ pub struct ConversationMessages {
     /// replay events, so resume/transcript projections should skip it.
     #[serde(default)]
     pub display_from: usize,
+}
+
+/// Audit metadata for a successful model-context compaction. The adjacent
+/// reset snapshot is authoritative; this event is operational and never enters
+/// the model conversation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConversationCompacted {
+    pub summary: String,
+    pub tokens_before: u64,
+    pub kept_messages: usize,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modified_files: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
