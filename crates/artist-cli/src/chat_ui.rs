@@ -333,6 +333,7 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+    reasoning: &'a str,
     transcript_gap: bool,
 }
 
@@ -1721,6 +1722,7 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
+            reasoning: &reasoning,
             transcript_gap: false,
         },
         &mut stream_viewport,
@@ -1852,7 +1854,7 @@ async fn submit(
                         if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
-                            transcript_gap = true;
+                            transcript_gap = false;
                         }
                         if !response_started {
                             response_started = true;
@@ -1886,7 +1888,7 @@ async fn submit(
                         if !reasoning.is_empty() {
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
-                            transcript_gap = true;
+                            transcript_gap = false;
                         }
                         if let Some(title) = tools.start(id, &name, &arguments) {
                             insert_tool_line(terminal, &title, true, false)?;
@@ -1974,6 +1976,7 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
+                reasoning: &reasoning,
                 transcript_gap,
             },
             &mut stream_viewport,
@@ -2093,6 +2096,10 @@ fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
         }
         return Some(pending.drain(..split).collect());
     }
+    take_plain_visible_line(pending, width)
+}
+
+fn take_plain_visible_line(pending: &mut String, width: usize) -> Option<String> {
     let split = pending.find('\n').map(|index| index + 1).or_else(|| {
         let mut columns = 0;
         pending.char_indices().find_map(|(index, character)| {
@@ -2311,14 +2318,23 @@ fn insert_tool_line(
 }
 
 fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) -> Result<()> {
-    let text = reasoning_text(reasoning);
+    insert_reasoning_chunk(terminal, reasoning, true)?;
+    insert_blank(terminal)
+}
+
+fn insert_reasoning_chunk(
+    terminal: &mut ratatui::DefaultTerminal,
+    reasoning: &str,
+    first: bool,
+) -> Result<()> {
+    let text = reasoning_chunk_text(reasoning, first);
     let width = usize::from(terminal.size()?.width.max(1));
     let height = text
         .lines
         .iter()
         .map(|line| line.width().max(1).div_ceil(width))
         .sum::<usize>() as u16;
-    terminal.insert_before(height.saturating_add(1), |buffer| {
+    terminal.insert_before(height.max(1), |buffer| {
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .render(buffer.area, buffer);
@@ -2326,7 +2342,12 @@ fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) ->
     Ok(())
 }
 
+#[cfg(test)]
 fn reasoning_text(reasoning: &str) -> Text<'static> {
+    reasoning_chunk_text(reasoning, true)
+}
+
+fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
     Text::from(
         reasoning
             // Providers commonly stream adjacent bold summary headings without
@@ -2335,7 +2356,11 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
             .lines()
             .enumerate()
             .map(|(line_index, line)| {
-                let mut spans = vec![Span::raw(if line_index == 0 { "  ◉ " } else { "    " })];
+                let mut spans = vec![Span::raw(if first && line_index == 0 {
+                    "  ◉ "
+                } else {
+                    "    "
+                })];
                 let mut rest = line;
                 while let Some(start) = rest.find("**") {
                     spans.push(Span::styled(
@@ -2360,6 +2385,41 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
             })
             .collect::<Vec<_>>(),
     )
+}
+
+fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in reasoning_chunk_text(reasoning, true).lines {
+        let mut row = Vec::new();
+        let mut used = 0usize;
+        for span in line.spans {
+            let style = span.style;
+            let mut chunk = String::new();
+            for character in span.content.chars() {
+                let mut character_width = character.width().unwrap_or(0);
+                if used > 0 && used.saturating_add(character_width) > width {
+                    if !chunk.is_empty() {
+                        row.push(Span::styled(std::mem::take(&mut chunk), style));
+                    }
+                    rows.push(Line::from(std::mem::take(&mut row)));
+                    used = 0;
+                }
+                if character_width > width {
+                    chunk.push('�');
+                    character_width = 1;
+                } else {
+                    chunk.push(character);
+                }
+                used = used.saturating_add(character_width);
+            }
+            if !chunk.is_empty() {
+                row.push(Span::styled(chunk, style));
+            }
+        }
+        rows.push(Line::from(row));
+    }
+    rows
 }
 
 /// Whether the terminal has a light background, from `COLORFGBG` (`fg;bg`, and
@@ -2428,12 +2488,14 @@ fn insert_response(
 fn streaming_viewport_height(
     input_height: u16,
     queued_height: u16,
+    reasoning_height: u16,
     footer_height: u16,
     transcript_gap: bool,
     terminal_height: u16,
 ) -> u16 {
     input_height
         .saturating_add(queued_height)
+        .saturating_add(reasoning_height)
         .saturating_add(u16::from(transcript_gap))
         .saturating_add(1)
         .saturating_add(footer_height)
@@ -2478,24 +2540,46 @@ fn draw_streaming(
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
     let terminal_size = terminal.size()?;
+    let can_resize = viewport.can_resize_viewport(terminal_size);
+    let layout_height = if can_resize {
+        terminal_size.height
+    } else {
+        viewport.height.min(terminal_size.height)
+    };
     let width = terminal_size.width.max(1);
     let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
-    let transcript_gap_height = u16::from(controls.transcript_gap);
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
+    let transcript_gap_height =
+        u16::from(controls.transcript_gap || !controls.reasoning.is_empty());
+    let fixed_height = input_height
+        .saturating_add(queued_height)
+        .saturating_add(transcript_gap_height)
+        .saturating_add(1)
+        .saturating_add(footer_height);
+    const MAX_LIVE_REASONING_ROWS: u16 = 8;
+    let mut reasoning_lines = wrapped_reasoning_lines(controls.reasoning, usize::from(width));
+    let reasoning_height = (reasoning_lines.len() as u16)
+        .min(layout_height.saturating_sub(fixed_height))
+        .min(MAX_LIVE_REASONING_ROWS);
+    let keep_from = reasoning_lines
+        .len()
+        .saturating_sub(usize::from(reasoning_height));
+    reasoning_lines.drain(..keep_from);
     // Show the activity/cancel hint above the input while preserving the
     // configured status bar at the bottom.
     let desired = streaming_viewport_height(
         input_height,
         queued_height,
+        reasoning_height,
         footer_height,
-        controls.transcript_gap,
-        terminal_size.height,
+        transcript_gap_height > 0,
+        layout_height,
     );
-    let resized = desired != viewport.height && viewport.can_resize_viewport(terminal_size);
+    let resized = desired != viewport.height && can_resize;
     if resized {
         viewport.height = desired;
         execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
@@ -2529,16 +2613,27 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
+        let reasoning_area = Rect::new(
+            area.x,
+            queued_area.bottom(),
+            area.width,
+            reasoning_height.min(area.height.saturating_sub(queued_height)),
+        );
+        if reasoning_height > 0 {
+            frame.render_widget(Paragraph::new(reasoning_lines), reasoning_area);
+        }
         // Keep one live blank row between streamed transcript output and the
         // activity timer. A committed spacer disables the live one, so tool
         // completion and output transitions never double the spacing.
-        let status_top = queued_area.bottom().saturating_add(transcript_gap_height);
+        let status_top = reasoning_area
+            .bottom()
+            .saturating_add(transcript_gap_height);
         let status_area = Rect::new(
             area.x,
             status_top,
             area.width,
             area.height
-                .saturating_sub(queued_height + transcript_gap_height)
+                .saturating_sub(queued_height + reasoning_height + transcript_gap_height)
                 .min(1),
         );
         frame.render_widget(
@@ -2549,8 +2644,9 @@ fn draw_streaming(
             area.x,
             status_area.bottom(),
             area.width,
-            area.height
-                .saturating_sub(queued_height + transcript_gap_height + 1 + footer_height),
+            area.height.saturating_sub(
+                queued_height + reasoning_height + transcript_gap_height + 1 + footer_height,
+            ),
         );
         render_input(frame, input_area, controls.input);
         frame.render_widget(
@@ -2950,6 +3046,25 @@ mod tests {
     }
 
     #[test]
+    fn live_reasoning_wraps_for_the_available_viewport_width() {
+        let rows = wrapped_reasoning_lines("**Planning** a deliberately long trace", 12);
+        assert!(rows.len() > 1);
+        assert!(rows.iter().all(|line| line.width() <= 12));
+        let tail = rows
+            .last()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(tail.trim_end().ends_with('e'));
+
+        let narrow = wrapped_reasoning_lines("界", 1);
+        assert!(narrow.iter().all(|line| line.width() <= 1));
+        assert_eq!(narrow.last().unwrap().spans[0].content, "�");
+    }
+
+    #[test]
     fn adjacent_reasoning_headings_get_separate_rows() {
         let text = reasoning_text("**Diagnosing****Evaluating****Identifying**");
         assert_eq!(text.lines.len(), 3);
@@ -3031,11 +3146,13 @@ mod tests {
 
     #[test]
     fn streamed_transcript_adds_exactly_one_live_viewport_gap() {
-        let without_output = streaming_viewport_height(3, 0, 1, false, 20);
-        let with_output = streaming_viewport_height(3, 0, 1, true, 20);
+        let without_output = streaming_viewport_height(3, 0, 0, 1, false, 20);
+        let with_output = streaming_viewport_height(3, 0, 0, 1, true, 20);
+        let with_live_reasoning = streaming_viewport_height(3, 0, 1, 1, true, 20);
         assert_eq!(with_output, without_output + 1);
+        assert_eq!(with_live_reasoning, without_output + 2);
         assert_eq!(
-            streaming_viewport_height(3, 0, 1, false, 20),
+            streaming_viewport_height(3, 0, 0, 1, false, 20),
             without_output,
             "a committed spacer disables the live gap"
         );
