@@ -1,6 +1,7 @@
 //! Display projections: the TUI resume replay and the markdown transcript.
 //! Both are derived views over the event log — the log is truth.
 
+use crate::conversation_replay::{ConversationReplay, markdown_messages, user_message_text};
 use crate::event::{ContentBlock, Envelope, SessionEvent};
 use crate::history::resolve_masks;
 
@@ -23,11 +24,21 @@ const TOOL_PREVIEW_CAP: usize = 160;
 pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
     let masks = resolve_masks(events, None);
     let mut items = Vec::new();
+    let mut conversation = ConversationReplay::default();
     for envelope in events {
         if envelope.lineage != crate::event::MAIN_LINEAGE || masks.covers(envelope.seq) {
             continue;
         }
         match envelope.event() {
+            SessionEvent::ConversationMessages(batch) => {
+                if batch.reset && batch.display_from == 0 {
+                    items.clear();
+                    conversation.clear();
+                }
+                for message in batch.messages.iter().skip(batch.display_from) {
+                    conversation.push(message, &mut items);
+                }
+            }
             SessionEvent::TurnUser(turn) => {
                 let text = turn.display.unwrap_or_else(|| blocks_text(&turn.content));
                 if !text.is_empty() {
@@ -89,17 +100,34 @@ pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
 /// The user prompt texts, oldest first (feeds the TUI prompt-recall
 /// history).
 pub fn user_prompts(events: &[Envelope]) -> Vec<String> {
-    events
-        .iter()
-        .filter(|envelope| envelope.lineage == crate::event::MAIN_LINEAGE)
-        .filter_map(|envelope| match envelope.event() {
-            SessionEvent::TurnUser(turn) if turn.source == "prompt" || turn.source == "queued" => {
-                Some(turn.display.unwrap_or_else(|| blocks_text(&turn.content)))
+    let masks = resolve_masks(events, None);
+    let mut prompts = Vec::new();
+    for envelope in events {
+        if envelope.lineage != crate::event::MAIN_LINEAGE || masks.covers(envelope.seq) {
+            continue;
+        }
+        match envelope.event() {
+            SessionEvent::ConversationMessages(batch) => {
+                if batch.reset && batch.display_from == 0 {
+                    prompts.clear();
+                }
+                prompts.extend(
+                    batch
+                        .messages
+                        .iter()
+                        .skip(batch.display_from)
+                        .filter_map(user_message_text)
+                        .filter(|text| !text.starts_with("<system-reminder")),
+                );
             }
-            SessionEvent::LegacyTurn(turn) if turn.role == "user" => Some(turn.content),
-            _ => None,
-        })
-        .collect()
+            SessionEvent::TurnUser(turn) if turn.source == "prompt" || turn.source == "queued" => {
+                prompts.push(turn.display.unwrap_or_else(|| blocks_text(&turn.content)));
+            }
+            SessionEvent::LegacyTurn(turn) if turn.role == "user" => prompts.push(turn.content),
+            _ => {}
+        }
+    }
+    prompts
 }
 
 /// Events not hidden by rewind masks — the "current" view of
@@ -116,21 +144,36 @@ pub fn visible_events(events: &[Envelope]) -> Vec<&Envelope> {
 /// ranges excluded (an already-rewound turn is not offered again).
 pub fn rewind_targets(events: &[Envelope]) -> Vec<(u64, String)> {
     let masks = resolve_masks(events, None);
-    events
-        .iter()
-        .filter(|envelope| {
-            envelope.lineage == crate::event::MAIN_LINEAGE && !masks.covers(envelope.seq)
-        })
-        .filter_map(|envelope| match envelope.event() {
+    let mut targets = Vec::new();
+    for envelope in events {
+        if envelope.lineage != crate::event::MAIN_LINEAGE || masks.covers(envelope.seq) {
+            continue;
+        }
+        match envelope.event() {
+            SessionEvent::ConversationMessages(batch) => {
+                if batch.reset && batch.display_from == 0 {
+                    targets.clear();
+                }
+                if let Some(text) = batch
+                    .messages
+                    .iter()
+                    .skip(batch.display_from)
+                    .filter_map(user_message_text)
+                    .rfind(|text| !text.starts_with("<system-reminder"))
+                {
+                    targets.push((envelope.seq, text));
+                }
+            }
             SessionEvent::TurnUser(turn) if turn.source == "prompt" || turn.source == "queued" => {
-                Some((
+                targets.push((
                     envelope.seq,
                     turn.display.unwrap_or_else(|| blocks_text(&turn.content)),
-                ))
+                ));
             }
-            _ => None,
-        })
-        .collect()
+            _ => {}
+        }
+    }
+    targets
 }
 
 fn blocks_text(blocks: &[ContentBlock]) -> String {
@@ -160,6 +203,10 @@ pub fn markdown_fragment(envelope: &Envelope) -> Option<String> {
                 .map(|parent| format!("\n- Forked from: `{parent}`"))
                 .unwrap_or_default(),
         )),
+        SessionEvent::ConversationMessages(batch) => {
+            let fragment = markdown_messages(&batch.messages[batch.display_from..]);
+            (!fragment.is_empty()).then_some(fragment)
+        }
         SessionEvent::TurnUser(turn) => {
             let text = turn.display.unwrap_or_else(|| blocks_text(&turn.content));
             match turn.source.as_str() {
@@ -211,7 +258,30 @@ pub fn markdown_fragment(envelope: &Envelope) -> Option<String> {
 /// Regenerate the full transcript markdown from the log (`artist sessions
 /// render`, and the recovery path when transcript.md is stale or missing).
 pub fn render_markdown(events: &[Envelope]) -> String {
-    events.iter().filter_map(markdown_fragment).collect()
+    let masks = resolve_masks(events, None);
+    let mut header = String::new();
+    let mut fragments = Vec::new();
+    for envelope in events {
+        if envelope.lineage != crate::event::MAIN_LINEAGE || masks.covers(envelope.seq) {
+            continue;
+        }
+        let event = envelope.event();
+        if matches!(event, SessionEvent::SessionCreated(_)) {
+            header = markdown_fragment(envelope).unwrap_or_default();
+            continue;
+        }
+        if matches!(
+            event,
+            SessionEvent::ConversationMessages(ref batch)
+                if batch.reset && batch.display_from == 0
+        ) {
+            fragments.clear();
+        }
+        if let Some(fragment) = markdown_fragment(envelope) {
+            fragments.push(fragment);
+        }
+    }
+    header + &fragments.concat()
 }
 
 #[cfg(test)]
