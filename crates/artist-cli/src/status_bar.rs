@@ -15,15 +15,17 @@ pub(crate) enum StatusItem {
     Model,
     Reasoning,
     Context,
+    SessionTokens,
 }
 
 impl StatusItem {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ProjectDirectory,
         Self::GitBranch,
         Self::Model,
         Self::Reasoning,
         Self::Context,
+        Self::SessionTokens,
     ];
 
     pub fn label(self) -> &'static str {
@@ -32,7 +34,8 @@ impl StatusItem {
             Self::GitBranch => "Git branch",
             Self::Model => "Model",
             Self::Reasoning => "Reasoning",
-            Self::Context => "Context remaining / total",
+            Self::Context => "Context remaining / capacity",
+            Self::SessionTokens => "Session tokens",
         }
     }
 }
@@ -44,6 +47,7 @@ fn default_items() -> Vec<StatusItem> {
         StatusItem::Model,
         StatusItem::Reasoning,
         StatusItem::Context,
+        StatusItem::SessionTokens,
     ]
 }
 
@@ -108,26 +112,23 @@ pub(crate) fn segments(
                     .reasoning_effort
                     .clone()
                     .unwrap_or_else(|| "default".into()),
-                StatusItem::Context => {
-                    // Current-context view (last request), plus the session's
-                    // cumulative billed volume so a long tool loop or TTSR
-                    // retries aren't misread as context size.
-                    let context = match (used_tokens, context_capacity) {
-                        (Some(used), Some(capacity)) if capacity > 0 => {
-                            let remaining = context_remaining(used, capacity);
-                            format!(
-                                "{}%/{}",
-                                remaining.saturating_mul(100) / capacity,
-                                format_tokens(capacity)
-                            )
-                        }
-                        (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
-                        _ => "—/—".into(),
-                    };
+                StatusItem::Context => match (used_tokens, context_capacity) {
+                    (Some(used), Some(capacity)) if capacity > 0 => {
+                        let remaining = context_remaining(used, capacity);
+                        format!(
+                            "{}%/{}",
+                            remaining.saturating_mul(100) / capacity,
+                            format_tokens(capacity)
+                        )
+                    }
+                    (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
+                    _ => "—/—".into(),
+                },
+                StatusItem::SessionTokens => {
                     if session_tokens > 0 {
-                        format!("{context} · {} total", format_tokens(session_tokens))
+                        format!("{} total", format_tokens(session_tokens))
                     } else {
-                        context
+                        "— total".into()
                     }
                 }
             },
@@ -222,8 +223,16 @@ mod tests {
 
     #[test]
     fn config_uses_stable_snake_case_names() {
-        let config: StatusBarConfig = toml::from_str("items = ['model', 'git_branch']").unwrap();
-        assert_eq!(config.items, [StatusItem::Model, StatusItem::GitBranch]);
+        let config: StatusBarConfig =
+            toml::from_str("items = ['model', 'git_branch', 'session_tokens']").unwrap();
+        assert_eq!(
+            config.items,
+            [
+                StatusItem::Model,
+                StatusItem::GitBranch,
+                StatusItem::SessionTokens
+            ]
+        );
     }
 
     #[test]
@@ -268,6 +277,37 @@ mod tests {
         assert_eq!(segments[0].text, "project");
         assert_eq!(segments[1].text, "main");
         assert_eq!(segments[4].text, "75%/100");
+        assert_eq!(segments[5].text, "— total");
+    }
+
+    #[test]
+    fn context_and_session_tokens_can_be_enabled_independently() {
+        let provider: SavedProvider = serde_json::from_value(serde_json::json!({
+            "id":"x", "name":"x", "base_url":"https://example.com/", "model":"m",
+            "auth":{"access_token":"t","refresh_token":"r","account_id":"a"}
+        }))
+        .unwrap();
+        let render = |items| {
+            segments(
+                &StatusBarConfig {
+                    items,
+                    extension_items: Vec::new(),
+                },
+                Path::new("."),
+                &provider,
+                None,
+                Some(25),
+                Some(100),
+                1_500,
+                &[],
+            )
+        };
+
+        assert_eq!(render(vec![StatusItem::Context])[0].text, "75%/100");
+        assert_eq!(
+            render(vec![StatusItem::SessionTokens])[0].text,
+            "1.5k total"
+        );
     }
 
     #[test]

@@ -21,27 +21,32 @@ pub struct ProviderStore {
     pub disabled_tools: Vec<String>,
 }
 fn version() -> u8 {
-    2
+    3
 }
 
 impl ProviderStore {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self {
-                version: 2,
+                version: version(),
                 ..Self::default()
             });
         }
         let contents = fs::read_to_string(path).context("read providers.toml")?;
         let mut document: toml::Value =
             toml::from_str(&contents).context("parse providers.toml")?;
+        let previous_version = document
+            .get("version")
+            .and_then(toml::Value::as_integer)
+            .unwrap_or(1);
         migrate_to_chatgpt_only(&mut document);
+        migrate_session_tokens(&mut document, previous_version);
         let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
         Ok(store)
     }
     pub fn save(&mut self, path: &Path) -> Result<()> {
-        self.version = 2;
+        self.version = version();
         self.validate()?;
         let parent = path.parent().context("providers path has no parent")?;
         fs::create_dir_all(parent).context("create Artist config directory")?;
@@ -85,7 +90,7 @@ fn migrate_to_chatgpt_only(document: &mut toml::Value) {
     let Some(table) = document.as_table_mut() else {
         return;
     };
-    table.insert("version".into(), toml::Value::Integer(2));
+    table.insert("version".into(), toml::Value::Integer(i64::from(version())));
     if let Some(providers) = table
         .get_mut("providers")
         .and_then(toml::Value::as_array_mut)
@@ -120,6 +125,29 @@ fn migrate_to_chatgpt_only(document: &mut toml::Value) {
                 table.remove("default_provider");
             }
         }
+    }
+}
+
+/// Version 2 rendered cumulative tokens as part of `context`. Preserve the
+/// existing visible bar by enabling the new independent item once; version 3
+/// then respects users who disable it.
+fn migrate_session_tokens(document: &mut toml::Value, previous_version: i64) {
+    if previous_version >= 3 {
+        return;
+    }
+    let Some(items) = document
+        .get_mut("status_bar")
+        .and_then(|status| status.get_mut("items"))
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return;
+    };
+    let has_context = items.iter().any(|item| item.as_str() == Some("context"));
+    let has_tokens = items
+        .iter()
+        .any(|item| item.as_str() == Some("session_tokens"));
+    if has_context && !has_tokens {
+        items.push(toml::Value::String("session_tokens".into()));
     }
 }
 
@@ -179,6 +207,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status_bar::StatusItem;
     use llm_provider::{Auth, SavedProvider, Secret};
     #[test]
     fn removes_legacy_api_key_providers() {
@@ -210,6 +239,32 @@ api_key = "secret"
         fs::write(&path, "version = 2\nproviders = []\n").unwrap();
         let store = ProviderStore::load(&path).unwrap();
         assert_eq!(store.status_bar, StatusBarConfig::default());
+    }
+
+    #[test]
+    fn migrates_combined_context_tokens_once_then_respects_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        fs::write(
+            &path,
+            "version = 2\nproviders = []\n[status_bar]\nitems = ['context']\n",
+        )
+        .unwrap();
+
+        let mut store = ProviderStore::load(&path).unwrap();
+        assert_eq!(
+            store.status_bar.items,
+            [StatusItem::Context, StatusItem::SessionTokens]
+        );
+        store
+            .status_bar
+            .items
+            .retain(|item| *item != StatusItem::SessionTokens);
+        store.save(&path).unwrap();
+
+        let reloaded = ProviderStore::load(&path).unwrap();
+        assert_eq!(reloaded.version, 3);
+        assert_eq!(reloaded.status_bar.items, [StatusItem::Context]);
     }
 
     fn write_file(path: &Path, contents: &str) {

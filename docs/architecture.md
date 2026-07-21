@@ -307,16 +307,16 @@ leave the tree. On stale/unknown anchors the model must re-read then retry
 - **Interactive:** `artist` / `artist <dir>`; **one-shot:** `artist -p "…"`;
   **resume:** `-r [id]`.
 - **Slash commands:** `/model`, `/statusbar`, `/skills`, `/tools`, `/mcp`,
-  `/rewind`, `/rules`, `/help`, extension-declared commands, and `!` bang
+  `/rewind`, `/compact`, `/rules`, `/help`, extension-declared commands, and `!` bang
   commands routed to the persistent input shell — plus **custom commands**:
   markdown prompt templates in
   `<project>/.artist/commands/*.md` or `~/.config/artist/commands/` with
   optional frontmatter (`description`) and `$ARGUMENTS` expansion; they
   join the completion menu (built-in names always win).
 - **Maintenance:** `artist rules new`, `artist sessions list|render|gc`.
-- Status bar `Context` segment shows current-context tokens *and* the
-  session's cumulative total, so tool loops and TTSR retries aren't
-  misread.
+- Status bar `Context` shows remaining context versus capacity; the separate
+  `Session tokens` item shows cumulative request volume. `/statusbar` can toggle
+  and reorder them independently.
 
 ## Configuration
 
