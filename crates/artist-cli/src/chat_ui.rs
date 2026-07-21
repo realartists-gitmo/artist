@@ -333,6 +333,7 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+    tool_gap: bool,
 }
 
 struct StreamingViewport {
@@ -1719,6 +1720,7 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
+            tool_gap: false,
         },
         &mut stream_viewport,
     )?;
@@ -1961,6 +1963,7 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
+                tool_gap: tools.is_active(),
             },
             &mut stream_viewport,
         )?;
@@ -2411,6 +2414,21 @@ fn insert_response(
     Ok(())
 }
 
+fn streaming_viewport_height(
+    input_height: u16,
+    queued_height: u16,
+    footer_height: u16,
+    tool_gap: bool,
+    terminal_height: u16,
+) -> u16 {
+    input_height
+        .saturating_add(queued_height)
+        .saturating_add(u16::from(tool_gap))
+        .saturating_add(1)
+        .saturating_add(footer_height)
+        .min(terminal_height)
+}
+
 fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
     const FRAMES: [&str; 6] = ["▓", "▒", "░", " ", "░", "▒"];
     format!(
@@ -2452,17 +2470,20 @@ fn draw_streaming(
     let width = terminal_size.width.max(1);
     let footer_height = wrapped_line_height(footer, width);
     let queued_height = controls.steering.displays().count() as u16;
+    let tool_gap_height = u16::from(controls.tool_gap);
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
     // Show the activity/cancel hint above the input while preserving the
     // configured status bar at the bottom.
-    let desired = input_height
-        .saturating_add(queued_height)
-        .saturating_add(1)
-        .saturating_add(footer_height)
-        .min(terminal_size.height);
+    let desired = streaming_viewport_height(
+        input_height,
+        queued_height,
+        footer_height,
+        controls.tool_gap,
+        terminal_size.height,
+    );
     let resized = desired != viewport.height && viewport.can_resize_viewport(terminal_size);
     if resized {
         viewport.height = desired;
@@ -2497,11 +2518,17 @@ fn draw_streaming(
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(queued), queued_area);
+        // While tools are running, keep one live blank row between their
+        // scrollback panel and the activity timer. On batch completion the
+        // existing committed spacer replaces it, so spacing never doubles.
+        let status_top = queued_area.bottom().saturating_add(tool_gap_height);
         let status_area = Rect::new(
             area.x,
-            queued_area.bottom(),
+            status_top,
             area.width,
-            area.height.saturating_sub(queued_height).min(1),
+            area.height
+                .saturating_sub(queued_height + tool_gap_height)
+                .min(1),
         );
         frame.render_widget(
             Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
@@ -2512,7 +2539,7 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height
-                .saturating_sub(queued_height + 1 + footer_height),
+                .saturating_sub(queued_height + tool_gap_height + 1 + footer_height),
         );
         render_input(frame, input_area, controls.input);
         frame.render_widget(
@@ -2989,6 +3016,18 @@ mod tests {
             "  ▓ thinking [00:00 elapsed] · esc to interrupt"
         );
         assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
+    }
+
+    #[test]
+    fn running_tool_adds_exactly_one_live_viewport_gap() {
+        let without_tool = streaming_viewport_height(3, 0, 1, false, 20);
+        let with_tool = streaming_viewport_height(3, 0, 1, true, 20);
+        assert_eq!(with_tool, without_tool + 1);
+        assert_eq!(
+            streaming_viewport_height(3, 0, 1, false, 20),
+            without_tool,
+            "completion removes the live gap before committing its spacer"
+        );
     }
 
     #[test]

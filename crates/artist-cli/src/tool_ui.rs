@@ -30,6 +30,11 @@ struct CallState {
 }
 
 impl ToolUi {
+    /// Whether a tool batch is still running and needs live viewport spacing.
+    pub fn is_active(&self) -> bool {
+        !self.pending.is_empty() || !self.order.is_empty()
+    }
+
     /// Registers a call and returns its title only when it is the next transcript slot.
     /// Later calls run concurrently, but remain buffered behind earlier call output.
     pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> Option<String> {
@@ -413,6 +418,7 @@ mod tests {
             ui.start("a".into(), "find", &serde_json::json!({"query":"a"}))
                 .is_some()
         );
+        assert!(ui.is_active());
         assert!(
             ui.start("b".into(), "find", &serde_json::json!({"query":"b"}))
                 .is_none()
@@ -424,6 +430,7 @@ mod tests {
 
         let released = ui.output("a", "a.rs");
         assert!(released.batch_complete);
+        assert!(!ui.is_active());
         assert_eq!(released.lines.len(), 3);
         assert_eq!(released.lines[0].text, "= Found 1 files");
         assert_eq!(released.lines[1].text, "Searched files for “b”");
