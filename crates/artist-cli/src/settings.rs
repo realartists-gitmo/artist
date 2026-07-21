@@ -3,8 +3,8 @@
 //! override layer (CLI flags / in-session changes).
 //!
 //! Resolution rules:
-//! - **Scalars** (`model`, `reasoning_effort`) take the value from the
-//!   highest-precedence layer that sets them: override > project > global.
+//! - **Scalars** (`model`, `reasoning_effort`, compaction fields) take the
+//!   value from the highest-precedence layer that sets them: override > project > global.
 //! - **Restriction lists** (denied tools) are **unioned** across every layer,
 //!   including the pre-existing global `disabled_tools` in `providers.toml`, so
 //!   a project can only ever *tighten* access, never silently loosen it.
@@ -32,8 +32,54 @@ pub struct Settings {
     /// The reasoning effort in this scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "CompactionSettings::is_empty")]
+    pub compaction: CompactionSettings,
     #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
+}
+
+/// Optional per-layer compaction values. The effective defaults match Pi.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(
+        default,
+        alias = "reserveTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reserve_tokens: Option<u64>,
+    #[serde(
+        default,
+        alias = "keepRecentTokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_recent_tokens: Option<u64>,
+}
+
+impl CompactionSettings {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.reserve_tokens.is_none() && self.keep_recent_tokens.is_none()
+    }
+}
+
+/// Resolved compaction policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionConfig {
+    pub enabled: bool,
+    pub reserve_tokens: u64,
+    pub keep_recent_tokens: u64,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+        }
+    }
 }
 
 /// The access-policy section. Today the only primitive is a tool denylist; it
@@ -133,6 +179,7 @@ pub struct Overrides {
 pub struct EffectiveSettings {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub compaction: CompactionConfig,
     /// The full set of tool names the agent may not use — the union of the
     /// global `disabled_tools` and every layer's `permissions.deny`.
     pub denied_tools: Vec<String>,
@@ -158,6 +205,24 @@ impl EffectiveSettings {
             .clone()
             .or_else(|| project.reasoning_effort.clone())
             .or_else(|| global.reasoning_effort.clone());
+        let defaults = CompactionConfig::default();
+        let compaction = CompactionConfig {
+            enabled: project
+                .compaction
+                .enabled
+                .or(global.compaction.enabled)
+                .unwrap_or(defaults.enabled),
+            reserve_tokens: project
+                .compaction
+                .reserve_tokens
+                .or(global.compaction.reserve_tokens)
+                .unwrap_or(defaults.reserve_tokens),
+            keep_recent_tokens: project
+                .compaction
+                .keep_recent_tokens
+                .or(global.compaction.keep_recent_tokens)
+                .unwrap_or(defaults.keep_recent_tokens),
+        };
         let mut denied_tools = Vec::new();
         for name in base_denied
             .iter()
@@ -171,6 +236,7 @@ impl EffectiveSettings {
         Self {
             model,
             reasoning_effort,
+            compaction,
             denied_tools,
         }
     }
@@ -273,6 +339,29 @@ mod tests {
         assert_eq!(effective.model, None);
         assert_eq!(effective.reasoning_effort, None);
         assert!(effective.denied_tools.is_empty());
+    }
+
+    #[test]
+    fn compaction_defaults_and_project_overrides_resolve_per_field() {
+        let global = from_str(
+            "[compaction]\nenabled = false\nreserve_tokens = 12000\nkeepRecentTokens = 9000\n",
+        );
+        let project = from_str("[compaction]\nenabled = true\nreserveTokens = 8000\n");
+
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+
+        assert_eq!(
+            effective.compaction,
+            CompactionConfig {
+                enabled: true,
+                reserve_tokens: 8_000,
+                keep_recent_tokens: 9_000,
+            }
+        );
+        assert_eq!(
+            EffectiveSettings::default().compaction,
+            CompactionConfig::default()
+        );
     }
 
     #[test]
