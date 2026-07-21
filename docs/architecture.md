@@ -67,8 +67,12 @@ retry loop** around a Rig streaming run:
    bundle: conversation id, steering handle, rules handle + compiled rule
    set, event recorder, and a cancellation token. Rig loads the native
    messages and appends the successful run delta.
-2. Each iteration builds a fresh Rig agent (system prompt, built-in tools,
-   MCP tools, `delegate`) with three hooks, in order:
+2. Each iteration builds a fresh Rig agent and one ordered tool registry from
+   built-ins, MCP, and extensions. The denylist filters that registry once;
+   provider registration and the generated system-prompt tool section consume
+   the same final list, so descriptions and tool-specific guidance cannot name
+   disabled tools and automatically include extension/MCP tools. The agent then
+   installs three hooks, in order:
    - **SteeringHook** — injects queued user corrections into tool results
      as `<user_steering>` blocks.
    - **CaptureHook** — captures structured tool outcome/timing metadata for
@@ -297,8 +301,8 @@ are annotated in the `-r` picker.
 
 File tools remain jailed to the project root (two hardcoded layers:
 `Workspace` path resolution and the hashline `FileToolConfig`); bash can
-leave the tree. On stale/unknown anchors the model must re-read then retry
-(system prompt encodes this).
+leave the tree. On stale/unknown anchors the model must re-read then retry; this guidance is
+conditionally generated only when the relevant tools are registered.
 
 ---
 

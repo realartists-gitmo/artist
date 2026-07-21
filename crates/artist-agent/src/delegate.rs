@@ -8,7 +8,7 @@ use crate::{
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
 use artist_session::{DelegateFinished, DelegateStarted, RunFinished, RunStarted};
-use artist_tools::{TOOL_POLICY, ToolBundle};
+use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
@@ -17,7 +17,7 @@ use rig_core::{
     completion::Message,
     providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamingChat},
-    tool::Tool,
+    tool::{Tool, ToolDyn},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,6 +33,7 @@ pub(crate) struct Delegate {
     jobs: DelegateJobs,
     resources: Resources,
     handles: SessionHandles,
+    disabled_tools: Vec<String>,
 }
 
 impl Delegate {
@@ -42,6 +43,7 @@ impl Delegate {
         context: Arc<Vec<Message>>,
         resources: Resources,
         handles: SessionHandles,
+        disabled_tools: Vec<String>,
     ) -> Self {
         let jobs = DelegateJobs::for_project(tools.project_root());
         Self {
@@ -51,6 +53,7 @@ impl Delegate {
             jobs,
             resources,
             handles,
+            disabled_tools,
         }
     }
 }
@@ -211,16 +214,35 @@ impl Delegate {
             fork,
             background: false,
         });
-        let mut policy = if read_only {
-            format!(
-                "{TOOL_POLICY}\nYou are a read-only subagent. Inspect with read, find, and grep only. Return concise findings and evidence."
-            )
-        } else {
-            format!(
-                "{TOOL_POLICY}\nComplete only the focused delegated task. Return concise findings and evidence. You cannot delegate further."
-            )
+        let registered_tools = || {
+            let mut tools: Vec<Box<dyn ToolDyn>> = vec![
+                Box::new(child_tools.read.clone()),
+                Box::new(child_tools.find.clone()),
+                Box::new(child_tools.grep.clone()),
+                Box::new(self.resources.skill_tool()),
+            ];
+            if !read_only {
+                tools.extend([
+                    Box::new(child_tools.bash.clone()) as Box<dyn ToolDyn>,
+                    Box::new(child_tools.edit.clone()),
+                    Box::new(child_tools.write.clone()),
+                ]);
+            }
+            crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
+            tools
         };
-        policy.push_str(&self.resources.prompt_section());
+        let prompt_tools = registered_tools();
+        let role = if read_only {
+            "You are a focused read-only subagent. Inspect the project and return concise findings with evidence."
+        } else {
+            "You are a focused implementation subagent. Complete only the delegated task and return concise findings with evidence. You cannot delegate further."
+        };
+        let policy = format!(
+            "{role}\n\n{}{}\nCurrent working directory: {}",
+            crate::tool_prompt::render(&prompt_tools),
+            self.resources.prompt_section(),
+            self.tools.project_root().display()
+        );
 
         let mut seed_history = if fork {
             (*self.context).clone()
@@ -256,20 +278,12 @@ impl Delegate {
                 params["reasoning"] = json!({ "effort": effort });
             }
             builder = builder.additional_params(params);
-            let mut builder = builder
-                .tool(child_tools.read.clone())
-                .tool(child_tools.find.clone())
-                .tool(child_tools.grep.clone())
-                .tool(self.resources.skill_tool())
+            let agent = builder
+                .tools(registered_tools())
                 .add_hook(CaptureHook::new(ToolMeta::default()))
-                .add_hook(TtsrHook(Arc::clone(&ttsr)));
-            if !read_only {
-                builder = builder
-                    .tool(child_tools.bash.clone())
-                    .tool(child_tools.edit.clone())
-                    .tool(child_tools.write.clone());
-            }
-            let agent = builder.default_max_turns(usize::MAX).build();
+                .add_hook(TtsrHook(Arc::clone(&ttsr)))
+                .default_max_turns(usize::MAX)
+                .build();
             run_recorder.record(RunStarted {
                 provider: "chatgpt".to_owned(),
                 model: model.to_owned(),

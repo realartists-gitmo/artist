@@ -13,6 +13,7 @@ mod ttsr_tests;
 
 pub use resources::AvailableSkill;
 mod steering;
+mod tool_prompt;
 
 pub use steering::SteeringHandle;
 
@@ -223,12 +224,6 @@ pub async fn stream_chat(
         .context("build ChatGPT client")?;
 
     let resources = resources::Resources::discover(tools.project_root());
-    let system_prompt = format!(
-        "{}{}\nCurrent working directory: {}",
-        include_str!("system_prompt.md"),
-        resources.prompt_section(),
-        tools.project_root().display()
-    );
     handles.rules.note_user_turn();
 
     let mut seed_history = handles
@@ -291,6 +286,7 @@ pub async fn stream_chat(
                 Arc::clone(&fork_context),
                 resources.clone(),
                 handles.clone(),
+                tool_context.disabled.to_vec(),
             )),
         ];
         registered.extend(
@@ -302,12 +298,14 @@ pub async fn stream_chat(
         if let Some(extensions) = tool_context.extensions {
             registered.extend(extensions.tools());
         }
-        registered.retain(|tool| {
-            !tool_context
-                .disabled
-                .iter()
-                .any(|name| name == &tool.name())
-        });
+        tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
+        let system_prompt = format!(
+            "{}\n\n{}{}\nCurrent working directory: {}",
+            include_str!("system_prompt.md").trim_end(),
+            tool_prompt::render(&registered),
+            resources.prompt_section(),
+            tools.project_root().display()
+        );
         let persistence = conversation::PersistenceStatus::default();
         let attempt_memory = conversation::AttemptMemory::new(
             Arc::clone(&handles.memory),
