@@ -1638,17 +1638,24 @@ async fn submit(
     // outside the masked historical range.
     if crate::compaction::should_compact(status.used_tokens, status.context_capacity) {
         insert_message(terminal, "Compacting older context…")?;
-        if let Some(result) = crate::compaction::compact(active, context.provider).await? {
-            *history = result.history;
-            status.used_tokens = None;
-            insert_message(
+        match crate::compaction::compact(active, context.provider).await {
+            Ok(Some(result)) => {
+                *history = result.history;
+                status.used_tokens = None;
+                insert_message(
+                    terminal,
+                    &format!(
+                        "Compacted {} older session events; preserved the {} most recent turns.",
+                        result.compacted_events,
+                        crate::compaction::PRESERVE_RECENT_TURNS
+                    ),
+                )?;
+            }
+            Ok(None) => {}
+            Err(error) => insert_message(
                 terminal,
-                &format!(
-                    "Compacted {} older session events; preserved the {} most recent turns.",
-                    result.compacted_events,
-                    crate::compaction::PRESERVE_RECENT_TURNS
-                ),
-            )?;
+                &format!("Automatic context compaction failed: {error:#}"),
+            )?,
         }
     }
     // Rules hot-reload between turns; the run holds the snapshot.
