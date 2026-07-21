@@ -25,6 +25,7 @@ use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsComman
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
+use rig_core::memory::ConversationMemory;
 use sessions::{ActiveSession, SessionStore};
 use std::{
     io::IsTerminal,
@@ -297,6 +298,8 @@ async fn execute_prompt(
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
+    compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
+        .await?;
     let rules_engine = artist_rules::RulesEngine::discover(&project);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -402,6 +405,54 @@ async fn execute_prompt(
             extension_control,
         ))
         .await?;
+    }
+    Ok(())
+}
+
+async fn compact_noninteractive_if_needed(
+    active: &ActiveSession,
+    provider: &llm_provider::SavedProvider,
+    settings: settings::CompactionConfig,
+    prompt: &str,
+) -> Result<()> {
+    if !settings.enabled {
+        return Ok(());
+    }
+    let history = active
+        .memory
+        .load(&active.session.id)
+        .await
+        .context("load conversation for compaction check")?;
+    if history.is_empty() {
+        return Ok(());
+    }
+    let capacity = models::catalog(provider).await.ok().and_then(|catalog| {
+        catalog
+            .iter()
+            .find(|model| Some(&model.slug) == provider.model.as_ref())
+            .and_then(|model| model.effective_context_window())
+    });
+    let projected = compaction::projected_context_tokens(&history, None, prompt, 0);
+    if capacity.is_some_and(|window| compaction::should_compact(projected, window, settings)) {
+        eprintln!("Compacting context…");
+        match compaction::compact(
+            active,
+            provider,
+            settings,
+            None,
+            "threshold",
+            Some(projected),
+        )
+        .await
+        {
+            Ok(Some(result)) => eprintln!(
+                "Compacted {} messages; ~{} context tokens retained.",
+                result.summarized_messages,
+                artist_session::compaction::estimate_messages_tokens(&result.history)
+            ),
+            Ok(None) => {}
+            Err(error) => eprintln!("Warning: automatic compaction failed: {error:#}"),
+        }
     }
     Ok(())
 }
