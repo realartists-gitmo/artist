@@ -1697,7 +1697,7 @@ async fn submit(
             context.compaction,
             None,
             "threshold",
-            Some(projected_tokens),
+            status.used_tokens,
         )
         .await
         {

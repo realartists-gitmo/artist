@@ -435,16 +435,7 @@ async fn compact_noninteractive_if_needed(
     let projected = compaction::projected_context_tokens(&history, None, prompt, 0);
     if capacity.is_some_and(|window| compaction::should_compact(projected, window, settings)) {
         eprintln!("Compacting context…");
-        match compaction::compact(
-            active,
-            provider,
-            settings,
-            None,
-            "threshold",
-            Some(projected),
-        )
-        .await
-        {
+        match compaction::compact(active, provider, settings, None, "threshold", None).await {
             Ok(Some(result)) => eprintln!(
                 "Compacted {} messages; ~{} context tokens retained.",
                 result.summarized_messages,
