@@ -49,7 +49,7 @@ artist/                          # Cargo workspace
 | **artist-agent** | The model loop: builds the Rig agent, drives the TTSR abort/inject/retry loop, owns the capture/steering/TTSR hooks, `delegate` subagents, MCP. |
 | **artist-rules** | The rules engine: declarative rule files, discovery + hot reload, streaming matcher, per-session state, retro scanning, wasmtime plugin host (feature `wasm`). |
 | **artist-extensions** | Trusted WASM extensions: persistent component instances discovered from `<config>/extensions` manifests, with a powerful host interface (run/spawn commands, steer, queue prompts, stop the agent, live context, event bus). Distinct trust model from rule plugins — extensions are trusted and capable; rule plugins are untrusted and sandboxed. Both hosts share one wasmtime (46). |
-| **artist-session** | The canonical event log (`events.jsonl`), content schema + rig converters, recorder/writer task, and every projection (model history, markdown transcript, TUI replay, rewind targets). |
+| **artist-session** | Rig `ConversationMemory` persistence in `events.jsonl`, operational events, legacy converters, and lossy display/rewind projections. |
 | **artist-tools** | Tool implementations bound to a `Workspace` (project-jailed file tools, PTY bash, FFF find/grep). |
 | **hashline-tools** | Standalone file-tool core: mnemonic anchors, hidden line hashes, SQLite anchor state, cross-process path locks. |
 | **llm-provider** | ChatGPT subscription auth (PKCE), provider records, redacted-but-serializable secrets. |
@@ -63,21 +63,21 @@ Workspace edition is Rust 2024; MSRV `1.88`. License: MIT OR Apache-2.0.
 `artist_agent::stream_chat` executes one user turn. Its shape is an **outer
 retry loop** around a Rig streaming run:
 
-1. The CLI hands it full-fidelity history (`Vec<rig::Message>` rebuilt from
-   the event log — tool calls, tool results, reasoning included) plus a
-   `SessionHandles` bundle: steering handle, rules handle + compiled rule
-   set, event recorder, attachment store, and a cancellation token.
+1. The CLI hands it a Rig `ConversationMemory` plus a `SessionHandles`
+   bundle: conversation id, steering handle, rules handle + compiled rule
+   set, event recorder, and a cancellation token. Rig loads the native
+   messages and appends the successful run delta.
 2. Each iteration builds a fresh Rig agent (system prompt, built-in tools,
    MCP tools, `delegate`) with three hooks, in order:
    - **SteeringHook** — injects queued user corrections into tool results
      as `<user_steering>` blocks.
-   - **CaptureHook** — records committed model turns and tool results into
-     the event log (see below). Ignores all delta events.
+   - **CaptureHook** — captures structured tool outcome/timing metadata for
+     the live UI; conversation persistence is handled by Rig memory.
    - **TtsrHook** — the stream-rules matcher (see below).
 3. The drive loop translates Rig stream items into `PromptEvent`s for the
    UI, `tokio::select!`-ing against the cancellation token: Esc cancels
-   cooperatively (the run records `run.finished{cancelled}` and accumulated
-   text is preserved as a partial model turn — nothing is abandoned).
+   cooperatively and records `run.finished{cancelled}`; partial model output
+   is intentionally absent from resumed conversation memory.
 4. When a rule fires, the run terminates and the loop reseeds (see TTSR
    mechanics) — `continue 'retry`.
 
@@ -218,20 +218,19 @@ retries mint new runs, so aborted branches stay distinguishable). Unknown
 kinds/fields are tolerated on read — an older binary can open a newer
 session, degraded.
 
-**Event kinds:** `session.created`, `run.started/finished`, `turn.user`,
-`model.turn` (the commit point: full assistant content incl. tool calls and
-reasoning, `partial: true` when synthesized after a cancel), `tool.result`
-(model-visible text + structured outcome + duration), `steering.delivered`,
-`delegate.started/finished`, `history.rewind`,
-`legacy.turn`, `rule.fired`, `rule.injection`, `rule.retro_findings`.
-**Deltas are never persisted** — capture happens at commit points via the
-`CaptureHook` (`ModelTurnFinished` / `ToolResult` step events), so the log
-is byte-faithful to what rig committed, including encrypted reasoning.
+**Event kinds:** `session.created`, `run.started/finished`,
+`conversation.messages`, `steering.delivered`, `delegate.started/finished`,
+`history.rewind`, `rule.fired`, `rule.injection`, and `rule.retro_findings`.
+Older `turn.user`, `model.turn`, `tool.result`, and `legacy.turn` records remain
+readable for migration.
 
-**Content schema:** own explicitly-tagged `ContentBlock` enum mirroring rig
-types with exact round-trip converters; content we can't model degrades to
-an `Opaque` block carrying verbatim rig serde (zero loss). Images are
-content-addressed into `attachments/`.
+**Conversation memory:** the main agent uses Rig's `ConversationMemory` API.
+After a successful run Rig appends its native `Vec<Message>` delta as one
+`conversation.messages` event; subsequent runs load those messages directly.
+The first successful turn in an older session writes a reset snapshot containing
+the legacy projection plus the new Rig delta. Failed and cancelled runs do not
+enter model memory. Images therefore persist in Rig's own message representation;
+the attachment store remains for older sessions.
 
 **Writer:** all producers (CLI, hooks, delegates) send through a clonable
 `Recorder` into one writer task — total order, O(1) durable appends
@@ -240,15 +239,12 @@ lock (a second `artist -r` fails fast). A flush barrier gives
 read-your-writes at turn boundaries.
 
 **Projections:**
-- *Model history* — `build_history(events) -> Vec<rig::Message>` with tool
-  results paired to committed tool-call ids (what rig validates on replay),
-  rewind masks honored, and a degrade option that drops encrypted
-  reasoning if the backend rejects cross-process replay. This is what fixes
-  the old "tool context lost between turns" problem.
-- *Markdown transcript* — appended incrementally by the writer task;
+- *Model memory* — Rig loads native messages through `SessionMemory`; rewind
+  masks select the active batches. Legacy events are converted only when needed.
+- *Markdown transcript* — a lossy display projection appended by the writer;
   regenerate any time with `artist sessions render <id>`.
-- *TUI replay* — resume shows tool activity, reasoning, steering, and rule
-  firings, not just prose.
+- *TUI replay* — reconstructed from Rig messages plus operational events. Fine
+  timing and cancelled partial output are intentionally not resume state.
 
 **Time travel:** `/rewind` lists recent user turns; `/rewind <n>` appends a
 `history.rewind` mask (projections hide the range; the log keeps it) and
