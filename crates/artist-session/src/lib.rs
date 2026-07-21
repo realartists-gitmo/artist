@@ -17,6 +17,7 @@
 //! ```
 
 mod attachments;
+pub mod compaction;
 mod conversation_replay;
 mod convert;
 mod event;
