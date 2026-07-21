@@ -4,7 +4,7 @@
 use anyhow::Result;
 use rig_core::OneOrMany;
 use rig_core::completion::message::{
-    AssistantContent, Message, Text, ToolResult, ToolResultContent, UserContent,
+    AssistantContent, Message, ReasoningContent, Text, ToolResult, ToolResultContent, UserContent,
 };
 
 use crate::attachments::AttachmentStore;
@@ -68,12 +68,27 @@ pub(crate) fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Mask
     masks
 }
 
+/// Whether the active projection contains Rig-native conversation batches.
+pub(crate) fn has_native_conversation(events: &[Envelope], up_to_seq: Option<u64>) -> bool {
+    native_conversation(
+        events,
+        &HistoryOptions {
+            up_to_seq,
+            ..HistoryOptions::default()
+        },
+    )
+    .is_some()
+}
+
 /// Build the model-facing history from a session's events.
 pub fn build(
     events: &[Envelope],
     attachments: &AttachmentStore,
     options: &HistoryOptions,
 ) -> Result<Vec<Message>> {
+    if let Some(messages) = native_conversation(events, options) {
+        return Ok(messages);
+    }
     let masks = resolve_masks(events, options.up_to_seq);
     let mut messages: Vec<Message> = Vec::new();
     // ToolCall blocks of the latest assistant turn not yet fully answered:
@@ -166,14 +181,57 @@ pub fn build(
                     _ => messages.push(Message::user(&turn.content)),
                 }
             }
-            // Lifecycle, steering-display, delegate, and rule events carry no
-            // model-facing content (rule injections ride in turn.user /
-            // tool.result text already).
+            // Lifecycle, steering-display, delegate, and rule bookkeeping
+            // events carry no model-facing content.
             _ => {}
         }
     }
     flush_results(&mut messages, &mut unanswered, &mut pending_results);
     Ok(messages)
+}
+
+fn native_conversation(events: &[Envelope], options: &HistoryOptions) -> Option<Vec<Message>> {
+    let masks = resolve_masks(events, options.up_to_seq);
+    let mut found = false;
+    let mut messages = Vec::new();
+    for envelope in events {
+        if options.up_to_seq.is_some_and(|limit| envelope.seq > limit) {
+            break;
+        }
+        if envelope.lineage != options.lineage || masks.covers(envelope.seq) {
+            continue;
+        }
+        if let SessionEvent::ConversationMessages(batch) = envelope.event() {
+            found = true;
+            if batch.reset {
+                messages.clear();
+            }
+            messages.extend(batch.messages);
+        }
+    }
+    if found && options.drop_encrypted_reasoning {
+        messages = messages
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::Assistant { id, content } => {
+                    let mut items = content.iter().cloned().collect::<Vec<_>>();
+                    for item in &mut items {
+                        if let AssistantContent::Reasoning(reasoning) = item {
+                            reasoning.content.retain(|part| {
+                                !matches!(part, ReasoningContent::Encrypted(_))
+                            });
+                        }
+                    }
+                    items.retain(|item| {
+                        !matches!(item, AssistantContent::Reasoning(reasoning) if reasoning.content.is_empty())
+                    });
+                    one_or_many(items).map(|content| Message::Assistant { id, content })
+                }
+                other => Some(other),
+            })
+            .collect();
+    }
+    found.then_some(messages)
 }
 
 /// `OneOrMany` from a possibly-empty vec (`None` when empty).
@@ -214,8 +272,8 @@ fn flush_results(
 mod tests {
     use super::*;
     use crate::event::{
-        HistoryRewind, LegacyTurn, ModelTurn, SCHEMA_VERSION, ToolOutcomeRecord, ToolResultEvent,
-        TurnUser,
+        ConversationMessages, HistoryRewind, LegacyTurn, ModelTurn, SCHEMA_VERSION,
+        ToolOutcomeRecord, ToolResultEvent, TurnUser,
     };
 
     struct LogBuilder {
@@ -356,6 +414,34 @@ mod tests {
             texts,
             vec!["one", "first answer", "two, better", "third answer"]
         );
+    }
+
+    #[test]
+    fn rewind_masks_rig_native_conversation_batches() {
+        let (_dir, store) = attachments();
+        let mut log = LogBuilder::new();
+        let retained = log.push(SessionEvent::ConversationMessages(ConversationMessages {
+            messages: vec![Message::user("one"), Message::assistant("first")],
+            reset: false,
+            display_from: 0,
+        }));
+        log.push(SessionEvent::ConversationMessages(ConversationMessages {
+            messages: vec![Message::user("two"), Message::assistant("second")],
+            reset: false,
+            display_from: 0,
+        }));
+        log.push(SessionEvent::HistoryRewind(HistoryRewind {
+            to_seq: retained,
+            reason: "retry".into(),
+            by: "user".into(),
+        }));
+
+        let history = build(&log.events, &store, &HistoryOptions::default()).unwrap();
+        let expected: Vec<Message> = serde_json::from_value(
+            serde_json::to_value(vec![Message::user("one"), Message::assistant("first")]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(history, expected);
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub enum SessionEvent {
     SteeringDelivered(SteeringDelivered),
     DelegateStarted(DelegateStarted),
     DelegateFinished(DelegateFinished),
+    ConversationMessages(ConversationMessages),
     HistoryRewind(HistoryRewind),
     LegacyTurn(LegacyTurn),
     RuleFired(RuleFired),
@@ -113,6 +114,11 @@ event_kinds!(
     (SteeringDelivered, SteeringDelivered, "steering.delivered"),
     (DelegateStarted, DelegateStarted, "delegate.started"),
     (DelegateFinished, DelegateFinished, "delegate.finished"),
+    (
+        ConversationMessages,
+        ConversationMessages,
+        "conversation.messages"
+    ),
     (HistoryRewind, HistoryRewind, "history.rewind"),
     (LegacyTurn, LegacyTurn, "legacy.turn"),
     (RuleFired, RuleFired, "rule.fired"),
@@ -268,6 +274,19 @@ pub struct DelegateStarted {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DelegateFinished {
     pub outcome: String,
+}
+
+/// Rig-native conversation messages committed after a successful agent run.
+/// `reset` replaces prior conversation batches; otherwise this batch appends.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConversationMessages {
+    pub messages: Vec<rig_core::completion::Message>,
+    #[serde(default)]
+    pub reset: bool,
+    /// Prefix retained for model continuity but already represented by legacy
+    /// replay events, so resume/transcript projections should skip it.
+    #[serde(default)]
+    pub display_from: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
