@@ -47,7 +47,7 @@ async fn compaction_replaces_model_context_without_replacing_transcript() {
         )
         .await
         .unwrap();
-    let snapshot = vec![Message::user("summary"), Message::assistant("recent")];
+    let snapshot = vec![Message::user("summary"), Message::assistant("old answer")];
 
     memory
         .compact(
@@ -64,16 +64,33 @@ async fn compaction_replaces_model_context_without_replacing_transcript() {
         .await
         .unwrap();
 
-    assert_eq!(memory.load("s").await.unwrap(), normalized(snapshot));
+    memory
+        .append(
+            "s",
+            vec![
+                Message::user("next request"),
+                Message::assistant("next answer"),
+            ],
+        )
+        .await
+        .unwrap();
+    let mut expected = snapshot;
+    expected.extend([
+        Message::user("next request"),
+        Message::assistant("next answer"),
+    ]);
+    assert_eq!(memory.load("s").await.unwrap(), normalized(expected));
     let events = EventLogReader::new(dir.path()).read_all().unwrap();
     assert_eq!(
         replay_for_ui(&events),
         vec![
             ReplayItem::User("old request".into()),
             ReplayItem::Assistant("old answer".into()),
+            ReplayItem::User("next request".into()),
+            ReplayItem::Assistant("next answer".into()),
         ]
     );
-    let SessionEvent::ConversationMessages(batch) = events.last().unwrap().event() else {
+    let SessionEvent::ConversationMessages(batch) = events[2].event() else {
         panic!("expected compacted conversation snapshot")
     };
     assert!(batch.reset);

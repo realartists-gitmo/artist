@@ -219,8 +219,9 @@ kinds/fields are tolerated on read — an older binary can open a newer
 session, degraded.
 
 **Event kinds:** `session.created`, `run.started/finished`,
-`conversation.messages`, `steering.delivered`, `delegate.started/finished`,
-`history.rewind`, `rule.fired`, `rule.injection`, and `rule.retro_findings`.
+`conversation.messages`, `conversation.compacted`, `steering.delivered`,
+`delegate.started/finished`, `history.rewind`, `rule.fired`, `rule.injection`,
+and `rule.retro_findings`.
 Older `turn.user`, `model.turn`, `tool.result`, and `legacy.turn` records remain
 readable for migration.
 
@@ -231,6 +232,29 @@ The first successful turn in an older session writes a reset snapshot containing
 the legacy projection plus the new Rig delta. Failed and cancelled runs do not
 enter model memory. Images therefore persist in Rig's own message representation;
 the attachment store remains for older sessions.
+
+**Compaction:** Artist follows Pi's turn-aware checkpoint design directly over
+Rig messages. Before a turn, automatic compaction triggers when projected
+context exceeds `context_window - reserve_tokens`; `/compact [instructions]`
+triggers it manually. The planner walks backward to retain approximately
+`keep_recent_tokens`, never cuts at a tool result, and separately summarizes an
+early prefix when one oversized turn must be split. Summarization uses labelled
+conversation serialization, truncates tool results to 2,000 characters, updates
+the previous structured checkpoint on repeated compactions, and carries
+cumulative read/modified file lists. A successful compaction appends
+`conversation.compacted` audit metadata and a hidden reset snapshot containing
+the summary plus the recent suffix. The append-only transcript remains intact;
+only model context is replaced. Summary failures leave memory untouched.
+
+Defaults are enabled with 16,384 reserve tokens and 20,000 recent tokens. They
+can be overridden globally or per project in `settings.toml`:
+
+```toml
+[compaction]
+enabled = true
+reserve_tokens = 16384
+keep_recent_tokens = 20000
+```
 
 **Writer:** all producers (CLI, hooks, delegates) send through a clonable
 `Recorder` into one writer task — total order, O(1) durable appends
