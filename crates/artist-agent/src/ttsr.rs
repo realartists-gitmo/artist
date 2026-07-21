@@ -157,8 +157,8 @@ fn reminder_text(rule: &RuleId, reminder: &str) -> String {
 }
 
 /// The aggregated "active stream rules" context document re-applied on
-/// every completion call — `persistence: session` reminders survive any
-/// history manipulation (including future compaction) by construction.
+/// every completion call — `persistence: session` reminders survive history
+/// manipulation by construction.
 fn injection_document(injections: &[(RuleId, String)]) -> Document {
     let mut text = String::from(
         "Active stream rules (previously triggered this session; they still apply):\n",

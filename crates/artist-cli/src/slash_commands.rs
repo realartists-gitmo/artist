@@ -33,11 +33,6 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/mcp [status|start|stop|restart|refresh] [server]",
     },
     SlashCommand {
-        name: "/compact",
-        description: "Summarize older context while preserving recent turns",
-        usage: "/compact",
-    },
-    SlashCommand {
         name: "/rewind",
         description: "Rewind to an earlier turn, or fork the session there",
         usage: "/rewind [n] [fork]",
@@ -103,7 +98,6 @@ pub(crate) enum ParsedCommand<'a> {
         target: Option<usize>,
         fork: bool,
     },
-    Compact,
     Rules(RulesAction<'a>),
     /// Start a fresh session.
     New,
@@ -204,11 +198,6 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         ("/model", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/model [model] [reasoning]",
-        }),
-        ("/compact", []) => Ok(ParsedCommand::Compact),
-        ("/compact", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/compact",
         }),
         ("/rewind", []) => Ok(ParsedCommand::Rewind {
             target: None,
@@ -323,7 +312,6 @@ mod tests {
                 "/skills",
                 "/tools",
                 "/mcp",
-                "/compact",
                 "/rewind",
                 "/rules",
                 "/new",
@@ -348,7 +336,6 @@ mod tests {
         assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
         assert_eq!(parse("/skills"), Some(Ok(ParsedCommand::Skills)));
         assert_eq!(parse("/tools"), Some(Ok(ParsedCommand::Tools)));
-        assert_eq!(parse("/compact"), Some(Ok(ParsedCommand::Compact)));
         assert_eq!(
             parse(" /model "),
             Some(Ok(ParsedCommand::Model {
