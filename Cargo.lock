@@ -262,6 +262,7 @@ dependencies = [
  "artist-session",
  "dirs 6.0.0",
  "regex",
+ "rig-core",
  "serde",
  "serde_json",
  "serde_yaml",

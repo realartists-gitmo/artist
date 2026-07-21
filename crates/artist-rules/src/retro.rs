@@ -3,6 +3,7 @@
 //! abort anything and never consume a rule's fire budget.
 
 use artist_session::{ContentBlock, Envelope, SessionEvent, visible_events};
+use rig_core::completion::message::{AssistantContent, Message};
 
 use crate::matcher::RuleSet;
 use crate::types::{MatchTarget, RuleId};
@@ -22,28 +23,22 @@ pub struct RetroFinding {
 pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
     let mut findings = Vec::new();
     for envelope in visible_events(events) {
-        let SessionEvent::ModelTurn(turn) = envelope.event() else {
-            continue;
+        let candidates = match envelope.event() {
+            SessionEvent::ModelTurn(turn) => turn
+                .content
+                .iter()
+                .filter_map(block_candidate)
+                .collect::<Vec<_>>(),
+            SessionEvent::ConversationMessages(batch) => batch
+                .messages
+                .iter()
+                .skip(batch.display_from)
+                .flat_map(message_candidates)
+                .collect(),
+            _ => continue,
         };
-        for block in &turn.content {
-            let matched = match block {
-                ContentBlock::Text { text } => {
-                    rules.scan_all(MatchTarget::AssistantText, text, None)
-                }
-                ContentBlock::ReasoningSummary { text, .. } => {
-                    rules.scan_all(MatchTarget::ReasoningSummary, text, None)
-                }
-                ContentBlock::ToolCall {
-                    name, arguments, ..
-                } => rules.scan_all(MatchTarget::ToolArgs, &arguments.to_string(), Some(name)),
-                _ => Vec::new(),
-            };
-            let target = match block {
-                ContentBlock::Text { .. } => MatchTarget::AssistantText,
-                ContentBlock::ReasoningSummary { .. } => MatchTarget::ReasoningSummary,
-                _ => MatchTarget::ToolArgs,
-            };
-            for (rule, excerpt) in matched {
+        for (target, text, tool) in candidates {
+            for (rule, excerpt) in rules.scan_all(target, &text, tool.as_deref()) {
                 // Wasm-backed rules judge their prefilter hits in scans too,
                 // so a plugin's pass never shows up as a false finding.
                 let firing = crate::types::Firing {
@@ -67,6 +62,48 @@ pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
         }
     }
     findings
+}
+
+fn block_candidate(block: &ContentBlock) -> Option<(MatchTarget, String, Option<String>)> {
+    match block {
+        ContentBlock::Text { text } => Some((MatchTarget::AssistantText, text.clone(), None)),
+        ContentBlock::ReasoningSummary { text, .. } => {
+            Some((MatchTarget::ReasoningSummary, text.clone(), None))
+        }
+        ContentBlock::ToolCall {
+            name, arguments, ..
+        } => Some((
+            MatchTarget::ToolArgs,
+            arguments.to_string(),
+            Some(name.clone()),
+        )),
+        _ => None,
+    }
+}
+
+fn message_candidates(message: &Message) -> Vec<(MatchTarget, String, Option<String>)> {
+    let Message::Assistant { content, .. } = message else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter_map(|item| match item {
+            AssistantContent::Text(text) => {
+                Some((MatchTarget::AssistantText, text.text.clone(), None))
+            }
+            AssistantContent::Reasoning(reasoning) => Some((
+                MatchTarget::ReasoningSummary,
+                reasoning.display_text(),
+                None,
+            )),
+            AssistantContent::ToolCall(call) => Some((
+                MatchTarget::ToolArgs,
+                call.function.arguments.to_string(),
+                Some(call.function.name.clone()),
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
