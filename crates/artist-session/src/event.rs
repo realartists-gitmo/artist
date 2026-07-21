@@ -53,7 +53,6 @@ pub enum SessionEvent {
     DelegateStarted(DelegateStarted),
     DelegateFinished(DelegateFinished),
     HistoryRewind(HistoryRewind),
-    HistoryCompact(HistoryCompact),
     LegacyTurn(LegacyTurn),
     RuleFired(RuleFired),
     RuleInjection(RuleInjection),
@@ -115,7 +114,6 @@ event_kinds!(
     (DelegateStarted, DelegateStarted, "delegate.started"),
     (DelegateFinished, DelegateFinished, "delegate.finished"),
     (HistoryRewind, HistoryRewind, "history.rewind"),
-    (HistoryCompact, HistoryCompact, "history.compact"),
     (LegacyTurn, LegacyTurn, "legacy.turn"),
     (RuleFired, RuleFired, "rule.fired"),
     (RuleInjection, RuleInjection, "rule.injection"),
@@ -279,14 +277,6 @@ pub struct HistoryRewind {
     pub reason: String,
     /// "user" | "stream-rules"
     pub by: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct HistoryCompact {
-    pub from_seq: u64,
-    pub to_seq: u64,
-    /// Replacement message content summarizing the masked range.
-    pub summary: Vec<ContentBlock>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

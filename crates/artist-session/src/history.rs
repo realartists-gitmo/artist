@@ -1,6 +1,5 @@
 //! The model-facing history projection: events → `Vec<rig Message>` with
-//! full tool-call/result fidelity, honoring `history.rewind` and
-//! `history.compact` masks.
+//! full tool-call/result fidelity, honoring `history.rewind` masks.
 
 use anyhow::Result;
 use rig_core::OneOrMany;
@@ -45,10 +44,8 @@ impl Masks {
     }
 }
 
-/// Resolve which rewind/compact control events are active. Processed from
-/// latest to earliest: a control event that falls inside a later active
-/// control's range is disabled (e.g. rewinding past a compaction restores
-/// the originals the compaction had replaced).
+/// Resolve which rewind control events are active. Processed from latest to
+/// earliest so a control event inside a later active range is disabled.
 pub(crate) fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Masks {
     let mut masks = Masks::default();
     for envelope in events.iter().rev() {
@@ -59,7 +56,6 @@ pub(crate) fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Mask
         }
         let range = match envelope.event() {
             SessionEvent::HistoryRewind(rewind) => (rewind.to_seq.saturating_add(1), envelope.seq),
-            SessionEvent::HistoryCompact(compact) => (compact.from_seq, compact.to_seq),
             _ => continue,
         };
         if masks.covers(envelope.seq) {
@@ -163,13 +159,6 @@ pub fn build(
                     flush_results(&mut messages, &mut unanswered, &mut pending_results);
                 }
             }
-            SessionEvent::HistoryCompact(compact) => {
-                flush_results(&mut messages, &mut unanswered, &mut pending_results);
-                let content = blocks_to_user(&compact.summary, attachments)?;
-                if let Some(content) = one_or_many(content) {
-                    messages.push(Message::User { content });
-                }
-            }
             SessionEvent::LegacyTurn(turn) => {
                 flush_results(&mut messages, &mut unanswered, &mut pending_results);
                 match turn.role.as_str() {
@@ -225,8 +214,8 @@ fn flush_results(
 mod tests {
     use super::*;
     use crate::event::{
-        HistoryCompact, HistoryRewind, LegacyTurn, ModelTurn, SCHEMA_VERSION, ToolOutcomeRecord,
-        ToolResultEvent, TurnUser,
+        HistoryRewind, LegacyTurn, ModelTurn, SCHEMA_VERSION, ToolOutcomeRecord, ToolResultEvent,
+        TurnUser,
     };
 
     struct LogBuilder {
@@ -367,36 +356,6 @@ mod tests {
             texts,
             vec!["one", "first answer", "two, better", "third answer"]
         );
-    }
-
-    #[test]
-    fn rewind_past_compaction_restores_originals() {
-        let (_dir, store) = attachments();
-        let mut log = LogBuilder::new();
-        let first = log.push(user("one"));
-        let second = log.push(assistant_text("original answer"));
-        log.push(SessionEvent::HistoryCompact(HistoryCompact {
-            from_seq: first,
-            to_seq: second,
-            summary: vec![ContentBlock::Text {
-                text: "Earlier: user asked one".into(),
-            }],
-        }));
-        log.push(SessionEvent::HistoryRewind(HistoryRewind {
-            to_seq: second,
-            reason: "user rewind".into(),
-            by: "user".into(),
-        }));
-
-        let history = build(&log.events, &store, &HistoryOptions::default()).unwrap();
-        assert_eq!(history.len(), 2, "compaction summary must be gone");
-        match &history[1] {
-            Message::Assistant { content, .. } => match content.first() {
-                AssistantContent::Text(text) => assert_eq!(text.text, "original answer"),
-                other => panic!("unexpected {other:?}"),
-            },
-            other => panic!("unexpected {other:?}"),
-        }
     }
 
     #[test]

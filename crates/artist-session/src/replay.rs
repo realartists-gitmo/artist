@@ -102,7 +102,7 @@ pub fn user_prompts(events: &[Envelope]) -> Vec<String> {
         .collect()
 }
 
-/// Events not hidden by rewind/compaction masks — the "current" view of
+/// Events not hidden by rewind masks — the "current" view of
 /// the session that on-demand scans should see.
 pub fn visible_events(events: &[Envelope]) -> Vec<&Envelope> {
     let masks = resolve_masks(events, None);

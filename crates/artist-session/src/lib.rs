@@ -2,10 +2,9 @@
 //!
 //! The canonical record of a session is an append-only JSONL event log
 //! (`events.jsonl`); everything else — the markdown transcript, the
-//! model-facing history, the TUI replay — is a projection. Rewind and
-//! compaction are *events* that mask ranges in projections; nothing is ever
-//! deleted, which is what makes retroactive rule evaluation and session
-//! forking possible.
+//! model-facing history, the TUI replay — is a projection. Rewind events mask
+//! ranges in projections; nothing is ever deleted, which is what makes
+//! retroactive rule evaluation and session forking possible.
 //!
 //! Layout on disk, one directory per session:
 //!
@@ -18,7 +17,6 @@
 //! ```
 
 mod attachments;
-mod compaction;
 mod convert;
 mod event;
 mod history;
@@ -27,12 +25,11 @@ mod recorder;
 mod replay;
 
 pub use attachments::AttachmentStore;
-pub use compaction::{CompactionCandidate, render_compaction_source, select_compaction_candidate};
 pub use convert::{assistant_to_blocks, blocks_to_assistant, blocks_to_user, user_to_blocks};
 pub use event::{
-    ContentBlock, DelegateFinished, DelegateStarted, Envelope, HistoryCompact, HistoryRewind,
-    LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection, RuleRetroFindings, RunFinished,
-    RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, ToolOutcomeRecord,
+    ContentBlock, DelegateFinished, DelegateStarted, Envelope, HistoryRewind, LegacyTurn,
+    MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection, RuleRetroFindings, RunFinished, RunStarted,
+    SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, ToolOutcomeRecord,
     ToolResultEvent, TurnUser,
 };
 pub use history::{HistoryOptions, build as build_history};
