@@ -117,8 +117,7 @@ once per session (default) or once per user turn.
   `CompletionCall`.
 - Tool-argument matches abort **before the tool executes**.
 - `persistence: session` reminders re-inject on every completion call via
-  `RequestPatch.extra_context` — they live outside compactable history by
-  construction, so any future context compaction cannot lose them.
+  `RequestPatch.extra_context`, outside ordinary history.
 - A retry budget (4 per user prompt) backstops loops; exhausted firings
   degrade to inject-only. Rule state (fired set, injections, hit counts)
   restores from the event log on resume.
@@ -200,9 +199,9 @@ pure abort-retry), user-prompt matching, trust prompts for project rules
 ## Event-sourced sessions
 
 The canonical record of a session is an append-only JSONL event log;
-everything else is a projection. Nothing is ever deleted — rewind and
-compaction are *mask events* — which is what makes retroactive rule scans,
-`/rewind`, and forking possible.
+everything else is a projection. Nothing is ever deleted — rewind events mask
+history ranges — which is what makes retroactive rule scans, `/rewind`, and
+forking possible.
 
 ```text
 <config_root>/sessions/<project-key>/<session-id>/
@@ -223,7 +222,7 @@ session, degraded.
 `model.turn` (the commit point: full assistant content incl. tool calls and
 reasoning, `partial: true` when synthesized after a cancel), `tool.result`
 (model-visible text + structured outcome + duration), `steering.delivered`,
-`delegate.started/finished`, `history.rewind`, `history.compact`,
+`delegate.started/finished`, `history.rewind`,
 `legacy.turn`, `rule.fired`, `rule.injection`, `rule.retro_findings`.
 **Deltas are never persisted** — capture happens at commit points via the
 `CaptureHook` (`ModelTurnFinished` / `ToolResult` step events), so the log
@@ -243,7 +242,7 @@ read-your-writes at turn boundaries.
 **Projections:**
 - *Model history* — `build_history(events) -> Vec<rig::Message>` with tool
   results paired to committed tool-call ids (what rig validates on replay),
-  rewind/compact masks honored, and a degrade option that drops encrypted
+  rewind masks honored, and a degrade option that drops encrypted
   reasoning if the backend rejects cross-process replay. This is what fixes
   the old "tool context lost between turns" problem.
 - *Markdown transcript* — appended incrementally by the writer task;
@@ -257,9 +256,6 @@ pre-fills the turn's text for editing; `/rewind <n> fork` creates a new
 session whose log is the verbatim event prefix (stable seqs, parent pointer
 in `session.created`, attachments copied) — the parent is untouched. Forks
 are annotated in the `-r` picker.
-
-**Compaction** has a designed hook point (`history.compact` replaces a
-masked range with a summary message in projections) but no summarizer yet.
 
 **Migration:** legacy markdown sessions convert on first open (one
 `legacy.turn` per parsed turn, idempotent, old file becomes
@@ -375,7 +371,6 @@ for cross-run replay.
 ## Open items
 
 - Codex replay spike not yet run against a live login (degrade path ready).
-- Context compaction: hook point exists; summarizer unbuilt.
 - Tool-result rule target (inject-only semantics) deferred from v1.
 - Delegate activity is recorded in the log but not yet surfaced in the TUI.
 - Full clean-rewind rendering of aborted partial output in scrollback

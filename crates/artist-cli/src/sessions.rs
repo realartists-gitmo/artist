@@ -206,7 +206,7 @@ impl SessionStore {
 
     /// Fork a session at a point in its history: a new session whose log is
     /// the verbatim event prefix `seq <= up_to_seq` (identical seqs, so
-    /// rewind/compact references stay valid) with a fresh `session.created`
+    /// rewind references stay valid) with a fresh `session.created`
     /// carrying the parent pointer. The parent session is untouched.
     pub fn fork(&self, parent_id: &str, up_to_seq: u64) -> Result<ActiveSession> {
         let (parent, events) = self.peek(parent_id)?;

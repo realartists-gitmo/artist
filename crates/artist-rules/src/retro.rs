@@ -18,7 +18,7 @@ pub struct RetroFinding {
 
 /// Scan committed model output (assistant text, reasoning summaries,
 /// tool-call arguments) with the given rule set. Rule-injection turns and
-/// masked (rewound/compacted) ranges are skipped.
+/// rewound ranges are skipped.
 pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
     let mut findings = Vec::new();
     for envelope in visible_events(events) {

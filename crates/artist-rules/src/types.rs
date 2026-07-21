@@ -53,7 +53,7 @@ pub enum FirePolicy {
 #[serde(rename_all = "kebab-case")]
 pub enum Persistence {
     /// Re-injected on every completion call for the rest of the session
-    /// (survives any future compaction by construction; default).
+    /// (re-applied outside ordinary history; default).
     #[default]
     Session,
     /// Delivered once with the retry prompt only.
