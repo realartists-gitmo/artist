@@ -274,13 +274,7 @@ pub async fn stream_chat(
         );
 
         let mut builder = client.agent(model);
-        let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-        if let Some(effort) = &provider.reasoning_effort {
-            // No `summary` field: reasoning summaries are off (TOK-5) — they
-            // billed output tokens every turn. Reasoning-target stream rules
-            // match against raw reasoning deltas instead (handled in the loop).
-            params["reasoning"] = json!({ "effort": effort });
-        }
+        let params = request_params(&cache_key, provider.reasoning_effort.as_deref());
         builder = builder.additional_params(params);
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
@@ -488,8 +482,19 @@ pub async fn stream_chat(
     }
 }
 
-/// Log rule bookkeeping; Rig conversation memory persists the reminder prompt
-/// when the retried run succeeds.
+/// Provider parameters shared by every request attempt in a turn.
+fn request_params(cache_key: &str, reasoning_effort: Option<&str>) -> serde_json::Value {
+    let mut params = json!({ "prompt_cache_key": cache_key });
+    // Request a provider-generated trace for the live UI even when the model's
+    // default effort is in use. Rig's memory policy is independent: streaming
+    // this summary does not make the CLI responsible for model context.
+    params["reasoning"] = match reasoning_effort {
+        Some(effort) => json!({ "effort": effort, "summary": "auto" }),
+        None => json!({ "summary": "auto" }),
+    };
+    params
+}
+
 /// A stable `prompt_cache_key` derived from the project root and model, so a
 /// project's turns route to the same server-side prefix cache. Deterministic
 /// across process runs (`DefaultHasher` uses fixed keys).
@@ -501,6 +506,8 @@ pub(crate) fn prompt_cache_key(project_root: &std::path::Path, model: &str) -> S
     format!("artist-{:016x}", hasher.finish())
 }
 
+/// Log rule bookkeeping; Rig conversation memory persists the reminder prompt
+/// when the retried run succeeds.
 pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firing: &Firing) {
     recorder.record(RuleFired {
         rule: firing.rule.0.clone(),
@@ -560,4 +567,20 @@ pub async fn stream_prompt(
         on_event,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_params;
+
+    #[test]
+    fn reasoning_requests_a_live_summary_trace() {
+        let params = request_params("cache", Some("high"));
+        assert_eq!(params["reasoning"]["effort"], "high");
+        assert_eq!(params["reasoning"]["summary"], "auto");
+
+        let default_effort = request_params("cache", None);
+        assert_eq!(default_effort["reasoning"]["summary"], "auto");
+        assert!(default_effort["reasoning"].get("effort").is_none());
+    }
 }
