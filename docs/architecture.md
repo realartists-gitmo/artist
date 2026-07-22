@@ -297,11 +297,11 @@ are annotated in the `-r` picker.
 | **read** | Bounded text with mnemonic line anchors; images report metadata in the tool channel (image results surface a count marker in the UI). |
 | **edit** | Atomic replacements keyed by mnemonic anchors from the latest read. |
 | **write** | Atomic full-file create/overwrite. |
-| **find/grep** | FFF index queries. The index builds in the **background** — session startup never blocks on it; results carry an "index still building" note until the scan lands (`ARTIST_INDEX_STRICT` restores the hard 30s wait). |
+| **find/grep** | FFF index queries. The project index builds in the **background**; an absolute scope outside the project creates a watcher-free transient index for that path. |
 
-File tools remain jailed to the project root (two hardcoded layers:
-`Workspace` path resolution and the hashline `FileToolConfig`); bash can
-leave the tree. On stale/unknown anchors the model must re-read then retry; this guidance is
+All file tools accept project-relative paths and unrestricted absolute paths;
+bash also accepts either form for `cwd`. Relative paths remain rooted in the
+project and cannot traverse or escape it through symlinks. On stale/unknown anchors the model must re-read then retry; this guidance is
 conditionally generated only when the relevant tools are registered.
 
 ---

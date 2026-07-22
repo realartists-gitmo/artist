@@ -124,6 +124,66 @@ async fn writes_finds_and_greps_project_files() {
 }
 
 #[tokio::test]
+async fn all_file_tools_accept_external_absolute_paths() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let outside = tempfile::tempdir().unwrap();
+    let existing = outside.path().join("existing.rs");
+    std::fs::write(&existing, "fn external_needle() {}\n").unwrap();
+    let existing = existing.to_string_lossy().into_owned();
+    let tools = ToolBundle::new(workspace.clone());
+
+    let read = call(&tools.read, json!({"path":existing})).await;
+    let anchor = read.lines().next().unwrap().split(':').next().unwrap();
+    call(
+        &tools.edit,
+        json!({"path":existing,"replacements":[{"start":anchor,"content":"fn edited_external_needle() {}"}]}),
+    )
+    .await;
+    assert!(
+        std::fs::read_to_string(&existing)
+            .unwrap()
+            .contains("edited_external_needle")
+    );
+
+    let created = outside.path().join("created.txt");
+    call(
+        &tools.write,
+        json!({"path":created,"content":"absolute write needle\n"}),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(&created).unwrap(),
+        "absolute write needle\n"
+    );
+
+    let scope = outside.path().to_string_lossy();
+    let found = call(
+        &tools.find,
+        json!({"query":"existing rs","path":scope,"glob":"**/*.rs"}),
+    )
+    .await;
+    assert!(found.contains(&existing), "unexpected find output: {found}");
+    let grepped = call(
+        &tools.grep,
+        json!({"query":"edited_external_needle","path":scope,"glob":"**/*.rs"}),
+    )
+    .await;
+    assert!(
+        grepped.contains(&existing),
+        "unexpected grep output: {grepped}"
+    );
+
+    let bash = BashTool::new(workspace);
+    let output = call(
+        &bash,
+        json!({"mode":"exec","command":"pwd; cat created.txt","cwd":scope}),
+    )
+    .await;
+    assert!(output.contains(&*scope));
+    assert!(output.contains("absolute write needle"));
+}
+
+#[tokio::test]
 async fn stale_anchor_requires_a_fresh_read() {
     let (root, _state, workspace) = workspace(&[("file.rs", "one\ntwo\n")]);
     let tools = ToolBundle::new(workspace);
