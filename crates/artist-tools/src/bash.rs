@@ -171,11 +171,11 @@ impl Tool for BashTool {
     type Args = BashArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Run tests, builds, diagnostics, package commands, or persistent terminal sessions from the project root. Use the dedicated find, grep, and read tools instead of shell file discovery or content-search commands."
+        "Run tests, builds, diagnostics, package commands, or persistent terminal sessions. Commands default to the project root; cwd may be project-relative or absolute. Use the dedicated find, grep, and read tools instead of shell file discovery or content-search commands."
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"mode":{"enum":["exec","start","send","read","stop","list"]},"command":{"type":"string"},"background":{"type":"boolean","default":false,"description":"Return a persistent session immediately so other work can continue."},"sessionId":{"type":"string"},"input":{"type":"string"},"timeout":{"type":"integer","minimum":1,"default":DEFAULT_EXEC_TIMEOUT_SECS,"description":"Maximum time in seconds for a foreground exec command. Defaults to 10 seconds. If exceeded, the command is killed and the result explicitly reports the timeout."},"waitMs":{"type":"integer"},"maxBytes":{"type":"integer"},"cwd":{"type":"string"},"env":{"type":"object","additionalProperties":{"type":"string"}},"signal":{"enum":["SIGINT","SIGTERM","SIGKILL"]}},"additionalProperties":false})
+        json!({"type":"object","properties":{"mode":{"enum":["exec","start","send","read","stop","list"]},"command":{"type":"string"},"background":{"type":"boolean","default":false,"description":"Return a persistent session immediately so other work can continue."},"sessionId":{"type":"string"},"input":{"type":"string"},"timeout":{"type":"integer","minimum":1,"default":DEFAULT_EXEC_TIMEOUT_SECS,"description":"Maximum time in seconds for a foreground exec command. Defaults to 10 seconds. If exceeded, the command is killed and the result explicitly reports the timeout."},"waitMs":{"type":"integer"},"maxBytes":{"type":"integer"},"cwd":{"type":"string","description":"Project-relative or absolute working directory."},"env":{"type":"object","additionalProperties":{"type":"string"}},"signal":{"enum":["SIGINT","SIGTERM","SIGKILL"]}},"additionalProperties":false})
     }
     async fn call(&self, args: BashArgs) -> Result<String, ToolError> {
         let mode = args.mode.as_deref().unwrap_or(if args.command.is_some() {

@@ -21,7 +21,7 @@ impl Tool for ReadTool {
     type Args = ReadArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Read a project-relative file. Each line renders as `ANCHOR: CONTENT` (for example, `abc: hello`). Use only the token before the colon as the `start`/`end` anchor in edit; the content after the colon is not an anchor."
+        "Read a project-relative or absolute file. Each line renders as `ANCHOR: CONTENT` (for example, `abc: hello`). Use only the token before the colon as the `start`/`end` anchor in edit; the content after the colon is not an anchor."
             .into()
     }
 

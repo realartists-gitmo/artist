@@ -18,7 +18,7 @@ impl Tool for WriteTool {
     type Args = WriteArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Create or fully overwrite a project-relative file; use read+edit for targeted changes."
+        "Create or fully overwrite a project-relative or absolute file; use read+edit for targeted changes."
             .into()
     }
     fn parameters(&self) -> Value {

@@ -1,6 +1,9 @@
 use anyhow::{Context, Result, bail};
 use fff_search::{FFFMode, FilePicker, FilePickerOptions, SharedFilePicker, SharedFrecency};
 use hashline_tools::{AgentIdentity, FileCoordinator, FileToolConfig};
+
+mod search_scope;
+
 use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
@@ -26,7 +29,7 @@ impl Workspace {
         let files = FileCoordinator::open(
             FileToolConfig {
                 workspace_root: Some(root.clone()),
-                allow_outside_workspace: false,
+                allow_outside_workspace: true,
                 follow_symlinks: false,
             },
             state.join("hashlines.sqlite3"),
@@ -70,22 +73,18 @@ impl Workspace {
     }
 
     pub(crate) async fn wait_for_index(&self) -> Result<()> {
-        let picker = self.index.clone();
-        let ready =
-            tokio::task::spawn_blocking(move || picker.wait_for_scan(Duration::from_secs(30)))
-                .await
-                .context("join project indexing task")?;
-        if !ready {
-            bail!("timed out indexing project files")
-        }
-        Ok(())
+        wait_for_picker(self.index.clone()).await
     }
 
     pub fn resolve_existing(&self, input: &str) -> Result<PathBuf> {
         let candidate = self.checked_join(input)?;
         let canonical = std::fs::canonicalize(&candidate)
             .with_context(|| format!("path does not exist: {input}"))?;
-        self.ensure_inside(canonical, input)
+        if Path::new(input).is_absolute() {
+            Ok(canonical)
+        } else {
+            self.ensure_inside(canonical, input)
+        }
     }
 
     pub fn resolve_new(&self, input: &str) -> Result<PathBuf> {
@@ -95,11 +94,16 @@ impl Workspace {
             parent = parent.parent().context("path has no existing parent")?;
         }
         let canonical_parent = std::fs::canonicalize(parent)?;
-        self.ensure_inside(canonical_parent, input)?;
+        if !Path::new(input).is_absolute() {
+            self.ensure_inside(canonical_parent, input)?;
+        }
         Ok(candidate)
     }
 
     pub(crate) fn refresh_index(&self, path: &Path) {
+        if !path.starts_with(self.root()) {
+            return;
+        }
         if let Ok(mut index) = self.index.write()
             && let Some(index) = index.as_mut()
         {
@@ -120,7 +124,7 @@ impl Workspace {
         }
         let path = Path::new(input);
         if path.is_absolute() {
-            bail!("absolute paths are not allowed: {input}")
+            return Ok(path.to_owned());
         }
         if path
             .components()
@@ -137,6 +141,16 @@ impl Workspace {
         }
         Ok(path)
     }
+}
+
+async fn wait_for_picker(picker: SharedFilePicker) -> Result<()> {
+    let ready = tokio::task::spawn_blocking(move || picker.wait_for_scan(Duration::from_secs(30)))
+        .await
+        .context("join file indexing task")?;
+    if !ready {
+        bail!("timed out indexing files")
+    }
+    Ok(())
 }
 
 fn is_broad_root(root: &Path) -> bool {
@@ -163,12 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_escape_and_absolute_paths() {
+    fn accepts_absolute_paths_but_rejects_relative_escape() {
         let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(root.path(), state.path()).unwrap();
         assert!(workspace.resolve_new("../escape").is_err());
-        assert!(workspace.resolve_new("/tmp/escape").is_err());
+        assert_eq!(
+            workspace
+                .resolve_new(outside.path().join("new.txt").to_str().unwrap())
+                .unwrap(),
+            outside.path().join("new.txt")
+        );
         assert_eq!(
             workspace.resolve_new("src/lib.rs").unwrap(),
             root.path().join("src/lib.rs")
