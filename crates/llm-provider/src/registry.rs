@@ -36,36 +36,108 @@ pub struct ProviderMetadata {
 }
 
 pub const PROVIDERS: &[ProviderMetadata] = &[
-    entry(ProviderKind::Anthropic, "Anthropic"),
-    entry(ProviderKind::Azure, "Azure OpenAI"),
-    entry(ProviderKind::Chatgpt, "ChatGPT"),
-    entry(ProviderKind::Cohere, "Cohere"),
-    entry(ProviderKind::Copilot, "GitHub Copilot"),
-    entry(ProviderKind::Deepseek, "DeepSeek"),
-    entry(ProviderKind::Gemini, "Google Gemini"),
-    entry(ProviderKind::Groq, "Groq"),
-    entry(ProviderKind::Huggingface, "Hugging Face"),
-    entry(ProviderKind::Hyperbolic, "Hyperbolic"),
-    entry(ProviderKind::Llamafile, "Llamafile"),
-    entry(ProviderKind::Minimax, "MiniMax"),
-    entry(ProviderKind::Mira, "Mira"),
-    entry(ProviderKind::Mistral, "Mistral"),
-    entry(ProviderKind::Moonshot, "Moonshot"),
-    entry(ProviderKind::Ollama, "Ollama"),
-    entry(ProviderKind::Openai, "OpenAI"),
-    entry(ProviderKind::Openrouter, "OpenRouter"),
-    entry(ProviderKind::Perplexity, "Perplexity"),
-    entry(ProviderKind::Together, "Together AI"),
-    entry(ProviderKind::Xai, "xAI"),
-    entry(ProviderKind::Xiaomimimo, "Xiaomi MiMo"),
-    entry(ProviderKind::Zai, "Z.ai"),
+    entry(
+        ProviderKind::Anthropic,
+        "Anthropic",
+        "https://api.anthropic.com/",
+    ),
+    entry(
+        ProviderKind::Azure,
+        "Azure OpenAI",
+        "https://example.openai.azure.com/",
+    ),
+    entry(
+        ProviderKind::Chatgpt,
+        "ChatGPT",
+        "https://chatgpt.com/backend-api/codex/",
+    ),
+    entry(ProviderKind::Cohere, "Cohere", "https://api.cohere.com/v2/"),
+    entry(
+        ProviderKind::Copilot,
+        "GitHub Copilot",
+        "https://api.githubcopilot.com/",
+    ),
+    entry(
+        ProviderKind::Deepseek,
+        "DeepSeek",
+        "https://api.deepseek.com/",
+    ),
+    entry(
+        ProviderKind::Gemini,
+        "Google Gemini",
+        "https://generativelanguage.googleapis.com/",
+    ),
+    entry(
+        ProviderKind::Groq,
+        "Groq",
+        "https://api.groq.com/openai/v1/",
+    ),
+    entry(
+        ProviderKind::Huggingface,
+        "Hugging Face",
+        "https://router.huggingface.co/",
+    ),
+    entry(
+        ProviderKind::Hyperbolic,
+        "Hyperbolic",
+        "https://api.hyperbolic.xyz/v1/",
+    ),
+    entry(
+        ProviderKind::Llamafile,
+        "Llamafile",
+        "http://localhost:8080/v1/",
+    ),
+    entry(
+        ProviderKind::Minimax,
+        "MiniMax",
+        "https://api.minimax.io/v1/",
+    ),
+    entry(ProviderKind::Mira, "Mira", "https://api.mira.network/v1/"),
+    entry(
+        ProviderKind::Mistral,
+        "Mistral",
+        "https://api.mistral.ai/v1/",
+    ),
+    entry(
+        ProviderKind::Moonshot,
+        "Moonshot",
+        "https://api.moonshot.ai/v1/",
+    ),
+    entry(ProviderKind::Ollama, "Ollama", "http://localhost:11434/"),
+    entry(ProviderKind::Openai, "OpenAI", "https://api.openai.com/v1/"),
+    entry(
+        ProviderKind::Openrouter,
+        "OpenRouter",
+        "https://openrouter.ai/api/v1/",
+    ),
+    entry(
+        ProviderKind::Perplexity,
+        "Perplexity",
+        "https://api.perplexity.ai/",
+    ),
+    entry(
+        ProviderKind::Together,
+        "Together AI",
+        "https://api.together.xyz/v1/",
+    ),
+    entry(ProviderKind::Xai, "xAI", "https://api.x.ai/v1/"),
+    entry(
+        ProviderKind::Xiaomimimo,
+        "Xiaomi MiMo",
+        "https://api.xiaomimimo.com/v1/",
+    ),
+    entry(ProviderKind::Zai, "Z.ai", "https://api.z.ai/api/paas/v4/"),
 ];
 
-const fn entry(kind: ProviderKind, display_name: &'static str) -> ProviderMetadata {
+const fn entry(
+    kind: ProviderKind,
+    display_name: &'static str,
+    base_url: &'static str,
+) -> ProviderMetadata {
     ProviderMetadata {
         kind,
         display_name,
-        default_base_url: None,
+        default_base_url: Some(base_url),
     }
 }
 
@@ -89,6 +161,9 @@ mod tests {
                     .any(|other| other.kind == provider.kind)
             );
             assert_eq!(metadata(provider.kind).display_name, provider.display_name);
+            let url = url::Url::parse(provider.default_base_url.expect("completion URL"))
+                .expect("registered base URL is valid");
+            assert!(matches!(url.scheme(), "http" | "https"));
         }
     }
 }

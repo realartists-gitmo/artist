@@ -1,7 +1,9 @@
 use crate::{prompt, store::ProviderStore};
 use anyhow::{Context, Result, bail};
 use dialoguer::{Confirm, Input, Password};
-use llm_provider::{Credentials, OpenAiApi, ProviderId, ProviderKind, SavedProvider, Secret};
+use llm_provider::{
+    Credentials, OpenAiApi, PROVIDERS, ProviderId, ProviderKind, SavedProvider, Secret, metadata,
+};
 use url::Url;
 
 pub fn add(store: &mut ProviderStore) -> Result<()> {
@@ -13,32 +15,65 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
     {
         bail!("provider already exists: {id}");
     }
+    // ChatGPT subscription credentials are created by `artist login`, not here.
+    let available = PROVIDERS
+        .iter()
+        .filter(|item| item.kind != ProviderKind::Chatgpt)
+        .collect::<Vec<_>>();
+    let choices = available
+        .iter()
+        .map(|item| item.display_name.to_owned())
+        .collect::<Vec<_>>();
+    let kind = available[prompt::select("Provider", &choices, 0)?].kind;
+    let info = metadata(kind);
     let name: String = Input::new()
         .with_prompt("Display name")
-        .default("OpenAI".into())
+        .default(info.display_name.into())
         .interact_text()?;
     let base_url: String = Input::new()
         .with_prompt("Base URL")
-        .default("https://api.openai.com/v1/".into())
+        .default(info.default_base_url.unwrap_or_default().into())
         .interact_text()?;
-    let choices = vec![
-        "Responses API".to_owned(),
-        "Chat Completions API".to_owned(),
-    ];
-    let api = match prompt::select("API", &choices, 0)? {
-        0 => OpenAiApi::Responses,
-        _ => OpenAiApi::ChatCompletions,
+    let api = if matches!(
+        kind,
+        ProviderKind::Openai
+            | ProviderKind::Minimax
+            | ProviderKind::Moonshot
+            | ProviderKind::Xiaomimimo
+            | ProviderKind::Zai
+    ) {
+        let protocols = if kind == ProviderKind::Openai {
+            vec![
+                "Responses API".to_owned(),
+                "Chat Completions API".to_owned(),
+            ]
+        } else {
+            vec![
+                "OpenAI-compatible".to_owned(),
+                "Anthropic-compatible".to_owned(),
+            ]
+        };
+        Some(match prompt::select("Protocol", &protocols, 0)? {
+            0 => OpenAiApi::Responses,
+            _ => OpenAiApi::ChatCompletions,
+        })
+    } else {
+        None
     };
     let api_key = Password::new().with_prompt("API key").interact()?;
-    if api_key.is_empty() {
+    if api_key.trim().is_empty() {
         bail!("API key cannot be empty");
+    }
+    let parsed_url = Url::parse(&base_url).context("invalid base URL")?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        bail!("base URL must use HTTP or HTTPS");
     }
     store.add(SavedProvider {
         id: ProviderId::new(id)?,
         name,
-        provider: ProviderKind::Openai,
-        base_url: Url::parse(&base_url).context("invalid base URL")?,
-        api: Some(api),
+        provider: kind,
+        base_url: parsed_url,
+        api,
         model: None,
         reasoning_effort: None,
         credentials: Credentials::ApiKey {
