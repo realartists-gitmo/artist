@@ -32,6 +32,12 @@ impl ProviderStore {
                 ..Self::default()
             });
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .context("secure providers.toml permissions")?;
+        }
         let contents = fs::read_to_string(path).context("read providers.toml")?;
         let mut document: toml::Value =
             toml::from_str(&contents).context("parse providers.toml")?;
@@ -433,6 +439,11 @@ type = "none"
             },
         ));
         store.save(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.providers.len(), 1);
         assert_eq!(loaded.disabled_tools, ["bash"]);

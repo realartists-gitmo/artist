@@ -910,6 +910,14 @@ async fn run_loop(
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
+                        let active_provider_edited = match command {
+                            slash_commands::ParsedCommand::Provider {
+                                action: slash_commands::ProviderAction::Edit { id },
+                            } => id.is_none_or(|id| {
+                                context.store.providers[context.provider_index].id.as_str() == id
+                            }),
+                            _ => false,
+                        };
                         let command_input = ChatInput::default();
                         match command_ui::run(
                             context.store,
@@ -949,9 +957,11 @@ async fn run_loop(
                                     )?
                                     .denied_tools;
                                 }
-                                if output.model_changed {
-                                    status.context_capacity = output.context_capacity;
-                                    status.used_tokens = None;
+                                if output.model_changed || active_provider_edited {
+                                    if output.model_changed {
+                                        status.context_capacity = output.context_capacity;
+                                        status.used_tokens = None;
+                                    }
                                     // `/model` is an explicit in-session override, including
                                     // when startup settings supplied model defaults. Use the
                                     // newly persisted choice directly rather than reapplying

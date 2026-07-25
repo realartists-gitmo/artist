@@ -80,24 +80,20 @@ pub const PROVIDERS: &[ProviderMetadata] = &[
     entry(
         ProviderKind::Hyperbolic,
         "Hyperbolic",
-        "https://api.hyperbolic.xyz/v1/",
+        "https://api.hyperbolic.xyz/",
     ),
     entry(
         ProviderKind::Llamafile,
         "Llamafile",
-        "http://localhost:8080/v1/",
+        "http://localhost:8080/",
     ),
     entry(
         ProviderKind::Minimax,
         "MiniMax",
         "https://api.minimax.io/v1/",
     ),
-    entry(ProviderKind::Mira, "Mira", "https://api.mira.network/v1/"),
-    entry(
-        ProviderKind::Mistral,
-        "Mistral",
-        "https://api.mistral.ai/v1/",
-    ),
+    entry(ProviderKind::Mira, "Mira", "https://api.mira.network/"),
+    entry(ProviderKind::Mistral, "Mistral", "https://api.mistral.ai/"),
     entry(
         ProviderKind::Moonshot,
         "Moonshot",
@@ -165,5 +161,27 @@ mod tests {
                 .expect("registered base URL is valid");
             assert!(matches!(url.scheme(), "http" | "https"));
         }
+    }
+
+    #[test]
+    fn completion_request_paths_are_not_duplicated() {
+        for kind in [
+            ProviderKind::Hyperbolic,
+            ProviderKind::Llamafile,
+            ProviderKind::Mira,
+            ProviderKind::Mistral,
+        ] {
+            let base = url::Url::parse(metadata(kind).default_base_url.unwrap()).unwrap();
+            assert_eq!(
+                base.join("v1/chat/completions").unwrap().path(),
+                "/v1/chat/completions"
+            );
+        }
+        let mimo =
+            url::Url::parse(metadata(ProviderKind::Xiaomimimo).default_base_url.unwrap()).unwrap();
+        assert_eq!(
+            mimo.join("/anthropic/v1/").unwrap().path(),
+            "/anthropic/v1/"
+        );
     }
 }

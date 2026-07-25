@@ -247,16 +247,16 @@ impl EffectiveSettings {
         }
     }
 
-    /// Apply the resolved model/reasoning override onto a provider for the
-    /// lifetime of a session, without touching the persisted store. A `None`
-    /// override leaves the provider's own value in place, so this is safe to
-    /// call on every provider (including one just switched to via `/accounts`).
+    /// Apply legacy global model/reasoning compatibility to ChatGPT only.
+    /// Every other provider owns and persists its selection locally.
     pub fn apply_to(&self, mut provider: SavedProvider) -> SavedProvider {
-        if self.model.is_some() {
-            provider.model = self.model.clone();
-        }
-        if self.reasoning_effort.is_some() {
-            provider.reasoning_effort = self.reasoning_effort.clone();
+        if provider.provider == llm_provider::ProviderKind::Chatgpt {
+            if self.model.is_some() {
+                provider.model = self.model.clone();
+            }
+            if self.reasoning_effort.is_some() {
+                provider.reasoning_effort = self.reasoning_effort.clone();
+            }
         }
         provider
     }

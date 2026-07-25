@@ -163,7 +163,11 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         .with_prompt("Base URL")
         .default(provider.base_url.to_string())
         .interact_text()?;
-    provider.base_url = Url::parse(&base_url).context("invalid base URL")?;
+    let parsed_url = Url::parse(&base_url).context("invalid base URL")?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        bail!("base URL must use HTTP or HTTPS");
+    }
+    provider.base_url = parsed_url;
     if provider.provider == ProviderKind::Copilot
         && Confirm::new()
             .with_prompt("Replace Copilot authentication?")

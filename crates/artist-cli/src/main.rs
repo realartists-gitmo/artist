@@ -51,17 +51,6 @@ async fn run() -> Result<()> {
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
     ui_config::load(config_root)?;
-    // Move any pre-settings per-provider model/reasoning (old `providers.toml`
-    // location) into the global `settings.toml`, then rewrite `providers.toml`
-    // without those fields. One-time and idempotent.
-    if let Ok(index) = default_index(&store) {
-        let model = store.providers[index].model.clone();
-        let reasoning = store.providers[index].reasoning_effort.clone();
-        if settings::migrate_provider_defaults(config_root, model.as_deref(), reasoning.as_deref())?
-        {
-            store.save(&path)?;
-        }
-    }
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
@@ -119,19 +108,8 @@ async fn run() -> Result<()> {
             if refresh_if_needed(&mut store.providers[selected]).await? {
                 store.save(&path)?;
             }
-            // Pick against a scratch clone seeded with the current global
-            // settings (the model's real home), then persist the choice to
-            // `settings.toml` — never back into `providers.toml`.
-            let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
-            let mut scratch = store.providers[selected].clone();
-            scratch.model = global.model.clone();
-            scratch.reasoning_effort = global.reasoning_effort.clone();
-            models::select(&mut scratch).await?;
-            settings::write_provider_defaults(
-                config_root,
-                scratch.model.as_deref(),
-                scratch.reasoning_effort.as_deref(),
-            )?;
+            models::select(&mut store.providers[selected]).await?;
+            store.save(&path)?;
         }
         Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
             match args.action {
@@ -162,11 +140,14 @@ async fn run() -> Result<()> {
                 &settings::Overrides::default(),
                 &store.disabled_tools,
             )?;
-            // Catch a missing model here, before the TUI takes over — otherwise
-            // it only surfaces as an agent error on the first prompt, forcing a
-            // quit → `artist model` → relaunch. A settings override counts as a
-            // model, so this only fires when nothing supplies one.
-            if store.providers[selected].model.is_none() && effective.model.is_none() {
+            // Catch a missing effective model before the TUI takes over. Legacy
+            // settings scalars supply ChatGPT only; other providers must have a
+            // provider-local selection.
+            if effective
+                .apply_to(store.providers[selected].clone())
+                .model
+                .is_none()
+            {
                 bail!("no model selected — run `artist model` to choose one first");
             }
             // Resolve an interactive resume before entering inline TUI mode so the
@@ -729,7 +710,15 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
-    let provider = store.providers[selected].clone();
+    let config_root = path.parent().context("providers path has no parent")?;
+    let project = std::env::current_dir().context("find current project directory")?;
+    let effective = settings::load_effective(
+        config_root,
+        &project,
+        &settings::Overrides::default(),
+        &store.disabled_tools,
+    )?;
+    let provider = effective.apply_to(store.providers[selected].clone());
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
     test_provider::test(&provider).await?;

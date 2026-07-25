@@ -169,13 +169,21 @@ impl RigClient {
                     )
                 };
                 let anthropic = provider.api == Some(OpenAiApi::ChatCompletions);
+                let anthropic_base_url = (kind == ProviderKind::Xiaomimimo)
+                    .then(|| provider.base_url.join("/anthropic/v1/"))
+                    .transpose()?;
                 macro_rules! dual {
                     ($module:ident, $normal:ident, $anthropic:ident) => {{
                         if anthropic {
                             Self::$anthropic(
                                 $module::AnthropicClient::builder()
                                     .api_key(api_key.expose())
-                                    .base_url(provider.base_url.as_str())
+                                    .base_url(
+                                        anthropic_base_url
+                                            .as_ref()
+                                            .unwrap_or(&provider.base_url)
+                                            .as_str(),
+                                    )
                                     .build()
                                     .context("build Anthropic-compatible client")?,
                             )
