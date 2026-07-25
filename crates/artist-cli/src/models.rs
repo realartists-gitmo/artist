@@ -1,6 +1,6 @@
 use crate::prompt;
 use anyhow::{Context, Result, bail};
-use llm_provider::SavedProvider;
+use llm_provider::{ProviderKind, SavedProvider};
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -103,6 +103,19 @@ pub(crate) fn apply_selection(
 
 /// Preserves the interactive `artist model` selection flow.
 pub async fn select(provider: &mut SavedProvider) -> Result<()> {
+    if provider.provider != ProviderKind::Chatgpt {
+        let model: String = dialoguer::Input::new()
+            .with_prompt("Exact model ID")
+            .with_initial_text(provider.model.clone().unwrap_or_default())
+            .interact_text()?;
+        if model.trim().is_empty() {
+            bail!("model ID cannot be empty");
+        }
+        provider.model = Some(model);
+        provider.reasoning_effort = None;
+        println!("Model updated.");
+        return Ok(());
+    }
     let models = catalog(provider).await?;
     let labels: Vec<_> = models
         .iter()

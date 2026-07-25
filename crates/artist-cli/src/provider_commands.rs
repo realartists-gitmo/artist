@@ -205,14 +205,15 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
             };
         }
     }
-    if matches!(
+    let protocol_configurable = matches!(
         provider.provider,
         ProviderKind::Openai
             | ProviderKind::Minimax
             | ProviderKind::Moonshot
             | ProviderKind::Xiaomimimo
             | ProviderKind::Zai
-    ) {
+    );
+    if protocol_configurable {
         let choices = if provider.provider == ProviderKind::Openai {
             vec![
                 "Responses API".to_owned(),
@@ -234,19 +235,23 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
                 _ => OpenAiApi::ChatCompletions,
             },
         );
-        if Confirm::new()
+    }
+    // Every provider currently authenticated by an API key can rotate it,
+    // including fixed-protocol providers such as Anthropic and Gemini.
+    if matches!(provider.credentials, Credentials::ApiKey { .. })
+        && provider.provider != ProviderKind::Azure
+        && Confirm::new()
             .with_prompt("Replace API key?")
             .default(false)
             .interact()?
-        {
-            let api_key = Password::new().with_prompt("New API key").interact()?;
-            if api_key.is_empty() {
-                bail!("API key cannot be empty");
-            }
-            provider.credentials = Credentials::ApiKey {
-                api_key: Secret::new(api_key),
-            };
+    {
+        let api_key = Password::new().with_prompt("New API key").interact()?;
+        if api_key.trim().is_empty() {
+            bail!("API key cannot be empty");
         }
+        provider.credentials = Credentials::ApiKey {
+            api_key: Secret::new(api_key),
+        };
     }
     Ok(())
 }

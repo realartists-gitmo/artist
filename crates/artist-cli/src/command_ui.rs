@@ -161,6 +161,23 @@ pub async fn run(
             })
         }
         ParsedCommand::Model { model, reasoning } => {
+            if store.providers[provider_index].provider != llm_provider::ProviderKind::Chatgpt {
+                let exact = model.context(
+                    "this provider does not expose a compatible model catalog; use `/model <exact-model-id>`",
+                )?;
+                let previous = store.providers[provider_index].clone();
+                store.providers[provider_index].model = Some(exact.to_owned());
+                store.providers[provider_index].reasoning_effort = reasoning.map(str::to_owned);
+                if let Err(error) = store.save(store_path) {
+                    store.providers[provider_index] = previous;
+                    return Err(error);
+                }
+                return Ok(CommandOutput {
+                    lines: vec![format!("model set to {exact}.")],
+                    context_capacity: None,
+                    model_changed: true,
+                });
+            }
             draw(&["Loading models…".to_owned()])?;
             let catalog = models::catalog(&store.providers[provider_index]).await?;
             let current_model = store.providers[provider_index]

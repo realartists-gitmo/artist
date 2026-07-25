@@ -729,13 +729,7 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
-    // The model lives in settings now, so hydrate the provider from the global
-    // settings before testing.
-    let config_root = path.parent().context("providers path has no parent")?;
-    let global = settings::Settings::load(&config_root.join(settings::SETTINGS_FILE))?;
-    let mut provider = store.providers[selected].clone();
-    provider.model = global.model.clone();
-    provider.reasoning_effort = global.reasoning_effort.clone();
+    let provider = store.providers[selected].clone();
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;
     test_provider::test(&provider).await?;
@@ -758,6 +752,9 @@ fn default_index(store: &ProviderStore) -> Result<usize> {
 }
 
 pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider) -> Result<bool> {
+    if provider.provider != llm_provider::ProviderKind::Chatgpt {
+        return Ok(false);
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -779,6 +776,9 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
 /// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
 /// recorded expiry.
 pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
+    if provider.provider != llm_provider::ProviderKind::Chatgpt {
+        return Ok(());
+    }
     let refreshed = ChatGptOAuth::default()
         .refresh(provider.chatgpt_auth()?)
         .await

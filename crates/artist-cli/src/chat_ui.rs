@@ -1522,6 +1522,9 @@ async fn handle_provider(
                 Ok((vec!["Provider updated and saved.".into()], false))
             }
             ProviderAction::Remove { id } => {
+                if store.providers.len() == 1 {
+                    anyhow::bail!("cannot remove the only provider while chat is running");
+                }
                 let active_id = store.providers.get(*current).map(|p| p.id.clone());
                 crate::provider_commands::remove(store, id)?;
                 store.save(store_path)?;

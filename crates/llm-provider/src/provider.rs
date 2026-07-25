@@ -121,14 +121,11 @@ pub struct SavedProvider {
     /// Azure OpenAI API version. Ignored by other providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_version: Option<String>,
-    // Model and reasoning effort are no longer persisted here — they live in
-    // `settings.toml` (global/project layered). These fields are runtime-only
-    // carriers, populated from the resolved settings; `default` still reads a
-    // value from a pre-migration `providers.toml`, and `skip_serializing`
-    // ensures it is never written back, so the field drops out on the next save.
-    #[serde(default, skip_serializing)]
+    /// Provider-specific model selection. Persisting this beside the provider
+    /// prevents switching providers from carrying an incompatible model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(rename = "credentials", alias = "auth")]
     pub credentials: Credentials,

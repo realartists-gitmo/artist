@@ -157,13 +157,19 @@ pub fn migrate_provider_defaults(
     }
     let path = config_root.join(SETTINGS_FILE);
     let mut settings = Settings::load(&path)?;
-    if settings.model.is_some() || settings.reasoning_effort.is_some() {
-        return Ok(false);
+    let mut changed = false;
+    if settings.model.is_none() && provider_model.is_some() {
+        settings.model = provider_model.map(str::to_owned);
+        changed = true;
     }
-    settings.model = provider_model.map(str::to_owned);
-    settings.reasoning_effort = provider_reasoning.map(str::to_owned);
-    settings.save(&path)?;
-    Ok(true)
+    if settings.reasoning_effort.is_none() && provider_reasoning.is_some() {
+        settings.reasoning_effort = provider_reasoning.map(str::to_owned);
+        changed = true;
+    }
+    if changed {
+        settings.save(&path)?;
+    }
+    Ok(changed)
 }
 
 /// The highest-precedence layer: values from CLI flags or in-session changes
@@ -420,6 +426,16 @@ mod tests {
         assert!(!migrate_provider_defaults(root, Some("gpt-4"), None).unwrap());
         let settings = Settings::load(&root.join(SETTINGS_FILE)).unwrap();
         assert_eq!(settings.model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn migrate_provider_defaults_fills_missing_fields_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SETTINGS_FILE), "model = \"kept\"\n").unwrap();
+        assert!(migrate_provider_defaults(dir.path(), Some("ignored"), Some("high")).unwrap());
+        let settings = Settings::load(&dir.path().join(SETTINGS_FILE)).unwrap();
+        assert_eq!(settings.model.as_deref(), Some("kept"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

@@ -39,7 +39,7 @@ impl ProviderStore {
             .get("version")
             .and_then(toml::Value::as_integer)
             .unwrap_or(1);
-        migrate_provider_credentials(&mut document);
+        migrate_provider_credentials(&mut document, previous_version);
         migrate_session_tokens(&mut document, previous_version);
         let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
@@ -88,10 +88,15 @@ impl ProviderStore {
 
 /// Upgrade pre-v4 records without discarding credentials. Older OAuth tables
 /// were untagged, while old API-key tables already carried `type = "api_key"`.
-fn migrate_provider_credentials(document: &mut toml::Value) {
+fn migrate_provider_credentials(document: &mut toml::Value, previous_version: i64) {
     let Some(table) = document.as_table_mut() else {
         return;
     };
+    // Version 4 credentials are already explicitly tagged. Reinterpreting
+    // them would corrupt bearer, Copilot OAuth, and no-auth records.
+    if previous_version >= i64::from(version()) {
+        return;
+    }
     table.insert("version".into(), toml::Value::Integer(i64::from(version())));
     let Some(providers) = table
         .get_mut("providers")
@@ -109,13 +114,21 @@ fn migrate_provider_credentials(document: &mut toml::Value) {
         let Some(mut credentials) = credentials else {
             continue;
         };
-        let is_api_key = credentials.get("type").and_then(toml::Value::as_str) == Some("api_key");
-        if !is_api_key && let Some(auth) = credentials.as_table_mut() {
+        let credential_type = credentials.get("type").and_then(toml::Value::as_str);
+        let is_legacy_chatgpt = credential_type.is_none();
+        if is_legacy_chatgpt && let Some(auth) = credentials.as_table_mut() {
             auth.insert("type".into(), toml::Value::String("chatgpt".into()));
         }
         provider.insert("credentials".into(), credentials);
         provider.entry("provider").or_insert_with(|| {
-            toml::Value::String(if is_api_key { "openai" } else { "chatgpt" }.into())
+            toml::Value::String(
+                if is_legacy_chatgpt {
+                    "chatgpt"
+                } else {
+                    "openai"
+                }
+                .into(),
+            )
         });
     }
 }
@@ -225,6 +238,51 @@ api_key = "secret"
         assert!(matches!(&store.providers[0].credentials,
             Credentials::ApiKey { api_key } if api_key.expose() == "secret"));
         assert_eq!(store.default_provider.unwrap().as_str(), "api");
+    }
+
+    #[test]
+    fn preserves_all_v4_credential_variants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        fs::write(
+            &path,
+            r#"version = 4
+[[providers]]
+id = "bearer"
+name = "Bearer"
+provider = "azure"
+base_url = "https://example.com/"
+[providers.credentials]
+type = "bearer_token"
+token = "token"
+[[providers]]
+id = "copilot"
+name = "Copilot"
+provider = "copilot"
+base_url = "https://example.com/"
+[providers.credentials]
+type = "copilot_oauth"
+token_dir = "/tmp/tokens"
+[[providers]]
+id = "none"
+name = "Local"
+provider = "ollama"
+base_url = "http://localhost:11434/"
+[providers.credentials]
+type = "none"
+"#,
+        )
+        .unwrap();
+        let store = ProviderStore::load(&path).unwrap();
+        assert!(matches!(
+            store.providers[0].credentials,
+            Credentials::BearerToken { .. }
+        ));
+        assert!(matches!(
+            store.providers[1].credentials,
+            Credentials::CopilotOauth { .. }
+        ));
+        assert_eq!(store.providers[2].credentials, Credentials::None);
     }
 
     #[test]
