@@ -152,7 +152,7 @@ pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
     };
     for (index, segment) in segments.iter().enumerate() {
         if index != 0 {
-            spans.push(Span::styled(" • ", Style::default().fg(Color::White)));
+            spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
         }
         spans.push(segment.render());
     }
@@ -348,11 +348,9 @@ mod tests {
         assert_eq!(rendered.spans.len(), 4);
         assert_eq!(rendered.spans[0].content, " ");
         assert_eq!(rendered.spans[2].content, " • ");
-        assert!(
-            rendered.spans[1..]
-                .iter()
-                .all(|span| span.style.fg == Some(Color::White))
-        );
+        assert_eq!(rendered.spans[1].style.fg, Some(Color::White));
+        assert_eq!(rendered.spans[2].style.fg, Some(Color::DarkGray));
+        assert_eq!(rendered.spans[3].style.fg, Some(Color::White));
         assert!(rendered.spans.iter().all(|span| span.style.bg.is_none()));
     }
 }
