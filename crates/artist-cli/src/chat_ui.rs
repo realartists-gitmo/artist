@@ -872,12 +872,14 @@ async fn run_loop(
                         &mut context.provider_index,
                         action,
                         viewport_height,
+                        context.settings,
                     )
                     .await
                     .map(|(lines, changed)| {
                         if changed {
-                            session_provider =
-                                context.store.providers[context.provider_index].clone();
+                            session_provider = context
+                                .settings
+                                .apply_to(context.store.providers[context.provider_index].clone());
                             // Capacity is provider/model-specific and is resolved from
                             // that provider's catalog before the next submission.
                             status.context_capacity = None;
@@ -887,19 +889,25 @@ async fn run_loop(
                         lines
                     })
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Accounts { id }) => {
-                        let (panel, switch) =
-                            handle_accounts(context.store, context.provider_index, id);
+                    Ok(slash_commands::ParsedCommand::Accounts { id }) => handle_accounts(
+                        context.store,
+                        context.store_path,
+                        context.provider_index,
+                        id,
+                    )
+                    .map(|(panel, switch)| {
                         if let Some(new_index) = switch {
                             context.provider_index = new_index;
+                            status.context_capacity = None;
+                            status.used_tokens = None;
                             status.refresh(&context.store.status_bar, context.project);
-                            // The settings override still applies to whichever
-                            // account is now active.
-                            session_provider =
-                                context.store.providers[context.provider_index].clone();
+                            session_provider = context
+                                .settings
+                                .apply_to(context.store.providers[context.provider_index].clone());
                         }
                         panel
-                    }
+                    })
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Login) => handle_login(
                         &mut terminal,
                         context.store,
@@ -966,8 +974,13 @@ async fn run_loop(
                                     // when startup settings supplied model defaults. Use the
                                     // newly persisted choice directly rather than reapplying
                                     // those defaults over it.
-                                    session_provider =
-                                        context.store.providers[context.provider_index].clone();
+                                    session_provider = if output.model_changed {
+                                        context.store.providers[context.provider_index].clone()
+                                    } else {
+                                        context.settings.apply_to(
+                                            context.store.providers[context.provider_index].clone(),
+                                        )
+                                    };
                                 }
                                 output.lines
                             }
@@ -995,7 +1008,10 @@ async fn run_loop(
                 if crate::refresh_if_needed(&mut context.store.providers[context.provider_index])
                     .await?
                 {
-                    let _ = context.store.save(context.store_path);
+                    context
+                        .store
+                        .save(context.store_path)
+                        .context("save refreshed ChatGPT login")?;
                 }
                 // Carry refreshed account credentials into the request without
                 // clobbering a model/reasoning choice made via `/model`.
@@ -1035,10 +1051,13 @@ async fn run_loop(
                     match crate::force_refresh(&mut context.store.providers[context.provider_index])
                         .await
                     {
-                        Ok(()) => {
-                            let _ = context.store.save(context.store_path);
-                            insert_status(&mut terminal, "  ✓ login refreshed")?;
-                        }
+                        Ok(()) => match context.store.save(context.store_path) {
+                            Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
+                            Err(error) => insert_status(
+                                &mut terminal,
+                                &format!("  ⚠ login refreshed but couldn't be saved: {error:#}"),
+                            )?,
+                        },
                         Err(error) => insert_status(
                             &mut terminal,
                             &format!("  ⚠ couldn't refresh login: {error:#} — run `artist login`"),
@@ -1507,6 +1526,7 @@ async fn handle_provider(
     current: &mut usize,
     action: slash_commands::ProviderAction<'_>,
     viewport_height: u16,
+    settings: &crate::settings::EffectiveSettings,
 ) -> Result<(Vec<String>, bool)> {
     use slash_commands::ProviderAction;
     if matches!(action, ProviderAction::List) {
@@ -1556,7 +1576,8 @@ async fn handle_provider(
                 if crate::refresh_if_needed(&mut store.providers[index]).await? {
                     store.save(store_path)?;
                 }
-                crate::test_provider::test(&store.providers[index]).await?;
+                let provider = settings.apply_to(store.providers[index].clone());
+                crate::test_provider::test(&provider).await?;
                 Ok((vec![format!("{}: OK", store.providers[index].name)], false))
             }
             ProviderAction::List => unreachable!(),
@@ -1578,35 +1599,41 @@ async fn handle_provider(
 /// `/accounts [id]`: list logged-in accounts, or return the index to switch to.
 /// Returns the panel plus `Some(new_index)` when a switch was requested.
 fn handle_accounts(
-    store: &ProviderStore,
+    store: &mut ProviderStore,
+    store_path: &Path,
     current: usize,
     id: Option<&str>,
-) -> (Vec<String>, Option<usize>) {
+) -> Result<(Vec<String>, Option<usize>)> {
     let Some(id) = id else {
         let mut lines = crate::provider_commands::list_lines(store, current);
         lines.push("Switch with /accounts <id>, or add one with /login.".to_owned());
-        return (lines, None);
+        return Ok((lines, None));
     };
     match store
         .providers
         .iter()
         .position(|provider| provider.id.as_str() == id)
     {
-        Some(index) if index == current => (vec![format!("Already using account {id}.")], None),
-        Some(index) => (
-            vec![format!(
-                "Switched to {} ({}).",
-                store.providers[index].id.as_str(),
-                store.providers[index].name
-            )],
-            Some(index),
-        ),
-        None => (
+        Some(index) => {
+            store.default_provider = Some(store.providers[index].id.clone());
+            store.save(store_path)?;
+            let line = if index == current {
+                format!("Already using account {id}; saved as default.")
+            } else {
+                format!(
+                    "Switched to {} ({}), and saved as default.",
+                    store.providers[index].id.as_str(),
+                    store.providers[index].name
+                )
+            };
+            Ok((vec![line], Some(index)))
+        }
+        None => Ok((
             vec![format!(
                 "No such account: {id} — see /accounts for the list."
             )],
             None,
-        ),
+        )),
     }
 }
 
@@ -3217,7 +3244,38 @@ fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use llm_provider::{Auth, ProviderId, SavedProvider, Secret};
     use ratatui::{Terminal, backend::TestBackend};
+
+    fn test_account(id: &str) -> SavedProvider {
+        SavedProvider::chatgpt(
+            ProviderId::new(id).unwrap(),
+            id,
+            Auth {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                account_id: id.into(),
+                email: None,
+                expires_at: None,
+            },
+        )
+    }
+
+    #[test]
+    fn accounts_switch_persists_selected_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut store = ProviderStore::default();
+        store.add(test_account("one"));
+        store.add(test_account("two"));
+
+        let (_, switched) = handle_accounts(&mut store, &path, 0, Some("two")).unwrap();
+
+        assert_eq!(switched, Some(1));
+        assert_eq!(store.default_provider.as_ref().unwrap().as_str(), "two");
+        let loaded = ProviderStore::load(&path).unwrap();
+        assert_eq!(loaded.default_provider.unwrap().as_str(), "two");
+    }
 
     #[test]
     fn edits_and_expands_input() {
