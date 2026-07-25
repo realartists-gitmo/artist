@@ -53,7 +53,9 @@ impl fmt::Debug for Auth {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Credentials {
+    None,
     ApiKey { api_key: Secret },
+    BearerToken { token: Secret },
     Chatgpt(Auth),
 }
 
@@ -64,7 +66,9 @@ impl<'de> Deserialize<'de> for Credentials {
         #[derive(Deserialize)]
         #[serde(tag = "type", rename_all = "snake_case")]
         enum Tagged {
+            None,
             ApiKey { api_key: Secret },
+            BearerToken { token: Secret },
             Chatgpt(Auth),
         }
         #[derive(Deserialize)]
@@ -74,7 +78,9 @@ impl<'de> Deserialize<'de> for Credentials {
             Legacy(Auth),
         }
         Ok(match Compatible::deserialize(deserializer)? {
+            Compatible::Tagged(Tagged::None) => Self::None,
             Compatible::Tagged(Tagged::ApiKey { api_key }) => Self::ApiKey { api_key },
+            Compatible::Tagged(Tagged::BearerToken { token }) => Self::BearerToken { token },
             Compatible::Tagged(Tagged::Chatgpt(auth)) | Compatible::Legacy(auth) => {
                 Self::Chatgpt(auth)
             }
@@ -100,6 +106,9 @@ pub struct SavedProvider {
     /// OpenAI-compatible transport. Ignored by providers with a fixed API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<OpenAiApi>,
+    /// Azure OpenAI API version. Ignored by other providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
     // Model and reasoning effort are no longer persisted here — they live in
     // `settings.toml` (global/project layered). These fields are runtime-only
     // carriers, populated from the resolved settings; `default` still reads a
@@ -125,6 +134,7 @@ impl SavedProvider {
             provider: ProviderKind::Chatgpt,
             base_url: Url::parse(CHATGPT_CODEX_BASE_URL).expect("constant URL"),
             api: None,
+            api_version: None,
             model: None,
             reasoning_effort: None,
             credentials: Credentials::Chatgpt(auth),
@@ -134,18 +144,14 @@ impl SavedProvider {
     pub fn chatgpt_auth(&self) -> Result<&Auth> {
         match &self.credentials {
             Credentials::Chatgpt(auth) => Ok(auth),
-            Credentials::ApiKey { .. } => {
-                Err(Error::InvalidConfig("ChatGPT credentials required".into()))
-            }
+            _ => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
         }
     }
 
     pub fn chatgpt_auth_mut(&mut self) -> Result<&mut Auth> {
         match &mut self.credentials {
             Credentials::Chatgpt(auth) => Ok(auth),
-            Credentials::ApiKey { .. } => {
-                Err(Error::InvalidConfig("ChatGPT credentials required".into()))
-            }
+            _ => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
         }
     }
 
@@ -155,6 +161,8 @@ impl SavedProvider {
                 (auth.access_token.expose(), Some(auth.account_id.as_str()))
             }
             Credentials::ApiKey { api_key } => (api_key.expose(), None),
+            Credentials::BearerToken { token } => (token.expose(), None),
+            Credentials::None => return Err(Error::InvalidConfig("credentials required".into())),
         };
         let mut headers = HeaderMap::new();
         let bearer = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {

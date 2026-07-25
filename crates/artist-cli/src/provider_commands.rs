@@ -60,10 +60,56 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
     } else {
         None
     };
-    let api_key = Password::new().with_prompt("API key").interact()?;
-    if api_key.trim().is_empty() {
-        bail!("API key cannot be empty");
-    }
+    let credentials = match kind {
+        ProviderKind::Llamafile => Credentials::None,
+        ProviderKind::Ollama => {
+            let key = Password::new()
+                .with_prompt("API key (optional)")
+                .allow_empty_password(true)
+                .interact()?;
+            if key.trim().is_empty() {
+                Credentials::None
+            } else {
+                Credentials::ApiKey {
+                    api_key: Secret::new(key),
+                }
+            }
+        }
+        ProviderKind::Azure => {
+            let methods = vec!["API key".to_owned(), "Bearer token".to_owned()];
+            let secret = Password::new().with_prompt("Credential").interact()?;
+            if secret.trim().is_empty() {
+                bail!("credential cannot be empty");
+            }
+            if prompt::select("Authentication", &methods, 0)? == 0 {
+                Credentials::ApiKey {
+                    api_key: Secret::new(secret),
+                }
+            } else {
+                Credentials::BearerToken {
+                    token: Secret::new(secret),
+                }
+            }
+        }
+        _ => {
+            let api_key = Password::new().with_prompt("API key").interact()?;
+            if api_key.trim().is_empty() {
+                bail!("API key cannot be empty");
+            }
+            Credentials::ApiKey {
+                api_key: Secret::new(api_key),
+            }
+        }
+    };
+    let api_version = if kind == ProviderKind::Azure {
+        let version: String = Input::new()
+            .with_prompt("API version")
+            .default("2024-10-21".into())
+            .interact_text()?;
+        Some(version)
+    } else {
+        None
+    };
     let parsed_url = Url::parse(&base_url).context("invalid base URL")?;
     if !matches!(parsed_url.scheme(), "http" | "https") {
         bail!("base URL must use HTTP or HTTPS");
@@ -74,11 +120,10 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
         provider: kind,
         base_url: parsed_url,
         api,
+        api_version,
         model: None,
         reasoning_effort: None,
-        credentials: Credentials::ApiKey {
-            api_key: Secret::new(api_key),
-        },
+        credentials,
     });
     Ok(())
 }
@@ -95,11 +140,25 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         .default(provider.base_url.to_string())
         .interact_text()?;
     provider.base_url = Url::parse(&base_url).context("invalid base URL")?;
-    if provider.provider == ProviderKind::Openai {
-        let choices = vec![
-            "Responses API".to_owned(),
-            "Chat Completions API".to_owned(),
-        ];
+    if matches!(
+        provider.provider,
+        ProviderKind::Openai
+            | ProviderKind::Minimax
+            | ProviderKind::Moonshot
+            | ProviderKind::Xiaomimimo
+            | ProviderKind::Zai
+    ) {
+        let choices = if provider.provider == ProviderKind::Openai {
+            vec![
+                "Responses API".to_owned(),
+                "Chat Completions API".to_owned(),
+            ]
+        } else {
+            vec![
+                "OpenAI-compatible".to_owned(),
+                "Anthropic-compatible".to_owned(),
+            ]
+        };
         provider.api = Some(
             match prompt::select(
                 "API",
