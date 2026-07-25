@@ -7,6 +7,7 @@ mod delegate;
 mod delegate_jobs;
 pub mod mcp;
 mod resources;
+mod rig_provider;
 mod ttsr;
 #[cfg(test)]
 mod ttsr_tests;

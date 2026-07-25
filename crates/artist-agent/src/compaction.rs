@@ -3,7 +3,7 @@
 use anyhow::{Context, Result, bail};
 use artist_session::compaction::{CompactionPlan, format_file_operations};
 use llm_provider::SavedProvider;
-use rig_core::{client::CompletionClient, completion::Prompt, providers::chatgpt};
+use crate::rig_provider::RigClient;
 
 const SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Read the supplied conversation and produce the requested structured checkpoint.
 
@@ -99,22 +99,8 @@ async fn complete(provider: &SavedProvider, prompt: &str, max_tokens: u64) -> Re
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let client = chatgpt::Client::builder()
-        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.chatgpt_auth()?.access_token.expose().to_owned(),
-            account_id: Some(provider.chatgpt_auth()?.account_id.clone()),
-        })
-        .base_url(provider.base_url.as_str())
-        .originator("artist")
-        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build ChatGPT client for context compaction")?;
-    let response = client
-        .agent(model)
-        .preamble(SYSTEM_PROMPT)
-        .max_tokens(max_tokens)
-        .build()
-        .prompt(prompt)
+    let response = RigClient::build(provider)?
+        .prompt(model, SYSTEM_PROMPT, prompt, max_tokens)
         .await?;
     if response.trim().is_empty() {
         bail!("context compaction returned an empty summary");
