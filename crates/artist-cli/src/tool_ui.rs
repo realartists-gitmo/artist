@@ -225,11 +225,16 @@ fn title(name: &str, arguments: &Value) -> String {
                 || string(arguments, "mode") == "start" =>
             {
                 format!(
-                    "Started subagent: {}",
+                    "Started {} subagent: {}",
+                    subagent_role(arguments),
                     shortened(&string(arguments, "prompt"), 80)
                 )
             }
-            _ => format!("Subagent: {}", shortened(&string(arguments, "prompt"), 80)),
+            _ => format!(
+                "{} subagent: {}",
+                subagent_role(arguments),
+                shortened(&string(arguments, "prompt"), 80)
+            ),
         },
         _ => humanize(name),
     }
@@ -314,9 +319,13 @@ fn compact_delegate_output(output: &str) -> String {
                     .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
+                let role = task
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("default");
                 let prompt = task.get("prompt").and_then(Value::as_str).unwrap_or("");
                 format!(
-                    "{id} · {status}{}",
+                    "{id} · {role} · {status}{}",
                     if prompt.is_empty() {
                         String::new()
                     } else {
@@ -331,17 +340,21 @@ fn compact_delegate_output(output: &str) -> String {
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
     if let Some(result) = value.get("output").and_then(Value::as_str) {
-        return format!("Completed\n{}", truncate_delegate_text(result));
+        return format!("{role} · completed\n{}", truncate_delegate_text(result));
     }
     if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return format!("Failed\n{}", truncate_delegate_text(error));
+        return format!("{role} · failed\n{}", truncate_delegate_text(error));
     }
     let id = value
         .get("taskId")
         .and_then(Value::as_str)
         .unwrap_or("delegate");
-    format!("{id} · {status}")
+    format!("{id} · {role} · {status}")
 }
 
 fn truncate_delegate_text(output: &str) -> String {
@@ -368,6 +381,15 @@ fn result_count(output: &str) -> usize {
         .filter(|line| !line.starts_with('[') && *line != "No files found.")
         .count()
 }
+fn subagent_role(arguments: &Value) -> String {
+    let role = string(arguments, "agent");
+    if role.is_empty() {
+        "default".into()
+    } else {
+        role
+    }
+}
+
 fn string(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -455,11 +477,11 @@ mod tests {
         assert_eq!(
             ui.output(
                 "d",
-                r#"{"taskId":"delegate-1","status":"completed","output":"Found the bug."}"#,
+                r#"{"taskId":"a-quiet-river","role":"explorer","status":"completed","output":"Found the bug."}"#,
             )
             .lines[0]
                 .text,
-            "= Completed\nFound the bug."
+            "= explorer · completed\nFound the bug."
         );
         assert_eq!(
             numbered_diff("@@ -10,2 +20,2 @@\n context\n-old\n+new\n"),

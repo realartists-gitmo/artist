@@ -447,6 +447,12 @@ impl Delegate {
                 };
                 match item {
                     Ok(MultiTurnStreamItem::CompletionCall(_)) => turn_text.clear(),
+                    Ok(MultiTurnStreamItem::FinalResponse(response)) => {
+                        // The final response is authoritative. Some providers do
+                        // not emit text deltas, which previously produced a
+                        // successful subagent run with an empty output.
+                        turn_text = response.output().to_owned();
+                    }
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::Text(text),
                     )) => turn_text.push_str(&text.text),
