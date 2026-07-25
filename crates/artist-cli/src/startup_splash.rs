@@ -7,15 +7,9 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-pub(crate) const HEIGHT: u16 = 5;
+pub(crate) const HEIGHT: u16 = 1;
 
-const ART: [&str; HEIGHT as usize] = [
-    "   ██             ▄    ██          ▄  ",
-    "  ▐██▌   ▄ ▄▄▄   ██   ▄▄▄   ▄▄▄   ██  ",
-    "  █▄██    ██ ██ ▀██▀   ██  ▀██▄  ▀██▀ ",
-    " ▐▌ ▐█▌   ██     ██    ██    ▀██  ██  ",
-    "▄█▄ ▄██▄ ▄██     ▀█▄▀ ▄██▄ ▀▄▄█▀  ▀█▄▀",
-];
+const ART: [&str; HEIGHT as usize] = ["Artist"];
 
 fn splash_text(extension_ids: &[String]) -> Text<'static> {
     let mut lines = ART
@@ -50,7 +44,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn renders_unbounded_white_art_and_dark_extension_list() {
+    fn renders_plain_name_and_dark_extension_list() {
         let mut terminal = Terminal::new(TestBackend::new(80, HEIGHT)).unwrap();
         let extensions = vec!["extension1".to_owned(), "extension2".to_owned()];
         terminal
@@ -58,10 +52,10 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((3, 0)).unwrap().symbol(), "█");
-        assert_eq!(buffer.cell((3, 0)).unwrap().fg, Color::White);
-        assert_eq!(buffer.cell((39, 4)).unwrap().symbol(), "+");
-        assert_eq!(buffer.cell((39, 4)).unwrap().fg, Color::DarkGray);
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "A");
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::White);
+        assert_eq!(buffer.cell((7, 0)).unwrap().symbol(), "+");
+        assert_eq!(buffer.cell((7, 0)).unwrap().fg, Color::DarkGray);
     }
 
     #[test]
