@@ -331,8 +331,11 @@ conditionally generated only when the relevant tools are registered.
 Global state lives in `~/.config/artist/` (override with `$ARTIST_CONFIG_DIR`); a
 one-time migration moves a pre-existing `~/.artist/` in, preferring
 destination files on conflict so a partial home is never clobbered
-(`store.rs`). `providers.toml` holds provider identity, secrets, the status
-bar, and the base `disabled_tools` — **not** model choice.
+(`store.rs`). `providers.toml` v4 holds provider identity, explicitly tagged credentials,
+provider-local model/protocol choices, the status bar, and the base
+`disabled_tools`. See the [provider guide](../crates/llm-provider/README.md) for
+the schema, safe examples, all 23 completion providers, and Voyage's
+embedding-only limitation.
 
 Behaviour is layered through **`settings.toml`**, resolved from a global
 `~/.config/artist/settings.toml` and a project `<repo>/.artist/settings.toml`, plus an
@@ -352,24 +355,27 @@ global); **restriction lists** (`permissions.deny`) are **unioned** with each
 other and with `providers.toml`'s `disabled_tools`, so a project can tighten
 access but never silently loosen it.
 
-Model/reasoning are settings, not per-provider fields: `artist model` writes
-the global `settings.toml`, and a first launch after upgrade migrates any
-per-provider model out of `providers.toml` (which then drops the field on its
-next save — the `SavedProvider` fields are runtime-only carriers now,
-`skip_serializing`). At session time the resolved model/reasoning are applied
-to a throwaway provider clone, so switching accounts (`/accounts`) keeps the
-project's model and nothing settings-derived is ever persisted back.
+A provider record's `model` and `reasoning_effort` are its durable defaults;
+`artist model` and `/model` edit the active default provider. Thus switching
+with `/provider set ID` or `/accounts ID` restores compatible provider-local
+choices. Project/global `settings.toml` values remain layered runtime overrides
+when present; they do not rewrite another provider's stored model.
 
 ## Auth, providers, MCP
 
-Unchanged in shape: Authorization Code + PKCE against the ChatGPT/Codex
-public client id (documented dependency risk), tokens in `0o600` TOML,
-JWT identity decoded without signature verification (acceptable given the
-token source). MCP (`mcp.toml`, cached schemas, startup/manual/on-call
-activation) hardened: oversized tool output is wrapped in a **valid JSON
-envelope** with an explicit `truncated` marker (never cut mid-byte), and
-server-map access degrades gracefully instead of panicking. The tool set
-is still snapshotted per turn; `/mcp start` binds on the next message.
+Provider CRUD is interactive through `artist provider add|edit|remove|list|set|test`
+and TUI `/provider` equivalents; `/providers` and `/accounts` are list aliases.
+ChatGPT uses Authorization Code + PKCE and an eligible ChatGPT subscription.
+Copilot supports API key, GitHub token, and cached device-OAuth modes. Other
+clients enforce their protocol-specific API-key/bearer/no-auth requirements.
+Pre-v4 credentials migrate to v4's tagged union without discarding secrets;
+Unix config/token permissions are tightened to `0700` directories and `0600`
+files. Full operational and security details are in the provider guide.
+
+MCP (`mcp.toml`, cached schemas, startup/manual/on-call activation) wraps
+oversized tool output in a valid JSON envelope with an explicit `truncated`
+marker and degrades server-map access gracefully. The tool set is snapshotted
+per turn; `/mcp start` binds on the next message.
 
 ---
 
