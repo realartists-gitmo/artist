@@ -82,6 +82,14 @@ impl<'de> Deserialize<'de> for Credentials {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiApi {
+    #[default]
+    Responses,
+    ChatCompletions,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedProvider {
     pub id: ProviderId,
@@ -89,6 +97,9 @@ pub struct SavedProvider {
     #[serde(default = "chatgpt_kind")]
     pub provider: ProviderKind,
     pub base_url: Url,
+    /// OpenAI-compatible transport. Ignored by providers with a fixed API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<OpenAiApi>,
     // Model and reasoning effort are no longer persisted here — they live in
     // `settings.toml` (global/project layered). These fields are runtime-only
     // carriers, populated from the resolved settings; `default` still reads a
@@ -113,6 +124,7 @@ impl SavedProvider {
             name: name.into(),
             provider: ProviderKind::Chatgpt,
             base_url: Url::parse(CHATGPT_CODEX_BASE_URL).expect("constant URL"),
+            api: None,
             model: None,
             reasoning_effort: None,
             credentials: Credentials::Chatgpt(auth),
@@ -138,19 +150,24 @@ impl SavedProvider {
     }
 
     pub fn request_auth(&self) -> Result<RequestAuth> {
-        let auth = self.chatgpt_auth()?;
+        let (token, account_id) = match &self.credentials {
+            Credentials::Chatgpt(auth) => (auth.access_token.expose(), Some(auth.account_id.as_str())),
+            Credentials::ApiKey { api_key } => (api_key.expose(), None),
+        };
         let mut headers = HeaderMap::new();
-        let bearer = HeaderValue::from_str(&format!("Bearer {}", auth.access_token.expose()))
+        let bearer = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| {
                 Error::InvalidConfig("credential contains invalid header characters".into())
             })?;
         headers.insert(AUTHORIZATION, bearer);
-        headers.insert(
-            "chatgpt-account-id",
-            HeaderValue::from_str(&auth.account_id).map_err(|_| {
-                Error::InvalidConfig("account id contains invalid header characters".into())
-            })?,
-        );
+        if let Some(account_id) = account_id {
+            headers.insert(
+                "chatgpt-account-id",
+                HeaderValue::from_str(account_id).map_err(|_| {
+                    Error::InvalidConfig("account id contains invalid header characters".into())
+                })?,
+            );
+        }
         Ok(RequestAuth { headers })
     }
 }
