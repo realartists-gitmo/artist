@@ -206,6 +206,58 @@ impl Delegate {
                 self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
                     .await
             }
+            crate::rig_provider::RigClient::Anthropic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Cohere(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Gemini(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::DeepSeek(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Groq(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::HuggingFace(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Hyperbolic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Mira(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Mistral(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::OpenRouter(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Perplexity(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Together(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::XAi(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
         }
     }
 

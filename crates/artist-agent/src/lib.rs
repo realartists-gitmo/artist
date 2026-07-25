@@ -216,6 +216,45 @@ pub async fn stream_chat(
         rig_provider::RigClient::OpenAiChat(client) => {
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
+        rig_provider::RigClient::Anthropic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Cohere(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Gemini(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::DeepSeek(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Groq(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::HuggingFace(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Hyperbolic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Mira(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Mistral(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::OpenRouter(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Perplexity(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Together(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::XAi(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
     }
 }
 
