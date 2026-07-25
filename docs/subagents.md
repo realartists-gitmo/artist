@@ -1,6 +1,6 @@
 # Subagent roles
 
-Artist loads `$ARTIST_CONFIG_DIR/subagents.toml` (normally `~/.config/artist/subagents.toml`) and then `.artist/subagents.toml` in the project. Project roles replace global roles with the same name. The built-in `default`, `worker`, and read-only `explorer` roles remain available unless replaced.
+Artist loads `$ARTIST_CONFIG_DIR/subagents.toml` (normally `~/.config/artist/subagents.toml`) and then `.artist/subagents.toml` in the project. Project roles replace global roles with the same name. The built-in `default`, `worker`, and read-only `explorer`, `planner`, and `reviewer` roles remain available unless replaced.
 
 ```toml
 [settings]

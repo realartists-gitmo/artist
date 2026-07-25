@@ -198,6 +198,18 @@ fn builtins() -> BTreeMap<String, Role> {
             Some(vec!["read", "find", "grep", "skill"]),
             "Inspect without editing. Return concise findings with file and symbol references.",
         ),
+        (
+            "planner",
+            "Planning agent that turns requirements and code evidence into an executable plan",
+            Some(vec!["read", "find", "grep", "skill"]),
+            "Analyze requirements and the current code before planning. Return an ordered, implementation-ready plan with exact files, dependencies, verification steps, and risks. Do not edit files.",
+        ),
+        (
+            "reviewer",
+            "Review agent focused on correctness, regressions, security, and missing tests",
+            Some(vec!["read", "find", "grep", "skill"]),
+            "Review like a code owner. Lead with concrete findings ordered by severity, cite files and symbols, explain impact and reproduction, and avoid style-only feedback. Do not edit files.",
+        ),
     ]
     .into_iter()
     .map(|(name, description, allow, instructions)| {
@@ -234,6 +246,11 @@ mod tests {
         std::fs::write(d.path().join(".artist/subagents.toml"),"[settings]\nmax_concurrent=2\n[agents.worker]\ndescription='project'\n[agents.bad]\ndescription='bad'\n[agents.bad.tools]\nallow=['wat']").unwrap();
         let s = Subagents::discover_from(d.path(), Some(&g));
         assert_eq!(s.role("worker").unwrap().description, "project");
+        for name in ["default", "explorer", "planner", "reviewer"] {
+            assert!(s.role(name).is_ok(), "missing built-in role {name}");
+        }
+        assert!(!s.role("planner").unwrap().permits("write"));
+        assert!(!s.role("reviewer").unwrap().permits("bash"));
         assert!(s.role("bad").is_err());
         assert_eq!(s.semaphore.available_permits(), 2);
         assert!(s.catalog().contains("unknown tools"));
