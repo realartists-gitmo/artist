@@ -161,7 +161,6 @@ async fn run() -> Result<()> {
             let sessions = SessionStore::new(config_root);
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let show_splash = resumed.is_none() && cli.prompt.is_none();
-            let terminal = chat_ui::start_terminal(show_splash, cli.prompt.is_some())?;
             let extension_control = extension_control::ExtensionControl::default();
             let mut refreshed_provider = store.providers[selected].clone();
             let (mcp, extensions, refreshed) = tokio::join!(
@@ -171,6 +170,11 @@ async fn run() -> Result<()> {
             );
             let mcp = mcp?;
             let extensions = extensions?;
+            let terminal = chat_ui::start_terminal(
+                show_splash,
+                cli.prompt.is_some(),
+                &extensions.extension_ids(),
+            )?;
             if refreshed? {
                 store.providers[selected] = refreshed_provider;
                 store.save(&path)?;

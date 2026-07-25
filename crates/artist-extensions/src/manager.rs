@@ -77,6 +77,13 @@ impl Manager {
         &self.registry.diagnostics
     }
 
+    /// IDs of extensions that activated successfully, in stable display order.
+    pub fn extension_ids(&self) -> Vec<String> {
+        let mut ids = self.instances.keys().cloned().collect::<Vec<_>>();
+        ids.sort();
+        ids
+    }
+
     pub fn tools(&self) -> Vec<Box<dyn ToolDyn>> {
         self.registry
             .tools()

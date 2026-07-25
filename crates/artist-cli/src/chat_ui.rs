@@ -407,7 +407,11 @@ fn startup_viewport_height() -> u16 {
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
-pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::DefaultTerminal> {
+pub fn start_terminal(
+    show_splash: bool,
+    thinking: bool,
+    extension_ids: &[String],
+) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
     }
@@ -426,7 +430,7 @@ pub fn start_terminal(show_splash: bool, thinking: bool) -> Result<ratatui::Defa
     // never forces a viewport resize.
     if show_splash && !thinking {
         terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
-            crate::startup_splash::render_buffer(buffer);
+            crate::startup_splash::render_buffer(buffer, extension_ids);
         })?;
     }
     terminal.show_cursor()?;
@@ -1601,7 +1605,7 @@ fn resize_and_draw(
         terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
         if width_shrank && restore_scrollback_splash {
             terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
-                crate::startup_splash::render_buffer(buffer);
+                crate::startup_splash::render_buffer(buffer, &[]);
             })?;
         }
         terminal.show_cursor()?;
@@ -1730,7 +1734,7 @@ async fn submit(
         // Add separation only when moving the splash into scrollback. The live
         // startup layout already reserves its own gap above the input box.
         terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
-            crate::startup_splash::render_buffer(buffer);
+            crate::startup_splash::render_buffer(buffer, &[]);
         })?;
     } else if !first_turn {
         insert_blank(terminal)?;
@@ -2865,6 +2869,7 @@ fn render_with_panel(
         crate::startup_splash::render(
             frame,
             Rect::new(area.x, area.y, area.width, crate::startup_splash::HEIGHT),
+            &[],
         );
     }
     if status_height > 0 {

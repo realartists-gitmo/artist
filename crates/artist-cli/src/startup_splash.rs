@@ -3,57 +3,45 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Paragraph, Widget},
 };
 
-pub(crate) const HEIGHT: u16 = 8;
+pub(crate) const HEIGHT: u16 = 5;
 
 const ART: [&str; HEIGHT as usize] = [
-    "                      █████     ███           █████",
-    "                     ▒▒███     ▒▒▒           ▒▒███",
-    "  ██████   ████████  ███████   ████   █████  ███████",
-    " ▒▒▒▒▒███ ▒▒███▒▒███▒▒▒███▒   ▒▒███  ███▒▒  ▒▒▒███▒",
-    "  ███████  ▒███ ▒▒▒   ▒███     ▒███ ▒▒█████   ▒███",
-    " ███▒▒███  ▒███       ▒███ ███ ▒███  ▒▒▒▒███  ▒███ ███",
-    "▒▒████████ █████      ▒▒█████  █████ ██████   ▒▒█████",
-    " ▒▒▒▒▒▒▒▒ ▒▒▒▒▒        ▒▒▒▒▒  ▒▒▒▒▒ ▒▒▒▒▒▒     ▒▒▒▒▒",
+    "   ██             ▄    ██          ▄  ",
+    "  ▐██▌   ▄ ▄▄▄   ██   ▄▄▄   ▄▄▄   ██  ",
+    "  █▄██    ██ ██ ▀██▀   ██  ▀██▄  ▀██▀ ",
+    " ▐▌ ▐█▌   ██     ██    ██    ▀██  ██  ",
+    "▄█▄ ▄██▄ ▄██     ▀█▄▀ ▄██▄ ▀▄▄█▀  ▀█▄▀",
 ];
 
-const GRADIENT_START: (u8, u8, u8) = (64, 64, 64);
-const GRADIENT_END: (u8, u8, u8) = (255, 255, 255);
+fn splash_text(extension_ids: &[String]) -> Text<'static> {
+    let mut lines = ART
+        .iter()
+        .map(|text| Line::styled((*text).to_owned(), Style::default().fg(Color::White)))
+        .collect::<Vec<_>>();
 
-/// Linearly interpolate the splash foreground from dark gray at the top to
-/// white at the bottom.
-fn gradient_color(row: usize) -> Color {
-    let t = row as f32 / (HEIGHT - 1) as f32;
-    let interpolate =
-        |start: u8, end: u8| (start as f32 + (end as f32 - start as f32) * t).round() as u8;
-    Color::Rgb(
-        interpolate(GRADIENT_START.0, GRADIENT_END.0),
-        interpolate(GRADIENT_START.1, GRADIENT_END.1),
-        interpolate(GRADIENT_START.2, GRADIENT_END.2),
-    )
+    if !extension_ids.is_empty() {
+        lines[HEIGHT as usize - 1].push_span(Span::styled(
+            format!(" + {}", extension_ids.join(", ")),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    Text::from(lines)
 }
 
-fn splash_text() -> Text<'static> {
-    Text::from(
-        ART.iter()
-            .enumerate()
-            .map(|(row, text)| Line::styled(*text, Style::default().fg(gradient_color(row))))
-            .collect::<Vec<_>>(),
-    )
-}
-
-pub(crate) fn render(frame: &mut Frame<'_>, area: Rect) {
+pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, extension_ids: &[String]) {
     let area = area.intersection(frame.area());
     if !area.is_empty() {
-        frame.render_widget(Paragraph::new(splash_text()), area);
+        frame.render_widget(Paragraph::new(splash_text(extension_ids)), area);
     }
 }
 
-pub(crate) fn render_buffer(buffer: &mut Buffer) {
-    Paragraph::new(splash_text()).render(buffer.area, buffer);
+pub(crate) fn render_buffer(buffer: &mut Buffer, extension_ids: &[String]) {
+    Paragraph::new(splash_text(extension_ids)).render(buffer.area, buffer);
 }
 
 #[cfg(test)]
@@ -62,31 +50,25 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn renders_art_with_dark_gray_to_white_gradient() {
-        let mut terminal = Terminal::new(TestBackend::new(64, HEIGHT)).unwrap();
-        terminal.draw(|frame| render(frame, frame.area())).unwrap();
+    fn renders_unbounded_white_art_and_dark_extension_list() {
+        let mut terminal = Terminal::new(TestBackend::new(80, HEIGHT)).unwrap();
+        let extensions = vec!["extension1".to_owned(), "extension2".to_owned()];
+        terminal
+            .draw(|frame| render(frame, frame.area(), &extensions))
+            .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((22, 0)).unwrap().symbol(), "█");
-        let colors = (0..HEIGHT)
-            .map(|y| buffer.cell((22, y)).unwrap().fg)
-            .collect::<Vec<_>>();
-
-        assert_eq!(colors.first(), Some(&Color::Rgb(64, 64, 64)));
-        assert_eq!(colors.last(), Some(&Color::Rgb(255, 255, 255)));
-        assert!(colors.windows(2).all(|pair| {
-            let (Color::Rgb(previous, _, _), Color::Rgb(next, _, _)) = (pair[0], pair[1]) else {
-                return false;
-            };
-            previous < next
-        }));
+        assert_eq!(buffer.cell((3, 0)).unwrap().symbol(), "█");
+        assert_eq!(buffer.cell((3, 0)).unwrap().fg, Color::White);
+        assert_eq!(buffer.cell((39, 4)).unwrap().symbol(), "+");
+        assert_eq!(buffer.cell((39, 4)).unwrap().fg, Color::DarkGray);
     }
 
     #[test]
     fn clips_to_small_terminal_area() {
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
         terminal
-            .draw(|frame| render(frame, Rect::new(0, 0, 20, HEIGHT)))
+            .draw(|frame| render(frame, Rect::new(0, 0, 20, HEIGHT), &[]))
             .unwrap();
     }
 }
