@@ -88,7 +88,10 @@ pub fn discover_all(
     diagnostics: &mut Vec<String>,
 ) -> (Vec<DeclarativeRule>, WasmRules) {
     let mut rules = discover_roots(roots, diagnostics);
+    #[cfg(feature = "wasm")]
     let mut wasm: WasmRules = Vec::new();
+    #[cfg(not(feature = "wasm"))]
+    let wasm: WasmRules = Vec::new();
     for root in roots {
         for manifest_path in wasm_manifests(root) {
             match load_wasm_rule(&manifest_path) {
