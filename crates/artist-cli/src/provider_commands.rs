@@ -32,14 +32,22 @@ pub fn add_kind(store: &mut ProviderStore, requested_kind: Option<&str>) -> Resu
     } else {
         available[prompt::select_paged("Provider", &choices, 0, 7)?].kind
     };
-    let id: String = Input::new().with_prompt("Provider ID").interact_text()?;
-    if store
-        .providers
-        .iter()
-        .any(|provider| provider.id.as_str() == id)
-    {
-        bail!("provider already exists: {id}");
-    }
+    let base_id = kind.slug();
+    let id = (1..)
+        .map(|number| {
+            if number == 1 {
+                base_id.to_owned()
+            } else {
+                format!("{base_id}-{number}")
+            }
+        })
+        .find(|candidate| {
+            store
+                .providers
+                .iter()
+                .all(|provider| provider.id.as_str() != candidate)
+        })
+        .expect("provider ID suffix space is inexhaustible");
     let info = metadata(kind);
     let name: String = Input::new()
         .with_prompt("Display name")

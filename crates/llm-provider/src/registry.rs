@@ -29,6 +29,36 @@ pub enum ProviderKind {
     Zai,
 }
 
+impl ProviderKind {
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::Azure => "azure",
+            Self::Chatgpt => "chatgpt",
+            Self::Cohere => "cohere",
+            Self::Copilot => "copilot",
+            Self::Deepseek => "deepseek",
+            Self::Gemini => "gemini",
+            Self::Groq => "groq",
+            Self::Huggingface => "huggingface",
+            Self::Hyperbolic => "hyperbolic",
+            Self::Llamafile => "llamafile",
+            Self::Minimax => "minimax",
+            Self::Mira => "mira",
+            Self::Mistral => "mistral",
+            Self::Moonshot => "moonshot",
+            Self::Ollama => "ollama",
+            Self::Openai => "openai",
+            Self::Openrouter => "openrouter",
+            Self::Perplexity => "perplexity",
+            Self::Together => "together",
+            Self::Xai => "xai",
+            Self::Xiaomimimo => "xiaomimimo",
+            Self::Zai => "zai",
+        }
+    }
+}
+
 pub struct ProviderMetadata {
     pub kind: ProviderKind,
     pub display_name: &'static str,
