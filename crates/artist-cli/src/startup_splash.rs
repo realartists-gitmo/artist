@@ -14,7 +14,12 @@ const ART: [&str; HEIGHT as usize] = ["Artist"];
 fn splash_text(extension_ids: &[String]) -> Text<'static> {
     let mut lines = ART
         .iter()
-        .map(|text| Line::styled((*text).to_owned(), Style::default().fg(Color::White)))
+        .map(|text| {
+            Line::styled(
+                (*text).to_owned(),
+                Style::default().fg(crate::ui_config::color()),
+            )
+        })
         .collect::<Vec<_>>();
 
     if !extension_ids.is_empty() {
@@ -53,7 +58,7 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "A");
-        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::White);
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, crate::ui_config::color());
         assert_eq!(buffer.cell((7, 0)).unwrap().symbol(), "+");
         assert_eq!(buffer.cell((7, 0)).unwrap().fg, Color::DarkGray);
     }

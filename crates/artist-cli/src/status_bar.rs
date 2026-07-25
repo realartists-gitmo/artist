@@ -77,7 +77,10 @@ pub(crate) struct StatusSegment {
 
 impl StatusSegment {
     pub fn render(&self) -> Span<'static> {
-        Span::styled(self.text.clone(), Style::default().fg(Color::White))
+        Span::styled(
+            self.text.clone(),
+            Style::default().fg(crate::ui_config::color()),
+        )
     }
 }
 
@@ -348,9 +351,9 @@ mod tests {
         assert_eq!(rendered.spans.len(), 4);
         assert_eq!(rendered.spans[0].content, " ");
         assert_eq!(rendered.spans[2].content, " • ");
-        assert_eq!(rendered.spans[1].style.fg, Some(Color::White));
+        assert_eq!(rendered.spans[1].style.fg, Some(crate::ui_config::color()));
         assert_eq!(rendered.spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(rendered.spans[3].style.fg, Some(Color::White));
+        assert_eq!(rendered.spans[3].style.fg, Some(crate::ui_config::color()));
         assert!(rendered.spans.iter().all(|span| span.style.bg.is_none()));
     }
 }

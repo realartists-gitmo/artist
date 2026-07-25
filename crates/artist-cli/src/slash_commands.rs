@@ -18,6 +18,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/statusbar",
     },
     SlashCommand {
+        name: "/colorscheme",
+        description: "Set the UI accent color",
+        usage: "/colorscheme <#rrggbb>",
+    },
+    SlashCommand {
         name: "/skills",
         description: "List available Agent Skills",
         usage: "/skills",
@@ -91,6 +96,9 @@ pub(crate) enum ParsedCommand<'a> {
     Skills,
     Tools,
     StatusBar,
+    ColorScheme {
+        color: &'a str,
+    },
     Mcp {
         action: &'a str,
         server: Option<&'a str>,
@@ -187,6 +195,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/statusbar",
+        }),
+        ("/colorscheme", [color]) => Ok(ParsedCommand::ColorScheme { color }),
+        ("/colorscheme", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/colorscheme <#rrggbb>",
         }),
         ("/skills", _) => Err(ParseError::InvalidUsage {
             command,
@@ -326,6 +339,7 @@ mod tests {
             [
                 "/model",
                 "/statusbar",
+                "/colorscheme",
                 "/skills",
                 "/tools",
                 "/mcp",
@@ -352,6 +366,10 @@ mod tests {
     fn parses_supported_forms() {
         assert_eq!(parse("/help"), Some(Ok(ParsedCommand::Help)));
         assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
+        assert_eq!(
+            parse("/colorscheme #12abef"),
+            Some(Ok(ParsedCommand::ColorScheme { color: "#12abef" }))
+        );
         assert_eq!(parse("/skills"), Some(Ok(ParsedCommand::Skills)));
         assert_eq!(parse("/tools"), Some(Ok(ParsedCommand::Tools)));
         assert_eq!(

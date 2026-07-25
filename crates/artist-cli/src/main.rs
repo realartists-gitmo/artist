@@ -19,6 +19,7 @@ mod status_bar;
 mod store;
 mod test_provider;
 mod tool_ui;
+mod ui_config;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
@@ -48,6 +49,7 @@ async fn run() -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
+    ui_config::load(config_root)?;
     // Move any pre-settings per-provider model/reasoning (old `providers.toml`
     // location) into the global `settings.toml`, then rewrite `providers.toml`
     // without those fields. One-time and idempotent.

@@ -131,6 +131,17 @@ pub async fn run(
                 model_changed: false,
             })
         }
+        ParsedCommand::ColorScheme { color } => {
+            let config_root = store_path
+                .parent()
+                .context("providers path has no parent")?;
+            crate::ui_config::save_color(config_root, color)?;
+            Ok(CommandOutput {
+                lines: vec![format!("color scheme set to {color}.")],
+                context_capacity: None,
+                model_changed: false,
+            })
+        }
         ParsedCommand::StatusBar => {
             let Some(config) = pick_status_bar(&store.status_bar, extension_statuses, &mut draw)?
             else {

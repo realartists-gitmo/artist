@@ -2295,7 +2295,9 @@ fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result
         );
         Paragraph::new(Text::styled(
             text,
-            Style::default().fg(Color::Black).bg(Color::White),
+            Style::default()
+                .fg(crate::ui_config::contrast_color())
+                .bg(crate::ui_config::color()),
         ))
         .wrap(Wrap { trim: false })
         .render(highlighted_area, buffer);
@@ -3093,13 +3095,15 @@ fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
     let last_row = area.height.saturating_sub(1);
     for row in 0..area.height {
         // Keep the original three-row gradient stable as the box grows. New rows
-        // continue with its final white shade instead of recoloring existing rows.
-        let shade = match row {
-            0 => 128,
-            1 => 191,
-            _ => 255,
+        // continue with the configured final shade instead of recoloring existing rows.
+        let intensity = match row {
+            0 => 0.5,
+            1 => 0.75,
+            _ => 1.0,
         };
-        let style = Style::default().fg(Color::Rgb(shade, shade, shade));
+        let (red, green, blue) = crate::ui_config::rgb();
+        let scale = |channel: u8| (f32::from(channel) * intensity).round() as u8;
+        let style = Style::default().fg(Color::Rgb(scale(red), scale(green), scale(blue)));
         let y = area.y + row;
         if row == 0 || row == last_row {
             for x in area.x..area.right() {
