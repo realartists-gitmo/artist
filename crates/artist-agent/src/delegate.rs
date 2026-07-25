@@ -258,6 +258,50 @@ impl Delegate {
                 self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
                     .await
             }
+            crate::rig_provider::RigClient::Azure(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Llamafile(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Ollama(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Minimax(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::MinimaxAnthropic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::Moonshot(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::MoonshotAnthropic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::XiaomiMiMo(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::XiaomiMiMoAnthropic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::ZAi(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::ZAiAnthropic(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
         }
     }
 

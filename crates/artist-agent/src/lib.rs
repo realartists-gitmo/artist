@@ -268,6 +268,39 @@ pub async fn stream_chat(
         rig_provider::RigClient::XAi(client) => {
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
+        rig_provider::RigClient::Azure(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Llamafile(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Ollama(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Minimax(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::MinimaxAnthropic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Moonshot(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::MoonshotAnthropic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::XiaomiMiMo(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::XiaomiMiMoAnthropic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::ZAi(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::ZAiAnthropic(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
     }
 }
 
