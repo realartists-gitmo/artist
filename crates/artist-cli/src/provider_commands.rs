@@ -30,10 +30,6 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
         .with_prompt("Display name")
         .default(info.display_name.into())
         .interact_text()?;
-    let base_url: String = Input::new()
-        .with_prompt("Base URL")
-        .default(info.default_base_url.unwrap_or_default().into())
-        .interact_text()?;
     let api = if matches!(
         kind,
         ProviderKind::Openai
@@ -60,6 +56,20 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
     } else {
         None
     };
+    let presets = endpoint_presets(kind, api);
+    let default_url = if presets.len() > 1 {
+        let labels = presets
+            .iter()
+            .map(|(label, _)| (*label).to_owned())
+            .collect::<Vec<_>>();
+        presets[prompt::select("Endpoint preset", &labels, 0)?].1
+    } else {
+        info.default_base_url.unwrap_or_default()
+    };
+    let base_url: String = Input::new()
+        .with_prompt("Base URL")
+        .default(default_url.into())
+        .interact_text()?;
     let credentials = match kind {
         ProviderKind::Llamafile => Credentials::None,
         ProviderKind::Ollama => {
@@ -140,6 +150,39 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         .default(provider.base_url.to_string())
         .interact_text()?;
     provider.base_url = Url::parse(&base_url).context("invalid base URL")?;
+    if provider.provider == ProviderKind::Azure {
+        let version: String = Input::new()
+            .with_prompt("API version")
+            .default(
+                provider
+                    .api_version
+                    .clone()
+                    .unwrap_or_else(|| "2024-10-21".into()),
+            )
+            .interact_text()?;
+        provider.api_version = Some(version);
+        if Confirm::new()
+            .with_prompt("Replace credential?")
+            .default(false)
+            .interact()?
+        {
+            let methods = vec!["API key".to_owned(), "Bearer token".to_owned()];
+            let method = prompt::select("Authentication", &methods, 0)?;
+            let secret = Password::new().with_prompt("New credential").interact()?;
+            if secret.trim().is_empty() {
+                bail!("credential cannot be empty");
+            }
+            provider.credentials = if method == 0 {
+                Credentials::ApiKey {
+                    api_key: Secret::new(secret),
+                }
+            } else {
+                Credentials::BearerToken {
+                    token: Secret::new(secret),
+                }
+            };
+        }
+    }
     if matches!(
         provider.provider,
         ProviderKind::Openai
@@ -205,6 +248,46 @@ pub fn remove(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         store.default_provider = store.providers.first().map(|provider| provider.id.clone());
     }
     Ok(())
+}
+
+fn endpoint_presets(
+    kind: ProviderKind,
+    api: Option<OpenAiApi>,
+) -> Vec<(&'static str, &'static str)> {
+    let anthropic = api == Some(OpenAiApi::ChatCompletions);
+    match (kind, anthropic) {
+        (ProviderKind::Minimax, false) => vec![
+            ("Global", "https://api.minimax.io/v1/"),
+            ("China", "https://api.minimaxi.com/v1/"),
+        ],
+        (ProviderKind::Minimax, true) => vec![
+            ("Global", "https://api.minimax.io/anthropic/"),
+            ("China", "https://api.minimaxi.com/anthropic/"),
+        ],
+        (ProviderKind::Moonshot, false) => vec![
+            ("Global", "https://api.moonshot.ai/v1/"),
+            ("China", "https://api.moonshot.cn/v1/"),
+        ],
+        (ProviderKind::Moonshot, true) => vec![("Anthropic", "https://api.moonshot.ai/anthropic/")],
+        (ProviderKind::Xiaomimimo, false) => {
+            vec![("OpenAI-compatible", "https://api.xiaomimimo.com/v1/")]
+        }
+        (ProviderKind::Xiaomimimo, true) => vec![(
+            "Anthropic-compatible",
+            "https://api.xiaomimimo.com/anthropic/",
+        )],
+        (ProviderKind::Zai, false) => vec![
+            ("General", "https://api.z.ai/api/paas/v4/"),
+            ("Coding", "https://api.z.ai/api/coding/paas/v4/"),
+        ],
+        (ProviderKind::Zai, true) => {
+            vec![("Anthropic-compatible", "https://api.z.ai/api/anthropic/")]
+        }
+        _ => vec![(
+            "Default",
+            metadata(kind).default_base_url.unwrap_or_default(),
+        )],
+    }
 }
 
 fn select_index(store: &ProviderStore, id: Option<&str>) -> Result<usize> {
