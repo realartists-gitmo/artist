@@ -273,9 +273,21 @@ impl BashTool {
         let command = args
             .command
             .ok_or_else(|| ToolError::Message("command is required".into()))?;
-        let id = args
-            .session_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+        let id = if let Some(id) = args.session_id {
+            if self.sessions.contains_key(&id) || !self.starting.insert(id.clone()) {
+                return Err(ToolError::Message(format!("session already exists: {id}")));
+            }
+            id
+        } else {
+            loop {
+                let candidate = crate::short_id("t");
+                if !self.sessions.contains_key(&candidate)
+                    && self.starting.insert(candidate.clone())
+                {
+                    break candidate;
+                }
+            }
+        };
         let pair = NativePtySystem::default().openpty(PtySize {
             rows: 24,
             cols: 120,
@@ -306,9 +318,6 @@ impl BashTool {
             for (key, value) in env {
                 builder.env(key, value);
             }
-        }
-        if self.sessions.contains_key(&id) || !self.starting.insert(id.clone()) {
-            return Err(ToolError::Message(format!("session already exists: {id}")));
         }
         let mut child = match pair.slave.spawn_command(builder) {
             Ok(child) => child,

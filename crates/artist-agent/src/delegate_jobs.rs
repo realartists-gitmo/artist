@@ -1,4 +1,4 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 use serde_json::{Value, json};
 use std::{
     future::Future,
@@ -45,14 +45,19 @@ impl DelegateJobs {
         F: Future<Output = Result<String, String>> + Send + 'static,
     {
         self.cleanup().await;
-        let task_id = format!("delegate-{}", uuid::Uuid::new_v4().simple());
         let job = Arc::new(Job {
             prompt,
             state: RwLock::new(JobState::Running),
             done: Notify::new(),
             abort: Mutex::new(None),
         });
-        self.jobs.insert(task_id.clone(), job.clone());
+        let task_id = loop {
+            let candidate = artist_tools::short_id("a");
+            if let Entry::Vacant(entry) = self.jobs.entry(candidate.clone()) {
+                entry.insert(job.clone());
+                break candidate;
+            }
+        };
         let running_job = job.clone();
         let handle = tokio::spawn(async move {
             let next = match future.await {
@@ -141,7 +146,7 @@ impl DelegateJobs {
         self.jobs
             .get(id)
             .map(|entry| entry.clone())
-            .ok_or_else(|| format!("unknown delegate task: {id}"))
+            .ok_or_else(|| format!("unknown subagent task: {id}"))
     }
 
     async fn cleanup(&self) {

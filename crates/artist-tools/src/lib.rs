@@ -4,6 +4,7 @@ mod find;
 mod grep;
 mod output;
 mod read;
+mod short_id;
 mod workspace;
 mod write;
 
@@ -12,6 +13,7 @@ pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;
 pub use read::ReadTool;
+pub use short_id::short_id;
 pub use workspace::Workspace;
 pub use write::WriteTool;
 

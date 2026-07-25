@@ -74,9 +74,9 @@ pub(crate) struct DelegateArgs {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DelegateError {
-    #[error("delegate model is not configured")]
+    #[error("subagent model is not configured")]
     MissingModel,
-    #[error("delegate failed: {0}")]
+    #[error("subagent failed: {0}")]
     Failed(String),
 }
 
@@ -96,7 +96,7 @@ impl Tool for Delegate {
             "prompt":{"type":"string"},
             "readOnly":{"type":"boolean","default":true},
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
-            "background":{"type":"boolean","default":false,"description":"Start the delegate and return immediately."},
+            "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
             "taskId":{"type":"string"},
             "waitMs":{"type":"integer","minimum":1,"maximum":30000},
             "model":{"type":"string","description":"Model slug for this subagent. Defaults to the main agent's model."},
@@ -321,7 +321,7 @@ impl Delegate {
     where
         C::CompletionModel: 'static,
     {
-        let actor = format!("delegate-{}", uuid::Uuid::new_v4().simple());
+        let actor = artist_tools::short_id("a");
         let child_tools = self
             .tools
             .for_actor(&actor)

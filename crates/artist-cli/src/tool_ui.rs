@@ -301,7 +301,7 @@ fn compact_delegate_output(output: &str) -> String {
     };
     if let Some(tasks) = value.as_array() {
         if tasks.is_empty() {
-            return "No delegate tasks".into();
+            return "No subagent tasks".into();
         }
         return tasks
             .iter()
