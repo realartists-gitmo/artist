@@ -300,6 +300,9 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/providers",
         }),
+        ("/provider", []) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Add { kind: None },
+        }),
         ("/provider", ["list"]) => Ok(ParsedCommand::Provider {
             action: ProviderAction::List,
         }),
@@ -580,6 +583,12 @@ mod tests {
             parse("/providers"),
             Some(Ok(ParsedCommand::Provider {
                 action: ProviderAction::List
+            }))
+        );
+        assert_eq!(
+            parse("/provider"),
+            Some(Ok(ParsedCommand::Provider {
+                action: ProviderAction::Add { kind: None }
             }))
         );
         assert_eq!(

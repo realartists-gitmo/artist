@@ -12,14 +12,8 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
 
 /// Shared lifecycle entry point used by both the CLI and chat UI.
 pub fn add_kind(store: &mut ProviderStore, requested_kind: Option<&str>) -> Result<()> {
-    let id: String = Input::new().with_prompt("Provider ID").interact_text()?;
-    if store
-        .providers
-        .iter()
-        .any(|provider| provider.id.as_str() == id)
-    {
-        bail!("provider already exists: {id}");
-    }
+    // Pick the provider first so the interactive flow immediately presents the
+    // available integrations instead of opening with an unexplained ID prompt.
     // ChatGPT subscription credentials are created by `artist login`, not here.
     let available = PROVIDERS
         .iter()
@@ -36,8 +30,16 @@ pub fn add_kind(store: &mut ProviderStore, requested_kind: Option<&str>) -> Resu
             .with_context(|| format!("unknown provider kind: {requested}"))?
             .kind
     } else {
-        available[prompt::select("Provider", &choices, 0)?].kind
+        available[prompt::select_paged("Provider", &choices, 0, 7)?].kind
     };
+    let id: String = Input::new().with_prompt("Provider ID").interact_text()?;
+    if store
+        .providers
+        .iter()
+        .any(|provider| provider.id.as_str() == id)
+    {
+        bail!("provider already exists: {id}");
+    }
     let info = metadata(kind);
     let name: String = Input::new()
         .with_prompt("Display name")
