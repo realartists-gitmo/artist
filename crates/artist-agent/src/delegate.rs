@@ -81,7 +81,7 @@ pub(crate) enum DelegateError {
 }
 
 impl Tool for Delegate {
-    const NAME: &'static str = "delegate";
+    const NAME: &'static str = "subagent";
     type Error = DelegateError;
     type Args = DelegateArgs;
     type Output = String;

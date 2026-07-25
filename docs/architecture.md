@@ -88,7 +88,7 @@ retry loop** around a Rig streaming run:
 Multi-turn tool loops are unbounded by design (`default_max_turns(MAX)`);
 bash remains fully privileged by design.
 
-Subagents via `delegate` run the same streaming drive (with TTSR active and
+Subagents via the `subagent` tool run the same streaming drive (with TTSR active and
 the same rules handle, so once-per-session semantics span main + delegates),
 record into the log under a child lineage (`main/delegate-<uuid>`), and
 cannot delegate further.
@@ -406,7 +406,7 @@ for cross-run replay.
 
 - Codex replay spike not yet run against a live login (degrade path ready).
 - Tool-result rule target (inject-only semantics) deferred from v1.
-- Delegate activity is recorded in the log but not yet surfaced in the TUI.
+- Subagent activity is recorded in the log but not yet surfaced in the TUI.
 - Full clean-rewind rendering of aborted partial output in scrollback
   (currently the unflushed tail clears and an amber card marks the rewind).
 

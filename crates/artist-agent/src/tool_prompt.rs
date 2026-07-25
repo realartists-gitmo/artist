@@ -47,8 +47,8 @@ pub(crate) fn render(tools: &[Box<dyn ToolDyn>]) -> String {
         }
         guidance.push("For independent long-running commands, use background mode, continue useful work, then read or stop the session without polling repeatedly.");
     }
-    if names.contains("delegate") {
-        guidance.push("Use `delegate` for focused work that benefits from a subagent. Collect or cancel every background delegate before finishing.");
+    if names.contains("subagent") {
+        guidance.push("Use `subagent` for focused work that benefits from a separate agent. Collect or cancel every background subagent before finishing.");
     }
     if !guidance.is_empty() {
         output.push_str("\nTool-specific guidelines:\n");

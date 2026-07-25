@@ -16,7 +16,7 @@ pub fn format_parse_error(error: ParseError<'_>) -> String {
 }
 
 const BUILTIN_TOOLS: &[&str] = &[
-    "bash", "read", "find", "grep", "edit", "write", "skill", "delegate",
+    "bash", "read", "find", "grep", "edit", "write", "skill", "subagent",
 ];
 
 pub struct CommandOutput {

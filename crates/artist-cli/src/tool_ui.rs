@@ -146,7 +146,7 @@ pub fn icon_for<'a>(name: &str, custom_icons: &'a HashMap<String, String>) -> Op
 fn builtin_icon(name: &str) -> Option<&'static str> {
     match name {
         "bash" => Some("$"),
-        "delegate" => Some("♟"),
+        "subagent" => Some("♟"),
         "edit" => Some("🖉"),
         "find" => Some("🗁"),
         "grep" => Some("⌕"),
@@ -216,20 +216,20 @@ fn title(name: &str, arguments: &Value) -> String {
             "list" => "Listed shell sessions".into(),
             _ => format!("Ran: {}", shortened(&string(arguments, "command"), 80)),
         },
-        "delegate" => match string(arguments, "mode").as_str() {
-            "status" | "read" => format!("Checked delegate {}", string(arguments, "taskId")),
-            "wait" => format!("Waited for delegate {}", string(arguments, "taskId")),
-            "cancel" => format!("Cancelled delegate {}", string(arguments, "taskId")),
-            "list" => "Listed delegate tasks".into(),
+        "subagent" => match string(arguments, "mode").as_str() {
+            "status" | "read" => format!("Checked subagent {}", string(arguments, "taskId")),
+            "wait" => format!("Waited for subagent {}", string(arguments, "taskId")),
+            "cancel" => format!("Cancelled subagent {}", string(arguments, "taskId")),
+            "list" => "Listed subagent tasks".into(),
             _ if arguments.get("background").and_then(Value::as_bool) == Some(true)
                 || string(arguments, "mode") == "start" =>
             {
                 format!(
-                    "Started delegate: {}",
+                    "Started subagent: {}",
                     shortened(&string(arguments, "prompt"), 80)
                 )
             }
-            _ => format!("Delegated: {}", shortened(&string(arguments, "prompt"), 80)),
+            _ => format!("Subagent: {}", shortened(&string(arguments, "prompt"), 80)),
         },
         _ => humanize(name),
     }
@@ -250,7 +250,7 @@ fn compact_output(name: &str, output: &str) -> String {
             .split_once("Diff:\n")
             .map(|(_, diff)| numbered_diff(diff))
             .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
-        "delegate" => compact_delegate_output(output),
+        "subagent" => compact_delegate_output(output),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
     }
 }
@@ -449,7 +449,7 @@ mod tests {
 
         ui.start(
             "d".into(),
-            "delegate",
+            "subagent",
             &serde_json::json!({"mode":"read","taskId":"delegate-1"}),
         );
         assert_eq!(
@@ -502,7 +502,7 @@ mod tests {
         let icons = HashMap::new();
         for (name, expected) in [
             ("bash", "$"),
-            ("delegate", "♟"),
+            ("subagent", "♟"),
             ("edit", "🖉"),
             ("find", "🗁"),
             ("grep", "⌕"),
