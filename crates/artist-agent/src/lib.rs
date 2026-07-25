@@ -200,7 +200,16 @@ pub struct ToolContext<'a> {
 /// Sends the small completion used by provider health checks through the same
 /// typed Rig client dispatch as normal and delegated runs.
 pub async fn provider_health_check(provider: &SavedProvider, model: &str) -> Result<String> {
-    rig_provider::RigClient::build(provider)?
+    provider_health_check_with_device_flow(provider, model, false).await
+}
+
+/// Interactive health check; only this explicit CLI path may start device OAuth.
+pub async fn provider_health_check_with_device_flow(
+    provider: &SavedProvider,
+    model: &str,
+    allow_device_flow: bool,
+) -> Result<String> {
+    rig_provider::RigClient::build_with_device_flow(provider, allow_device_flow)?
         .prompt(
             model,
             "Reply with exactly OK and nothing else.",
@@ -221,6 +230,9 @@ pub async fn stream_chat(
 ) -> Result<RunOutcome> {
     match rig_provider::RigClient::build(provider)? {
         rig_provider::RigClient::ChatGpt(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::Copilot(client) => {
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
         rig_provider::RigClient::OpenAiResponses(client) => {

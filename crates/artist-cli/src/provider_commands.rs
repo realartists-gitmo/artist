@@ -71,6 +71,7 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
         .default(default_url.into())
         .interact_text()?;
     let credentials = match kind {
+        ProviderKind::Copilot => copilot_credentials(&id)?,
         ProviderKind::Llamafile => Credentials::None,
         ProviderKind::Ollama => {
             let key = Password::new()
@@ -150,6 +151,14 @@ pub fn edit(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         .default(provider.base_url.to_string())
         .interact_text()?;
     provider.base_url = Url::parse(&base_url).context("invalid base URL")?;
+    if provider.provider == ProviderKind::Copilot
+        && Confirm::new()
+            .with_prompt("Replace Copilot authentication?")
+            .default(false)
+            .interact()?
+    {
+        provider.credentials = copilot_credentials(provider.id.as_str())?;
+    }
     if provider.provider == ProviderKind::Azure {
         let version: String = Input::new()
             .with_prompt("API version")
@@ -248,6 +257,52 @@ pub fn remove(store: &mut ProviderStore, id: Option<&str>) -> Result<()> {
         store.default_provider = store.providers.first().map(|provider| provider.id.clone());
     }
     Ok(())
+}
+
+fn copilot_credentials(id: &str) -> Result<Credentials> {
+    let methods = vec![
+        "Copilot API key".to_owned(),
+        "GitHub access token".to_owned(),
+        "Device OAuth (token directory)".to_owned(),
+    ];
+    match prompt::select("Authentication", &methods, 2)? {
+        0 => {
+            let key = Password::new().with_prompt("Copilot API key").interact()?;
+            if key.trim().is_empty() {
+                bail!("API key cannot be empty");
+            }
+            Ok(Credentials::ApiKey {
+                api_key: Secret::new(key),
+            })
+        }
+        1 => {
+            let token = Password::new()
+                .with_prompt("GitHub access token")
+                .interact()?;
+            if token.trim().is_empty() {
+                bail!("GitHub token cannot be empty");
+            }
+            Ok(Credentials::BearerToken {
+                token: Secret::new(token),
+            })
+        }
+        _ => {
+            let default = dirs::config_dir()
+                .context("cannot determine config directory")?
+                .join("artist/copilot")
+                .join(id);
+            let token_dir: String = Input::new()
+                .with_prompt("Token directory")
+                .default(default.to_string_lossy().into_owned())
+                .interact_text()?;
+            if token_dir.trim().is_empty() {
+                bail!("token directory cannot be empty");
+            }
+            Ok(Credentials::CopilotOauth {
+                token_dir: token_dir.into(),
+            })
+        }
+    }
 }
 
 fn endpoint_presets(

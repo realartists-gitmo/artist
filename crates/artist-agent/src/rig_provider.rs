@@ -6,14 +6,33 @@ use rig_core::{
     client::CompletionClient,
     completion::Prompt,
     providers::{
-        anthropic, azure, chatgpt, cohere, deepseek, gemini, groq, huggingface, hyperbolic,
-        llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter, perplexity,
-        together, xai, xiaomimimo, zai,
+        anthropic, azure, chatgpt, cohere, copilot, deepseek, gemini, groq, huggingface,
+        hyperbolic, llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter,
+        perplexity, together, xai, xiaomimimo, zai,
     },
 };
 
+fn secure_token_dir(path: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(path).context("create Copilot token directory")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .context("secure Copilot token directory")?;
+        for name in ["access-token", "api-key.json"] {
+            let file = path.join(name);
+            if file.exists() {
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("secure {}", file.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) enum RigClient {
     ChatGpt(chatgpt::Client),
+    Copilot(copilot::Client),
     OpenAiResponses(openai::Client),
     OpenAiChat(openai::CompletionsClient),
     Anthropic(anthropic::Client),
@@ -44,6 +63,13 @@ pub(crate) enum RigClient {
 
 impl RigClient {
     pub(crate) fn build(provider: &SavedProvider) -> Result<Self> {
+        Self::build_with_device_flow(provider, false)
+    }
+
+    pub(crate) fn build_with_device_flow(
+        provider: &SavedProvider,
+        allow_device_flow: bool,
+    ) -> Result<Self> {
         match provider.provider {
             ProviderKind::Chatgpt => {
                 let auth = provider.chatgpt_auth()?;
@@ -58,6 +84,27 @@ impl RigClient {
                         .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
                         .build()
                         .context("build ChatGPT client")?,
+                ))
+            }
+            ProviderKind::Copilot => {
+                let builder = copilot::Client::builder();
+                let builder = match &provider.credentials {
+                    Credentials::ApiKey { api_key } => builder.api_key(api_key.expose()),
+                    Credentials::BearerToken { token } => builder.api_key(
+                        copilot::CopilotAuth::GitHubAccessToken(token.expose().to_owned()),
+                    ),
+                    Credentials::CopilotOauth { token_dir } => {
+                        secure_token_dir(token_dir)?;
+                        builder
+                            .api_key(copilot::CopilotAuth::OAuth)
+                            .token_dir(token_dir)
+                    }
+                    _ => bail!("Copilot API key, GitHub token, or OAuth token directory required"),
+                }
+                .base_url(provider.base_url.as_str())
+                .allow_device_flow(allow_device_flow);
+                Ok(Self::Copilot(
+                    builder.build().context("build GitHub Copilot client")?,
                 ))
             }
             ProviderKind::Azure => {
@@ -203,10 +250,6 @@ impl RigClient {
                     _ => unreachable!(),
                 })
             }
-            other => bail!(
-                "{} runtime is not implemented yet",
-                llm_provider::metadata(other).display_name
-            ),
         }
     }
 
@@ -230,6 +273,7 @@ impl RigClient {
         }
         Ok(match self {
             Self::ChatGpt(client) => run!(client),
+            Self::Copilot(client) => run!(client),
             Self::OpenAiResponses(client) => run!(client),
             Self::OpenAiChat(client) => run!(client),
             Self::Anthropic(client) => run!(client),
@@ -319,6 +363,40 @@ mod tests {
             model: Some("test-model".into()),
             reasoning_effort: None,
             credentials,
+        }
+    }
+
+    #[test]
+    fn builds_all_copilot_auth_modes_without_starting_device_flow() {
+        let temp = tempfile::tempdir().unwrap();
+        let credentials = [
+            Credentials::ApiKey {
+                api_key: Secret::new("copilot-key"),
+            },
+            Credentials::BearerToken {
+                token: Secret::new("github-token"),
+            },
+            Credentials::CopilotOauth {
+                token_dir: temp.path().join("tokens"),
+            },
+        ];
+        for credentials in credentials {
+            assert!(matches!(
+                RigClient::build(&test_provider(ProviderKind::Copilot, credentials)),
+                Ok(RigClient::Copilot(_))
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(temp.path().join("tokens"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
     }
 

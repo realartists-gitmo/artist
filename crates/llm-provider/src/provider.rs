@@ -1,7 +1,7 @@
 use crate::{CHATGPT_CODEX_BASE_URL, Error, ProviderKind, Result, Secret};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, path::PathBuf};
 use url::Url;
 
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -54,8 +54,16 @@ impl fmt::Debug for Auth {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Credentials {
     None,
-    ApiKey { api_key: Secret },
-    BearerToken { token: Secret },
+    ApiKey {
+        api_key: Secret,
+    },
+    BearerToken {
+        token: Secret,
+    },
+    /// Device OAuth using Rig's cached GitHub/Copilot tokens in this directory.
+    CopilotOauth {
+        token_dir: PathBuf,
+    },
     Chatgpt(Auth),
 }
 
@@ -69,6 +77,7 @@ impl<'de> Deserialize<'de> for Credentials {
             None,
             ApiKey { api_key: Secret },
             BearerToken { token: Secret },
+            CopilotOauth { token_dir: PathBuf },
             Chatgpt(Auth),
         }
         #[derive(Deserialize)]
@@ -81,6 +90,9 @@ impl<'de> Deserialize<'de> for Credentials {
             Compatible::Tagged(Tagged::None) => Self::None,
             Compatible::Tagged(Tagged::ApiKey { api_key }) => Self::ApiKey { api_key },
             Compatible::Tagged(Tagged::BearerToken { token }) => Self::BearerToken { token },
+            Compatible::Tagged(Tagged::CopilotOauth { token_dir }) => {
+                Self::CopilotOauth { token_dir }
+            }
             Compatible::Tagged(Tagged::Chatgpt(auth)) | Compatible::Legacy(auth) => {
                 Self::Chatgpt(auth)
             }
@@ -162,7 +174,9 @@ impl SavedProvider {
             }
             Credentials::ApiKey { api_key } => (api_key.expose(), None),
             Credentials::BearerToken { token } => (token.expose(), None),
-            Credentials::None => return Err(Error::InvalidConfig("credentials required".into())),
+            Credentials::CopilotOauth { .. } | Credentials::None => {
+                return Err(Error::InvalidConfig("direct credentials required".into()));
+            }
         };
         let mut headers = HeaderMap::new();
         let bearer = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {

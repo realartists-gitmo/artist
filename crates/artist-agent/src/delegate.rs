@@ -198,6 +198,10 @@ impl Delegate {
                 self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
                     .await
             }
+            crate::rig_provider::RigClient::Copilot(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
             crate::rig_provider::RigClient::OpenAiResponses(client) => {
                 self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
                     .await
