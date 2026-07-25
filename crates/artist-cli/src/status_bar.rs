@@ -77,10 +77,7 @@ pub(crate) struct StatusSegment {
 
 impl StatusSegment {
     pub fn render(&self) -> Span<'static> {
-        Span::styled(
-            self.text.clone(),
-            Style::default().fg(Color::Black).bg(Color::Gray),
-        )
+        Span::styled(self.text.clone(), Style::default().fg(Color::White))
     }
 }
 
@@ -148,17 +145,10 @@ pub(crate) fn segments(
 }
 
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = if segments.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::raw(" ")]
-    };
+    let mut spans = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
         if index != 0 {
-            spans.push(Span::styled(
-                " | ",
-                Style::default().fg(Color::DarkGray).bg(Color::Gray),
-            ));
+            spans.push(Span::styled(" • ", Style::default().fg(Color::White)));
         }
         spans.push(segment.render());
     }
@@ -339,14 +329,26 @@ mod tests {
     }
 
     #[test]
-    fn rendered_segments_have_light_gray_background() {
-        let segment = StatusSegment {
-            item: StatusItem::Model,
-            text: "gpt-5".into(),
-        };
-        assert_eq!(segment.render().style.bg, Some(Color::Gray));
-        let rendered = render(&[segment]);
-        assert_eq!(rendered.spans.len(), 2);
-        assert_eq!(rendered.spans[0].content, " ");
+    fn renders_white_segments_separated_by_bullets() {
+        let segments = [
+            StatusSegment {
+                item: StatusItem::Model,
+                text: "gpt-5".into(),
+            },
+            StatusSegment {
+                item: StatusItem::Reasoning,
+                text: "high".into(),
+            },
+        ];
+        let rendered = render(&segments);
+        assert_eq!(rendered.spans.len(), 3);
+        assert_eq!(rendered.spans[1].content, " • ");
+        assert!(
+            rendered
+                .spans
+                .iter()
+                .all(|span| span.style.fg == Some(Color::White))
+        );
+        assert!(rendered.spans.iter().all(|span| span.style.bg.is_none()));
     }
 }
