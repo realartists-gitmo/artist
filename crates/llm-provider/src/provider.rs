@@ -201,6 +201,27 @@ pub struct RequestAuth {
 mod tests {
     use super::*;
     #[test]
+    fn provider_model_round_trips() {
+        let mut provider = SavedProvider::chatgpt(
+            ProviderId::new("chatgpt").unwrap(),
+            "ChatGPT",
+            Auth {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                account_id: "acct".into(),
+                email: None,
+                expires_at: None,
+            },
+        );
+        provider.model = Some("gpt-5".into());
+        provider.reasoning_effort = Some("high".into());
+        let decoded: SavedProvider =
+            serde_json::from_str(&serde_json::to_string(&provider).unwrap()).unwrap();
+        assert_eq!(decoded.model.as_deref(), Some("gpt-5"));
+        assert_eq!(decoded.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
     fn secrets_are_redacted_and_headers_are_set() {
         let provider = SavedProvider::chatgpt(
             ProviderId::new("chatgpt").unwrap(),
