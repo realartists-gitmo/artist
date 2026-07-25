@@ -11,6 +11,7 @@ mod interaction;
 mod login;
 mod models;
 mod prompt;
+mod provider_commands;
 mod sessions;
 mod settings;
 mod slash_commands;
@@ -89,6 +90,18 @@ async fn run() -> Result<()> {
                     login::chatgpt(&mut store).await?;
                     store.save(&path)?;
                 }
+                (None, Some(ProviderAction::Add)) => {
+                    provider_commands::add(&mut store)?;
+                    store.save(&path)?;
+                }
+                (None, Some(ProviderAction::Edit { id })) => {
+                    provider_commands::edit(&mut store, id.as_deref())?;
+                    store.save(&path)?;
+                }
+                (None, Some(ProviderAction::Remove { id })) => {
+                    provider_commands::remove(&mut store, id.as_deref())?;
+                    store.save(&path)?;
+                }
                 (None, Some(ProviderAction::List)) => list(&store),
                 (None, Some(ProviderAction::Set)) => {
                     set_default(&mut store)?;
@@ -98,7 +111,7 @@ async fn run() -> Result<()> {
                     test_selected(&mut store, &path).await?;
                     store.save(&path)?;
                 }
-                _ => bail!("choose --login chatgpt or list, set, or test"),
+                _ => bail!("choose --login chatgpt or a provider subcommand"),
             }
         }
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {

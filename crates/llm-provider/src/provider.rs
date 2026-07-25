@@ -151,14 +151,15 @@ impl SavedProvider {
 
     pub fn request_auth(&self) -> Result<RequestAuth> {
         let (token, account_id) = match &self.credentials {
-            Credentials::Chatgpt(auth) => (auth.access_token.expose(), Some(auth.account_id.as_str())),
+            Credentials::Chatgpt(auth) => {
+                (auth.access_token.expose(), Some(auth.account_id.as_str()))
+            }
             Credentials::ApiKey { api_key } => (api_key.expose(), None),
         };
         let mut headers = HeaderMap::new();
-        let bearer = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| {
-                Error::InvalidConfig("credential contains invalid header characters".into())
-            })?;
+        let bearer = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            Error::InvalidConfig("credential contains invalid header characters".into())
+        })?;
         headers.insert(AUTHORIZATION, bearer);
         if let Some(account_id) = account_id {
             headers.insert(

@@ -1,9 +1,9 @@
 //! Provider-backed generation for Pi-style structured context checkpoints.
 
+use crate::rig_provider::RigClient;
 use anyhow::{Context, Result, bail};
 use artist_session::compaction::{CompactionPlan, format_file_operations};
 use llm_provider::SavedProvider;
-use crate::rig_provider::RigClient;
 
 const SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Read the supplied conversation and produce the requested structured checkpoint.
 

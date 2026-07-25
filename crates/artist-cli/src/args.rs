@@ -80,6 +80,16 @@ pub enum LoginKind {
 
 #[derive(Debug, Subcommand)]
 pub enum ProviderAction {
+    /// Add an API-key provider interactively.
+    Add,
+    /// Edit a provider interactively (select when ID is omitted).
+    Edit {
+        id: Option<String>,
+    },
+    /// Remove a provider interactively (select when ID is omitted).
+    Remove {
+        id: Option<String>,
+    },
     List,
     Set,
     Test,
@@ -128,7 +138,7 @@ mod tests {
                 .as_deref(),
             Some("abc")
         );
-        for action in ["list", "set", "test"] {
+        for action in ["add", "edit", "remove", "list", "set", "test"] {
             assert!(Cli::try_parse_from(["artist", "provider", action]).is_ok());
         }
     }

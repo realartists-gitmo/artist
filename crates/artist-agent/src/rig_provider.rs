@@ -46,7 +46,10 @@ impl RigClient {
                     OpenAiApi::ChatCompletions => Self::OpenAiChat(client.completions_api()),
                 })
             }
-            other => bail!("{} runtime is not implemented yet", llm_provider::metadata(other).display_name),
+            other => bail!(
+                "{} runtime is not implemented yet",
+                llm_provider::metadata(other).display_name
+            ),
         }
     }
 
@@ -59,7 +62,13 @@ impl RigClient {
     ) -> Result<String> {
         macro_rules! run {
             ($client:expr) => {{
-                $client.agent(model).preamble(preamble).max_tokens(max_tokens).build().prompt(prompt).await?
+                $client
+                    .agent(model)
+                    .preamble(preamble)
+                    .max_tokens(max_tokens)
+                    .build()
+                    .prompt(prompt)
+                    .await?
             }};
         }
         Ok(match self {
