@@ -1,4 +1,4 @@
-use crate::{CHATGPT_CODEX_BASE_URL, Error, Result, Secret};
+use crate::{CHATGPT_CODEX_BASE_URL, Error, ProviderKind, Result, Secret};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -47,10 +47,37 @@ impl fmt::Debug for Auth {
     }
 }
 
+/// Provider credentials are explicitly tagged on disk. The legacy variant in
+/// the deserializer keeps pre-v4 ChatGPT records (whose `auth` table was
+/// untagged) readable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Credentials {
+    ApiKey { api_key: Secret },
+    Chatgpt(Auth),
+}
+
+impl<'de> Deserialize<'de> for Credentials {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Tagged { ApiKey { api_key: Secret }, Chatgpt(Auth) }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compatible { Tagged(Tagged), Legacy(Auth) }
+        Ok(match Compatible::deserialize(deserializer)? {
+            Compatible::Tagged(Tagged::ApiKey { api_key }) => Self::ApiKey { api_key },
+            Compatible::Tagged(Tagged::Chatgpt(auth)) | Compatible::Legacy(auth) => Self::Chatgpt(auth),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedProvider {
     pub id: ProviderId,
     pub name: String,
+    #[serde(default = "chatgpt_kind")]
+    pub provider: ProviderKind,
     pub base_url: Url,
     // Model and reasoning effort are no longer persisted here — they live in
     // `settings.toml` (global/project layered). These fields are runtime-only
@@ -61,31 +88,50 @@ pub struct SavedProvider {
     pub model: Option<String>,
     #[serde(default, skip_serializing)]
     pub reasoning_effort: Option<String>,
-    pub auth: Auth,
+    #[serde(rename = "credentials", alias = "auth")]
+    pub credentials: Credentials,
 }
+
+fn chatgpt_kind() -> ProviderKind { ProviderKind::Chatgpt }
 
 impl SavedProvider {
     pub fn chatgpt(id: ProviderId, name: impl Into<String>, auth: Auth) -> Self {
         Self {
             id,
             name: name.into(),
+            provider: ProviderKind::Chatgpt,
             base_url: Url::parse(CHATGPT_CODEX_BASE_URL).expect("constant URL"),
             model: None,
             reasoning_effort: None,
-            auth,
+            credentials: Credentials::Chatgpt(auth),
+        }
+    }
+
+    pub fn chatgpt_auth(&self) -> Result<&Auth> {
+        match &self.credentials {
+            Credentials::Chatgpt(auth) => Ok(auth),
+            Credentials::ApiKey { .. } => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
+        }
+    }
+
+    pub fn chatgpt_auth_mut(&mut self) -> Result<&mut Auth> {
+        match &mut self.credentials {
+            Credentials::Chatgpt(auth) => Ok(auth),
+            Credentials::ApiKey { .. } => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
         }
     }
 
     pub fn request_auth(&self) -> Result<RequestAuth> {
+        let auth = self.chatgpt_auth()?;
         let mut headers = HeaderMap::new();
-        let bearer = HeaderValue::from_str(&format!("Bearer {}", self.auth.access_token.expose()))
+        let bearer = HeaderValue::from_str(&format!("Bearer {}", auth.access_token.expose()))
             .map_err(|_| {
                 Error::InvalidConfig("credential contains invalid header characters".into())
             })?;
         headers.insert(AUTHORIZATION, bearer);
         headers.insert(
             "chatgpt-account-id",
-            HeaderValue::from_str(&self.auth.account_id).map_err(|_| {
+            HeaderValue::from_str(&auth.account_id).map_err(|_| {
                 Error::InvalidConfig("account id contains invalid header characters".into())
             })?,
         );
