@@ -39,7 +39,6 @@ use rig_core::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
     memory::{ConversationMemory, InMemoryConversationMemory},
-    providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt},
 };
 use serde_json::json;
@@ -205,24 +204,38 @@ pub async fn stream_chat(
     input: &ChatInput,
     tool_context: ToolContext<'_>,
     handles: SessionHandles,
-    mut on_event: impl FnMut(PromptEvent) -> Result<()>,
+    on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
+    match rig_provider::RigClient::build(provider)? {
+        rig_provider::RigClient::ChatGpt(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::OpenAiResponses(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+        rig_provider::RigClient::OpenAiChat(client) => {
+            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+        }
+    }
+}
+
+async fn stream_chat_with<C: CompletionClient>(
+    client: C,
+    provider: &SavedProvider,
+    input: &ChatInput,
+    tool_context: ToolContext<'_>,
+    handles: SessionHandles,
+    mut on_event: impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome>
+where
+    C::CompletionModel: 'static,
+{
     let tools = tool_context.native;
     let mcp = tool_context.mcp;
     let model = provider
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let client = chatgpt::Client::builder()
-        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.chatgpt_auth()?.access_token.expose().to_owned(),
-            account_id: Some(provider.chatgpt_auth()?.account_id.clone()),
-        })
-        .base_url(provider.base_url.as_str())
-        .originator("artist")
-        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build ChatGPT client")?;
 
     let resources = resources::Resources::discover(tools.project_root());
     handles.rules.note_user_turn();
@@ -271,8 +284,16 @@ pub async fn stream_chat(
         );
 
         let mut builder = client.agent(model);
-        let params = request_params(&cache_key, provider.reasoning_effort.as_deref());
-        builder = builder.additional_params(params);
+        // These fields belong to the ChatGPT subscription transport. Keep them
+        // off OpenAI Responses and Chat Completions requests, whose accepted
+        // parameter shapes differ.
+        if let Some(params) = request_params(
+            provider.provider,
+            &cache_key,
+            provider.reasoning_effort.as_deref(),
+        ) {
+            builder = builder.additional_params(params);
+        }
         let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
             Box::new(tools.bash.clone()),
             Box::new(tools.read.clone()),
@@ -327,7 +348,7 @@ pub async fn stream_chat(
             .build();
 
         run_recorder.record(RunStarted {
-            provider: "chatgpt".to_owned(),
+            provider: format!("{:?}", provider.provider).to_lowercase(),
             model: model.to_owned(),
             reasoning_effort: provider.reasoning_effort.clone(),
         });
@@ -483,7 +504,14 @@ pub async fn stream_chat(
 }
 
 /// Provider parameters shared by every request attempt in a turn.
-fn request_params(cache_key: &str, reasoning_effort: Option<&str>) -> serde_json::Value {
+fn request_params(
+    provider: llm_provider::ProviderKind,
+    cache_key: &str,
+    reasoning_effort: Option<&str>,
+) -> Option<serde_json::Value> {
+    if provider != llm_provider::ProviderKind::Chatgpt {
+        return None;
+    }
     let mut params = json!({ "prompt_cache_key": cache_key });
     // Request a provider-generated trace for the live UI even when the model's
     // default effort is in use. Rig's memory policy is independent: streaming
@@ -492,7 +520,7 @@ fn request_params(cache_key: &str, reasoning_effort: Option<&str>) -> serde_json
         Some(effort) => json!({ "effort": effort, "summary": "auto" }),
         None => json!({ "summary": "auto" }),
     };
-    params
+    Some(params)
 }
 
 /// A stable `prompt_cache_key` derived from the project root and model, so a
@@ -572,15 +600,21 @@ pub async fn stream_prompt(
 #[cfg(test)]
 mod tests {
     use super::request_params;
+    use llm_provider::ProviderKind;
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {
-        let params = request_params("cache", Some("high"));
+        let params = request_params(ProviderKind::Chatgpt, "cache", Some("high")).unwrap();
         assert_eq!(params["reasoning"]["effort"], "high");
         assert_eq!(params["reasoning"]["summary"], "auto");
 
-        let default_effort = request_params("cache", None);
+        let default_effort = request_params(ProviderKind::Chatgpt, "cache", None).unwrap();
         assert_eq!(default_effort["reasoning"]["summary"], "auto");
         assert!(default_effort["reasoning"].get("effort").is_none());
+    }
+
+    #[test]
+    fn chatgpt_only_params_are_not_sent_to_openai() {
+        assert!(request_params(ProviderKind::Openai, "cache", Some("high")).is_none());
     }
 }

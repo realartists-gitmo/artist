@@ -15,7 +15,6 @@ use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
     completion::Message,
-    providers::chatgpt,
     streaming::{StreamedAssistantContent, StreamingChat},
     tool::{Tool, ToolDyn},
 };
@@ -192,20 +191,36 @@ impl Delegate {
             .as_deref()
             .or(self.provider.model.as_deref())
             .ok_or(DelegateError::MissingModel)?;
-        let auth = self
-            .provider
-            .chatgpt_auth()
+        let client = crate::rig_provider::RigClient::build(&self.provider)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        let client = chatgpt::Client::builder()
-            .api_key(chatgpt::ChatGPTAuth::AccessToken {
-                access_token: auth.access_token.expose().to_owned(),
-                account_id: Some(auth.account_id.clone()),
-            })
-            .base_url(self.provider.base_url.as_str())
-            .originator("artist")
-            .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        match client {
+            crate::rig_provider::RigClient::ChatGpt(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::OpenAiResponses(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+            crate::rig_provider::RigClient::OpenAiChat(client) => {
+                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                    .await
+            }
+        }
+    }
+
+    async fn run_agent_with<C: CompletionClient>(
+        &self,
+        client: C,
+        prompt: String,
+        read_only: bool,
+        fork: bool,
+        model: &str,
+        reasoning: Option<String>,
+    ) -> Result<String, DelegateError>
+    where
+        C::CompletionModel: 'static,
+    {
         let actor = format!("delegate-{}", uuid::Uuid::new_v4().simple());
         let child_tools = self
             .tools
@@ -270,18 +285,20 @@ impl Delegate {
                 retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
-            let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-            // The subagent's own `reasoning` arg overrides the main agent's
-            // effort (main b9d9193); fall back to the provider default.
-            if let Some(effort) = reasoning
-                .as_deref()
-                .or(self.provider.reasoning_effort.as_deref())
-            {
-                // Summaries off (TOK-5) — subagent reasoning is never surfaced,
-                // so a summary was pure token waste here.
-                params["reasoning"] = json!({ "effort": effort });
+            if self.provider.provider == llm_provider::ProviderKind::Chatgpt {
+                let mut params = json!({ "prompt_cache_key": cache_key.clone() });
+                // The subagent's own `reasoning` arg overrides the main agent's
+                // effort (main b9d9193); fall back to the provider default.
+                if let Some(effort) = reasoning
+                    .as_deref()
+                    .or(self.provider.reasoning_effort.as_deref())
+                {
+                    // Summaries off (TOK-5) — subagent reasoning is never surfaced,
+                    // so a summary was pure token waste here.
+                    params["reasoning"] = json!({ "effort": effort });
+                }
+                builder = builder.additional_params(params);
             }
-            builder = builder.additional_params(params);
             let agent = builder
                 .tools(registered_tools())
                 .add_hook(CaptureHook::new(ToolMeta::default()))
@@ -289,7 +306,7 @@ impl Delegate {
                 .default_max_turns(usize::MAX)
                 .build();
             run_recorder.record(RunStarted {
-                provider: "chatgpt".to_owned(),
+                provider: format!("{:?}", self.provider.provider).to_lowercase(),
                 model: model.to_owned(),
                 reasoning_effort: self.provider.reasoning_effort.clone(),
             });
