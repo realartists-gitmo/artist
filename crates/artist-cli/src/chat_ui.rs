@@ -27,6 +27,7 @@ use ratatui::{
             PushKeyboardEnhancementFlags,
         },
         execute,
+        style::Print,
         terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
     },
     layout::{Rect, Size},
@@ -515,14 +516,15 @@ pub async fn run(
         Err(error) => Err(error.into()),
     };
     ratatui::restore();
-    // Inline restoration can return to the cursor position saved during setup.
-    // Reposition afterwards so the shell prompt starts below the cleared UI.
+    // Keep the final inline viewport visible. A newline from its last row scrolls
+    // it into terminal history and leaves the shell prompt directly below the
+    // status bar instead of clearing the UI or jumping to a saved cursor row.
     if let Ok((_, height)) = ratatui::crossterm::terminal::size() {
         let _ = execute!(
             std::io::stdout(),
             Show,
             MoveTo(0, height.saturating_sub(1)),
-            Clear(ClearType::CurrentLine)
+            Print("\r\n")
         );
     }
     result
@@ -769,7 +771,6 @@ async fn run_loop(
             } else if let Some(command) = slash_commands::parse(&prompt.content) {
                 command_panel = match command {
                     Ok(slash_commands::ParsedCommand::Quit) => {
-                        finish_inline(&mut terminal)?;
                         if let Some(active) = active.take() {
                             active.close().await?;
                         }
@@ -1142,7 +1143,6 @@ async fn run_loop(
                 insert_status(&mut terminal, "  input cleared — ctrl+c again to quit")?;
             }
             Event::Key(key) if !input.handle_key(key) => {
-                finish_inline(&mut terminal)?;
                 if let Some(active) = active.take() {
                     active.close().await?;
                 }
