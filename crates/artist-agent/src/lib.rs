@@ -197,6 +197,19 @@ pub struct ToolContext<'a> {
     pub disabled: &'a [String],
 }
 
+/// Sends the small completion used by provider health checks through the same
+/// typed Rig client dispatch as normal and delegated runs.
+pub async fn provider_health_check(provider: &SavedProvider, model: &str) -> Result<String> {
+    rig_provider::RigClient::build(provider)?
+        .prompt(
+            model,
+            "Reply with exactly OK and nothing else.",
+            "Reply with exactly OK.",
+            16,
+        )
+        .await
+}
+
 /// Executes one prompt and emits model output as it arrives. Rig loads and
 /// persists the conversation through [`SessionHandles::memory`].
 pub async fn stream_chat(
