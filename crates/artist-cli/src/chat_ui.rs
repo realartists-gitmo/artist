@@ -455,7 +455,7 @@ impl Drop for TerminalModeGuard {
 
 /// Runs an inline, persistent multi-turn chat. A session is created on first submission.
 pub async fn run(
-    terminal: ratatui::DefaultTerminal,
+    mut terminal: ratatui::DefaultTerminal,
     store: &mut ProviderStore,
     provider_index: usize,
     store_path: &Path,
@@ -491,7 +491,7 @@ pub async fn run(
             // Guard restores paste/keyboard modes on any exit, including panic.
             let _mode_guard = TerminalModeGuard;
             run_loop(
-                terminal,
+                &mut terminal,
                 ChatContext {
                     store,
                     provider_index,
@@ -515,17 +515,18 @@ pub async fn run(
         }
         Err(error) => Err(error.into()),
     };
+    let viewport_bottom = terminal.get_frame().area().bottom();
     ratatui::restore();
-    // Keep the final inline viewport visible. A newline from its last row scrolls
-    // it into terminal history and leaves the shell prompt directly below the
-    // status bar instead of clearing the UI or jumping to a saved cursor row.
+    // Keep the final inline viewport visible and return the shell cursor to the
+    // row immediately below it. Only emit a newline when the viewport reaches
+    // the physical bottom and must scroll to make room for the prompt.
     if let Ok((_, height)) = ratatui::crossterm::terminal::size() {
-        let _ = execute!(
-            std::io::stdout(),
-            Show,
-            MoveTo(0, height.saturating_sub(1)),
-            Print("\r\n")
-        );
+        let last_row = height.saturating_sub(1);
+        if viewport_bottom < height {
+            let _ = execute!(std::io::stdout(), Show, MoveTo(0, viewport_bottom));
+        } else {
+            let _ = execute!(std::io::stdout(), Show, MoveTo(0, last_row), Print("\r\n"));
+        }
     }
     result
 }
@@ -595,7 +596,7 @@ fn skill_completions<'a>(
 }
 
 async fn run_loop(
-    mut terminal: ratatui::DefaultTerminal,
+    mut terminal: &mut ratatui::DefaultTerminal,
     mut context: ChatContext<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
     pending: Option<String>,
