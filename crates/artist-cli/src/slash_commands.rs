@@ -364,6 +364,39 @@ pub(crate) fn completions(input: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ArgumentCompletion {
+    pub value: String,
+    pub description: &'static str,
+}
+
+/// Returns provider subcommands formatted like the top-level command menu.
+pub(crate) fn provider_completions(input: &str) -> Vec<ArgumentCompletion> {
+    const ACTIONS: &[(&str, &str)] = &[
+        ("add", "Add a provider"),
+        ("edit", "Edit a provider"),
+        ("remove", "Remove a provider"),
+        ("list", "List configured providers"),
+        ("set", "Set the active provider"),
+        ("test", "Test a provider"),
+    ];
+    let trimmed = input.trim_start();
+    let Some(fragment) = trimmed.strip_prefix("/provider ") else {
+        return Vec::new();
+    };
+    if fragment.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    ACTIONS
+        .iter()
+        .filter(|(action, _)| action.starts_with(fragment))
+        .map(|(action, description)| ArgumentCompletion {
+            value: format!("/provider {action}"),
+            description,
+        })
+        .collect()
+}
+
 /// Returns complete command lines matching the MCP argument currently being typed.
 pub(crate) fn mcp_completions(input: &str, servers: &[String]) -> Vec<String> {
     const ACTIONS: &[&str] = &["status", "start", "stop", "restart", "refresh"];
@@ -582,6 +615,18 @@ mod tests {
         );
         assert!(completions("/model ").is_empty());
         assert!(completions("hello").is_empty());
+    }
+
+    #[test]
+    fn completes_provider_actions_with_descriptions() {
+        assert_eq!(
+            provider_completions("/provider s"),
+            vec![ArgumentCompletion {
+                value: "/provider set".into(),
+                description: "Set the active provider",
+            }]
+        );
+        assert_eq!(provider_completions("/provider set "), Vec::new());
     }
 
     #[test]

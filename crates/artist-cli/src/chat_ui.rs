@@ -682,6 +682,7 @@ async fn run_loop(
         let extension_suggestions = extension_command_completions(&input.text, &extension_commands);
         let custom_suggestions = crate::custom_commands::completions(&custom_commands, &input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
+        let provider_suggestions = slash_commands::provider_completions(&input.text);
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
             suggestion_index = 0;
@@ -704,6 +705,11 @@ async fn run_loop(
                         .iter()
                         .map(|command| format!("{}  {}", command.name, command.description)),
                 )
+                .collect()
+        } else if !provider_suggestions.is_empty() {
+            provider_suggestions
+                .iter()
+                .map(|completion| format!("{}  {}", completion.value, completion.description))
                 .collect()
         } else if !mcp_suggestions.is_empty() {
             mcp_suggestions.clone()
@@ -1116,6 +1122,7 @@ async fn run_loop(
                         &slash_suggestions,
                         &custom_suggestions,
                         &extension_suggestions,
+                        &provider_suggestions,
                         &mcp_suggestions,
                         &skill_range,
                         &skill_suggestions,
@@ -1162,6 +1169,7 @@ async fn run_loop(
                     &slash_suggestions,
                     &custom_suggestions,
                     &extension_suggestions,
+                    &provider_suggestions,
                     &mcp_suggestions,
                     &skill_range,
                     &skill_suggestions,
@@ -3056,6 +3064,7 @@ fn apply_selected_suggestion(
     slash: &[&slash_commands::SlashCommand],
     custom: &[&crate::custom_commands::CustomCommand],
     extension: &[&artist_extensions::CommandDeclaration],
+    provider: &[slash_commands::ArgumentCompletion],
     mcp: &[String],
     skill_range: &Option<std::ops::Range<usize>>,
     skills: &[&artist_agent::AvailableSkill],
@@ -3070,6 +3079,10 @@ fn apply_selected_suggestion(
         input.cursor = input.text.len();
     } else if let Some(command) = extension.get(index.saturating_sub(slash.len() + custom.len())) {
         input.text = command.name.clone() + " ";
+        input.atoms.clear();
+        input.cursor = input.text.len();
+    } else if let Some(completion) = provider.get(index) {
+        input.text = completion.value.clone() + " ";
         input.atoms.clear();
         input.cursor = input.text.len();
     } else if let Some(completion) = mcp.get(index) {
