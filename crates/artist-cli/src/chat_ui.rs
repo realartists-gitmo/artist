@@ -865,6 +865,28 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Provider { action }) => handle_provider(
+                        &mut terminal,
+                        context.store,
+                        context.store_path,
+                        &mut context.provider_index,
+                        action,
+                        viewport_height,
+                    )
+                    .await
+                    .map(|(lines, changed)| {
+                        if changed {
+                            session_provider =
+                                context.store.providers[context.provider_index].clone();
+                            // Capacity is provider/model-specific and is resolved from
+                            // that provider's catalog before the next submission.
+                            status.context_capacity = None;
+                            status.used_tokens = None;
+                            status.refresh(&context.store.status_bar, context.project);
+                        }
+                        lines
+                    })
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Accounts { id }) => {
                         let (panel, switch) =
                             handle_accounts(context.store, context.provider_index, id);
@@ -873,9 +895,8 @@ async fn run_loop(
                             status.refresh(&context.store.status_bar, context.project);
                             // The settings override still applies to whichever
                             // account is now active.
-                            session_provider = context
-                                .settings
-                                .apply_to(context.store.providers[context.provider_index].clone());
+                            session_provider =
+                                context.store.providers[context.provider_index].clone();
                         }
                         panel
                     }
@@ -1469,6 +1490,78 @@ async fn handle_resume(
     )])
 }
 
+async fn handle_provider(
+    terminal: &mut ratatui::DefaultTerminal,
+    store: &mut ProviderStore,
+    store_path: &Path,
+    current: &mut usize,
+    action: slash_commands::ProviderAction<'_>,
+    viewport_height: u16,
+) -> Result<(Vec<String>, bool)> {
+    use slash_commands::ProviderAction;
+    if matches!(action, ProviderAction::List) {
+        return Ok((crate::provider_commands::list_lines(store, *current), false));
+    }
+    finish_inline(terminal)?;
+    let _ = execute!(
+        std::io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+    let outcome: Result<(Vec<String>, bool)> = async {
+        match action {
+            ProviderAction::Add { kind } => {
+                crate::provider_commands::add_kind(store, kind)?;
+                store.save(store_path)?;
+                Ok((vec!["Provider added and saved.".into()], false))
+            }
+            ProviderAction::Edit { id } => {
+                crate::provider_commands::edit(store, id)?;
+                store.save(store_path)?;
+                Ok((vec!["Provider updated and saved.".into()], false))
+            }
+            ProviderAction::Remove { id } => {
+                let active_id = store.providers.get(*current).map(|p| p.id.clone());
+                crate::provider_commands::remove(store, id)?;
+                store.save(store_path)?;
+                *current = active_id
+                    .and_then(|id| store.providers.iter().position(|p| p.id == id))
+                    .unwrap_or(0);
+                Ok((vec!["Provider removal completed.".into()], true))
+            }
+            ProviderAction::Set { id } => {
+                *current = crate::provider_commands::set_default(store, id)?;
+                store.save(store_path)?;
+                Ok((
+                    vec![format!("Switched to {}.", store.providers[*current].name)],
+                    true,
+                ))
+            }
+            ProviderAction::Test { id } => {
+                let index = crate::provider_commands::select_index(store, id)?;
+                if crate::refresh_if_needed(&mut store.providers[index]).await? {
+                    store.save(store_path)?;
+                }
+                crate::test_provider::test(&store.providers[index]).await?;
+                Ok((vec![format!("{}: OK", store.providers[index].name)], false))
+            }
+            ProviderAction::List => unreachable!(),
+        }
+    }
+    .await;
+    *terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(viewport_height),
+    });
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
+    );
+    terminal.show_cursor()?;
+    outcome
+}
+
 /// `/accounts [id]`: list logged-in accounts, or return the index to switch to.
 /// Returns the panel plus `Some(new_index)` when a switch was requested.
 fn handle_accounts(
@@ -1477,20 +1570,7 @@ fn handle_accounts(
     id: Option<&str>,
 ) -> (Vec<String>, Option<usize>) {
     let Some(id) = id else {
-        let mut lines: Vec<String> = store
-            .providers
-            .iter()
-            .enumerate()
-            .map(|(index, provider)| {
-                let marker = if index == current { "*" } else { " " };
-                let model = provider.model.as_deref().unwrap_or("no model");
-                format!(
-                    "{marker} {}  {} ({model})",
-                    provider.id.as_str(),
-                    provider.name
-                )
-            })
-            .collect();
+        let mut lines = crate::provider_commands::list_lines(store, current);
         lines.push("Switch with /accounts <id>, or add one with /login.".to_owned());
         return (lines, None);
     };

@@ -7,6 +7,11 @@ use llm_provider::{
 use url::Url;
 
 pub fn add(store: &mut ProviderStore) -> Result<()> {
+    add_kind(store, None)
+}
+
+/// Shared lifecycle entry point used by both the CLI and chat UI.
+pub fn add_kind(store: &mut ProviderStore, requested_kind: Option<&str>) -> Result<()> {
     let id: String = Input::new().with_prompt("Provider ID").interact_text()?;
     if store
         .providers
@@ -24,7 +29,15 @@ pub fn add(store: &mut ProviderStore) -> Result<()> {
         .iter()
         .map(|item| item.display_name.to_owned())
         .collect::<Vec<_>>();
-    let kind = available[prompt::select("Provider", &choices, 0)?].kind;
+    let kind = if let Some(requested) = requested_kind {
+        available
+            .iter()
+            .find(|item| format!("{:?}", item.kind).eq_ignore_ascii_case(requested))
+            .with_context(|| format!("unknown provider kind: {requested}"))?
+            .kind
+    } else {
+        available[prompt::select("Provider", &choices, 0)?].kind
+    };
     let info = metadata(kind);
     let name: String = Input::new()
         .with_prompt("Display name")
@@ -345,7 +358,7 @@ fn endpoint_presets(
     }
 }
 
-fn select_index(store: &ProviderStore, id: Option<&str>) -> Result<usize> {
+pub fn select_index(store: &ProviderStore, id: Option<&str>) -> Result<usize> {
     if let Some(id) = id {
         return store
             .providers
@@ -362,4 +375,35 @@ fn select_index(store: &ProviderStore, id: Option<&str>) -> Result<usize> {
         .map(|provider| format!("{} ({})", provider.name, provider.id.as_str()))
         .collect::<Vec<_>>();
     prompt::select("Provider", &items, 0)
+}
+
+pub fn list_lines(store: &ProviderStore, current: usize) -> Vec<String> {
+    if store.providers.is_empty() {
+        return vec!["No providers configured.".to_owned()];
+    }
+    store
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(index, provider)| {
+            let marker = if index == current { "*" } else { " " };
+            let default = if store.default_provider.as_ref() == Some(&provider.id) {
+                " [default]"
+            } else {
+                ""
+            };
+            let model = provider.model.as_deref().unwrap_or("no model");
+            format!(
+                "{marker} {}  {} ({model}){default}",
+                provider.id.as_str(),
+                provider.name
+            )
+        })
+        .collect()
+}
+
+pub fn set_default(store: &mut ProviderStore, id: Option<&str>) -> Result<usize> {
+    let index = select_index(store, id)?;
+    store.default_provider = Some(store.providers[index].id.clone());
+    Ok(index)
 }
