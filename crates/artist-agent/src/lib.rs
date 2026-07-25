@@ -6,6 +6,7 @@ mod conversation;
 mod delegate;
 mod delegate_jobs;
 pub mod mcp;
+mod prompt_config;
 mod resources;
 mod rig_provider;
 mod ttsr;
@@ -421,9 +422,15 @@ where
             registered.extend(extensions.tools());
         }
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
+        let (main_prompt, prompt_diagnostics) = prompt_config::main_prompt();
+        let prompt_diagnostics = prompt_diagnostics
+            .iter()
+            .map(|d| format!("<diagnostic>{}</diagnostic>", d))
+            .collect::<String>();
         let system_prompt = format!(
-            "{}\n\n{}{}\nCurrent working directory: {}",
-            include_str!("system_prompt.md").trim_end(),
+            "{}\n\n{}{}{}\nCurrent working directory: {}",
+            main_prompt,
+            prompt_diagnostics,
             tool_prompt::render(&registered),
             format!(
                 "{}<available_subagents>{}</available_subagents>",

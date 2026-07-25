@@ -40,6 +40,7 @@ struct AgentConfig {
     model: Option<String>,
     reasoning_effort: Option<String>,
     instructions: Option<String>,
+    instructions_file: Option<PathBuf>,
     tools: Option<Tools>,
 }
 #[derive(Default, Deserialize)]
@@ -55,10 +56,11 @@ const KNOWN_TOOLS: &[&str] = &[
 
 impl Subagents {
     pub fn discover(project: &Path) -> Self {
-        let global = std::env::var_os("ARTIST_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| dirs::config_dir().map(|p| p.join("artist")))
-            .map(|p| p.join("subagents.toml"));
+        let root = crate::prompt_config::config_root();
+        if let Some(root) = &root {
+            crate::prompt_config::scaffold(root);
+        }
+        let global = root.map(|p| p.join("subagents.toml"));
         Self::discover_from(project, global.as_deref())
     }
 
@@ -75,10 +77,10 @@ impl Subagents {
                 continue;
             }
             match std::fs::read_to_string(path)
-                .ok()
-                .and_then(|s| toml::from_str::<FileConfig>(&s).ok())
+                .map_err(|e| e.to_string())
+                .and_then(|s| toml::from_str::<FileConfig>(&s).map_err(|e| e.to_string()))
             {
-                Some(file) => {
+                Ok(file) => {
                     if let Some(value) = file.settings.and_then(|s| s.max_concurrent) {
                         max = Some(value.max(1));
                     }
@@ -100,6 +102,36 @@ impl Subagents {
                             ));
                             continue;
                         }
+                        if cfg.instructions.is_some() && cfg.instructions_file.is_some() {
+                            diagnostics.push(format!(
+                                "{}: agent {name} sets both instructions and instructions_file",
+                                path.display()
+                            ));
+                            continue;
+                        }
+                        let instructions = match cfg.instructions_file {
+                            Some(file) => {
+                                let file = path.parent().unwrap_or(Path::new(".")).join(file);
+                                match std::fs::read_to_string(&file) {
+                                    Ok(text) if !text.trim().is_empty() => Some(text),
+                                    Ok(_) => {
+                                        diagnostics.push(format!(
+                                            "{}: agent {name} prompt is empty",
+                                            file.display()
+                                        ));
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        diagnostics.push(format!(
+                                            "{}: agent {name} prompt cannot be read: {error}",
+                                            file.display()
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                            None => cfg.instructions,
+                        };
                         roles.insert(
                             name.clone(),
                             Role {
@@ -107,15 +139,15 @@ impl Subagents {
                                 description: cfg.description,
                                 model: cfg.model,
                                 reasoning_effort: cfg.reasoning_effort,
-                                instructions: cfg.instructions,
+                                instructions,
                                 allow: tools.allow,
                                 deny: tools.deny,
                             },
                         );
                     }
                 }
-                None => diagnostics.push(format!(
-                    "{}: invalid subagent configuration",
+                Err(error) => diagnostics.push(format!(
+                    "{}: invalid subagent configuration: {error}",
                     path.display()
                 )),
             }
@@ -254,5 +286,28 @@ mod tests {
         assert!(s.role("bad").is_err());
         assert_eq!(s.semaphore.available_permits(), 2);
         assert!(s.catalog().contains("unknown tools"));
+    }
+
+    #[test]
+    fn instruction_files_are_relative_and_invalid_override_keeps_builtin() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("worker.md"), "global file prompt").unwrap();
+        let global = d.path().join("global.toml");
+        std::fs::write(
+            &global,
+            "[agents.worker]\ndescription='global'\ninstructions_file='worker.md'",
+        )
+        .unwrap();
+        std::fs::create_dir(d.path().join(".artist")).unwrap();
+        std::fs::write(
+            d.path().join(".artist/subagents.toml"),
+            "[agents.worker]\ndescription='broken project'\ninstructions_file='missing.md'",
+        )
+        .unwrap();
+        let s = Subagents::discover_from(d.path(), Some(&global));
+        let worker = s.role("worker").unwrap();
+        assert_eq!(worker.description, "global");
+        assert_eq!(worker.instructions.as_deref(), Some("global file prompt"));
+        assert!(s.catalog().contains("prompt cannot be read"));
     }
 }
