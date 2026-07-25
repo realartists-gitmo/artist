@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use llm_provider::SavedProvider;
+use llm_provider::{OpenAiApi, ProviderKind, SavedProvider};
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -10,23 +10,28 @@ pub async fn test(provider: &SavedProvider) -> Result<()> {
         .as_deref()
         .context("no model selected; run `artist model` first")?;
     let client = Client::builder().timeout(Duration::from_secs(45)).build()?;
-    let endpoint = provider.base_url.join("responses")?;
-    let mut body = json!({
-        "model": model,
-        "instructions": "Reply with exactly OK and nothing else.",
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "Reply with exactly OK."}]
-        }],
-        "tools": [],
-        "tool_choice": "auto",
-        "parallel_tool_calls": false,
-        "store": false,
-        "stream": true,
-        "include": []
-    });
-    if let Some(effort) = &provider.reasoning_effort {
+    let chat_completions = provider.provider == ProviderKind::Openai
+        && provider.api == Some(OpenAiApi::ChatCompletions);
+    let endpoint = provider.base_url.join(if chat_completions {
+        "chat/completions"
+    } else {
+        "responses"
+    })?;
+    let mut body = if chat_completions {
+        json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with exactly OK and nothing else."}],
+            "stream": false
+        })
+    } else {
+        json!({
+            "model": model,
+            "instructions": "Reply with exactly OK and nothing else.",
+            "input": "Reply with exactly OK.",
+            "tools": [], "store": false, "stream": true
+        })
+    };
+    if !chat_completions && let Some(effort) = &provider.reasoning_effort {
         body["reasoning"] = json!({"effort": effort});
     }
     let response = client
@@ -75,6 +80,10 @@ fn response_contains_ok(text: &str) -> bool {
             .and_then(Value::as_str)
             .is_some_and(has_ok)
             || value.get("output").is_some_and(output_contains_ok)
+            || value
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .is_some_and(has_ok)
     })
 }
 fn output_contains_ok(value: &Value) -> bool {
@@ -115,6 +124,9 @@ mod tests {
         ));
         assert!(response_contains_ok(
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"O\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"K\"}\n"
+        ));
+        assert!(response_contains_ok(
+            r#"{"choices":[{"message":{"content":"OK"}}]}"#
         ));
     }
 }
