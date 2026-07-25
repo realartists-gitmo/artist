@@ -145,7 +145,11 @@ pub(crate) fn segments(
 }
 
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = Vec::new();
+    let mut spans = if segments.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::raw(" ")]
+    };
     for (index, segment) in segments.iter().enumerate() {
         if index != 0 {
             spans.push(Span::styled(" • ", Style::default().fg(Color::White)));
@@ -341,11 +345,11 @@ mod tests {
             },
         ];
         let rendered = render(&segments);
-        assert_eq!(rendered.spans.len(), 3);
-        assert_eq!(rendered.spans[1].content, " • ");
+        assert_eq!(rendered.spans.len(), 4);
+        assert_eq!(rendered.spans[0].content, " ");
+        assert_eq!(rendered.spans[2].content, " • ");
         assert!(
-            rendered
-                .spans
+            rendered.spans[1..]
                 .iter()
                 .all(|span| span.style.fg == Some(Color::White))
         );
