@@ -58,16 +58,26 @@ pub enum Credentials {
 }
 
 impl<'de> Deserialize<'de> for Credentials {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(tag = "type", rename_all = "snake_case")]
-        enum Tagged { ApiKey { api_key: Secret }, Chatgpt(Auth) }
+        enum Tagged {
+            ApiKey { api_key: Secret },
+            Chatgpt(Auth),
+        }
         #[derive(Deserialize)]
         #[serde(untagged)]
-        enum Compatible { Tagged(Tagged), Legacy(Auth) }
+        enum Compatible {
+            Tagged(Tagged),
+            Legacy(Auth),
+        }
         Ok(match Compatible::deserialize(deserializer)? {
             Compatible::Tagged(Tagged::ApiKey { api_key }) => Self::ApiKey { api_key },
-            Compatible::Tagged(Tagged::Chatgpt(auth)) | Compatible::Legacy(auth) => Self::Chatgpt(auth),
+            Compatible::Tagged(Tagged::Chatgpt(auth)) | Compatible::Legacy(auth) => {
+                Self::Chatgpt(auth)
+            }
         })
     }
 }
@@ -92,7 +102,9 @@ pub struct SavedProvider {
     pub credentials: Credentials,
 }
 
-fn chatgpt_kind() -> ProviderKind { ProviderKind::Chatgpt }
+fn chatgpt_kind() -> ProviderKind {
+    ProviderKind::Chatgpt
+}
 
 impl SavedProvider {
     pub fn chatgpt(id: ProviderId, name: impl Into<String>, auth: Auth) -> Self {
@@ -110,14 +122,18 @@ impl SavedProvider {
     pub fn chatgpt_auth(&self) -> Result<&Auth> {
         match &self.credentials {
             Credentials::Chatgpt(auth) => Ok(auth),
-            Credentials::ApiKey { .. } => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
+            Credentials::ApiKey { .. } => {
+                Err(Error::InvalidConfig("ChatGPT credentials required".into()))
+            }
         }
     }
 
     pub fn chatgpt_auth_mut(&mut self) -> Result<&mut Auth> {
         match &mut self.credentials {
             Credentials::Chatgpt(auth) => Ok(auth),
-            Credentials::ApiKey { .. } => Err(Error::InvalidConfig("ChatGPT credentials required".into())),
+            Credentials::ApiKey { .. } => {
+                Err(Error::InvalidConfig("ChatGPT credentials required".into()))
+            }
         }
     }
 

@@ -192,7 +192,9 @@ impl Delegate {
             .as_deref()
             .or(self.provider.model.as_deref())
             .ok_or(DelegateError::MissingModel)?;
-        let auth = self.provider.chatgpt_auth()
+        let auth = self
+            .provider
+            .chatgpt_auth()
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
         let client = chatgpt::Client::builder()
             .api_key(chatgpt::ChatGPTAuth::AccessToken {

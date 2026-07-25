@@ -21,7 +21,7 @@ pub struct ProviderStore {
     pub disabled_tools: Vec<String>,
 }
 fn version() -> u8 {
-    3
+    4
 }
 
 impl ProviderStore {
@@ -39,7 +39,7 @@ impl ProviderStore {
             .get("version")
             .and_then(toml::Value::as_integer)
             .unwrap_or(1);
-        migrate_to_chatgpt_only(&mut document);
+        migrate_provider_credentials(&mut document);
         migrate_session_tokens(&mut document, previous_version);
         let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
@@ -86,45 +86,37 @@ impl ProviderStore {
     }
 }
 
-fn migrate_to_chatgpt_only(document: &mut toml::Value) {
+/// Upgrade pre-v4 records without discarding credentials. Older OAuth tables
+/// were untagged, while old API-key tables already carried `type = "api_key"`.
+fn migrate_provider_credentials(document: &mut toml::Value) {
     let Some(table) = document.as_table_mut() else {
         return;
     };
     table.insert("version".into(), toml::Value::Integer(i64::from(version())));
-    if let Some(providers) = table
+    let Some(providers) = table
         .get_mut("providers")
         .and_then(toml::Value::as_array_mut)
-    {
-        providers.retain(|provider| {
-            provider
-                .get("auth")
-                .and_then(|auth| auth.get("type"))
-                .and_then(toml::Value::as_str)
-                != Some("api_key")
-        });
-        let ids: Vec<String> = providers
-            .iter()
-            .filter_map(|provider| {
-                provider
-                    .get("id")
-                    .and_then(toml::Value::as_str)
-                    .map(str::to_owned)
-            })
-            .collect();
-        let invalid_default = table
-            .get("default_provider")
-            .and_then(toml::Value::as_str)
-            .is_some_and(|id| !ids.iter().any(|candidate| candidate == id));
-        if invalid_default {
-            if let Some(first) = ids.first() {
-                table.insert(
-                    "default_provider".into(),
-                    toml::Value::String(first.clone()),
-                );
-            } else {
-                table.remove("default_provider");
-            }
+    else {
+        return;
+    };
+    for provider in providers {
+        let Some(provider) = provider.as_table_mut() else {
+            continue;
+        };
+        let credentials = provider
+            .remove("credentials")
+            .or_else(|| provider.remove("auth"));
+        let Some(mut credentials) = credentials else {
+            continue;
+        };
+        let is_api_key = credentials.get("type").and_then(toml::Value::as_str) == Some("api_key");
+        if !is_api_key && let Some(auth) = credentials.as_table_mut() {
+            auth.insert("type".into(), toml::Value::String("chatgpt".into()));
         }
+        provider.insert("credentials".into(), credentials);
+        provider.entry("provider").or_insert_with(|| {
+            toml::Value::String(if is_api_key { "openai" } else { "chatgpt" }.into())
+        });
     }
 }
 
@@ -208,9 +200,9 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::status_bar::StatusItem;
-    use llm_provider::{Auth, SavedProvider, Secret};
+    use llm_provider::{Auth, Credentials, ProviderKind, SavedProvider, Secret};
     #[test]
-    fn removes_legacy_api_key_providers() {
+    fn preserves_legacy_api_key_providers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("providers.toml");
         fs::write(
@@ -228,8 +220,11 @@ api_key = "secret"
         )
         .unwrap();
         let store = ProviderStore::load(&path).unwrap();
-        assert!(store.providers.is_empty());
-        assert!(store.default_provider.is_none());
+        assert_eq!(store.providers.len(), 1);
+        assert_eq!(store.providers[0].provider, ProviderKind::Openai);
+        assert!(matches!(&store.providers[0].credentials,
+            Credentials::ApiKey { api_key } if api_key.expose() == "secret"));
+        assert_eq!(store.default_provider.unwrap().as_str(), "api");
     }
 
     #[test]
@@ -263,7 +258,7 @@ api_key = "secret"
         store.save(&path).unwrap();
 
         let reloaded = ProviderStore::load(&path).unwrap();
-        assert_eq!(reloaded.version, 3);
+        assert_eq!(reloaded.version, 4);
         assert_eq!(reloaded.status_bar.items, [StatusItem::Context]);
     }
 

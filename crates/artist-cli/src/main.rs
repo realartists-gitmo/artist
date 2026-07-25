@@ -683,9 +683,11 @@ fn list(store: &ProviderStore) {
         } else {
             " "
         };
-        let identity = provider.chatgpt_auth().ok().map(|auth| {
-            auth.email.as_deref().unwrap_or(&auth.account_id)
-        }).unwrap_or("API key");
+        let identity = provider
+            .chatgpt_auth()
+            .ok()
+            .map(|auth| auth.email.as_deref().unwrap_or(&auth.account_id))
+            .unwrap_or("API key");
         println!("{marker} {}  {identity}", provider.name);
     }
 }
