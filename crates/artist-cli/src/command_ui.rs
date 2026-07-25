@@ -56,6 +56,7 @@ pub async fn run(
         | ParsedCommand::Sessions
         | ParsedCommand::Resume { .. }
         | ParsedCommand::Accounts { .. }
+        | ParsedCommand::Provider { .. }
         | ParsedCommand::Login => Ok(CommandOutput {
             lines: vec!["that command is only available inside a chat session".to_owned()],
             context_capacity: None,

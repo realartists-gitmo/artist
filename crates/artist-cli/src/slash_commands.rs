@@ -68,8 +68,18 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/resume [id]",
     },
     SlashCommand {
+        name: "/provider",
+        description: "Manage providers",
+        usage: "/provider <add|edit|remove|list|set|test> [id|kind]",
+    },
+    SlashCommand {
+        name: "/providers",
+        description: "List configured providers",
+        usage: "/providers",
+    },
+    SlashCommand {
         name: "/accounts",
-        description: "List logged-in accounts, or switch to one by id",
+        description: "Alias for /providers, or switch by id",
         usage: "/accounts [id]",
     },
     SlashCommand {
@@ -123,12 +133,25 @@ pub(crate) enum ParsedCommand<'a> {
     Resume {
         id: Option<&'a str>,
     },
+    Provider {
+        action: ProviderAction<'a>,
+    },
     /// List logged-in accounts, or switch to one by id.
     Accounts {
         id: Option<&'a str>,
     },
     /// Log in to another account.
     Login,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderAction<'a> {
+    Add { kind: Option<&'a str> },
+    Edit { id: Option<&'a str> },
+    Remove { id: Option<&'a str> },
+    List,
+    Set { id: Option<&'a str> },
+    Test { id: Option<&'a str> },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +293,50 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/resume [id]",
         }),
+        ("/providers", []) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::List,
+        }),
+        ("/providers", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/providers",
+        }),
+        ("/provider", ["list"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::List,
+        }),
+        ("/provider", ["add"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Add { kind: None },
+        }),
+        ("/provider", ["add", kind]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Add { kind: Some(kind) },
+        }),
+        ("/provider", ["edit"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Edit { id: None },
+        }),
+        ("/provider", ["edit", id]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Edit { id: Some(id) },
+        }),
+        ("/provider", ["remove"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Remove { id: None },
+        }),
+        ("/provider", ["remove", id]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Remove { id: Some(id) },
+        }),
+        ("/provider", ["set"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Set { id: None },
+        }),
+        ("/provider", ["set", id]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Set { id: Some(id) },
+        }),
+        ("/provider", ["test"]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Test { id: None },
+        }),
+        ("/provider", ["test", id]) => Ok(ParsedCommand::Provider {
+            action: ProviderAction::Test { id: Some(id) },
+        }),
+        ("/provider", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/provider <add|edit|remove|list|set|test> [id|kind]",
+        }),
         ("/accounts", []) => Ok(ParsedCommand::Accounts { id: None }),
         ("/accounts", [id]) => Ok(ParsedCommand::Accounts { id: Some(id) }),
         ("/accounts", _) => Err(ParseError::InvalidUsage {
@@ -349,6 +416,8 @@ mod tests {
                 "/new",
                 "/sessions",
                 "/resume",
+                "/provider",
+                "/providers",
                 "/accounts",
                 "/login",
                 "/help",
@@ -474,6 +543,26 @@ mod tests {
             }))
         );
         assert_eq!(parse("/login"), Some(Ok(ParsedCommand::Login)));
+        assert_eq!(
+            parse("/providers"),
+            Some(Ok(ParsedCommand::Provider {
+                action: ProviderAction::List
+            }))
+        );
+        assert_eq!(
+            parse("/provider set work"),
+            Some(Ok(ParsedCommand::Provider {
+                action: ProviderAction::Set { id: Some("work") }
+            }))
+        );
+        assert_eq!(
+            parse("/provider add anthropic"),
+            Some(Ok(ParsedCommand::Provider {
+                action: ProviderAction::Add {
+                    kind: Some("anthropic")
+                }
+            }))
+        );
         assert!(matches!(
             parse("/new now"),
             Some(Err(ParseError::InvalidUsage { .. }))
