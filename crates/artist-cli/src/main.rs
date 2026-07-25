@@ -683,15 +683,10 @@ fn list(store: &ProviderStore) {
         } else {
             " "
         };
-        println!(
-            "{marker} {}  {}",
-            provider.name,
-            provider
-                .auth
-                .email
-                .as_deref()
-                .unwrap_or(&provider.auth.account_id)
-        );
+        let identity = provider.chatgpt_auth().ok().map(|auth| {
+            auth.email.as_deref().unwrap_or(&auth.account_id)
+        }).unwrap_or("API key");
+        println!("{marker} {}  {identity}", provider.name);
     }
 }
 
@@ -756,7 +751,7 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
     // trusted forever — otherwise it silently rots into an unrecoverable 401.
     // The refresh response populates `expires_at`, so this self-corrects.
     let needs_refresh = provider
-        .auth
+        .chatgpt_auth()?
         .expires_at
         .map_or(true, |expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
@@ -769,10 +764,11 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
 /// a mid-turn 401 (AUTH-2), where the token is known-bad regardless of its
 /// recorded expiry.
 pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) -> Result<()> {
-    provider.auth = ChatGptOAuth::default()
-        .refresh(&provider.auth)
+    let refreshed = ChatGptOAuth::default()
+        .refresh(provider.chatgpt_auth()?)
         .await
         .context("refresh ChatGPT login")?
         .auth;
+    *provider.chatgpt_auth_mut()? = refreshed;
     Ok(())
 }

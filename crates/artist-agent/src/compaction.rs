@@ -101,8 +101,8 @@ async fn complete(provider: &SavedProvider, prompt: &str, max_tokens: u64) -> Re
         .context("no model selected; run `artist model` first")?;
     let client = chatgpt::Client::builder()
         .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: provider.auth.access_token.expose().to_owned(),
-            account_id: Some(provider.auth.account_id.clone()),
+            access_token: provider.chatgpt_auth()?.access_token.expose().to_owned(),
+            account_id: Some(provider.chatgpt_auth()?.account_id.clone()),
         })
         .base_url(provider.base_url.as_str())
         .originator("artist")
