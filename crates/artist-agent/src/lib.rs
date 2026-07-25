@@ -14,6 +14,7 @@ mod ttsr_tests;
 
 pub use resources::AvailableSkill;
 mod steering;
+mod subagents;
 mod tool_prompt;
 
 pub use steering::SteeringHandle;
@@ -335,6 +336,7 @@ where
         .context("no model selected; run `artist model` first")?;
 
     let resources = resources::Resources::discover(tools.project_root());
+    let subagents = subagents::Subagents::discover(tools.project_root());
     handles.rules.note_user_turn();
 
     let mut seed_history = handles
@@ -406,6 +408,7 @@ where
                 resources.clone(),
                 handles.clone(),
                 tool_context.disabled.to_vec(),
+                subagents.clone(),
             )),
         ];
         registered.extend(
@@ -422,7 +425,11 @@ where
             "{}\n\n{}{}\nCurrent working directory: {}",
             include_str!("system_prompt.md").trim_end(),
             tool_prompt::render(&registered),
-            resources.prompt_section(),
+            format!(
+                "{}<available_subagents>{}</available_subagents>",
+                resources.prompt_section(),
+                subagents.catalog()
+            ),
             tools.project_root().display()
         );
         let persistence = conversation::PersistenceStatus::default();

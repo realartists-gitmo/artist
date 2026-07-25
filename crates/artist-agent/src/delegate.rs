@@ -33,6 +33,7 @@ pub(crate) struct Delegate {
     resources: Resources,
     handles: SessionHandles,
     disabled_tools: Vec<String>,
+    subagents: crate::subagents::Subagents,
 }
 
 impl Delegate {
@@ -43,6 +44,7 @@ impl Delegate {
         resources: Resources,
         handles: SessionHandles,
         disabled_tools: Vec<String>,
+        subagents: crate::subagents::Subagents,
     ) -> Self {
         let jobs = DelegateJobs::for_project(tools.project_root());
         Self {
@@ -53,6 +55,7 @@ impl Delegate {
             resources,
             handles,
             disabled_tools,
+            subagents,
         }
     }
 }
@@ -62,14 +65,11 @@ impl Delegate {
 pub(crate) struct DelegateArgs {
     mode: Option<String>,
     prompt: Option<String>,
-    read_only: Option<bool>,
+    agent: Option<String>,
     fork: Option<bool>,
     background: Option<bool>,
     task_id: Option<String>,
     wait_ms: Option<u64>,
-    model: Option<String>,
-    #[serde(alias = "reasoningLevel", alias = "reasoningEffort")]
-    reasoning: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -94,13 +94,11 @@ impl Tool for Delegate {
         json!({"type":"object","properties":{
             "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run"},
             "prompt":{"type":"string"},
-            "readOnly":{"type":"boolean","default":true},
+            "agent":{"type":"string","enum":self.subagents.names(),"description":"Configured subagent role"},
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
             "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
             "taskId":{"type":"string"},
-            "waitMs":{"type":"integer","minimum":1,"maximum":30000},
-            "model":{"type":"string","description":"Model slug for this subagent. Defaults to the main agent's model."},
-            "reasoning":{"type":"string","description":"Reasoning effort for this subagent. Defaults to the main agent's reasoning effort."}
+            "waitMs":{"type":"integer","minimum":1,"maximum":30000}
         },"additionalProperties":false})
     }
 
@@ -118,10 +116,8 @@ impl Tool for Delegate {
                 let prompt = required(args.prompt, "prompt")?;
                 self.run_agent(
                     prompt,
-                    args.read_only.unwrap_or(true),
+                    args.agent.as_deref().unwrap_or("default"),
                     args.fork.unwrap_or(false),
-                    args.model,
-                    args.reasoning,
                 )
                 .await
             }
@@ -129,17 +125,13 @@ impl Tool for Delegate {
                 let prompt = required(args.prompt, "prompt")?;
                 let delegate = self.clone();
                 let task_prompt = prompt.clone();
+                let role = args.agent.unwrap_or_else(|| "default".into());
+                let task_role = role.clone();
                 Ok(self
                     .jobs
-                    .start(prompt, async move {
+                    .start(prompt, role, async move {
                         delegate
-                            .run_agent(
-                                task_prompt,
-                                args.read_only.unwrap_or(true),
-                                args.fork.unwrap_or(false),
-                                args.model,
-                                args.reasoning,
-                            )
+                            .run_agent(task_prompt, &task_role, args.fork.unwrap_or(false))
                             .await
                             .map_err(|error| error.to_string())
                     })
@@ -182,12 +174,21 @@ impl Delegate {
     async fn run_agent(
         &self,
         prompt: String,
-        read_only: bool,
+        role_name: &str,
         fork: bool,
-        model: Option<String>,
-        reasoning: Option<String>,
     ) -> Result<String, DelegateError> {
-        let model = model
+        let role = self
+            .subagents
+            .role(role_name)
+            .map_err(DelegateError::Failed)?;
+        let _permit = self
+            .subagents
+            .semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| DelegateError::Failed("subagent concurrency limit reached".into()))?;
+        let model = role
+            .model
             .as_deref()
             .or(self.provider.model.as_deref())
             .ok_or(DelegateError::MissingModel)?;
@@ -195,115 +196,115 @@ impl Delegate {
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
         match client {
             crate::rig_provider::RigClient::ChatGpt(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Copilot(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::OpenAiResponses(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::OpenAiChat(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Anthropic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Cohere(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Gemini(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::DeepSeek(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Groq(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::HuggingFace(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Hyperbolic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Mira(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Mistral(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::OpenRouter(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Perplexity(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Together(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::XAi(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Azure(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Llamafile(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Ollama(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Minimax(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::MinimaxAnthropic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::Moonshot(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::MoonshotAnthropic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::XiaomiMiMo(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::XiaomiMiMoAnthropic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::ZAi(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
             crate::rig_provider::RigClient::ZAiAnthropic(client) => {
-                self.run_agent_with(client, prompt, read_only, fork, model, reasoning)
+                self.run_agent_with(client, prompt, &role, fork, model)
                     .await
             }
         }
@@ -313,10 +314,9 @@ impl Delegate {
         &self,
         client: C,
         prompt: String,
-        read_only: bool,
+        role: &crate::subagents::Role,
         fork: bool,
         model: &str,
-        reasoning: Option<String>,
     ) -> Result<String, DelegateError>
     where
         C::CompletionModel: 'static,
@@ -329,35 +329,44 @@ impl Delegate {
         let recorder = self.handles.recorder.child_lineage(&actor);
         recorder.record(DelegateStarted {
             prompt: prompt.clone(),
-            read_only,
+            read_only: !["bash", "edit", "write"]
+                .into_iter()
+                .any(|tool| role.permits(tool)),
             fork,
             background: false,
         });
         let registered_tools = || {
-            let mut tools: Vec<Box<dyn ToolDyn>> = vec![
-                Box::new(child_tools.read.clone()),
-                Box::new(child_tools.find.clone()),
-                Box::new(child_tools.grep.clone()),
-                Box::new(self.resources.skill_tool()),
-            ];
-            if !read_only {
-                tools.extend([
-                    Box::new(child_tools.bash.clone()) as Box<dyn ToolDyn>,
-                    Box::new(child_tools.edit.clone()),
-                    Box::new(child_tools.write.clone()),
-                ]);
+            let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+            if role.permits("read") {
+                tools.push(Box::new(child_tools.read.clone()));
+            }
+            if role.permits("find") {
+                tools.push(Box::new(child_tools.find.clone()));
+            }
+            if role.permits("grep") {
+                tools.push(Box::new(child_tools.grep.clone()));
+            }
+            if role.permits("skill") {
+                tools.push(Box::new(self.resources.skill_tool()));
+            }
+            if role.permits("bash") {
+                tools.push(Box::new(child_tools.bash.clone()));
+            }
+            if role.permits("edit") {
+                tools.push(Box::new(child_tools.edit.clone()));
+            }
+            if role.permits("write") {
+                tools.push(Box::new(child_tools.write.clone()));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
             tools
         };
         let prompt_tools = registered_tools();
-        let role = if read_only {
-            "You are a focused read-only subagent. Inspect the project and return concise findings with evidence."
-        } else {
-            "You are a focused implementation subagent. Complete only the delegated task and return concise findings with evidence. You cannot delegate further."
-        };
+        let role_instructions = role.instructions.as_deref().unwrap_or("Complete only the delegated task and return concise findings with evidence. You cannot delegate further.");
         let policy = format!(
-            "{role}\n\n{}{}\nCurrent working directory: {}",
+            "You are the '{}' subagent role.\n{}\n\n{}{}\nCurrent working directory: {}",
+            role.name,
+            role_instructions,
             crate::tool_prompt::render(&prompt_tools),
             self.resources.prompt_section(),
             self.tools.project_root().display()
@@ -389,7 +398,8 @@ impl Delegate {
                 let mut params = json!({ "prompt_cache_key": cache_key.clone() });
                 // The subagent's own `reasoning` arg overrides the main agent's
                 // effort (main b9d9193); fall back to the provider default.
-                if let Some(effort) = reasoning
+                if let Some(effort) = role
+                    .reasoning_effort
                     .as_deref()
                     .or(self.provider.reasoning_effort.as_deref())
                 {
@@ -408,7 +418,10 @@ impl Delegate {
             run_recorder.record(RunStarted {
                 provider: format!("{:?}", self.provider.provider).to_lowercase(),
                 model: model.to_owned(),
-                reasoning_effort: self.provider.reasoning_effort.clone(),
+                reasoning_effort: role
+                    .reasoning_effort
+                    .clone()
+                    .or_else(|| self.provider.reasoning_effort.clone()),
             });
 
             let mut stream = agent
@@ -494,7 +507,10 @@ impl Delegate {
         recorder.record(DelegateFinished {
             outcome: "completed".into(),
         });
-        Ok(shorten(&output, 50 * 1024))
+        Ok(
+            json!({"role":role.name,"taskId":actor,"output":shorten(&output, 50 * 1024)})
+                .to_string(),
+        )
     }
 }
 
@@ -510,29 +526,4 @@ fn shorten(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\n[truncated]", &value[..end])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn delegate_args_accept_model_and_reasoning_overrides() {
-        let args: DelegateArgs = serde_json::from_value(json!({
-            "model": "gpt-5.1-codex-mini",
-            "reasoning": "high"
-        }))
-        .unwrap();
-
-        assert_eq!(args.model.as_deref(), Some("gpt-5.1-codex-mini"));
-        assert_eq!(args.reasoning.as_deref(), Some("high"));
-    }
-
-    #[test]
-    fn delegate_args_accept_reasoning_level_alias() {
-        let args: DelegateArgs =
-            serde_json::from_value(json!({"reasoningLevel": "medium"})).unwrap();
-
-        assert_eq!(args.reasoning.as_deref(), Some("medium"));
-    }
 }

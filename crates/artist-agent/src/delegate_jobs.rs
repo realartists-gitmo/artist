@@ -14,6 +14,7 @@ pub struct DelegateJobs {
 
 struct Job {
     prompt: String,
+    role: String,
     state: RwLock<JobState>,
     done: Notify,
     abort: Mutex<Option<tokio::task::AbortHandle>>,
@@ -40,13 +41,14 @@ impl DelegateJobs {
         Self { jobs }
     }
 
-    pub async fn start<F>(&self, prompt: String, future: F) -> String
+    pub async fn start<F>(&self, prompt: String, role: String, future: F) -> String
     where
         F: Future<Output = Result<String, String>> + Send + 'static,
     {
         self.cleanup().await;
         let job = Arc::new(Job {
             prompt,
+            role,
             state: RwLock::new(JobState::Running),
             done: Notify::new(),
             abort: Mutex::new(None),
@@ -71,7 +73,7 @@ impl DelegateJobs {
             }
         });
         *job.abort.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle.abort_handle());
-        json!({"taskId":task_id,"status":"running"}).to_string()
+        json!({"taskId":task_id,"role":job.role,"status":"running"}).to_string()
     }
 
     pub async fn wait(&self, id: &str, wait_ms: Option<u64>) -> Result<String, String> {
@@ -109,19 +111,30 @@ impl DelegateJobs {
     pub async fn status(&self, id: &str) -> Result<String, String> {
         let job = self.job(id)?;
         let state = job.state.read().await;
-        Ok(json!({"taskId":id,"status":status_name(&state)}).to_string())
+        Ok(json!({"taskId":id,"role":job.role,"status":status_name(&state)}).to_string())
     }
 
     pub async fn read(&self, id: &str) -> Result<String, String> {
         let job = self.job(id)?;
         let state = job.state.read().await;
         Ok(match &*state {
-            JobState::Running => json!({"taskId":id,"status":"running"}),
+            JobState::Running => json!({"taskId":id,"role":job.role,"status":"running"}),
             JobState::Completed(output) => {
-                json!({"taskId":id,"status":"completed","output":output})
+                let output = serde_json::from_str::<Value>(output)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("output")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| output.clone());
+                json!({"taskId":id,"role":job.role,"status":"completed","output":output})
             }
-            JobState::Failed(error) => json!({"taskId":id,"status":"failed","error":error}),
-            JobState::Cancelled => json!({"taskId":id,"status":"cancelled"}),
+            JobState::Failed(error) => {
+                json!({"taskId":id,"role":job.role,"status":"failed","error":error})
+            }
+            JobState::Cancelled => json!({"taskId":id,"role":job.role,"status":"cancelled"}),
         }
         .to_string())
     }
@@ -136,7 +149,7 @@ impl DelegateJobs {
         for (id, job) in jobs {
             let state = job.state.read().await;
             output.push(
-                json!({"taskId":id,"status":status_name(&state),"prompt":shorten(&job.prompt,100)}),
+                json!({"taskId":id,"role":job.role,"status":status_name(&state),"prompt":shorten(&job.prompt,100)}),
             );
         }
         Value::Array(output).to_string()
@@ -190,18 +203,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let jobs = DelegateJobs::for_project(root.path());
         let started = jobs
-            .start("work".into(), async { Ok("finished".into()) })
+            .start("work".into(), "worker".into(), async {
+                Ok("finished".into())
+            })
             .await;
-        let id = serde_json::from_str::<Value>(&started).unwrap()["taskId"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let result = jobs.wait(&id, Some(1_000)).await.unwrap();
-        assert!(result.contains("completed"));
-        assert!(result.contains("finished"));
+        let started = serde_json::from_str::<Value>(&started).unwrap();
+        assert_eq!(started["role"], "worker");
+        let id = started["taskId"].as_str().unwrap().to_owned();
+        let result =
+            serde_json::from_str::<Value>(&jobs.wait(&id, Some(1_000)).await.unwrap()).unwrap();
+        assert_eq!(result["taskId"], id);
+        assert_eq!(result["role"], "worker");
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["output"], "finished");
 
         let started = jobs
-            .start("never".into(), async {
+            .start("never".into(), "explorer".into(), async {
                 std::future::pending::<Result<String, String>>().await
             })
             .await;
