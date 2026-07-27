@@ -3093,7 +3093,7 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    let input_style = Style::default().fg(Color::White);
+    let input_style = Style::default().fg(crate::theme::PASTEL_WHITE);
     let paragraph =
         Paragraph::new(Text::raw(hard_wrap_input(&input.text, inner_width))).style(input_style);
     frame.render_widget(paragraph, input_area);
