@@ -1,4 +1,4 @@
-use super::row::{plain_line, plain_segment, plain_text, powerline_line, render_row};
+use super::row::{plain_line, plain_segment, plain_segments, plain_text, render_row};
 use super::{StatusItem, StatusSegment};
 use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -46,7 +46,7 @@ impl StatusView {
             .find(|segment| segment.item == StatusItem::Context);
         let full_right = context.map(plain_segment).unwrap_or_default();
         let mut right = full_right.clone();
-        let mut left = powerline_line(&repo);
+        let mut left = plain_segments(&repo);
         if left.width() + right.width() + 1 > usize::from(area.width) {
             right = context
                 .and_then(|segment| {
@@ -62,7 +62,7 @@ impl StatusView {
             .saturating_add(usize::from(!right.spans.is_empty()));
         let left_space = usize::from(area.width).saturating_sub(right_space);
         if left.width() > left_space && repo.len() > 1 {
-            left = powerline_line(&repo[1..]);
+            left = plain_segments(&repo[1..]);
         }
         render_row(buffer, area, &left, &right, true);
     }
@@ -135,7 +135,13 @@ mod tests {
 
         view.render(&mut buffer, area);
 
-        assert!(row_text(&buffer, width, 0).ends_with("ctx 75%"));
+        let top = row_text(&buffer, width, 0);
+        assert!(top.starts_with(" artist • main"));
+        assert!(top.ends_with("ctx 75%"));
+        assert!(!top.contains(''));
+        assert!((0..width).all(|column| {
+            buffer.cell((column, 0)).unwrap().bg == ratatui::style::Color::Reset
+        }));
         assert!(row_text(&buffer, width, 1).ends_with("1.5k total"));
         assert_eq!(buffer.cell((width - 1, 0)).unwrap().fg, PASTEL_BLUE);
     }
@@ -167,7 +173,11 @@ mod tests {
         assert!(!top.contains("impossibly"));
         assert!(top.contains("main"));
         assert!(top.ends_with("ctx 75%"));
-        assert_eq!(buffer.cell((1, 0)).unwrap().bg, PASTEL_WHITE);
+        assert_eq!(buffer.cell((1, 0)).unwrap().fg, PASTEL_WHITE);
+        assert_eq!(
+            buffer.cell((1, 0)).unwrap().bg,
+            ratatui::style::Color::Reset
+        );
     }
 
     #[test]

@@ -865,6 +865,7 @@ async fn run_loop(
                         }
                         history.clear();
                         context.rules_handle.restore_from_log(&[]);
+                        status.used_tokens = None;
                         status.session_tokens = 0;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }

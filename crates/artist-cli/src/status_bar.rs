@@ -106,27 +106,25 @@ pub(crate) fn segments(
                 StatusItem::GitBranch => (git_branch.map(str::to_owned)?, None),
                 StatusItem::Model => (provider.model.clone()?, None),
                 StatusItem::Reasoning => (provider.reasoning_effort.clone()?, None),
-                StatusItem::Context => match (used_tokens, context_capacity) {
-                    (Some(used), Some(capacity)) if capacity > 0 => {
-                        let remaining = context_remaining(used, capacity);
-                        let percent = remaining.saturating_mul(100) / capacity;
-                        (
-                            format!(
-                                "ctx {} {percent}% · {}",
-                                context_gauge(percent),
-                                format_tokens(capacity)
-                            ),
-                            Some(format!("ctx {percent}%")),
-                        )
-                    }
-                    _ => return None,
-                },
+                StatusItem::Context => {
+                    let capacity = context_capacity.filter(|capacity| *capacity > 0);
+                    let percent = capacity
+                        .map(|capacity| {
+                            context_remaining(used_tokens.unwrap_or(0), capacity)
+                                .saturating_mul(100)
+                                / capacity
+                        })
+                        .unwrap_or(100);
+                    let capacity = capacity
+                        .map(|capacity| format!(" · {}", format_tokens(capacity)))
+                        .unwrap_or_default();
+                    (
+                        format!("ctx {} {percent}%{capacity}", context_gauge(percent)),
+                        Some(format!("ctx {percent}%")),
+                    )
+                }
                 StatusItem::SessionTokens => {
-                    if session_tokens > 0 {
-                        (format!("{} total", format_tokens(session_tokens)), None)
-                    } else {
-                        return None;
-                    }
+                    (format!("{} total", format_tokens(session_tokens)), None)
                 }
             };
             Some(StatusSegment {
@@ -273,11 +271,51 @@ mod tests {
         assert_eq!(segments[4].text, "ctx ██████░░ 75% · 100");
         assert_eq!(segments[4].compact.as_deref(), Some("ctx 75%"));
         assert_eq!(segments[4].palette_index, 4);
-        assert!(
-            segments
-                .iter()
-                .all(|segment| segment.item != StatusItem::SessionTokens)
-        );
+        assert_eq!(segments[5].text, "0 total");
+    }
+
+    #[test]
+    fn displays_full_unused_context_before_provider_metadata_arrives() {
+        let provider: SavedProvider = serde_json::from_value(serde_json::json!({
+            "id":"x", "name":"x", "base_url":"https://example.com/", "model":"m",
+            "auth":{"access_token":"t","refresh_token":"r","account_id":"a"}
+        }))
+        .unwrap();
+        let render = |capacity| {
+            segments(
+                &StatusBarConfig {
+                    items: vec![StatusItem::Context, StatusItem::SessionTokens],
+                    extension_items: Vec::new(),
+                },
+                Path::new("."),
+                &provider,
+                None,
+                None,
+                capacity,
+                0,
+                &[],
+            )
+        };
+
+        let unknown = render(None);
+        let context = unknown
+            .iter()
+            .find(|segment| segment.item == StatusItem::Context)
+            .unwrap();
+        let session = unknown
+            .iter()
+            .find(|segment| segment.item == StatusItem::SessionTokens)
+            .unwrap();
+        assert_eq!(context.text, "ctx ████████ 100%");
+        assert_eq!(context.compact.as_deref(), Some("ctx 100%"));
+        assert_eq!(session.text, "0 total");
+
+        let known = render(Some(100));
+        let context = known
+            .iter()
+            .find(|segment| segment.item == StatusItem::Context)
+            .unwrap();
+        assert_eq!(context.text, "ctx ████████ 100% · 100");
     }
 
     #[test]
