@@ -1,8 +1,4 @@
 use llm_provider::SavedProvider;
-use ratatui::{
-    style::{Color, Style},
-    text::{Line, Span},
-};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -161,18 +157,6 @@ fn context_gauge(percent: u64) -> String {
     const CELLS: usize = 8;
     let filled = (percent.min(100) as usize * CELLS + 50) / 100;
     format!("{}{}", "█".repeat(filled), "░".repeat(CELLS - filled))
-}
-
-/// Compatibility renderer for callers migrating to [`StatusView`].
-pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
-    for (index, segment) in segments.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
-        }
-        spans.push(Span::raw(segment.text.clone()));
-    }
-    Line::from(spans)
 }
 
 /// Finds the branch checked out by the repository containing `project`.

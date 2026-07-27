@@ -254,13 +254,13 @@ fn provider_with_session_selection(
     }
 }
 
-fn footer_line(
+fn footer_view(
     config: &StatusBarConfig,
     provider: &SavedProvider,
     project: &Path,
     runtime: &StatusRuntime,
-) -> Line<'static> {
-    status_bar::render(&status_bar::segments(
+) -> status_bar::StatusView {
+    status_bar::view(status_bar::segments(
         config,
         project,
         provider,
@@ -399,12 +399,12 @@ pub struct ChatResources<'a> {
     pub settings: &'a crate::settings::EffectiveSettings,
 }
 
-/// Compact inline viewport height: input(1) + borders(2) + status(1). The
+/// Compact inline viewport height: input(1) + borders(2) + status(2). The
 /// splash is printed into scrollback (see `start_terminal`), never reserved
 /// inside the viewport — so clearing it on the first message can't shrink and
 /// re-init the viewport (which showed as a blink).
 fn startup_viewport_height() -> u16 {
-    1 + 2 + 1
+    1 + 2 + status_bar::HEIGHT
 }
 
 /// Draw the startup UI before loading models, extensions, indexes, or servers.
@@ -423,7 +423,13 @@ pub fn start_terminal(
         if thinking {
             frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
         } else {
-            render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), false);
+            render_with_panel(
+                frame,
+                &ChatInput::default(),
+                &[],
+                &status_bar::StatusView::default(),
+                false,
+            );
         }
     })?;
     // Print the splash into scrollback above the compact input viewport rather
@@ -644,7 +650,7 @@ async fn run_loop(
         .settings
         .apply_to(context.store.providers[context.provider_index].clone());
     if resumed_session {
-        let footer = footer_line(
+        let footer = footer_view(
             &context.store.status_bar,
             &session_provider,
             context.project,
@@ -728,7 +734,7 @@ async fn run_loop(
         } else {
             &suggestions
         };
-        let footer = footer_line(
+        let footer = footer_view(
             &context.store.status_bar,
             &session_provider,
             context.project,
@@ -1691,7 +1697,7 @@ fn resize_and_draw(
     terminal: &mut ratatui::DefaultTerminal,
     input: &ChatInput,
     panel: &[String],
-    footer: &Line<'_>,
+    footer: &status_bar::StatusView,
     viewport_height: &mut u16,
     viewport_floor: u16,
     show_splash: bool,
@@ -1710,7 +1716,7 @@ fn resize_and_draw(
     } else {
         panel.len() as u16 + 2
     };
-    let status_height = wrapped_line_height(footer, terminal.size()?.width);
+    let status_height = footer.height(terminal.size()?.width);
     let desired = input
         .visual_lines(width)
         .saturating_add(2)
@@ -1870,7 +1876,7 @@ async fn submit(
     }
     insert_message(terminal, &prompt.display)?;
     let empty_input = ChatInput::default();
-    let mut footer = footer_line(
+    let mut footer = footer_view(
         context.status_config,
         context.provider,
         context.project,
@@ -1978,7 +1984,7 @@ async fn submit(
                         .find(|model| Some(&model.slug) == context.provider.model.as_ref())
                         .and_then(|model| model.effective_context_window())
                 });
-                footer = footer_line(
+                footer = footer_view(
                     context.status_config,
                     context.provider,
                     context.project,
@@ -2192,7 +2198,7 @@ async fn submit(
                             status.used_tokens = Some(total_tokens);
                             status.session_tokens += total_tokens;
                         }
-                        footer = footer_line(
+                        footer = footer_view(
                             context.status_config,
                             context.provider,
                             context.project,
@@ -2806,7 +2812,7 @@ fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Resul
 fn draw_streaming(
     terminal: &mut ratatui::DefaultTerminal,
     status: &str,
-    footer: &Line<'_>,
+    footer: &status_bar::StatusView,
     controls: StreamingControls<'_>,
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
@@ -2818,7 +2824,7 @@ fn draw_streaming(
         viewport.height.min(terminal_size.height)
     };
     let width = terminal_size.width.max(1);
-    let footer_height = wrapped_line_height(footer, width);
+    let footer_height = footer.height(width);
     let queued_height = controls.steering.displays().count() as u16;
     let input_height = controls
         .input
@@ -2920,8 +2926,8 @@ fn draw_streaming(
             ),
         );
         render_input(frame, input_area, controls.input);
-        frame.render_widget(
-            Paragraph::new(wrapped_footer(footer, area.width)),
+        footer.render(
+            frame.buffer_mut(),
             Rect::new(
                 area.x,
                 area.bottom().saturating_sub(footer_height),
@@ -2937,56 +2943,15 @@ fn draw_streaming(
     Ok(())
 }
 
-fn wrapped_footer(line: &Line<'_>, width: u16) -> Text<'static> {
-    if line.spans.is_empty() || width == 0 {
-        return Text::default();
-    }
-    let width = usize::from(width);
-    let mut lines = Vec::new();
-    let mut spans = Vec::new();
-    let mut used: usize = 0;
-    for span in &line.spans {
-        let mut chunk = String::new();
-        for character in span.content.chars() {
-            let character_width = character.width().unwrap_or(0);
-            if used > 0 && used.saturating_add(character_width) > width {
-                if !chunk.is_empty() {
-                    spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
-                }
-                lines.push(Line::from(std::mem::take(&mut spans)).style(line.style));
-                used = 0;
-            }
-            chunk.push(character);
-            used = used.saturating_add(character_width);
-        }
-        if !chunk.is_empty() {
-            spans.push(Span::styled(chunk, span.style));
-        }
-    }
-    if !spans.is_empty() {
-        lines.push(Line::from(spans).style(line.style));
-    }
-    Text::from(lines)
-}
-
-fn wrapped_line_height(line: &Line<'_>, width: u16) -> u16 {
-    // Keep the footer to one physical row. Letting its wrapped height resize the
-    // inline viewport on every width-change is what causes terminal reflow to
-    // commit old composer borders into scrollback. The footer is secondary
-    // information and is clipped horizontally at very narrow widths, while the
-    // input box itself can resize in place with the terminal.
-    u16::from(!line.spans.is_empty() && width > 0)
-}
-
 fn render_with_panel(
     frame: &mut Frame<'_>,
     input: &ChatInput,
     panel: &[String],
-    footer: &Line<'_>,
+    footer: &status_bar::StatusView,
     show_splash: bool,
 ) {
     let area = frame.area();
-    let status_height = wrapped_line_height(footer, area.width);
+    let status_height = footer.height(area.width).min(area.height);
     // The splash is a startup affordance only. Suppress it whenever a command
     // panel (e.g. /help) is open: a Paragraph doesn't clear its background, so
     // the splash would otherwise bleed through the panel's empty cells and eat
@@ -3002,8 +2967,8 @@ fn render_with_panel(
         );
     }
     if status_height > 0 {
-        frame.render_widget(
-            Paragraph::new(wrapped_footer(footer, area.width)),
+        footer.render(
+            frame.buffer_mut(),
             Rect::new(
                 area.x,
                 area.bottom().saturating_sub(status_height),
@@ -3117,9 +3082,10 @@ fn panel_option_style(option: &str) -> Style {
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
     let inner_width = area.width.saturating_sub(2).max(1);
-    let block = Block::default().borders(Borders::ALL);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(crate::theme::PASTEL_PINK));
     frame.render_widget(block, area);
-    style_gradient_border(frame, area);
 
     let input_area = Rect::new(
         area.x.saturating_add(1),
@@ -3214,41 +3180,6 @@ fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         Clear(ClearType::FromCursorDown)
     )?;
     Ok(())
-}
-
-fn style_gradient_border(frame: &mut Frame<'_>, area: Rect) {
-    style_gradient_buffer(frame.buffer_mut(), area);
-}
-
-fn style_gradient_buffer(buffer: &mut Buffer, area: Rect) {
-    if area.is_empty() {
-        return;
-    }
-    let last_row = area.height.saturating_sub(1);
-    for row in 0..area.height {
-        // Keep the original three-row gradient stable as the box grows. New rows
-        // continue with its final white shade instead of recoloring existing rows.
-        let shade = match row {
-            0 => 128,
-            1 => 191,
-            _ => 255,
-        };
-        let style = Style::default().fg(Color::Rgb(shade, shade, shade));
-        let y = area.y + row;
-        if row == 0 || row == last_row {
-            for x in area.x..area.right() {
-                buffer.cell_mut((x, y)).unwrap().set_style(style);
-            }
-        } else {
-            buffer.cell_mut((area.x, y)).unwrap().set_style(style);
-            if area.width > 1 {
-                buffer
-                    .cell_mut((area.right() - 1, y))
-                    .unwrap()
-                    .set_style(style);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
