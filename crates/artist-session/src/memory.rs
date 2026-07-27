@@ -5,6 +5,7 @@
 //! conversation snapshot on their next successful turn.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use rig_core::completion::Message;
 use rig_core::memory::{ConversationMemory, MemoryError};
@@ -21,8 +22,8 @@ pub struct SessionMemory {
     session_dir: PathBuf,
     recorder: Recorder,
     attachments: AttachmentStore,
+    cache: Arc<Mutex<Option<(Vec<Message>, bool)>>>,
 }
-
 impl SessionMemory {
     pub fn new(
         session_id: impl Into<String>,
@@ -35,6 +36,7 @@ impl SessionMemory {
             session_dir: session_dir.as_ref().to_owned(),
             recorder,
             attachments,
+            cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -50,17 +52,39 @@ impl SessionMemory {
     }
 
     fn read(&self) -> Result<(Vec<Message>, bool), MemoryError> {
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = cache.as_ref() {
+            return Ok(state.clone());
+        }
         let events = EventLogReader::new(&self.session_dir)
             .read_all()
             .map_err(memory_error)?;
         let native = crate::history::has_native_conversation(&events, None);
         let messages = build_history(&events, &self.attachments, &HistoryOptions::default())
             .map_err(memory_error)?;
+        *cache = Some((messages.clone(), native));
         Ok((messages, native))
+    }
+
+    fn cache(&self, messages: Vec<Message>) -> Result<(), MemoryError> {
+        // Match the JSONL round trip used by a freshly loaded session so cached
+        // and restored histories have identical Rig parameter defaults.
+        let messages =
+            serde_json::from_value(serde_json::to_value(messages).map_err(memory_error)?)
+                .map_err(memory_error)?;
+        *self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((messages, true));
+        Ok(())
     }
 
     /// Replace the active conversation while retaining prior log records.
     pub async fn replace(&self, messages: Vec<Message>) -> Result<(), MemoryError> {
+        self.cache(messages.clone())?;
         self.recorder.record(ConversationMessages {
             messages,
             reset: true,
@@ -79,6 +103,7 @@ impl SessionMemory {
         event: ConversationCompacted,
     ) -> Result<(), MemoryError> {
         let display_from = messages.len();
+        self.cache(messages.clone())?;
         self.recorder.record(event);
         self.recorder.record(ConversationMessages {
             messages,
@@ -114,23 +139,28 @@ impl ConversationMemory for SessionMemory {
     fn append<'a>(
         &'a self,
         conversation_id: &'a str,
-        mut messages: Vec<Message>,
+        messages: Vec<Message>,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         Box::pin(async move {
             self.check_id(conversation_id)?;
             let (mut existing, native) = self.read()?;
             let reset = !native;
             let display_from = if reset { existing.len() } else { 0 };
-            if reset {
-                existing.append(&mut messages);
-                messages = existing;
-            }
+            let event_messages = if reset {
+                existing.extend(messages);
+                existing.clone()
+            } else {
+                existing.extend(messages.clone());
+                messages
+            };
             self.recorder.record(ConversationMessages {
-                messages,
+                messages: event_messages,
                 reset,
                 display_from,
             });
-            self.recorder.flush().await;
+            self.cache(existing)?;
+            // Recorder writes on its background task. The RAM projection above is
+            // immediately visible to the next turn without forcing an fsync here.
             self.health()
         })
     }

@@ -127,6 +127,8 @@ async fn first_append_migrates_legacy_projection_into_reset_snapshot() {
         memory.load("s").await.unwrap(),
         normalized(vec![Message::user("old"), Message::assistant("new")])
     );
+    // Appends update live context in RAM; durability is an explicit boundary.
+    recorder.flush().await;
     let events = EventLogReader::new(dir.path()).read_all().unwrap();
     let SessionEvent::ConversationMessages(batch) = events.last().unwrap().event() else {
         panic!("expected native conversation snapshot")
