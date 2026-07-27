@@ -7,8 +7,6 @@ use ratatui::{
     text::{Line, Span},
 };
 
-const POWERLINE_SEPARATOR: &str = "";
-
 pub(super) fn plain_segment(segment: &StatusSegment) -> Line<'static> {
     plain_text(segment, &segment.text)
 }
@@ -31,24 +29,8 @@ pub(super) fn plain_line<'a>(segments: impl Iterator<Item = &'a StatusSegment>) 
     Line::from(spans)
 }
 
-pub(super) fn powerline_line(segments: &[&StatusSegment]) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, segment) in segments.iter().enumerate() {
-        let color = cycle_color(segment.palette_index);
-        let next = segments
-            .get(index + 1)
-            .map(|next| cycle_color(next.palette_index))
-            .unwrap_or(Color::Reset);
-        spans.push(Span::styled(
-            format!(" {} ", segment.text),
-            Style::default().fg(Color::Black).bg(color),
-        ));
-        spans.push(Span::styled(
-            POWERLINE_SEPARATOR,
-            Style::default().fg(color).bg(next),
-        ));
-    }
-    Line::from(spans)
+pub(super) fn plain_segments(segments: &[&StatusSegment]) -> Line<'static> {
+    plain_line(segments.iter().copied())
 }
 
 pub(super) fn render_row(
@@ -99,18 +81,16 @@ mod tests {
     }
 
     #[test]
-    fn powerline_transitions_follow_global_cycle_indices() {
+    fn plain_line_uses_bullets_and_cycle_colors_without_backgrounds() {
         let project = segment(StatusItem::ProjectDirectory, "artist", 0);
         let branch = segment(StatusItem::GitBranch, "main", 1);
-        let line = powerline_line(&[&project, &branch]);
+        let line = plain_segments(&[&project, &branch]);
 
-        assert_eq!(line.spans[0].style.bg, Some(PASTEL_PINK));
-        assert_eq!(line.spans[0].style.fg, Some(Color::Black));
+        assert_eq!(line.to_string(), " artist • main");
         assert_eq!(line.spans[1].style.fg, Some(PASTEL_PINK));
-        assert_eq!(line.spans[1].style.bg, Some(PASTEL_WHITE));
-        assert_eq!(line.spans[2].style.bg, Some(PASTEL_WHITE));
+        assert_eq!(line.spans[2].style.fg, Some(Color::DarkGray));
         assert_eq!(line.spans[3].style.fg, Some(PASTEL_WHITE));
-        assert_eq!(line.spans[3].style.bg, Some(Color::Reset));
+        assert!(line.spans.iter().all(|span| span.style.bg.is_none()));
     }
 
     #[test]
