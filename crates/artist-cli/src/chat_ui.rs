@@ -18,7 +18,6 @@ use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
 use ratatui::{
     Frame, TerminalOptions, Viewport,
-    buffer::Buffer,
     crossterm::{
         cursor::{Hide, MoveTo, Show},
         event::{
@@ -2145,6 +2144,7 @@ async fn submit(
                                 true,
                                 false,
                                 title.icon.as_deref(),
+                                crate::theme::PASTEL_MINT,
                             )?;
                             transcript_gap = true;
                         }
@@ -2160,6 +2160,7 @@ async fn submit(
                                 line.first,
                                 line.is_diff,
                                 line.icon.as_deref(),
+                                crate::theme::PASTEL_MINT,
                             )?;
                             transcript_gap = true;
                         }
@@ -2170,6 +2171,7 @@ async fn submit(
                                 false,
                                 false,
                                 None,
+                                crate::theme::PASTEL_MINT,
                             )?;
                             transcript_gap = true;
                         }
@@ -2396,6 +2398,7 @@ fn insert_history(
                     true,
                     false,
                     crate::tool_ui::icon_for(name, custom_icons),
+                    crate::theme::PASTEL_MINT,
                 )?;
             }
             ReplayItem::Steering(text) => insert_message(terminal, text)?,
@@ -2517,82 +2520,19 @@ fn truncate_display_line(line: &str, width: usize) -> String {
     output
 }
 
-fn fill_panel_background(buffer: &mut Buffer) {
-    // A printable, one-column blank prevents ratatui's backend from replacing a
-    // run of trailing spaces with EraseToEndOfLine. NBSP is still treated as
-    // whitespace by some terminal layers, while the blank braille pattern is a
-    // regular glyph and therefore reliably carries its cell background.
-    const EXPLICIT_BLANK: &str = "\u{2800}";
-    for y in buffer.area.y..buffer.area.bottom() {
-        for x in buffer.area.x..buffer.area.right() {
-            let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
-            if cell.symbol() == " " {
-                cell.set_symbol(EXPLICIT_BLANK);
-            }
-        }
-    }
-}
-
-fn tool_prefix(first: bool, icon: Option<&str>) -> String {
-    if first {
-        format!("  {}  ", icon.unwrap_or("🛠"))
-    } else {
-        "    ".to_owned()
-    }
-}
-
 fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
     first: bool,
     is_diff: bool,
     icon: Option<&str>,
+    accent: Color,
 ) -> Result<()> {
-    let prefix = tool_prefix(first, icon);
     let width = usize::from(terminal.size()?.width.max(1));
-    let text = content
-        .lines()
-        .enumerate()
-        .map(|(index, line)| {
-            // Tabs otherwise skip styled terminal cells. Tool lines are kept
-            // to one terminal row so large diffs cannot dominate the UI.
-            let line = line.replace('\t', "    ");
-            let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
-            let line =
-                truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
-            let diff_content = line
-                .split_once("│ ")
-                .map_or(line.as_str(), |(_, content)| content);
-            let color = if first {
-                Color::White
-            } else if is_diff && diff_content.starts_with('+') {
-                Color::Rgb(120, 210, 140)
-            } else if is_diff && diff_content.starts_with('-') {
-                Color::Rgb(235, 120, 120)
-            } else {
-                Color::Rgb(175, 175, 175)
-            };
-            Line::styled(
-                format!("{line_prefix}{line}"),
-                Style::default().fg(color).bg(Color::Rgb(32, 32, 32)),
-            )
-        })
-        .collect::<Vec<_>>();
-    let height = text
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(width))
-        .sum::<usize>() as u16;
+    let text = crate::activity_ui::tool_text(content, first, is_diff, icon, width, accent);
+    let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height.max(1), |buffer| {
-        let background = Style::default().bg(Color::Rgb(32, 32, 32));
-        buffer.set_style(buffer.area, background);
-        Paragraph::new(Text::from(text))
-            .wrap(Wrap { trim: false })
-            .render(buffer.area, buffer);
-        // Ratatui may optimize trailing ordinary spaces into an erase-to-EOL
-        // sequence, which paints with the default background in terminals that
-        // do not support background-color erase (notably herdr). Emit a real
-        // blank glyph in every otherwise-empty panel cell instead.
-        fill_panel_background(buffer);
+        Paragraph::new(text).render(buffer.area, buffer);
     })?;
     Ok(())
 }
@@ -3397,20 +3337,6 @@ mod tests {
         assert_eq!(truncate_display_line("abcdef", 5), "abcd…");
         assert_eq!(truncate_display_line("ab界cd", 5), "ab界…");
         assert_eq!(truncate_display_line("short", 8), "short");
-        assert_eq!(tool_prefix(true, Some("$")), "  $  ");
-        assert_eq!(tool_prefix(true, None), "  🛠  ");
-        assert_eq!(tool_prefix(false, Some("$")), "    ");
-    }
-    #[test]
-    fn panel_background_uses_printable_blank_cells() {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
-        buffer.cell_mut((1, 0)).unwrap().set_symbol("x");
-
-        fill_panel_background(&mut buffer);
-
-        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "\u{2800}");
-        assert_eq!(buffer.cell((1, 0)).unwrap().symbol(), "x");
-        assert_eq!(buffer.cell((3, 0)).unwrap().symbol(), "\u{2800}");
     }
 
     #[test]
