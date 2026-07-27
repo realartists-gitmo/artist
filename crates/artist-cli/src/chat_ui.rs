@@ -9,6 +9,7 @@ use crate::{
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
     tool_ui::ToolUi,
+    transcript_style::TurnStyle,
 };
 use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
@@ -1810,6 +1811,7 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
+    let turn_style = TurnStyle::for_index(artist_session::user_prompts(&active.events()?).len());
     // Rules hot-reload between turns; the run holds the snapshot.
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
@@ -1876,7 +1878,7 @@ async fn submit(
     } else if !first_turn {
         insert_blank(terminal)?;
     }
-    insert_message(terminal, &prompt.display)?;
+    insert_message(terminal, &prompt.display, &turn_style)?;
     let empty_input = ChatInput::default();
     let mut footer = footer_view(
         context.status_config,
@@ -2111,7 +2113,12 @@ async fn submit(
                         response_since_tool = true;
                         let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
                         while let Some(line) = take_visible_line(&mut visible, width) {
-                            insert_response(terminal, &line, !response_output_started)?;
+                            insert_response(
+                                terminal,
+                                &line,
+                                !response_output_started,
+                                &turn_style,
+                            )?;
                             response_output_started = true;
                             transcript_gap = true;
                         }
@@ -2124,7 +2131,12 @@ async fn submit(
                         phase = "working";
                         if response_since_tool {
                             if !visible.is_empty() {
-                                insert_response(terminal, &visible, !response_output_started)?;
+                                insert_response(
+                                    terminal,
+                                    &visible,
+                                    !response_output_started,
+                                    &turn_style,
+                                )?;
                                 response_output_started = true;
                                 visible.clear();
                             }
@@ -2188,7 +2200,7 @@ async fn submit(
                             insert_blank(terminal)?;
                             transcript_gap = false;
                             for message in pending_delivered.drain(..) {
-                                insert_message(terminal, &message.display)?;
+                                insert_message(terminal, &message.display, &turn_style)?;
                                 transcript_gap = true;
                                 active.recorder.record(SteeringDelivered {
                                     content: message.content.clone(),
@@ -2260,7 +2272,7 @@ async fn submit(
     context.extension_control.set_steering(None);
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
-        insert_message(terminal, &message.display)?;
+        insert_message(terminal, &message.display, &turn_style)?;
         active.recorder.record(SteeringDelivered {
             content: message.content.clone(),
             after_internal_call_id: String::new(),
@@ -2271,7 +2283,7 @@ async fn submit(
         insert_reasoning(terminal, &reasoning)?;
     }
     if !visible.is_empty() {
-        insert_response(terminal, &visible, !response_output_started)?;
+        insert_response(terminal, &visible, !response_output_started, &turn_style)?;
     }
     // Compose the failure and elapsed time as one transcript block. This mirrors
     // component-based TUIs (Codex/Pi), where related rows are laid out together
@@ -2378,11 +2390,17 @@ fn insert_history(
     items: &[ReplayItem],
     custom_icons: &HashMap<String, String>,
 ) -> Result<()> {
+    let mut turn_index = 0;
+    let mut turn_style = TurnStyle::for_index(turn_index);
     for item in items {
         match item {
-            ReplayItem::User(text) => insert_message(terminal, text)?,
+            ReplayItem::User(text) => {
+                turn_style = TurnStyle::for_index(turn_index);
+                turn_index += 1;
+                insert_message(terminal, text, &turn_style)?;
+            }
             ReplayItem::Assistant(text) => {
-                insert_response(terminal, text, true)?;
+                insert_response(terminal, text, true, &turn_style)?;
                 insert_blank(terminal)?;
             }
             ReplayItem::Reasoning(text) => insert_reasoning(terminal, text)?,
@@ -2401,7 +2419,7 @@ fn insert_history(
                     crate::theme::PASTEL_MINT,
                 )?;
             }
-            ReplayItem::Steering(text) => insert_message(terminal, text)?,
+            ReplayItem::Steering(text) => insert_message(terminal, text, &turn_style)?,
             ReplayItem::RuleFired { rule, matched } => {
                 let excerpt: String = matched.chars().take(60).collect();
                 insert_status(
@@ -2414,32 +2432,39 @@ fn insert_history(
     Ok(())
 }
 
-fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
-    let inner_width = usize::from(terminal.size()?.width.saturating_sub(2).max(1));
+fn insert_message(
+    terminal: &mut ratatui::DefaultTerminal,
+    text: &str,
+    turn_style: &TurnStyle,
+) -> Result<()> {
+    let inner_width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
     let content_height = text
         .lines()
         .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
         .sum::<usize>()
         .max(1) as u16;
     terminal.insert_before(content_height.saturating_add(1), |buffer| {
-        let text_area = Rect::new(
-            buffer.area.x,
+        let area = Rect::new(
+            buffer.area.x.saturating_add(2),
             buffer.area.y,
-            buffer.area.width,
+            buffer.area.width.saturating_sub(2),
             content_height,
         );
-        let highlighted_area = Rect::new(
-            text_area.x.saturating_add(2),
-            text_area.y,
-            text_area.width.saturating_sub(2),
-            text_area.height,
-        );
-        Paragraph::new(Text::styled(
-            text,
-            Style::default().fg(Color::Black).bg(Color::White),
-        ))
-        .wrap(Wrap { trim: false })
-        .render(highlighted_area, buffer);
+        let lines = text.split('\n').enumerate().map(|(index, line)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 { "› " } else { "  " },
+                    Style::default().fg(turn_style.accent()),
+                ),
+                Span::styled(
+                    line.to_owned(),
+                    Style::default().fg(crate::theme::PASTEL_WHITE),
+                ),
+            ])
+        });
+        Paragraph::new(Text::from(lines.collect::<Vec<_>>()))
+            .wrap(Wrap { trim: false })
+            .render(area, buffer);
     })?;
     Ok(())
 }
@@ -2658,13 +2683,20 @@ fn terminal_is_light() -> bool {
         .unwrap_or(false)
 }
 
-fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
-    let mut style = if terminal_is_light() {
+fn response_text(
+    markdown: &str,
+    first: bool,
+    width: usize,
+    turn_style: &TurnStyle,
+) -> Result<Text<'static>> {
+    let light = terminal_is_light();
+    let mut style = if light {
         glamour::Style::Light.config()
     } else {
         glamour::Style::Dark.config()
     };
     style.document.margin = Some(0);
+    turn_style.apply_markdown(&mut style, light);
     let rendered = glamour::Renderer::new()
         .with_style_config(style)
         .with_word_wrap(width.saturating_sub(4).max(1))
@@ -2678,11 +2710,11 @@ fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'stat
     }
     for (index, line) in text.lines.iter_mut().enumerate() {
         let prefix = if first && index == 0 {
-            "  ⋗ "
+            Span::styled("  › ", Style::default().fg(turn_style.accent()))
         } else {
-            "    "
+            Span::raw("    ")
         };
-        line.spans.insert(0, Span::raw(prefix));
+        line.spans.insert(0, prefix);
     }
     Ok(text)
 }
@@ -2695,9 +2727,10 @@ fn insert_response(
     terminal: &mut ratatui::DefaultTerminal,
     markdown: &str,
     first: bool,
+    turn_style: &TurnStyle,
 ) -> Result<()> {
     let width = usize::from(terminal.size()?.width.max(1));
-    let text = response_text(markdown, first, width)?;
+    let text = response_text(markdown, first, width, turn_style)?;
     let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
         Paragraph::new(text).render(buffer.area, buffer);
@@ -3305,25 +3338,40 @@ mod tests {
 
     #[test]
     fn glamour_styles_and_indents_responses() {
-        let text = response_text("**hello**", true, 80).unwrap();
+        let turn_style = TurnStyle::for_index(0);
+        let text = response_text("**hello** and `code`", true, 80, &turn_style).unwrap();
         let rendered = text
             .lines
             .iter()
             .flat_map(|line| &line.spans)
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(rendered.contains("⋗"));
+        assert!(rendered.contains('›'));
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("**"));
+        assert_eq!(text.lines[0].spans[0].style.fg, Some(turn_style.accent()));
+        assert!(text.lines.iter().flat_map(|line| &line.spans).any(|span| {
+            span.content.contains("code")
+                && span.style.fg == Some(turn_style.accent())
+                && span.style.bg.is_some()
+        }));
     }
 
     #[test]
     fn glamour_syntax_highlights_fenced_code() {
-        let text = response_text("```rust\nfn main() { let answer = 42; }\n```", true, 80).unwrap();
+        let turn_style = TurnStyle::for_index(0);
+        let text = response_text(
+            "```rust\nfn main() { let answer = 42; }\n```",
+            true,
+            80,
+            &turn_style,
+        )
+        .unwrap();
         let colors = text
             .lines
             .iter()
             .flat_map(|line| &line.spans)
+            .filter(|span| !span.content.contains('›'))
             .filter_map(|span| span.style.fg)
             .collect::<std::collections::HashSet<_>>();
         assert!(
