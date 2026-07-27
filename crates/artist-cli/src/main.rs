@@ -554,7 +554,7 @@ fn sessions_gc(
     dry_run: bool,
 ) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
-    let cutoff = now.saturating_sub(older_than_days * 24 * 60 * 60 * 1000);
+    let cutoff = now.saturating_sub(older_than_days.saturating_mul(24 * 60 * 60 * 1000));
     let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
         Default::default();
     for session in sessions.list()? {

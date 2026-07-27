@@ -26,8 +26,9 @@ impl EventLogReader {
         }
     }
 
-    /// All complete, parseable records in seq order. A torn final line
-    /// (crash mid-append) is dropped; interior garbage lines are skipped.
+    /// All records in seq order. A torn final line (crash mid-append) is
+    /// tolerated and dropped; a newline-terminated but unparseable record is a
+    /// real corruption and errors rather than silently losing history.
     /// Returns an empty vec when the log does not exist yet.
     pub fn read_all(&self) -> Result<Vec<Envelope>> {
         let file = match File::open(&self.path) {
@@ -56,9 +57,9 @@ impl EventLogReader {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(envelope) = serde_json::from_str::<Envelope>(trimmed) {
-                events.push(envelope);
-            }
+            let envelope = serde_json::from_str::<Envelope>(trimmed)
+                .with_context(|| format!("corrupt event record in {}", self.path.display()))?;
+            events.push(envelope);
         }
         Ok(events)
     }

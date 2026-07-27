@@ -205,9 +205,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
         let from = entry.path();
         let to = destination.join(entry.file_name());
         if from.is_dir() {
-            if !to.exists() {
-                copy_tree(&from, &to)?;
-            }
+            copy_tree(&from, &to)?;
         } else if !to.exists() {
             fs::copy(&from, &to)?;
         }

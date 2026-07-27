@@ -203,6 +203,7 @@ fn reasoning_to_blocks(reasoning: &Reasoning) -> Option<Vec<ContentBlock>> {
 
 fn push_reasoning(out: &mut Vec<AssistantContent>, id: &Option<String>, item: ReasoningContent) {
     if let Some(AssistantContent::Reasoning(last)) = out.last_mut()
+        && id.is_some()
         && last.id == *id
     {
         last.content.push(item);

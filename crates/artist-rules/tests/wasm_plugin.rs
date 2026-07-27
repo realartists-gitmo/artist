@@ -8,28 +8,36 @@
 #![cfg(feature = "wasm")]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use artist_rules::matcher::StreamMatcher;
 use artist_rules::types::RuleId;
 
-/// Build (once) and locate the fixture guest component.
+/// Build (once per test process) and locate the fixture guest component. The
+/// `OnceLock` serializes the build so parallel tests can't race concurrent
+/// `cargo build` invocations on the same target dir.
 fn guest_wasm() -> PathBuf {
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rule-guest");
-    let artifact = fixture.join("target/wasm32-wasip2/release/rule_guest.wasm");
-    if !artifact.exists() {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--release", "--target", "wasm32-wasip2"])
-            .current_dir(&fixture)
-            .status()
-            .expect("run cargo for the fixture guest");
-        assert!(
-            status.success(),
-            "fixture guest build failed — install the target with \
-             `rustup target add wasm32-wasip2`"
-        );
-    }
-    artifact
+    static ARTIFACT: OnceLock<PathBuf> = OnceLock::new();
+    ARTIFACT
+        .get_or_init(|| {
+            let fixture =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rule-guest");
+            let artifact = fixture.join("target/wasm32-wasip2/release/rule_guest.wasm");
+            if !artifact.exists() {
+                let status = std::process::Command::new("cargo")
+                    .args(["build", "--release", "--target", "wasm32-wasip2"])
+                    .current_dir(&fixture)
+                    .status()
+                    .expect("run cargo for the fixture guest");
+                assert!(
+                    status.success(),
+                    "fixture guest build failed — install the target with \
+                     `rustup target add wasm32-wasip2`"
+                );
+            }
+            artifact
+        })
+        .clone()
 }
 
 /// A rules dir containing the third-strike plugin + manifest.
