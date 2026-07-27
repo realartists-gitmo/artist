@@ -2,6 +2,7 @@ use llm_provider::SavedProvider;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod icons;
 mod row;
 mod view;
 
@@ -96,16 +97,29 @@ pub(crate) fn segments(
         .filter_map(|(palette_index, item)| {
             let (text, compact) = match item {
                 StatusItem::ProjectDirectory => (
-                    project
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or_else(|| project.to_str().unwrap_or("—"))
-                        .to_owned(),
+                    format!(
+                        "{} {}",
+                        icons::PROJECT,
+                        project
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_else(|| project.to_str().unwrap_or("—"))
+                    ),
                     None,
                 ),
-                StatusItem::GitBranch => (git_branch.map(str::to_owned)?, None),
-                StatusItem::Model => (provider.model.clone()?, None),
-                StatusItem::Reasoning => (provider.reasoning_effort.clone()?, None),
+                StatusItem::GitBranch => (format!("{} {}", icons::BRANCH, git_branch?), None),
+                StatusItem::Model => (
+                    format!("{} {}", icons::MODEL, provider.model.as_deref()?),
+                    None,
+                ),
+                StatusItem::Reasoning => (
+                    format!(
+                        "{} {}",
+                        icons::REASONING,
+                        provider.reasoning_effort.as_deref()?
+                    ),
+                    None,
+                ),
                 StatusItem::Context => {
                     let capacity = context_capacity.filter(|capacity| *capacity > 0);
                     let percent = capacity
@@ -119,13 +133,22 @@ pub(crate) fn segments(
                         .map(|capacity| format!(" · {}", format_tokens(capacity)))
                         .unwrap_or_default();
                     (
-                        format!("ctx {} {percent}%{capacity}", context_gauge(percent)),
-                        Some(format!("ctx {percent}%")),
+                        format!(
+                            "{} ctx {} {percent}%{capacity}",
+                            icons::CONTEXT,
+                            context_gauge(percent)
+                        ),
+                        Some(format!("{} ctx {percent}%", icons::CONTEXT)),
                     )
                 }
-                StatusItem::SessionTokens => {
-                    (format!("{} total", format_tokens(session_tokens)), None)
-                }
+                StatusItem::SessionTokens => (
+                    format!(
+                        "{} {} total",
+                        icons::SESSION_TOKENS,
+                        format_tokens(session_tokens)
+                    ),
+                    None,
+                ),
             };
             Some(StatusSegment {
                 item: *item,
@@ -266,12 +289,28 @@ mod tests {
             0,
             &[],
         );
-        assert_eq!(segments[0].text, "project");
-        assert_eq!(segments[1].text, "main");
-        assert_eq!(segments[4].text, "ctx ██████░░ 75% · 100");
-        assert_eq!(segments[4].compact.as_deref(), Some("ctx 75%"));
-        assert_eq!(segments[4].palette_index, 4);
-        assert_eq!(segments[5].text, "0 total");
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                " project",
+                " main",
+                " gpt-test",
+                " high",
+                " ctx ██████░░ 75% · 100",
+                " 0 total",
+            ]
+        );
+        assert_eq!(segments[4].compact.as_deref(), Some(" ctx 75%"));
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.palette_index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5]
+        );
     }
 
     #[test]
@@ -306,16 +345,16 @@ mod tests {
             .iter()
             .find(|segment| segment.item == StatusItem::SessionTokens)
             .unwrap();
-        assert_eq!(context.text, "ctx ████████ 100%");
-        assert_eq!(context.compact.as_deref(), Some("ctx 100%"));
-        assert_eq!(session.text, "0 total");
+        assert_eq!(context.text, " ctx ████████ 100%");
+        assert_eq!(context.compact.as_deref(), Some(" ctx 100%"));
+        assert_eq!(session.text, " 0 total");
 
         let known = render(Some(100));
         let context = known
             .iter()
             .find(|segment| segment.item == StatusItem::Context)
             .unwrap();
-        assert_eq!(context.text, "ctx ████████ 100% · 100");
+        assert_eq!(context.text, " ctx ████████ 100% · 100");
     }
 
     #[test]
@@ -343,11 +382,11 @@ mod tests {
 
         assert_eq!(
             render(vec![StatusItem::Context])[0].text,
-            "ctx ██████░░ 75% · 100"
+            " ctx ██████░░ 75% · 100"
         );
         assert_eq!(
             render(vec![StatusItem::SessionTokens])[0].text,
-            "1.5k total"
+            " 1.5k total"
         );
     }
 
@@ -374,6 +413,7 @@ mod tests {
             &values,
         )[0];
         assert_eq!(segment.text, "42%");
+        assert_eq!(segment.item, StatusItem::Model);
         assert_eq!(segment.palette_index, 0);
     }
 }
