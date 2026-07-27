@@ -1,4 +1,5 @@
 use crate::{
+    activity_indicator::activation_indicator,
     clipboard, command_ui,
     input_atoms::{ExpandedInput, InputAtoms},
     input_images::ImagePaste,
@@ -421,7 +422,10 @@ pub fn start_terminal(
     });
     terminal.draw(|frame| {
         if thinking {
-            frame.render_widget(Paragraph::new("  ▓ thinking"), frame.area());
+            frame.render_widget(
+                Paragraph::new(format!("  {} thinking", activation_indicator(0))),
+                frame.area(),
+            );
         } else {
             render_with_panel(
                 frame,
@@ -2783,10 +2787,9 @@ fn streaming_viewport_height(
 }
 
 fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
-    const FRAMES: [&str; 6] = ["▓", "▒", "░", " ", "░", "▒"];
     format!(
         "  {} {phase} [{} elapsed] · esc to interrupt",
-        FRAMES[frame % FRAMES.len()],
+        activation_indicator(frame),
         format_elapsed(elapsed)
     )
 }
@@ -3422,9 +3425,11 @@ mod tests {
         );
         assert_eq!(
             status_line("thinking", std::time::Duration::ZERO, 0),
-            "  ▓ thinking [00:00 elapsed] · esc to interrupt"
+            "  ⋮·⋮·⋮ thinking [00:00 elapsed] · esc to interrupt"
         );
-        assert!(status_line("working", std::time::Duration::ZERO, 3).starts_with("    working"));
+        assert!(
+            status_line("working", std::time::Duration::ZERO, 3).starts_with("  ⋮··⋮ working")
+        );
     }
 
     #[test]
