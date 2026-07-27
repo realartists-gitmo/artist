@@ -769,7 +769,7 @@ pub(crate) async fn refresh_if_needed(provider: &mut llm_provider::SavedProvider
     let needs_refresh = provider
         .chatgpt_auth()?
         .expires_at
-        .map_or(true, |expiry| expiry <= now.saturating_add(60));
+        .is_none_or(|expiry| expiry <= now.saturating_add(60));
     if needs_refresh {
         return force_refresh(provider).await.map(|()| true);
     }
