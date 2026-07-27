@@ -20,7 +20,6 @@ mod status_bar;
 mod store;
 mod test_provider;
 mod tool_ui;
-mod ui_config;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
@@ -50,7 +49,7 @@ async fn run() -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
-    ui_config::load(config_root)?;
+
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
             bail!("-p cannot be combined with a subcommand");
