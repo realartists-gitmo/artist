@@ -630,6 +630,7 @@ async fn run_loop(
     let skills = artist_agent::available_skills(context.project);
     let custom_commands = crate::custom_commands::discover(context.project);
     let mcp_servers = context.mcp.server_names().await;
+    let splash_extension_ids = context.extensions.extension_ids();
     let mut prompt_history =
         PromptHistory::from_prompts(artist_session::user_prompts(&resumed_events));
     let mut pending = pending.map(SubmittedPrompt::from);
@@ -664,7 +665,7 @@ async fn run_loop(
             &mut viewport_height,
             viewport_floor,
             false,
-            false,
+            None,
         )?;
         insert_history(
             &mut terminal,
@@ -754,7 +755,7 @@ async fn run_loop(
             &mut viewport_height,
             viewport_floor,
             render_splash,
-            splash_visible,
+            splash_visible.then_some(splash_extension_ids.as_slice()),
         )?;
         if let Some(mut prompt) = pending.take() {
             show_splash = false;
@@ -814,7 +815,7 @@ async fn run_loop(
                             &mut viewport_height,
                             3,
                             false,
-                            false,
+                            None,
                         )?;
                         match crate::compaction::compact(
                             active_session,
@@ -959,7 +960,7 @@ async fn run_loop(
                                     &mut viewport_height,
                                     3,
                                     false,
-                                    false,
+                                    None,
                                 )
                             },
                         )
@@ -1013,7 +1014,7 @@ async fn run_loop(
                     &mut viewport_height,
                     3,
                     false,
-                    false,
+                    None,
                 )?;
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
                 // Refresh the access token at the turn boundary so a session
@@ -1702,7 +1703,7 @@ fn resize_and_draw(
     viewport_height: &mut u16,
     viewport_floor: u16,
     show_splash: bool,
-    restore_scrollback_splash: bool,
+    restore_scrollback_splash: Option<&[String]>,
 ) -> Result<()> {
     // A command panel hides the splash (see render_with_panel); keep the height
     // math consistent so no blank splash rows are reserved behind the panel.
@@ -1739,9 +1740,9 @@ fn resize_and_draw(
         terminal.autoresize()?;
         *viewport_height = desired;
         terminal.draw(|frame| render_with_panel(frame, input, panel, footer, show_splash))?;
-        if width_shrank && restore_scrollback_splash {
+        if width_shrank && let Some(extension_ids) = restore_scrollback_splash {
             terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
-                crate::startup_splash::render_buffer(buffer, &[]);
+                crate::startup_splash::render_buffer(buffer, extension_ids);
             })?;
         }
         terminal.show_cursor()?;
@@ -1869,8 +1870,9 @@ async fn submit(
     if context.show_splash {
         // Add separation only when moving the splash into scrollback. The live
         // startup layout already reserves its own gap above the input box.
+        let extension_ids = context.extensions.extension_ids();
         terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
-            crate::startup_splash::render_buffer(buffer, &[]);
+            crate::startup_splash::render_buffer(buffer, &extension_ids);
         })?;
     } else if !first_turn {
         insert_blank(terminal)?;
@@ -2306,7 +2308,7 @@ async fn submit(
         &mut stream_viewport.height,
         3,
         false,
-        false,
+        None,
     )?;
     // Rebuild the model-facing history from the log — the single source of
     // truth, including tool round-trips and any TTSR rule turns.

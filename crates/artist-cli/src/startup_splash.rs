@@ -1,3 +1,4 @@
+use ansi_to_tui::IntoText;
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -7,24 +8,28 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-pub(crate) const HEIGHT: u16 = 1;
+pub(crate) const HEIGHT: u16 = 7;
 
-const ART: [&str; HEIGHT as usize] = [" Artist"];
+const ART: &str = include_str!("../../../splash.txt");
 
 fn splash_text(extension_ids: &[String]) -> Text<'static> {
-    let mut lines = ART
-        .iter()
-        .map(|text| Line::styled((*text).to_owned(), Style::default().fg(Color::White)))
-        .collect::<Vec<_>>();
+    let mut text = ART
+        .into_text()
+        .expect("embedded startup splash must contain valid ANSI");
+    let mut footer = Line::default();
 
-    if !extension_ids.is_empty() {
-        lines[HEIGHT as usize - 1].push_span(Span::styled(
-            format!(" + {}", extension_ids.join(", ")),
-            Style::default().fg(Color::DarkGray),
+    for (index, extension_id) in extension_ids.iter().enumerate() {
+        if index > 0 {
+            footer.push_span(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
+        }
+        footer.push_span(Span::styled(
+            extension_id.clone(),
+            Style::default().fg(crate::theme::cycle_color(index)),
         ));
     }
 
-    Text::from(lines)
+    text.lines.push(footer);
+    text
 }
 
 pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, extension_ids: &[String]) {
@@ -41,28 +46,68 @@ pub(crate) fn render_buffer(buffer: &mut Buffer, extension_ids: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend};
+    use ratatui::{Terminal, backend::TestBackend, style::Modifier, text::Line};
 
     #[test]
-    fn renders_plain_name_and_dark_extension_list() {
-        let mut terminal = Terminal::new(TestBackend::new(80, HEIGHT)).unwrap();
-        let extensions = vec!["extension1".to_owned(), "extension2".to_owned()];
+    fn embeds_six_styled_art_rows() {
+        let text = splash_text(&[]);
+
+        assert_eq!(text.lines.len(), HEIGHT as usize);
+        assert!(text.lines[..6].iter().all(|line| line.width() == 42));
+        assert_eq!(
+            text.lines[0].to_string(),
+            "    ▄▄█▄            ██    ██          ██  "
+        );
+        assert_eq!(
+            text.lines[5].to_string(),
+            "▀▀▀▀▀ ▀▀▀▀▀ ▀▀       ▀▀▀ ▀▀▀▀  ▀▀▀     ▀▀▀"
+        );
+        assert_eq!(text.lines[0].spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(text.lines[0].spans[1].style.bg, Some(Color::Black));
+        assert!(
+            text.lines[0].spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert_eq!(text.lines[0].spans[2].style.fg, Some(Color::White));
+    }
+
+    #[test]
+    fn footer_contains_only_ordered_ids_and_real_bullets() {
+        let extensions = vec!["alpha".to_owned(), "beta".to_owned()];
+        let text = splash_text(&extensions);
+        let footer = &text.lines[6];
+
+        assert_eq!(footer.to_string(), "alpha • beta");
+        assert_eq!(footer.spans[0].style.fg, Some(crate::theme::cycle_color(0)));
+        assert_eq!(footer.spans[1].style.fg, Some(Color::DarkGray));
+        assert_eq!(footer.spans[2].style.fg, Some(crate::theme::cycle_color(1)));
+        assert!(!footer.to_string().contains("active extensions"));
+        assert!(!footer.to_string().contains(['+', ',']));
+    }
+
+    #[test]
+    fn empty_extensions_leave_footer_blank() {
+        let text = splash_text(&[]);
+
+        assert_eq!(text.lines.len(), HEIGHT as usize);
+        assert_eq!(text.lines[6], Line::default());
+    }
+
+    #[test]
+    fn clips_art_and_footer_to_narrow_area() {
+        let mut terminal = Terminal::new(TestBackend::new(8, HEIGHT)).unwrap();
+        let extensions = vec!["alpha".to_owned(), "beta".to_owned()];
         terminal
             .draw(|frame| render(frame, frame.area(), &extensions))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((1, 0)).unwrap().symbol(), "A");
-        assert_eq!(buffer.cell((1, 0)).unwrap().fg, Color::White);
-        assert_eq!(buffer.cell((8, 0)).unwrap().symbol(), "+");
-        assert_eq!(buffer.cell((8, 0)).unwrap().fg, Color::DarkGray);
-    }
-
-    #[test]
-    fn clips_to_small_terminal_area() {
-        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
-        terminal
-            .draw(|frame| render(frame, Rect::new(0, 0, 20, HEIGHT), &[]))
-            .unwrap();
+        let footer = (0..8)
+            .map(|x| buffer.cell((x, HEIGHT - 1)).unwrap().symbol())
+            .collect::<String>();
+        assert_eq!(footer, "alpha • ");
+        assert_eq!(buffer.cell((4, 0)).unwrap().symbol(), "▄");
     }
 }
