@@ -251,32 +251,12 @@ fn compact_output(name: &str, output: &str) -> String {
             "Read {} lines",
             output.lines().filter(|line| line.contains(" | ")).count()
         ),
-        "bash" => compact_bash_output(output),
         "edit" | "write" => output
             .split_once("Diff:\n")
             .map(|(_, diff)| numbered_diff(diff))
             .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
         "subagent" => compact_delegate_output(output),
         _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
-    }
-}
-
-fn compact_bash_output(output: &str) -> String {
-    let mut lines = output.lines();
-    let Some("status: completed") = lines.next() else {
-        return shortened(output.trim(), DISPLAY_OUTPUT_LIMIT);
-    };
-    let Some("exitCode: Some(0)") = lines.next() else {
-        return shortened(output.trim(), DISPLAY_OUTPUT_LIMIT);
-    };
-    let Some("truncated: false") = lines.next() else {
-        return shortened(output.trim(), DISPLAY_OUTPUT_LIMIT);
-    };
-    let stdout = lines.collect::<Vec<_>>().join("\n");
-    if stdout.trim().is_empty() {
-        "Completed".into()
-    } else {
-        shortened(stdout.trim(), DISPLAY_OUTPUT_LIMIT)
     }
 }
 
@@ -510,21 +490,6 @@ mod tests {
         assert_eq!(
             truncate_delegate_text("1\n2\n3\n4\n5\n6\n7\n8\n9"),
             "1\n2\n3\n4\n5\n6\n7\n8\n…"
-        );
-
-        assert_eq!(
-            compact_output(
-                "bash",
-                "status: completed\nexitCode: Some(0)\ntruncated: false\nhello\nmain"
-            ),
-            "hello\nmain"
-        );
-        assert_eq!(
-            compact_output(
-                "bash",
-                "status: failed\nexitCode: Some(1)\ntruncated: false\nbad"
-            ),
-            "status: failed\nexitCode: Some(1)\ntruncated: false\nbad"
         );
     }
 
