@@ -10,6 +10,18 @@ use rig_core::OneOrMany;
 use rig_core::completion::message::{AssistantContent, Message, ReasoningContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 
+pub(crate) async fn retain_cancelled_turn(
+    memory: &dyn ConversationMemory,
+    conversation_id: &str,
+    mut turn_messages: Vec<Message>,
+    assistant_text: String,
+) -> Result<(), MemoryError> {
+    if !assistant_text.is_empty() {
+        turn_messages.push(Message::assistant(assistant_text));
+    }
+    memory.append(conversation_id, turn_messages).await
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct PersistenceStatus(Arc<Mutex<Option<Result<(), String>>>>);
 
@@ -138,6 +150,42 @@ mod tests {
     use super::*;
     use rig_core::completion::message::{Reasoning, Text};
     use rig_core::memory::InMemoryConversationMemory;
+
+    #[tokio::test]
+    async fn cancelled_turn_retains_user_and_streamed_assistant_text() {
+        let memory = InMemoryConversationMemory::new();
+
+        retain_cancelled_turn(
+            &memory,
+            "s",
+            vec![Message::user("question")],
+            "partial answer".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            memory.load("s").await.unwrap(),
+            vec![
+                Message::user("question"),
+                Message::assistant("partial answer")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_first_token_still_retains_user() {
+        let memory = InMemoryConversationMemory::new();
+
+        retain_cancelled_turn(&memory, "s", vec![Message::user("question")], String::new())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            memory.load("s").await.unwrap(),
+            vec![Message::user("question")]
+        );
+    }
 
     #[tokio::test]
     async fn display_summaries_are_excluded_from_context_and_persistence() {

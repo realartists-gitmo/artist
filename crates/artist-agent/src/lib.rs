@@ -465,11 +465,33 @@ where
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
+        let mut streamed_assistant_text = String::new();
+        let mut streamed_turn = ttsr.turn();
         loop {
             let item = tokio::select! {
                 biased;
                 item = stream.next() => item,
                 _ = handles.cancel.cancelled() => {
+                    drop(stream);
+                    let (committed, _) = ttsr.committed();
+                    let mut cancelled_delta = if committed.is_empty() {
+                        let mut fallback = seed_history.clone();
+                        fallback.push(seed_prompt.clone());
+                        fallback
+                    } else {
+                        committed
+                    };
+                    cancelled_delta = cancelled_delta
+                        [durable_history_len.min(cancelled_delta.len())..]
+                        .to_vec();
+                    conversation::retain_cancelled_turn(
+                        handles.memory.as_ref(),
+                        &handles.conversation_id,
+                        cancelled_delta,
+                        streamed_assistant_text,
+                    )
+                    .await
+                    .context("retain cancelled turn in conversation memory")?;
                     run_recorder.record(RunFinished::Cancelled);
                     return Ok(RunOutcome::Cancelled);
                 }
@@ -495,6 +517,12 @@ where
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
+                    let turn = ttsr.turn();
+                    if turn != streamed_turn {
+                        streamed_assistant_text.clear();
+                        streamed_turn = turn;
+                    }
+                    streamed_assistant_text.push_str(&text.text);
                     on_event(PromptEvent::TextDelta(text.text))?;
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
