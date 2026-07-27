@@ -23,6 +23,7 @@ mod store;
 mod test_provider;
 mod theme;
 mod tool_ui;
+mod transcript_style;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
