@@ -270,8 +270,14 @@ mod tests {
         );
         assert_eq!(segments[0].text, "project");
         assert_eq!(segments[1].text, "main");
-        assert_eq!(segments[4].text, "75%/100");
-        assert_eq!(segments[5].text, "— total");
+        assert_eq!(segments[4].text, "ctx ██████░░ 75% · 100");
+        assert_eq!(segments[4].compact.as_deref(), Some("ctx 75%"));
+        assert_eq!(segments[4].palette_index, 4);
+        assert!(
+            segments
+                .iter()
+                .all(|segment| segment.item != StatusItem::SessionTokens)
+        );
     }
 
     #[test]
@@ -297,7 +303,10 @@ mod tests {
             )
         };
 
-        assert_eq!(render(vec![StatusItem::Context])[0].text, "75%/100");
+        assert_eq!(
+            render(vec![StatusItem::Context])[0].text,
+            "ctx ██████░░ 75% · 100"
+        );
         assert_eq!(
             render(vec![StatusItem::SessionTokens])[0].text,
             "1.5k total"
@@ -316,41 +325,17 @@ mod tests {
             extension_items: vec!["quota".into()],
         };
         let values = vec![("quota".into(), "42%".into())];
-        assert_eq!(
-            segments(
-                &config,
-                Path::new("."),
-                &provider,
-                None,
-                None,
-                None,
-                0,
-                &values
-            )[0]
-            .text,
-            "42%"
-        );
-    }
-
-    #[test]
-    fn renders_white_segments_separated_by_bullets() {
-        let segments = [
-            StatusSegment {
-                item: StatusItem::Model,
-                text: "gpt-5".into(),
-            },
-            StatusSegment {
-                item: StatusItem::Reasoning,
-                text: "high".into(),
-            },
-        ];
-        let rendered = render(&segments);
-        assert_eq!(rendered.spans.len(), 4);
-        assert_eq!(rendered.spans[0].content, " ");
-        assert_eq!(rendered.spans[2].content, " • ");
-        assert_eq!(rendered.spans[1].style.fg, Some(Color::White));
-        assert_eq!(rendered.spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(rendered.spans[3].style.fg, Some(Color::White));
-        assert!(rendered.spans.iter().all(|span| span.style.bg.is_none()));
+        let segment = &segments(
+            &config,
+            Path::new("."),
+            &provider,
+            None,
+            None,
+            None,
+            0,
+            &values,
+        )[0];
+        assert_eq!(segment.text, "42%");
+        assert_eq!(segment.palette_index, 0);
     }
 }
