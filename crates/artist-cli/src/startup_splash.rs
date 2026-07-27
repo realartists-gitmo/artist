@@ -9,7 +9,7 @@ use ratatui::{
 
 pub(crate) const HEIGHT: u16 = 1;
 
-const ART: [&str; HEIGHT as usize] = ["Artist"];
+const ART: [&str; HEIGHT as usize] = [" Artist"];
 
 fn splash_text(extension_ids: &[String]) -> Text<'static> {
     let mut lines = ART
@@ -57,10 +57,10 @@ mod tests {
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "A");
-        assert_eq!(buffer.cell((0, 0)).unwrap().fg, crate::ui_config::color());
-        assert_eq!(buffer.cell((7, 0)).unwrap().symbol(), "+");
-        assert_eq!(buffer.cell((7, 0)).unwrap().fg, Color::DarkGray);
+        assert_eq!(buffer.cell((1, 0)).unwrap().symbol(), "A");
+        assert_eq!(buffer.cell((1, 0)).unwrap().fg, crate::ui_config::color());
+        assert_eq!(buffer.cell((8, 0)).unwrap().symbol(), "+");
+        assert_eq!(buffer.cell((8, 0)).unwrap().fg, Color::DarkGray);
     }
 
     #[test]
