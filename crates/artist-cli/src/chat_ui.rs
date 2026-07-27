@@ -2585,6 +2585,9 @@ fn insert_tool_line(
         ));
         vec![Line::from(spans)]
     } else {
+        // Continuation lines derive their indent from the icon prefix rather than
+        // assuming it is four columns wide, so they stay aligned under it.
+        let continuation = " ".repeat(prefix.width());
         content
             .lines()
             .enumerate()
@@ -2592,7 +2595,11 @@ fn insert_tool_line(
                 // Tabs otherwise skip styled terminal cells. Tool lines are kept
                 // to one terminal row so large diffs cannot dominate the UI.
                 let line = line.replace('\t', "    ");
-                let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
+                let line_prefix = if index == 0 {
+                    prefix.as_str()
+                } else {
+                    continuation.as_str()
+                };
                 let diff_content = line
                     .split_once("│ ")
                     .map_or(line.as_str(), |(_, content)| content);
