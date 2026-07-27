@@ -6,6 +6,7 @@ mod compaction;
 mod custom_commands;
 mod extension_control;
 mod input_atoms;
+mod input_border;
 mod input_images;
 mod interaction;
 mod login;

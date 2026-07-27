@@ -3083,10 +3083,7 @@ fn panel_option_style(option: &str) -> Style {
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
     let inner_width = area.width.saturating_sub(2).max(1);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(crate::theme::PASTEL_PINK));
-    frame.render_widget(block, area);
+    crate::input_border::render(frame.buffer_mut(), area);
 
     let input_area = Rect::new(
         area.x.saturating_add(1),
@@ -3570,6 +3567,13 @@ mod tests {
         assert_eq!(buffer.cell((19, 0)).unwrap().symbol(), "┐");
         assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::Reset);
         assert_eq!(buffer.cell((0, 0)).unwrap().fg, crate::theme::PASTEL_PINK);
-        assert_eq!(buffer.cell((0, 2)).unwrap().fg, crate::theme::PASTEL_PINK);
+        assert_eq!(buffer.cell((7, 0)).unwrap().fg, crate::theme::PASTEL_WHITE);
+        assert_eq!(buffer.cell((14, 0)).unwrap().fg, crate::theme::PASTEL_MINT);
+        assert_eq!(
+            buffer.cell((19, 2)).unwrap().fg,
+            crate::theme::PASTEL_YELLOW
+        );
+        assert_eq!(buffer.cell((12, 2)).unwrap().fg, crate::theme::PASTEL_BLUE);
+        assert_eq!(buffer.cell((0, 2)).unwrap().fg, crate::theme::PASTEL_BLUSH);
     }
 }
