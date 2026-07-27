@@ -340,6 +340,7 @@ struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
     reasoning: &'a str,
+    turn_style: &'a TurnStyle,
     transcript_gap: bool,
 }
 
@@ -1972,6 +1973,7 @@ async fn submit(
             input: &steering_input,
             steering: &steering,
             reasoning: &reasoning,
+            turn_style: &turn_style,
             transcript_gap: false,
         },
         &mut stream_viewport,
@@ -2101,7 +2103,7 @@ async fn submit(
                     artist_agent::PromptEvent::TextDelta(delta) => {
                         phase = "responding";
                         if !reasoning.is_empty() {
-                            insert_reasoning(terminal, &reasoning)?;
+                            insert_reasoning(terminal, &reasoning, &turn_style)?;
                             reasoning.clear();
                             transcript_gap = false;
                         }
@@ -2145,7 +2147,7 @@ async fn submit(
                             response_since_tool = false;
                         }
                         if !reasoning.is_empty() {
-                            insert_reasoning(terminal, &reasoning)?;
+                            insert_reasoning(terminal, &reasoning, &turn_style)?;
                             reasoning.clear();
                             transcript_gap = false;
                         }
@@ -2156,7 +2158,7 @@ async fn submit(
                                 true,
                                 false,
                                 title.icon.as_deref(),
-                                crate::theme::PASTEL_MINT,
+                                turn_style.accent(),
                             )?;
                             transcript_gap = true;
                         }
@@ -2172,7 +2174,7 @@ async fn submit(
                                 line.first,
                                 line.is_diff,
                                 line.icon.as_deref(),
-                                crate::theme::PASTEL_MINT,
+                                turn_style.accent(),
                             )?;
                             transcript_gap = true;
                         }
@@ -2183,7 +2185,7 @@ async fn submit(
                                 false,
                                 false,
                                 None,
-                                crate::theme::PASTEL_MINT,
+                                turn_style.accent(),
                             )?;
                             transcript_gap = true;
                         }
@@ -2252,6 +2254,7 @@ async fn submit(
                 input: &steering_input,
                 steering: &steering,
                 reasoning: &reasoning,
+                turn_style: &turn_style,
                 transcript_gap,
             },
             &mut stream_viewport,
@@ -2280,7 +2283,7 @@ async fn submit(
         delivered_steering.push(message.content);
     }
     if !reasoning.is_empty() {
-        insert_reasoning(terminal, &reasoning)?;
+        insert_reasoning(terminal, &reasoning, &turn_style)?;
     }
     if !visible.is_empty() {
         insert_response(terminal, &visible, !response_output_started, &turn_style)?;
@@ -2403,7 +2406,7 @@ fn insert_history(
                 insert_response(terminal, text, true, &turn_style)?;
                 insert_blank(terminal)?;
             }
-            ReplayItem::Reasoning(text) => insert_reasoning(terminal, text)?,
+            ReplayItem::Reasoning(text) => insert_reasoning(terminal, text, &turn_style)?,
             ReplayItem::Tool { name, preview } => {
                 let line = if preview.is_empty() {
                     name.clone()
@@ -2416,7 +2419,7 @@ fn insert_history(
                     true,
                     false,
                     crate::tool_ui::icon_for(name, custom_icons),
-                    crate::theme::PASTEL_MINT,
+                    turn_style.accent(),
                 )?;
             }
             ReplayItem::Steering(text) => insert_message(terminal, text, &turn_style)?,
@@ -2562,8 +2565,12 @@ fn insert_tool_line(
     Ok(())
 }
 
-fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) -> Result<()> {
-    insert_reasoning_chunk(terminal, reasoning, true)?;
+fn insert_reasoning(
+    terminal: &mut ratatui::DefaultTerminal,
+    reasoning: &str,
+    turn_style: &TurnStyle,
+) -> Result<()> {
+    insert_reasoning_chunk(terminal, reasoning, true, turn_style)?;
     insert_blank(terminal)
 }
 
@@ -2571,8 +2578,9 @@ fn insert_reasoning_chunk(
     terminal: &mut ratatui::DefaultTerminal,
     reasoning: &str,
     first: bool,
+    turn_style: &TurnStyle,
 ) -> Result<()> {
-    let text = reasoning_chunk_text(reasoning, first);
+    let text = reasoning_chunk_text(reasoning, first, turn_style);
     let width = usize::from(terminal.size()?.width.max(1));
     let height = text
         .lines
@@ -2589,10 +2597,10 @@ fn insert_reasoning_chunk(
 
 #[cfg(test)]
 fn reasoning_text(reasoning: &str) -> Text<'static> {
-    reasoning_chunk_text(reasoning, true)
+    reasoning_chunk_text(reasoning, true, &TurnStyle::for_index(0))
 }
 
-fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
+fn reasoning_chunk_text(reasoning: &str, first: bool, turn_style: &TurnStyle) -> Text<'static> {
     Text::from(
         reasoning
             // Providers commonly stream adjacent bold summary headings without
@@ -2601,11 +2609,14 @@ fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
             .lines()
             .enumerate()
             .map(|(line_index, line)| {
-                let mut spans = vec![Span::raw(if first && line_index == 0 {
-                    "  ◉ "
-                } else {
-                    "    "
-                })];
+                let mut spans = vec![Span::styled(
+                    if first && line_index == 0 {
+                        "  ◌ "
+                    } else {
+                        "  │ "
+                    },
+                    Style::default().fg(turn_style.accent()),
+                )];
                 let mut rest = line;
                 while let Some(start) = rest.find("**") {
                     spans.push(Span::styled(
@@ -2617,7 +2628,7 @@ fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
                     spans.push(Span::styled(
                         rest[..end].to_owned(),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(turn_style.accent())
                             .add_modifier(Modifier::ITALIC),
                     ));
                     rest = &rest[end + 2..];
@@ -2632,10 +2643,14 @@ fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
     )
 }
 
-fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> {
+fn wrapped_reasoning_lines(
+    reasoning: &str,
+    width: usize,
+    turn_style: &TurnStyle,
+) -> Vec<Line<'static>> {
     let width = width.max(1);
     let mut rows = Vec::new();
-    for line in reasoning_chunk_text(reasoning, true).lines {
+    for line in reasoning_chunk_text(reasoning, true, turn_style).lines {
         let mut row = Vec::new();
         let mut used = 0usize;
         for span in line.spans {
@@ -2648,7 +2663,15 @@ fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> 
                         row.push(Span::styled(std::mem::take(&mut chunk), style));
                     }
                     rows.push(Line::from(std::mem::take(&mut row)));
-                    used = 0;
+                    if width >= 4usize.saturating_add(character_width) {
+                        row.push(Span::styled(
+                            "  │ ",
+                            Style::default().fg(turn_style.accent()),
+                        ));
+                        used = 4;
+                    } else {
+                        used = 0;
+                    }
                 }
                 if character_width > width {
                     chunk.push('�');
@@ -2814,7 +2837,8 @@ fn draw_streaming(
         .saturating_add(1)
         .saturating_add(footer_height);
     const MAX_LIVE_REASONING_ROWS: u16 = 8;
-    let mut reasoning_lines = wrapped_reasoning_lines(controls.reasoning, usize::from(width));
+    let mut reasoning_lines =
+        wrapped_reasoning_lines(controls.reasoning, usize::from(width), controls.turn_style);
     let reasoning_height = (reasoning_lines.len() as u16)
         .min(layout_height.saturating_sub(fixed_height))
         .min(MAX_LIVE_REASONING_ROWS);
@@ -3283,7 +3307,11 @@ mod tests {
     #[test]
     fn reasoning_markers_become_italics() {
         let text = reasoning_text("**Planning** the answer");
-        assert!(text.lines[0].spans[0].content.contains("◉"));
+        assert!(text.lines[0].spans[0].content.contains('◌'));
+        assert_eq!(
+            text.lines[0].spans[0].style.fg,
+            Some(crate::theme::PASTEL_PINK)
+        );
         assert!(
             text.lines[0]
                 .spans
@@ -3300,9 +3328,16 @@ mod tests {
 
     #[test]
     fn live_reasoning_wraps_for_the_available_viewport_width() {
-        let rows = wrapped_reasoning_lines("**Planning** a deliberately long trace", 12);
+        let turn_style = TurnStyle::for_index(0);
+        let rows =
+            wrapped_reasoning_lines("**Planning** a deliberately long trace", 12, &turn_style);
         assert!(rows.len() > 1);
         assert!(rows.iter().all(|line| line.width() <= 12));
+        assert!(
+            rows.iter()
+                .skip(1)
+                .all(|line| line.to_string().starts_with("  │ "))
+        );
         let tail = rows
             .last()
             .unwrap()
@@ -3312,7 +3347,7 @@ mod tests {
             .collect::<String>();
         assert!(tail.trim_end().ends_with('e'));
 
-        let narrow = wrapped_reasoning_lines("界", 1);
+        let narrow = wrapped_reasoning_lines("界", 1, &turn_style);
         assert!(narrow.iter().all(|line| line.width() <= 1));
         assert_eq!(narrow.last().unwrap().spans[0].content, "�");
     }
