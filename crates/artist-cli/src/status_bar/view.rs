@@ -96,7 +96,7 @@ mod tests {
     use super::*;
     use crate::{
         status_bar::StatusItem,
-        theme::{PASTEL_BLUE, PASTEL_WHITE},
+        theme::{PASTEL_BLUE, PASTEL_BLUSH, PASTEL_WHITE},
     };
 
     fn segment(
@@ -121,14 +121,19 @@ mod tests {
 
     #[test]
     fn renders_two_right_aligned_rows() {
-        let width = 40;
+        let width = 60;
         let view = view(vec![
-            segment(StatusItem::ProjectDirectory, "artist", None, 0),
-            segment(StatusItem::GitBranch, "main", None, 1),
-            segment(StatusItem::Model, "gpt", None, 2),
-            segment(StatusItem::Reasoning, "high", None, 3),
-            segment(StatusItem::Context, "ctx 75%", Some("ctx 75%"), 4),
-            segment(StatusItem::SessionTokens, "1.5k total", None, 5),
+            segment(StatusItem::ProjectDirectory, " artist", None, 0),
+            segment(StatusItem::GitBranch, " main", None, 1),
+            segment(StatusItem::Model, " gpt-5.4", None, 2),
+            segment(StatusItem::Reasoning, " high", None, 3),
+            segment(
+                StatusItem::Context,
+                " ctx ██████░░ 75% · 200k",
+                Some(" ctx 75%"),
+                4,
+            ),
+            segment(StatusItem::SessionTokens, " 1.5k total", None, 5),
         ]);
         let area = Rect::new(0, 0, width, HEIGHT);
         let mut buffer = Buffer::empty(area);
@@ -136,14 +141,19 @@ mod tests {
         view.render(&mut buffer, area);
 
         let top = row_text(&buffer, width, 0);
-        assert!(top.starts_with(" artist • main"));
-        assert!(top.ends_with("ctx 75%"));
+        assert!(top.starts_with("  artist •  main"));
+        assert!(top.ends_with(" ctx ██████░░ 75% · 200k"));
+        let bottom = row_text(&buffer, width, 1);
+        assert!(bottom.starts_with("  gpt-5.4 •  high"));
+        assert!(bottom.ends_with(" 1.5k total"));
         assert!(!top.contains(''));
-        assert!((0..width).all(|column| {
-            buffer.cell((column, 0)).unwrap().bg == ratatui::style::Color::Reset
+        assert!((0..HEIGHT).all(|row| {
+            (0..width).all(|column| {
+                buffer.cell((column, row)).unwrap().bg == ratatui::style::Color::Reset
+            })
         }));
-        assert!(row_text(&buffer, width, 1).ends_with("1.5k total"));
         assert_eq!(buffer.cell((width - 1, 0)).unwrap().fg, PASTEL_BLUE);
+        assert_eq!(buffer.cell((width - 1, 1)).unwrap().fg, PASTEL_BLUSH);
     }
 
     #[test]
@@ -152,15 +162,15 @@ mod tests {
         let view = view(vec![
             segment(
                 StatusItem::ProjectDirectory,
-                "an-impossibly-long-project",
+                " an-impossibly-long-project",
                 None,
                 0,
             ),
-            segment(StatusItem::GitBranch, "main", None, 1),
+            segment(StatusItem::GitBranch, " main", None, 1),
             segment(
                 StatusItem::Context,
-                "ctx ██████░░ 75% · 100",
-                Some("ctx 75%"),
+                " ctx ██████░░ 75% · 100",
+                Some(" ctx 75%"),
                 4,
             ),
         ]);
@@ -170,10 +180,10 @@ mod tests {
         view.render(&mut buffer, area);
 
         let top = row_text(&buffer, width, 0);
-        assert!(!top.contains("impossibly"));
-        assert!(top.contains("main"));
-        assert!(top.ends_with("ctx 75%"));
+        assert_eq!(top, "  main     ctx 75%");
+        assert!(!top.contains(''));
         assert_eq!(buffer.cell((1, 0)).unwrap().fg, PASTEL_WHITE);
+        assert_eq!(buffer.cell((11, 0)).unwrap().fg, PASTEL_BLUE);
         assert_eq!(
             buffer.cell((1, 0)).unwrap().bg,
             ratatui::style::Color::Reset

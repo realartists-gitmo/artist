@@ -68,7 +68,7 @@ mod tests {
     use super::*;
     use crate::{
         status_bar::StatusItem,
-        theme::{PASTEL_BLUE, PASTEL_MINT, PASTEL_PINK, PASTEL_WHITE},
+        theme::{PASTEL_BLUE, PASTEL_BLUSH, PASTEL_MINT, PASTEL_PINK, PASTEL_WHITE, PASTEL_YELLOW},
     };
 
     fn segment(item: StatusItem, text: &str, palette_index: usize) -> StatusSegment {
@@ -82,21 +82,45 @@ mod tests {
 
     #[test]
     fn plain_line_uses_bullets_and_cycle_colors_without_backgrounds() {
-        let project = segment(StatusItem::ProjectDirectory, "artist", 0);
-        let branch = segment(StatusItem::GitBranch, "main", 1);
-        let line = plain_segments(&[&project, &branch]);
+        let segments = [
+            segment(StatusItem::ProjectDirectory, " artist", 0),
+            segment(StatusItem::GitBranch, " main", 1),
+            segment(StatusItem::Model, " gpt-5.4", 2),
+            segment(StatusItem::Reasoning, " high", 3),
+            segment(StatusItem::Context, " ctx 75%", 4),
+            segment(StatusItem::SessionTokens, " 1.5k total", 5),
+        ];
+        let line = plain_segments(&segments.iter().collect::<Vec<_>>());
 
-        assert_eq!(line.to_string(), " artist • main");
-        assert_eq!(line.spans[1].style.fg, Some(PASTEL_PINK));
-        assert_eq!(line.spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(line.spans[3].style.fg, Some(PASTEL_WHITE));
+        assert_eq!(
+            line.to_string(),
+            "  artist •  main •  gpt-5.4 •  high •  ctx 75% •  1.5k total"
+        );
+        let expected_colors = [
+            PASTEL_PINK,
+            PASTEL_WHITE,
+            PASTEL_MINT,
+            PASTEL_YELLOW,
+            PASTEL_BLUE,
+            PASTEL_BLUSH,
+        ];
+        for (span, expected) in line.spans.iter().skip(1).step_by(2).zip(expected_colors) {
+            assert_eq!(span.style.fg, Some(expected));
+        }
+        assert!(
+            line.spans
+                .iter()
+                .skip(2)
+                .step_by(2)
+                .all(|span| span.style.fg == Some(Color::DarkGray))
+        );
         assert!(line.spans.iter().all(|span| span.style.bg.is_none()));
     }
 
     #[test]
     fn plain_segments_keep_indices_after_regrouping_and_wrap() {
-        let model = segment(StatusItem::Model, "gpt", 2);
-        let context = segment(StatusItem::Context, "ctx", 4);
+        let model = segment(StatusItem::Model, " gpt", 2);
+        let context = segment(StatusItem::Context, " ctx", 4);
         let extension = segment(StatusItem::Model, "quota", 6);
 
         assert_eq!(plain_segment(&model).spans[0].style.fg, Some(PASTEL_MINT));

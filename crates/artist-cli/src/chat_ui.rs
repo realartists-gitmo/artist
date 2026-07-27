@@ -3207,15 +3207,39 @@ mod tests {
         status_bar::view(vec![
             status_bar::StatusSegment {
                 item: StatusItem::ProjectDirectory,
-                text: "artist".into(),
+                text: " artist".into(),
                 compact: None,
                 palette_index: 0,
             },
             status_bar::StatusSegment {
+                item: StatusItem::GitBranch,
+                text: " main".into(),
+                compact: None,
+                palette_index: 1,
+            },
+            status_bar::StatusSegment {
                 item: StatusItem::Model,
-                text: "gpt-test".into(),
+                text: " gpt-5.4".into(),
                 compact: None,
                 palette_index: 2,
+            },
+            status_bar::StatusSegment {
+                item: StatusItem::Reasoning,
+                text: " high".into(),
+                compact: None,
+                palette_index: 3,
+            },
+            status_bar::StatusSegment {
+                item: StatusItem::Context,
+                text: " ctx ██████░░ 75% · 200k".into(),
+                compact: Some(" ctx 75%".into()),
+                palette_index: 4,
+            },
+            status_bar::StatusSegment {
+                item: StatusItem::SessionTokens,
+                text: " 1.5k total".into(),
+                compact: None,
+                palette_index: 5,
             },
         ])
     }
@@ -3502,8 +3526,10 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
-        assert_eq!(buffer.cell((1, 3)).unwrap().symbol(), "a");
-        assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "g");
+        assert_eq!(buffer.cell((1, 3)).unwrap().symbol(), "");
+        assert_eq!(buffer.cell((11, 3)).unwrap().symbol(), "");
+        assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "");
+        assert_eq!(buffer.cell((13, 4)).unwrap().symbol(), "");
     }
 
     #[test]
@@ -3520,6 +3546,8 @@ mod tests {
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
         assert_ne!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
         assert_ne!(buffer.cell((0, 4)).unwrap().symbol(), "└");
+        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "");
+        assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "");
     }
 
     #[test]
