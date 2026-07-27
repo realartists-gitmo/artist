@@ -2447,27 +2447,26 @@ fn insert_message(
         .sum::<usize>()
         .max(1) as u16;
     terminal.insert_before(content_height.saturating_add(1), |buffer| {
-        let area = Rect::new(
+        let prefix_area = Rect::new(
             buffer.area.x.saturating_add(2),
             buffer.area.y,
-            buffer.area.width.saturating_sub(2),
+            2.min(buffer.area.width.saturating_sub(2)),
+            1,
+        );
+        let content_area = Rect::new(
+            buffer.area.x.saturating_add(4),
+            buffer.area.y,
+            buffer.area.width.saturating_sub(4),
             content_height,
         );
-        let lines = text.split('\n').enumerate().map(|(index, line)| {
-            Line::from(vec![
-                Span::styled(
-                    if index == 0 { "› " } else { "  " },
-                    Style::default().fg(turn_style.accent()),
-                ),
-                Span::styled(
-                    line.to_owned(),
-                    Style::default().fg(crate::theme::PASTEL_WHITE),
-                ),
-            ])
-        });
-        Paragraph::new(Text::from(lines.collect::<Vec<_>>()))
-            .wrap(Wrap { trim: false })
-            .render(area, buffer);
+        Paragraph::new(Span::styled("› ", Style::default().fg(turn_style.accent())))
+            .render(prefix_area, buffer);
+        Paragraph::new(Text::styled(
+            text,
+            Style::default().fg(crate::theme::PASTEL_WHITE),
+        ))
+        .wrap(Wrap { trim: false })
+        .render(content_area, buffer);
     })?;
     Ok(())
 }
