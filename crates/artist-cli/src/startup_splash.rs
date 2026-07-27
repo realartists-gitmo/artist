@@ -8,6 +8,8 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+mod gradient;
+
 pub(crate) const HEIGHT: u16 = 7;
 
 const ART: &str = include_str!("../../../splash.txt");
@@ -16,7 +18,16 @@ fn splash_text(extension_ids: &[String]) -> Text<'static> {
     let mut text = ART
         .into_text()
         .expect("embedded startup splash must contain valid ANSI");
-    let mut footer = Line::default();
+    gradient::apply(&mut text.lines);
+    for line in &mut text.lines {
+        line.spans.insert(0, Span::raw(" "));
+    }
+
+    let mut footer = if extension_ids.is_empty() {
+        Line::default()
+    } else {
+        Line::from(Span::styled(" + ", Style::default().fg(Color::DarkGray)))
+    };
 
     for (index, extension_id) in extension_ids.iter().enumerate() {
         if index > 0 {
@@ -46,31 +57,32 @@ pub(crate) fn render_buffer(buffer: &mut Buffer, extension_ids: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend, style::Modifier, text::Line};
+    use ratatui::{Terminal, backend::TestBackend, text::Line};
 
     #[test]
     fn embeds_six_styled_art_rows() {
         let text = splash_text(&[]);
 
         assert_eq!(text.lines.len(), HEIGHT as usize);
-        assert!(text.lines[..6].iter().all(|line| line.width() == 42));
+        assert!(text.lines[..6].iter().all(|line| line.width() == 43));
         assert_eq!(
             text.lines[0].to_string(),
-            "    ▄▄█▄            ██    ██          ██  "
+            "     ▄▄█▄            ██    ██          ██  "
         );
         assert_eq!(
             text.lines[5].to_string(),
-            "▀▀▀▀▀ ▀▀▀▀▀ ▀▀       ▀▀▀ ▀▀▀▀  ▀▀▀     ▀▀▀"
+            " ▀▀▀▀▀ ▀▀▀▀▀ ▀▀       ▀▀▀ ▀▀▀▀  ▀▀▀     ▀▀▀"
         );
-        assert_eq!(text.lines[0].spans[1].style.fg, Some(Color::DarkGray));
-        assert_eq!(text.lines[0].spans[1].style.bg, Some(Color::Black));
         assert!(
-            text.lines[0].spans[1]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
+            text.lines[..6]
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| !matches!(
+                    (span.style.fg, span.style.bg),
+                    (Some(Color::Yellow | Color::LightYellow), _)
+                        | (_, Some(Color::Yellow | Color::LightYellow))
+                ))
         );
-        assert_eq!(text.lines[0].spans[2].style.fg, Some(Color::White));
     }
 
     #[test]
@@ -79,12 +91,13 @@ mod tests {
         let text = splash_text(&extensions);
         let footer = &text.lines[6];
 
-        assert_eq!(footer.to_string(), "alpha • beta");
-        assert_eq!(footer.spans[0].style.fg, Some(crate::theme::cycle_color(0)));
-        assert_eq!(footer.spans[1].style.fg, Some(Color::DarkGray));
-        assert_eq!(footer.spans[2].style.fg, Some(crate::theme::cycle_color(1)));
+        assert_eq!(footer.to_string(), " + alpha • beta");
+        assert_eq!(footer.spans[0].style.fg, Some(Color::DarkGray));
+        assert_eq!(footer.spans[1].style.fg, Some(crate::theme::cycle_color(0)));
+        assert_eq!(footer.spans[2].style.fg, Some(Color::DarkGray));
+        assert_eq!(footer.spans[3].style.fg, Some(crate::theme::cycle_color(1)));
         assert!(!footer.to_string().contains("active extensions"));
-        assert!(!footer.to_string().contains(['+', ',']));
+        assert!(!footer.to_string().contains(','));
     }
 
     #[test]
@@ -107,7 +120,7 @@ mod tests {
         let footer = (0..8)
             .map(|x| buffer.cell((x, HEIGHT - 1)).unwrap().symbol())
             .collect::<String>();
-        assert_eq!(footer, "alpha • ");
-        assert_eq!(buffer.cell((4, 0)).unwrap().symbol(), "▄");
+        assert_eq!(footer, " + alpha");
+        assert_eq!(buffer.cell((5, 0)).unwrap().symbol(), "▄");
     }
 }
