@@ -10,6 +10,9 @@ use rig_core::OneOrMany;
 use rig_core::completion::message::{AssistantContent, Message, ReasoningContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 
+const USER_INTERRUPTION: &str =
+    "<user_interruption>The user interrupted the previous response.</user_interruption>";
+
 pub(crate) async fn retain_cancelled_turn(
     memory: &dyn ConversationMemory,
     conversation_id: &str,
@@ -19,6 +22,7 @@ pub(crate) async fn retain_cancelled_turn(
     if !assistant_text.is_empty() {
         turn_messages.push(Message::assistant(assistant_text));
     }
+    turn_messages.push(Message::user(USER_INTERRUPTION));
     memory.append(conversation_id, turn_messages).await
 }
 
@@ -168,7 +172,8 @@ mod tests {
             memory.load("s").await.unwrap(),
             vec![
                 Message::user("question"),
-                Message::assistant("partial answer")
+                Message::assistant("partial answer"),
+                Message::user(USER_INTERRUPTION),
             ]
         );
     }
@@ -180,10 +185,9 @@ mod tests {
         retain_cancelled_turn(&memory, "s", vec![Message::user("question")], String::new())
             .await
             .unwrap();
-
         assert_eq!(
             memory.load("s").await.unwrap(),
-            vec![Message::user("question")]
+            vec![Message::user("question"), Message::user(USER_INTERRUPTION)]
         );
     }
 
