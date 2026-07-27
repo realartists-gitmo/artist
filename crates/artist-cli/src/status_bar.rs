@@ -6,6 +6,15 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+const POWERLINE_SEPARATOR: &str = "";
+const SEGMENT_COLORS: [Color; 6] = [
+    Color::Rgb(255, 204, 225), // #ffcce1
+    Color::Rgb(242, 241, 237), // #f2f1ed
+    Color::Rgb(205, 229, 217), // #cde5d9
+    Color::Rgb(242, 235, 204), // #f2ebcc
+    Color::Rgb(198, 226, 231), // #c6e2e7
+    Color::Rgb(247, 221, 232), // #f7dde8
+];
 /// Values that may be displayed in the status bar, in configured order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +45,17 @@ impl StatusItem {
             Self::Reasoning => "Reasoning",
             Self::Context => "Context remaining / capacity",
             Self::SessionTokens => "Session tokens",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::ProjectDirectory => "",
+            Self::GitBranch => "",
+            Self::Model => "",
+            Self::Reasoning => "",
+            Self::Context => "",
+            Self::SessionTokens => "",
         }
     }
 }
@@ -76,8 +96,8 @@ pub(crate) struct StatusSegment {
 }
 
 impl StatusSegment {
-    pub fn render(&self) -> Span<'static> {
-        Span::styled(self.text.clone(), Style::default().fg(Color::White))
+    fn content(&self) -> String {
+        format!(" {} {} ", self.item.icon(), self.text)
     }
 }
 
@@ -145,16 +165,22 @@ pub(crate) fn segments(
 }
 
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = if segments.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::raw(" ")]
-    };
+    let mut spans = Vec::with_capacity(segments.len().saturating_mul(2));
     for (index, segment) in segments.iter().enumerate() {
-        if index != 0 {
-            spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
-        }
-        spans.push(segment.render());
+        let color = SEGMENT_COLORS[index % SEGMENT_COLORS.len()];
+        let next_color = segments
+            .get(index + 1)
+            .map(|_| SEGMENT_COLORS[(index + 1) % SEGMENT_COLORS.len()]);
+        spans.push(Span::styled(
+            segment.content(),
+            Style::default().fg(Color::Black).bg(color),
+        ));
+        spans.push(Span::styled(
+            POWERLINE_SEPARATOR,
+            Style::default()
+                .fg(color)
+                .bg(next_color.unwrap_or(Color::Reset)),
+        ));
     }
     Line::from(spans)
 }
@@ -333,24 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn renders_white_segments_separated_by_bullets() {
-        let segments = [
-            StatusSegment {
-                item: StatusItem::Model,
-                text: "gpt-5".into(),
-            },
-            StatusSegment {
-                item: StatusItem::Reasoning,
-                text: "high".into(),
-            },
-        ];
+    fn renders_powerline_segments_with_icons_and_cycling_palette() {
+        let segments = (0..7)
+            .map(|index| StatusSegment {
+                item: if index == 0 {
+                    StatusItem::GitBranch
+                } else {
+                    StatusItem::Model
+                },
+                text: format!("value-{index}"),
+            })
+            .collect::<Vec<_>>();
         let rendered = render(&segments);
-        assert_eq!(rendered.spans.len(), 4);
-        assert_eq!(rendered.spans[0].content, " ");
-        assert_eq!(rendered.spans[2].content, " • ");
-        assert_eq!(rendered.spans[1].style.fg, Some(Color::White));
-        assert_eq!(rendered.spans[2].style.fg, Some(Color::DarkGray));
-        assert_eq!(rendered.spans[3].style.fg, Some(Color::White));
-        assert!(rendered.spans.iter().all(|span| span.style.bg.is_none()));
+
+        assert_eq!(rendered.spans.len(), 14);
+        assert_eq!(rendered.spans[0].content, "  value-0 ");
+        assert_eq!(rendered.spans[0].style.fg, Some(Color::Black));
+        assert_eq!(rendered.spans[0].style.bg, Some(SEGMENT_COLORS[0]));
+        assert_eq!(rendered.spans[1].content, POWERLINE_SEPARATOR);
+        assert_eq!(rendered.spans[1].style.fg, Some(SEGMENT_COLORS[0]));
+        assert_eq!(rendered.spans[1].style.bg, Some(SEGMENT_COLORS[1]));
+        assert_eq!(rendered.spans[12].style.bg, Some(SEGMENT_COLORS[0]));
+        assert_eq!(rendered.spans[13].style.bg, Some(Color::Reset));
     }
 }
