@@ -19,6 +19,7 @@ mod startup_splash;
 mod status_bar;
 mod store;
 mod test_provider;
+mod theme;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
