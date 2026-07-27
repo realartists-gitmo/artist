@@ -1,3 +1,4 @@
+mod activity_ui;
 mod args;
 mod chat_ui;
 mod clipboard;
