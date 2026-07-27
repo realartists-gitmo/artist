@@ -87,6 +87,6 @@ impl StatusView {
     }
 }
 
-pub(super) fn view(segments: Vec<StatusSegment>) -> StatusView {
+pub(crate) fn view(segments: Vec<StatusSegment>) -> StatusView {
     StatusView { segments }
 }

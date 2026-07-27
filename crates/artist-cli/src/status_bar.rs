@@ -6,6 +6,11 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+mod row;
+mod view;
+
+pub(crate) use view::{HEIGHT, StatusView, view};
+
 /// Values that may be displayed in the status bar, in configured order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,12 +78,8 @@ impl Default for StatusBarConfig {
 pub(crate) struct StatusSegment {
     pub item: StatusItem,
     pub text: String,
-}
-
-impl StatusSegment {
-    pub fn render(&self) -> Span<'static> {
-        Span::styled(self.text.clone(), Style::default().fg(Color::White))
-    }
+    pub compact: Option<String>,
+    pub palette_index: usize,
 }
 
 #[allow(clippy::too_many_arguments)] // display params accrete; a struct refactor is follow-up
@@ -95,66 +96,81 @@ pub(crate) fn segments(
     let mut segments = config
         .items
         .iter()
-        .map(|item| StatusSegment {
-            item: *item,
-            text: match item {
-                StatusItem::ProjectDirectory => project
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_else(|| project.to_str().unwrap_or("—"))
-                    .to_owned(),
-                StatusItem::GitBranch => git_branch.unwrap_or("—").to_owned(),
-                StatusItem::Model => provider.model.clone().unwrap_or_else(|| "—".into()),
-                StatusItem::Reasoning => provider
-                    .reasoning_effort
-                    .clone()
-                    .unwrap_or_else(|| "default".into()),
+        .enumerate()
+        .filter_map(|(palette_index, item)| {
+            let (text, compact) = match item {
+                StatusItem::ProjectDirectory => (
+                    project
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_else(|| project.to_str().unwrap_or("—"))
+                        .to_owned(),
+                    None,
+                ),
+                StatusItem::GitBranch => (git_branch.map(str::to_owned)?, None),
+                StatusItem::Model => (provider.model.clone()?, None),
+                StatusItem::Reasoning => (provider.reasoning_effort.clone()?, None),
                 StatusItem::Context => match (used_tokens, context_capacity) {
                     (Some(used), Some(capacity)) if capacity > 0 => {
                         let remaining = context_remaining(used, capacity);
-                        format!(
-                            "{}%/{}",
-                            remaining.saturating_mul(100) / capacity,
-                            format_tokens(capacity)
+                        let percent = remaining.saturating_mul(100) / capacity;
+                        (
+                            format!(
+                                "ctx {} {percent}% · {}",
+                                context_gauge(percent),
+                                format_tokens(capacity)
+                            ),
+                            Some(format!("ctx {percent}%")),
                         )
                     }
-                    (None, Some(capacity)) => format!("—%/{}", format_tokens(capacity)),
-                    _ => "—/—".into(),
+                    _ => return None,
                 },
                 StatusItem::SessionTokens => {
                     if session_tokens > 0 {
-                        format!("{} total", format_tokens(session_tokens))
+                        (format!("{} total", format_tokens(session_tokens)), None)
                     } else {
-                        "— total".into()
+                        return None;
                     }
                 }
-            },
+            };
+            Some(StatusSegment {
+                item: *item,
+                text,
+                compact,
+                palette_index,
+            })
         })
         .collect::<Vec<_>>();
-    segments.extend(config.extension_items.iter().map(|name| {
-        StatusSegment {
-            item: StatusItem::Model,
-            text: extension_values
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| "—".into()),
-        }
-    }));
+    segments.extend(config.extension_items.iter().enumerate().filter_map(
+        |(extension_index, name)| {
+            Some(StatusSegment {
+                item: StatusItem::Model,
+                text: extension_values
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())?,
+                compact: None,
+                palette_index: config.items.len() + extension_index,
+            })
+        },
+    ));
     segments
 }
 
+fn context_gauge(percent: u64) -> String {
+    const CELLS: usize = 8;
+    let filled = (percent.min(100) as usize * CELLS + 50) / 100;
+    format!("{}{}", "█".repeat(filled), "░".repeat(CELLS - filled))
+}
+
+/// Compatibility renderer for callers migrating to [`StatusView`].
 pub(crate) fn render(segments: &[StatusSegment]) -> Line<'static> {
-    let mut spans = if segments.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::raw(" ")]
-    };
+    let mut spans = vec![Span::raw(" ")];
     for (index, segment) in segments.iter().enumerate() {
-        if index != 0 {
+        if index > 0 {
             spans.push(Span::styled(" • ", Style::default().fg(Color::DarkGray)));
         }
-        spans.push(segment.render());
+        spans.push(Span::raw(segment.text.clone()));
     }
     Line::from(spans)
 }

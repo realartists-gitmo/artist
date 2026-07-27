@@ -20,9 +20,7 @@ pub(super) fn plain_text(segment: &StatusSegment, text: &str) -> Line<'static> {
     ))
 }
 
-pub(super) fn plain_line<'a>(
-    segments: impl Iterator<Item = &'a StatusSegment>,
-) -> Line<'static> {
+pub(super) fn plain_line<'a>(segments: impl Iterator<Item = &'a StatusSegment>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (index, segment) in segments.enumerate() {
         if index > 0 {
