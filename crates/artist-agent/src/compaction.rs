@@ -1,6 +1,5 @@
 //! Provider-backed generation for Pi-style structured context checkpoints.
 
-use crate::rig_provider::RigClient;
 use anyhow::{Context, Result, bail};
 use artist_session::compaction::{CompactionPlan, format_file_operations};
 use llm_provider::SavedProvider;
@@ -99,9 +98,14 @@ async fn complete(provider: &SavedProvider, prompt: &str, max_tokens: u64) -> Re
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let response = RigClient::build(provider)?
-        .prompt(model, SYSTEM_PROMPT, prompt, max_tokens)
-        .await?;
+    let response = crate::rig_provider::health_check_prompt(
+        provider,
+        model,
+        SYSTEM_PROMPT,
+        prompt,
+        max_tokens,
+    )
+    .await?;
     if response.trim().is_empty() {
         bail!("context compaction returned an empty summary");
     }

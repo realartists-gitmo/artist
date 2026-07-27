@@ -1,12 +1,33 @@
 use crate::store::ProviderStore;
+use crate::{prompt, provider_commands};
 use anyhow::{Context, Result, bail};
-use llm_provider::{ChatGptOAuth, ProviderId, SavedProvider};
+use llm_provider::{
+    ChatGptOAuth, PROVIDERS, ProviderId, ProviderKind, ProviderMetadata, SavedProvider,
+};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 use url::Url;
+
+pub async fn add_provider(store: &mut ProviderStore) -> Result<()> {
+    let api_providers: Vec<&ProviderMetadata> = PROVIDERS
+        .iter()
+        .filter(|p| p.kind != ProviderKind::Chatgpt)
+        .collect();
+    let choices: Vec<String> = std::iter::once("ChatGPT".to_owned())
+        .chain(api_providers.iter().map(|p| p.display_name.to_owned()))
+        .collect();
+    let selection = prompt::select_paged("Provider", &choices, 0, 7)?;
+    if selection == 0 {
+        chatgpt(store).await?;
+    } else {
+        let kind = api_providers[selection - 1].kind;
+        provider_commands::add_kind(store, Some(kind.slug()))?;
+    }
+    Ok(())
+}
 
 pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
     // The callback port must stay 1455 to match the registered redirect URI, so

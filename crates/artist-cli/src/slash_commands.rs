@@ -79,7 +79,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/login",
-        description: "Log in to another ChatGPT account",
+        description: "Add a provider (ChatGPT, OpenAI, Anthropic, …)",
         usage: "/login",
     },
     SlashCommand {
