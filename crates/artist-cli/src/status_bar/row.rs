@@ -61,7 +61,11 @@ pub(super) fn render_row(
     let width = usize::from(area.width);
     let show_right =
         !right.spans.is_empty() && (right_priority || left.width() + right.width() < width);
-    let right_width = show_right.then(|| right.width().min(width)).unwrap_or(0);
+    let right_width = if show_right {
+        right.width().min(width)
+    } else {
+        0
+    };
     if right_width > 0 {
         buffer.set_line(
             area.right().saturating_sub(right_width as u16),
