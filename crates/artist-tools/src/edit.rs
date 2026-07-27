@@ -62,6 +62,11 @@ impl Tool for EditTool {
             .unified_diff()
             .context_radius(3)
             .to_string();
+        let diff = output::anchored_diff(
+            &diff,
+            &result.result.before_lines,
+            &result.result.lines,
+        );
         let before_lines: std::collections::HashSet<&str> = before.lines().collect();
         let updates = result
             .result
@@ -69,7 +74,7 @@ impl Tool for EditTool {
             .iter()
             .filter(|line| !before_lines.contains(line.text.as_str()))
             .take(50)
-            .map(|line| format!("{} | {}", line.anchor, line.text))
+            .map(|line| format!("{}: {}", line.anchor, line.text))
             .collect::<Vec<_>>()
             .join("\n");
         Ok(output::head(

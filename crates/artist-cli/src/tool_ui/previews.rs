@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{diff::numbered_diff, titles::shortened};
+use super::titles::shortened;
 
 const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 
@@ -87,9 +87,11 @@ fn is_bash_header(line: &str) -> bool {
 }
 
 fn edit_preview(output: &str) -> PresentedOutput {
+    // The diff already carries a mnemonic-anchor gutter from artist-tools, so it
+    // is displayed verbatim rather than being renumbered here.
     let semantic_output = output
         .split_once("Diff:\n")
-        .map(|(_, diff)| numbered_diff(diff))
+        .map(|(_, diff)| diff.trim_end_matches('\n').to_owned())
         .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned());
     PresentedOutput {
         preview: truncate_edit(&semantic_output),
@@ -249,17 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn write_uses_the_same_numbered_diff_preview_as_edit() {
-        let result = "Written new.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n";
+    fn write_uses_the_same_anchored_diff_preview_as_edit() {
+        let result = "Written new.rs.\n\nDiff:\nvex │ ~new\n";
         let presented = present("write", result);
-        assert_eq!(presented.preview, "   1 │ ~new");
+        assert_eq!(presented.preview, "vex │ ~new");
         assert!(presented.is_diff);
     }
 
     #[test]
-    fn edit_rendering_remains_numbered_and_diff_styled() {
-        let presented = present("edit", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
-        assert_eq!(presented.preview, "   1 │ ~new");
+    fn edit_rendering_passes_the_anchor_gutter_through_and_stays_diff_styled() {
+        let presented = present("edit", "Applied edit.\n\nDiff:\nvex │ ~new\n");
+        assert_eq!(presented.preview, "vex │ ~new");
         assert!(presented.is_diff);
     }
 

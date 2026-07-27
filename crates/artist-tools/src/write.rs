@@ -35,7 +35,8 @@ impl Tool for WriteTool {
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        self.0
+        let result = self
+            .0
             .files
             .write_file(
                 &self.0.actor,
@@ -49,6 +50,7 @@ impl Tool for WriteTool {
             .unified_diff()
             .context_radius(3)
             .to_string();
+        let diff = output::anchored_diff(&diff, &[], &result.result.lines);
         Ok(output::head(
             format!(
                 "Written {} ({} bytes; {}).\n\nDiff:\n{}",

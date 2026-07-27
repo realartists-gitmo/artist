@@ -1,4 +1,3 @@
-mod diff;
 mod icons;
 mod previews;
 mod title_model;
@@ -287,8 +286,8 @@ mod tests {
             "edit",
             &serde_json::json!({"path":"src/lib.rs"}),
         );
-        let output = ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
-        assert_eq!(output.lines[0].text, "   1 │ ~new");
+        let output = ui.output("e", "Applied edit.\n\nDiff:\nvex │ ~new\n");
+        assert_eq!(output.lines[0].text, "vex │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
@@ -302,9 +301,9 @@ mod tests {
         );
         let output = ui.output(
             "w",
-            "Written src/lib.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
+            "Written src/lib.rs.\n\nDiff:\nvex │ ~new\n",
         );
-        assert_eq!(output.lines[0].text, "   1 │ ~new");
+        assert_eq!(output.lines[0].text, "vex │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
