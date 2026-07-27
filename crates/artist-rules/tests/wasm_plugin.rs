@@ -20,8 +20,7 @@ fn guest_wasm() -> PathBuf {
     static ARTIFACT: OnceLock<PathBuf> = OnceLock::new();
     ARTIFACT
         .get_or_init(|| {
-            let fixture =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rule-guest");
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rule-guest");
             let artifact = fixture.join("target/wasm32-wasip2/release/rule_guest.wasm");
             if !artifact.exists() {
                 let status = std::process::Command::new("cargo")

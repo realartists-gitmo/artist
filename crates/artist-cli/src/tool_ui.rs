@@ -299,10 +299,7 @@ mod tests {
             "write",
             &serde_json::json!({"path":"src/lib.rs","content":"new\n"}),
         );
-        let output = ui.output(
-            "w",
-            "Written src/lib.rs.\n\nDiff:\nvex │ ~new\n",
-        );
+        let output = ui.output("w", "Written src/lib.rs.\n\nDiff:\nvex │ ~new\n");
         assert_eq!(output.lines[0].text, "vex │ ~new");
         assert!(output.lines[0].is_diff);
     }

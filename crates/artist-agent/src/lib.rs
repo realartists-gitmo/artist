@@ -262,6 +262,7 @@ pub async fn stream_chat(
     handles: SessionHandles,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
+    use llm_provider::OpenAiApi;
     use rig_provider::{
         build_anthropic, build_azure, build_chatgpt, build_cohere, build_copilot, build_deepseek,
         build_gemini, build_groq, build_huggingface, build_hyperbolic, build_llamafile,
@@ -270,101 +271,324 @@ pub async fn stream_chat(
         build_openrouter, build_perplexity, build_together, build_xai, build_xiaomimimo,
         build_xiaomimimo_anthropic, build_zai, build_zai_anthropic,
     };
-    use llm_provider::OpenAiApi;
 
     match provider.provider {
         ProviderKind::Chatgpt => {
-            stream_chat_with(build_chatgpt(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_chatgpt(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Copilot => {
-            stream_chat_with(build_copilot(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_copilot(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Azure => {
-            stream_chat_with(build_azure(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_azure(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Llamafile => {
-            stream_chat_with(build_llamafile(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_llamafile(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Ollama => {
-            stream_chat_with(build_ollama(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_ollama(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Openai => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                stream_chat_with(build_openai_responses(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_openai_responses(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                stream_chat_with(build_openai_chat(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_openai_chat(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
         },
         ProviderKind::Anthropic => {
-            stream_chat_with(build_anthropic(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_anthropic(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Cohere => {
-            stream_chat_with(build_cohere(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_cohere(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Gemini => {
-            stream_chat_with(build_gemini(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_gemini(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Deepseek => {
-            stream_chat_with(build_deepseek(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_deepseek(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Groq => {
-            stream_chat_with(build_groq(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_groq(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Huggingface => {
-            stream_chat_with(build_huggingface(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_huggingface(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Hyperbolic => {
-            stream_chat_with(build_hyperbolic(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_hyperbolic(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Mira => {
-            stream_chat_with(build_mira(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_mira(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Mistral => {
-            stream_chat_with(build_mistral(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_mistral(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Openrouter => {
-            stream_chat_with(build_openrouter(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_openrouter(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Perplexity => {
-            stream_chat_with(build_perplexity(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_perplexity(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Together => {
-            stream_chat_with(build_together(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_together(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Xai => {
-            stream_chat_with(build_xai(provider)?, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                build_xai(provider)?,
+                provider,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         }
         ProviderKind::Minimax => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                stream_chat_with(build_minimax(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_minimax(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                stream_chat_with(build_minimax_anthropic(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_minimax_anthropic(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
         },
         ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                stream_chat_with(build_moonshot(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_moonshot(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                stream_chat_with(build_moonshot_anthropic(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_moonshot_anthropic(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
         },
         ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                stream_chat_with(build_xiaomimimo(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_xiaomimimo(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                stream_chat_with(build_xiaomimimo_anthropic(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_xiaomimimo_anthropic(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
         },
         ProviderKind::Zai => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                stream_chat_with(build_zai(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_zai(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                stream_chat_with(build_zai_anthropic(provider)?, provider, input, tool_context, handles, on_event).await
+                stream_chat_with(
+                    build_zai_anthropic(provider)?,
+                    provider,
+                    input,
+                    tool_context,
+                    handles,
+                    on_event,
+                )
+                .await
             }
         },
     }

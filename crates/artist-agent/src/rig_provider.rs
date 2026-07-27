@@ -55,9 +55,9 @@ fn build_copilot_inner(
     let builder = copilot::Client::builder();
     let builder = match &provider.credentials {
         Credentials::ApiKey { api_key } => builder.api_key(api_key.expose()),
-        Credentials::BearerToken { token } => {
-            builder.api_key(copilot::CopilotAuth::GitHubAccessToken(token.expose().to_owned()))
-        }
+        Credentials::BearerToken { token } => builder.api_key(
+            copilot::CopilotAuth::GitHubAccessToken(token.expose().to_owned()),
+        ),
         Credentials::CopilotOauth { token_dir } => {
             secure_token_dir(token_dir)?;
             builder
@@ -75,9 +75,7 @@ pub(crate) fn build_copilot(provider: &SavedProvider) -> Result<copilot::Client>
     build_copilot_inner(provider, false)
 }
 
-pub(crate) fn build_copilot_with_device_flow(
-    provider: &SavedProvider,
-) -> Result<copilot::Client> {
+pub(crate) fn build_copilot_with_device_flow(provider: &SavedProvider) -> Result<copilot::Client> {
     build_copilot_inner(provider, true)
 }
 
@@ -175,7 +173,9 @@ pub(crate) fn build_minimax(provider: &SavedProvider) -> Result<minimax::Client>
         .context("build MiniMax client")
 }
 
-pub(crate) fn build_minimax_anthropic(provider: &SavedProvider) -> Result<minimax::AnthropicClient> {
+pub(crate) fn build_minimax_anthropic(
+    provider: &SavedProvider,
+) -> Result<minimax::AnthropicClient> {
     let Credentials::ApiKey { api_key } = &provider.credentials else {
         bail!("MiniMax API-key credentials required")
     };
@@ -197,7 +197,9 @@ pub(crate) fn build_moonshot(provider: &SavedProvider) -> Result<moonshot::Clien
         .context("build Moonshot client")
 }
 
-pub(crate) fn build_moonshot_anthropic(provider: &SavedProvider) -> Result<moonshot::AnthropicClient> {
+pub(crate) fn build_moonshot_anthropic(
+    provider: &SavedProvider,
+) -> Result<moonshot::AnthropicClient> {
     let Credentials::ApiKey { api_key } = &provider.credentials else {
         bail!("Moonshot API-key credentials required")
     };
@@ -294,32 +296,72 @@ pub(crate) async fn health_check_prompt(
 ) -> Result<String> {
     match provider.provider {
         ProviderKind::Chatgpt => {
-            prompt_with(build_chatgpt(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_chatgpt(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Copilot => {
-            prompt_with(build_copilot(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_copilot(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Azure => {
             prompt_with(build_azure(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Llamafile => {
-            prompt_with(build_llamafile(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_llamafile(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Ollama => {
             prompt_with(build_ollama(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Openai => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                prompt_with(build_openai_responses(provider)?, model, preamble, prompt, max_tokens)
-                    .await
+                prompt_with(
+                    build_openai_responses(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                prompt_with(build_openai_chat(provider)?, model, preamble, prompt, max_tokens)
-                    .await
+                prompt_with(
+                    build_openai_chat(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         },
         ProviderKind::Anthropic => {
-            prompt_with(build_anthropic(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_anthropic(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Cohere => {
             prompt_with(build_cohere(provider)?, model, preamble, prompt, max_tokens).await
@@ -328,56 +370,138 @@ pub(crate) async fn health_check_prompt(
             prompt_with(build_gemini(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Deepseek => {
-            prompt_with(build_deepseek(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_deepseek(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Groq => {
             prompt_with(build_groq(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Huggingface => {
-            prompt_with(build_huggingface(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_huggingface(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Hyperbolic => {
-            prompt_with(build_hyperbolic(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_hyperbolic(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Mira => {
             prompt_with(build_mira(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Mistral => {
-            prompt_with(build_mistral(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_mistral(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Openrouter => {
-            prompt_with(build_openrouter(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_openrouter(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Perplexity => {
-            prompt_with(build_perplexity(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_perplexity(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Together => {
-            prompt_with(build_together(provider)?, model, preamble, prompt, max_tokens).await
+            prompt_with(
+                build_together(provider)?,
+                model,
+                preamble,
+                prompt,
+                max_tokens,
+            )
+            .await
         }
         ProviderKind::Xai => {
             prompt_with(build_xai(provider)?, model, preamble, prompt, max_tokens).await
         }
         ProviderKind::Minimax => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                prompt_with(build_minimax(provider)?, model, preamble, prompt, max_tokens).await
+                prompt_with(
+                    build_minimax(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                prompt_with(build_minimax_anthropic(provider)?, model, preamble, prompt, max_tokens)
-                    .await
+                prompt_with(
+                    build_minimax_anthropic(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         },
         ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                prompt_with(build_moonshot(provider)?, model, preamble, prompt, max_tokens).await
+                prompt_with(
+                    build_moonshot(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
-                prompt_with(build_moonshot_anthropic(provider)?, model, preamble, prompt, max_tokens)
-                    .await
+                prompt_with(
+                    build_moonshot_anthropic(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         },
         ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
             OpenAiApi::Responses => {
-                prompt_with(build_xiaomimimo(provider)?, model, preamble, prompt, max_tokens).await
+                prompt_with(
+                    build_xiaomimimo(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
             OpenAiApi::ChatCompletions => {
                 prompt_with(
@@ -395,8 +519,14 @@ pub(crate) async fn health_check_prompt(
                 prompt_with(build_zai(provider)?, model, preamble, prompt, max_tokens).await
             }
             OpenAiApi::ChatCompletions => {
-                prompt_with(build_zai_anthropic(provider)?, model, preamble, prompt, max_tokens)
-                    .await
+                prompt_with(
+                    build_zai_anthropic(provider)?,
+                    model,
+                    preamble,
+                    prompt,
+                    max_tokens,
+                )
+                .await
             }
         },
     }
@@ -528,7 +658,9 @@ mod tests {
         );
         azure.api_version = Some("2024-10-21".into());
         assert!(build_azure(&azure).is_ok());
-        assert!(build_llamafile(&test_provider(ProviderKind::Llamafile, Credentials::None)).is_ok());
+        assert!(
+            build_llamafile(&test_provider(ProviderKind::Llamafile, Credentials::None)).is_ok()
+        );
         assert!(build_ollama(&test_provider(ProviderKind::Ollama, Credentials::None)).is_ok());
         for kind in [
             ProviderKind::Minimax,

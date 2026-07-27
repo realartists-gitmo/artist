@@ -248,8 +248,8 @@ impl Delegate {
             .ok_or(DelegateError::MissingModel)?;
         use llm_provider::OpenAiApi;
         match self.provider.provider {
-            llm_provider::ProviderKind::Chatgpt => self
-                .run_agent_with(
+            llm_provider::ProviderKind::Chatgpt => {
+                self.run_agent_with(
                     crate::rig_provider::build_chatgpt(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -258,9 +258,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Copilot => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Copilot => {
+                self.run_agent_with(
                     crate::rig_provider::build_copilot(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -269,9 +270,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Azure => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Azure => {
+                self.run_agent_with(
                     crate::rig_provider::build_azure(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -280,9 +282,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Llamafile => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Llamafile => {
+                self.run_agent_with(
                     crate::rig_provider::build_llamafile(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -291,9 +294,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Ollama => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Ollama => {
+                self.run_agent_with(
                     crate::rig_provider::build_ollama(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -302,10 +306,11 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
+                .await
+            }
             llm_provider::ProviderKind::Openai => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => self
-                    .run_agent_with(
+                OpenAiApi::Responses => {
+                    self.run_agent_with(
                         crate::rig_provider::build_openai_responses(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -314,9 +319,10 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
-                OpenAiApi::ChatCompletions => self
-                    .run_agent_with(
+                    .await
+                }
+                OpenAiApi::ChatCompletions => {
+                    self.run_agent_with(
                         crate::rig_provider::build_openai_chat(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -325,10 +331,11 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
+                    .await
+                }
             },
-            llm_provider::ProviderKind::Anthropic => self
-                .run_agent_with(
+            llm_provider::ProviderKind::Anthropic => {
+                self.run_agent_with(
                     crate::rig_provider::build_anthropic(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -337,9 +344,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Cohere => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Cohere => {
+                self.run_agent_with(
                     crate::rig_provider::build_cohere(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -348,9 +356,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Gemini => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Gemini => {
+                self.run_agent_with(
                     crate::rig_provider::build_gemini(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -359,9 +368,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Deepseek => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Deepseek => {
+                self.run_agent_with(
                     crate::rig_provider::build_deepseek(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -370,9 +380,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Groq => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Groq => {
+                self.run_agent_with(
                     crate::rig_provider::build_groq(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -381,9 +392,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Huggingface => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Huggingface => {
+                self.run_agent_with(
                     crate::rig_provider::build_huggingface(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -392,9 +404,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Hyperbolic => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Hyperbolic => {
+                self.run_agent_with(
                     crate::rig_provider::build_hyperbolic(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -403,9 +416,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Mira => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Mira => {
+                self.run_agent_with(
                     crate::rig_provider::build_mira(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -414,9 +428,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Mistral => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Mistral => {
+                self.run_agent_with(
                     crate::rig_provider::build_mistral(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -425,9 +440,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Openrouter => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Openrouter => {
+                self.run_agent_with(
                     crate::rig_provider::build_openrouter(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -436,9 +452,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Perplexity => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Perplexity => {
+                self.run_agent_with(
                     crate::rig_provider::build_perplexity(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -447,9 +464,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Together => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Together => {
+                self.run_agent_with(
                     crate::rig_provider::build_together(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -458,9 +476,10 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
-            llm_provider::ProviderKind::Xai => self
-                .run_agent_with(
+                .await
+            }
+            llm_provider::ProviderKind::Xai => {
+                self.run_agent_with(
                     crate::rig_provider::build_xai(&self.provider)
                         .map_err(|error| DelegateError::Failed(error.to_string()))?,
                     prompt,
@@ -469,10 +488,11 @@ impl Delegate {
                     model,
                     &run,
                 )
-                .await,
+                .await
+            }
             llm_provider::ProviderKind::Minimax => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => self
-                    .run_agent_with(
+                OpenAiApi::Responses => {
+                    self.run_agent_with(
                         crate::rig_provider::build_minimax(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -481,9 +501,10 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
-                OpenAiApi::ChatCompletions => self
-                    .run_agent_with(
+                    .await
+                }
+                OpenAiApi::ChatCompletions => {
+                    self.run_agent_with(
                         crate::rig_provider::build_minimax_anthropic(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -492,11 +513,12 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
+                    .await
+                }
             },
             llm_provider::ProviderKind::Moonshot => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => self
-                    .run_agent_with(
+                OpenAiApi::Responses => {
+                    self.run_agent_with(
                         crate::rig_provider::build_moonshot(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -505,9 +527,10 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
-                OpenAiApi::ChatCompletions => self
-                    .run_agent_with(
+                    .await
+                }
+                OpenAiApi::ChatCompletions => {
+                    self.run_agent_with(
                         crate::rig_provider::build_moonshot_anthropic(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -516,37 +539,38 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
-            },
-            llm_provider::ProviderKind::Xiaomimimo => {
-                match self.provider.api.unwrap_or_default() {
-                    OpenAiApi::Responses => self
-                        .run_agent_with(
-                            crate::rig_provider::build_xiaomimimo(&self.provider)
-                                .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                            prompt,
-                            &role,
-                            fork,
-                            model,
-                            &run,
-                        )
-                        .await,
-                    OpenAiApi::ChatCompletions => self
-                        .run_agent_with(
-                            crate::rig_provider::build_xiaomimimo_anthropic(&self.provider)
-                                .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                            prompt,
-                            &role,
-                            fork,
-                            model,
-                            &run,
-                        )
-                        .await,
+                    .await
                 }
-            }
+            },
+            llm_provider::ProviderKind::Xiaomimimo => match self.provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => {
+                    self.run_agent_with(
+                        crate::rig_provider::build_xiaomimimo(&self.provider)
+                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
+                        prompt,
+                        &role,
+                        fork,
+                        model,
+                        &run,
+                    )
+                    .await
+                }
+                OpenAiApi::ChatCompletions => {
+                    self.run_agent_with(
+                        crate::rig_provider::build_xiaomimimo_anthropic(&self.provider)
+                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
+                        prompt,
+                        &role,
+                        fork,
+                        model,
+                        &run,
+                    )
+                    .await
+                }
+            },
             llm_provider::ProviderKind::Zai => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => self
-                    .run_agent_with(
+                OpenAiApi::Responses => {
+                    self.run_agent_with(
                         crate::rig_provider::build_zai(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -555,9 +579,10 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
-                OpenAiApi::ChatCompletions => self
-                    .run_agent_with(
+                    .await
+                }
+                OpenAiApi::ChatCompletions => {
+                    self.run_agent_with(
                         crate::rig_provider::build_zai_anthropic(&self.provider)
                             .map_err(|error| DelegateError::Failed(error.to_string()))?,
                         prompt,
@@ -566,7 +591,8 @@ impl Delegate {
                         model,
                         &run,
                     )
-                    .await,
+                    .await
+                }
             },
         }
     }
