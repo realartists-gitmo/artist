@@ -3202,6 +3202,23 @@ mod tests {
         )
     }
 
+    fn test_footer() -> status_bar::StatusView {
+        status_bar::view(vec![
+            status_bar::StatusSegment {
+                item: StatusItem::ProjectDirectory,
+                text: "artist".into(),
+                compact: None,
+                palette_index: 0,
+            },
+            status_bar::StatusSegment {
+                item: StatusItem::Model,
+                text: "gpt-test".into(),
+                compact: None,
+                palette_index: 2,
+            },
+        ])
+    }
+
     #[test]
     fn accounts_switch_persists_selected_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -3388,13 +3405,13 @@ mod tests {
 
     #[test]
     fn streamed_transcript_adds_exactly_one_live_viewport_gap() {
-        let without_output = streaming_viewport_height(3, 0, 0, 1, false, 20);
-        let with_output = streaming_viewport_height(3, 0, 0, 1, true, 20);
-        let with_live_reasoning = streaming_viewport_height(3, 0, 1, 1, true, 20);
+        let without_output = streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, false, 20);
+        let with_output = streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, true, 20);
+        let with_live_reasoning = streaming_viewport_height(3, 0, 1, status_bar::HEIGHT, true, 20);
         assert_eq!(with_output, without_output + 1);
         assert_eq!(with_live_reasoning, without_output + 2);
         assert_eq!(
-            streaming_viewport_height(3, 0, 0, 1, false, 20),
+            streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, false, 20),
             without_output,
             "a committed spacer disables the live gap"
         );
@@ -3410,7 +3427,7 @@ mod tests {
                     frame,
                     &ChatInput::default(),
                     &["/help  Show commands".into()],
-                    &Line::default(),
+                    &status_bar::StatusView::default(),
                     false,
                 )
             })
@@ -3462,7 +3479,7 @@ mod tests {
                         "› /help  Show commands".into(),
                         "/model  Select model".into(),
                     ],
-                    &Line::default(),
+                    &status_bar::StatusView::default(),
                     false,
                 )
             })
@@ -3474,37 +3491,34 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_renders_below_input() {
-        let backend = TestBackend::new(20, 4);
+    fn status_bar_renders_two_rows_below_input() {
+        let backend = TestBackend::new(20, 5);
         let mut terminal = Terminal::new(backend).unwrap();
-        let footer = Line::styled("model", Style::default().fg(Color::Black).bg(Color::Gray));
+        let footer = test_footer();
         terminal
             .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
         assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
-        assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "m");
-        assert_eq!(buffer.cell((0, 3)).unwrap().bg, Color::Gray);
+        assert_eq!(buffer.cell((1, 3)).unwrap().symbol(), "a");
+        assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "g");
     }
 
     #[test]
-    fn status_bar_stays_one_row_at_narrow_widths() {
-        let backend = TestBackend::new(6, 6);
+    fn status_bar_stays_two_rows_at_narrow_widths() {
+        let backend = TestBackend::new(6, 5);
         let mut terminal = Terminal::new(backend).unwrap();
-        let footer = Line::styled(
-            "model | branch",
-            Style::default().fg(Color::Black).bg(Color::Gray),
-        );
+        let footer = test_footer();
         terminal
             .draw(|frame| render_with_panel(frame, &ChatInput::default(), &[], &footer, false))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "┌");
-        assert_eq!(buffer.cell((0, 4)).unwrap().symbol(), "└");
-        assert_eq!(buffer.cell((0, 5)).unwrap().symbol(), "m");
-        assert_eq!(buffer.cell((0, 5)).unwrap().bg, Color::Gray);
+        assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
+        assert_eq!(buffer.cell((0, 2)).unwrap().symbol(), "└");
+        assert_ne!(buffer.cell((0, 3)).unwrap().symbol(), "┌");
+        assert_ne!(buffer.cell((0, 4)).unwrap().symbol(), "└");
     }
 
     #[test]
@@ -3513,14 +3527,20 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_with_panel(frame, &ChatInput::default(), &[], &Line::default(), false)
+                render_with_panel(
+                    frame,
+                    &ChatInput::default(),
+                    &[],
+                    &status_bar::StatusView::default(),
+                    false,
+                )
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "┌");
         assert_eq!(buffer.cell((19, 0)).unwrap().symbol(), "┐");
         assert_eq!(buffer.cell((1, 1)).unwrap().bg, Color::Reset);
-        assert_eq!(buffer.cell((0, 0)).unwrap().fg, Color::Rgb(128, 128, 128));
-        assert_eq!(buffer.cell((0, 2)).unwrap().fg, Color::Rgb(255, 255, 255));
+        assert_eq!(buffer.cell((0, 0)).unwrap().fg, crate::theme::PASTEL_PINK);
+        assert_eq!(buffer.cell((0, 2)).unwrap().fg, crate::theme::PASTEL_PINK);
     }
 }
