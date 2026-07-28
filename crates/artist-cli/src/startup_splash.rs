@@ -14,8 +14,8 @@ pub(crate) const HEIGHT: u16 = 7;
 
 const ART: &str = concat!(
     "\x1b[0;37;40m     \x1b[0;97;1;40m▄█▄\x1b[0;37;40m            \x1b[0;97;1;40m██\x1b[0;37;40m    \x1b[0;97;1;40m██\x1b[0;37;40m          \x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0m\n",
-    "\x1b[0;37;40m    \x1b[0;97;1;40m██▀█▄\x1b[0;37;40m   \x1b[0;97;1;40m▄\x1b[0;37;40m      \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▀\x1b[0;37;40m  \x1b[0;97;1;40m▄\x1b[0;97;1;47m▄▄\x1b[0;37;40m   \x1b[0;97;1;40m▄▄▄▄▄\x1b[0;37;40m \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▀\x1b[0;37;40m \x1b[0m\n",
-    "\x1b[0;37;40m   \x1b[0;97;1;40m██\x1b[0;37;40m█ \x1b[0;97;1;47m▀\x1b[0;97;1;40m█\x1b[0;37;40m   \x1b[0;97;1;40m██▄██▄\x1b[0;37;40m  \x1b[0;97;1;40m██\x1b[0;37;40m   ▀\x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▄\x1b[0;37;40m▀▀  \x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0m\n",
+    "\x1b[0;37;40m    \x1b[0;97;1;40m██\x1b[0;97;1;47m▀\x1b[0;97;1;40m█▄\x1b[0;37;40m   \x1b[0;97;1;40m▄\x1b[0;37;40m      \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▀\x1b[0;37;40m  \x1b[0;97;1;40m▄\x1b[0;97;1;47m▄▄\x1b[0;37;40m   \x1b[0;97;1;40m▄▄▄▄▄\x1b[0;37;40m \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▀\x1b[0;37;40m \x1b[0m\n",
+    "\x1b[0;37;40m   \x1b[0;97;1;40m███\x1b[0;37;40m \x1b[0;97;1;47m▀\x1b[0;97;1;40m█\x1b[0;37;40m   \x1b[0;97;1;40m██▄██▄\x1b[0;37;40m  \x1b[0;97;1;40m██\x1b[0;37;40m   ▀\x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0;97;1;47m▀\x1b[0;97;1;40m██\x1b[0;97;1;47m▄\x1b[0;37;40m▀▀  \x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0m\n",
     "\x1b[0;37;40m  \x1b[0;97;1;40m██\x1b[0;97;1;47m▀▀▀▀\x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0;97;1;40m██\x1b[0;37;40m▀\x1b[0;97;1;47m▀▀\x1b[0;37;40m▀  \x1b[0;97;1;40m██\x1b[0;37;40m    \x1b[0;97;1;40m██\x1b[0;37;40m   ▀\x1b[0;97;1;47m▀\x1b[0;97;1;40m██▄\x1b[0;37;40m  \x1b[0;97;1;40m██\x1b[0;37;40m  \x1b[0m\n",
     "\x1b[0;97;1;40m▄██\x1b[0;97;1;47m▄\x1b[0;97;1;40m▄\x1b[0;37;40m \x1b[0;90;1;40m▄\x1b[0;97;1;40m▄██▄\x1b[0;37;40m \x1b[0;97;1;40m██\x1b[0;37;40m      \x1b[0;97;1;47m▀\x1b[0;97;1;40m█▄▄\x1b[0;37;40m \x1b[0;97;1;40m▄██▄\x1b[0;37;40m \x1b[0;97;1;47m▀\x1b[0;97;1;40m▄▄█\x1b[0;97;1;47m▀\x1b[0;37;40m▀  \x1b[0;97;1;47m▀\x1b[0;97;1;40m█▄▄\x1b[0m\n",
     "\x1b[0;37;40m▀▀▀▀▀ \x1b[0;90;1;40m▀\x1b[0;37;40m▀▀▀▀ ▀▀       ▀▀▀ ▀▀▀▀  ▀▀▀     ▀▀▀\x1b[0m\n",
@@ -112,13 +112,14 @@ mod tests {
             ]
         );
         let upper_counter = &text.lines[1].spans[7];
-        let lower_shade = &text.lines[2].spans[6];
+        let lower_left_edge = &text.lines[2].spans[6];
         let lower_counter = &text.lines[2].spans[7];
         assert_eq!(upper_counter.content, "▀");
-        assert_eq!(upper_counter.style.bg, None);
-        assert_eq!(lower_shade.content, "█");
+        assert!(upper_counter.style.bg.is_some());
+        assert_eq!(lower_left_edge.content, "█");
         assert_eq!(lower_counter.content, " ");
         assert_eq!(lower_counter.style.bg, None);
+        assert!(ART.contains("\x1b[0;97;1;40m███\x1b[0;37;40m "));
         assert!(
             ['▓', '▒', '░']
                 .into_iter()
