@@ -293,6 +293,22 @@ mod tests {
     }
 
     #[test]
+    fn write_output_propagates_the_shared_diff_rendering() {
+        let mut ui = ToolUi::default();
+        ui.start(
+            "w".into(),
+            "write",
+            &serde_json::json!({"path":"src/lib.rs","content":"new\n"}),
+        );
+        let output = ui.output(
+            "w",
+            "Written src/lib.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        assert_eq!(output.lines[0].text, "   1      │ -old\n        1 │ +new");
+        assert!(output.lines[0].is_diff);
+    }
+
+    #[test]
     fn valid_custom_icons_survive_and_invalid_icons_use_fallback() {
         let mut ui = ToolUi::with_icons(HashMap::from([
             ("deploy".into(), "🚀".into()),

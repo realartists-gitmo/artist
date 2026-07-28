@@ -178,6 +178,17 @@ fn input(text: impl Into<String>) -> TitleSegment {
 mod tests {
     use super::*;
 
+    fn inputs(title: &ToolTitle) -> Vec<&str> {
+        title
+            .segments
+            .iter()
+            .filter_map(|segment| match segment {
+                TitleSegment::Input(text) => Some(text.as_str()),
+                TitleSegment::Prose(_) => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn describes_each_skill_operation() {
         assert_eq!(
@@ -204,5 +215,61 @@ mod tests {
             .plain_text(),
             "Read pdf skill resource references/forms.md"
         );
+    }
+
+    #[test]
+    fn marks_only_displayed_input_values_for_accenting() {
+        for (name, arguments, expected) in [
+            (
+                "read",
+                serde_json::json!({"path":"src/lib.rs"}),
+                vec!["src/lib.rs"],
+            ),
+            (
+                "find",
+                serde_json::json!({"query":"config"}),
+                vec!["config"],
+            ),
+            ("grep", serde_json::json!({"query":"TODO"}), vec!["TODO"]),
+            (
+                "web_search",
+                serde_json::json!({"queries":["rust","tui"]}),
+                vec!["rust; tui"],
+            ),
+            ("edit", serde_json::json!({"path":"old.rs"}), vec!["old.rs"]),
+            (
+                "write",
+                serde_json::json!({"path":"new.rs"}),
+                vec!["new.rs"],
+            ),
+            (
+                "bash",
+                serde_json::json!({"command":"cargo test"}),
+                vec!["cargo test"],
+            ),
+            (
+                "skill",
+                serde_json::json!({"mode":"activate","name":"pdf"}),
+                vec!["pdf"],
+            ),
+            (
+                "skill",
+                serde_json::json!({"mode":"readResource","name":"pdf","path":"forms.md"}),
+                vec!["pdf", "forms.md"],
+            ),
+            (
+                "subagent",
+                serde_json::json!({"agent":"explorer","prompt":"inspect"}),
+                vec!["explorer", "inspect"],
+            ),
+            (
+                "subagent",
+                serde_json::json!({"mode":"status","taskId":"a-blue-fox"}),
+                vec!["a-blue-fox"],
+            ),
+        ] {
+            assert_eq!(inputs(&title(name, &arguments)), expected, "{name}");
+        }
+        assert!(inputs(&title("find", &serde_json::json!({}))).is_empty());
     }
 }
