@@ -11,6 +11,7 @@ mod input_border;
 mod input_images;
 mod interaction;
 mod login;
+mod message_box;
 mod models;
 mod prompt;
 mod provider_commands;

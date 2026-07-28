@@ -1,0 +1,66 @@
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::Style,
+    text::Text,
+    widgets::{Paragraph, Widget, Wrap},
+};
+use unicode_width::UnicodeWidthStr;
+
+pub(crate) fn frame_height(text: &str, width: u16) -> u16 {
+    let inner_width = usize::from(width.saturating_sub(2).max(1));
+    let content_height = text
+        .split('\n')
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
+        .sum::<usize>()
+        .max(1) as u16;
+    content_height.saturating_add(2)
+}
+
+pub(crate) fn render(buffer: &mut Buffer, area: Rect, text: &str) {
+    crate::input_border::render(buffer, area);
+
+    let content_area = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    Paragraph::new(Text::styled(
+        text,
+        Style::default().fg(crate::theme::PASTEL_WHITE),
+    ))
+    .wrap(Wrap { trim: false })
+    .render(content_area, buffer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{buffer::Buffer, style::Color};
+
+    #[test]
+    fn sent_message_matches_input_box_styling() {
+        let area = Rect::new(0, 0, 12, 3);
+        let mut buffer = Buffer::empty(area);
+
+        render(&mut buffer, area, "hello");
+
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(11, 0)].symbol(), "┐");
+        assert_eq!(buffer[(0, 2)].symbol(), "└");
+        assert_eq!(buffer[(11, 2)].symbol(), "┘");
+        assert_eq!(buffer[(0, 0)].fg, crate::theme::PASTEL_PINK);
+        assert_eq!(buffer[(1, 1)].fg, crate::theme::PASTEL_WHITE);
+        assert_eq!(buffer[(1, 1)].bg, Color::Reset);
+        assert_eq!(buffer[(1, 1)].symbol(), "h");
+    }
+
+    #[test]
+    fn frame_height_accounts_for_borders_wrapping_and_newlines() {
+        assert_eq!(frame_height("hello", 12), 3);
+        assert_eq!(frame_height("12345678901", 12), 4);
+        assert_eq!(frame_height("one\ntwo", 12), 4);
+        assert_eq!(frame_height("one\n", 12), 4);
+    }
+}

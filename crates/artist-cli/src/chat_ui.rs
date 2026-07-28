@@ -2416,31 +2416,15 @@ fn insert_history(
 }
 
 fn insert_message(terminal: &mut ratatui::DefaultTerminal, text: &str) -> Result<()> {
-    let inner_width = usize::from(terminal.size()?.width.saturating_sub(2).max(1));
-    let content_height = text
-        .lines()
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
-        .sum::<usize>()
-        .max(1) as u16;
-    terminal.insert_before(content_height.saturating_add(1), |buffer| {
-        let text_area = Rect::new(
+    let frame_height = crate::message_box::frame_height(text, terminal.size()?.width);
+    terminal.insert_before(frame_height.saturating_add(1), |buffer| {
+        let message_area = Rect::new(
             buffer.area.x,
             buffer.area.y,
             buffer.area.width,
-            content_height,
+            frame_height,
         );
-        let highlighted_area = Rect::new(
-            text_area.x.saturating_add(2),
-            text_area.y,
-            text_area.width.saturating_sub(2),
-            text_area.height,
-        );
-        Paragraph::new(Text::styled(
-            text,
-            Style::default().fg(Color::Black).bg(Color::White),
-        ))
-        .wrap(Wrap { trim: false })
-        .render(highlighted_area, buffer);
+        crate::message_box::render(buffer, message_area, text);
     })?;
     Ok(())
 }
