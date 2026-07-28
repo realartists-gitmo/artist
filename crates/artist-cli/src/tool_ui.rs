@@ -59,6 +59,21 @@ impl ToolUi {
     /// Registers a call and returns its title only when it is the next transcript slot.
     /// Later calls run concurrently, but remain buffered behind earlier call output.
     pub fn start(&mut self, id: String, name: &str, arguments: &Value) -> Option<ToolLine> {
+        self.register(id, name, arguments, true)
+    }
+
+    /// Registers a call whose title is owned by another live UI component.
+    pub fn start_silent(&mut self, id: String, name: &str, arguments: &Value) {
+        self.register(id, name, arguments, false);
+    }
+
+    fn register(
+        &mut self,
+        id: String,
+        name: &str,
+        arguments: &Value,
+        show_title: bool,
+    ) -> Option<ToolLine> {
         let show_now = self.order.is_empty();
         let call_title = title(name, arguments);
         let icon = icon_for(name, &self.custom_icons).map(str::to_owned);
@@ -71,11 +86,11 @@ impl ToolUi {
                 arguments: arguments.clone(),
                 title: call_title.clone(),
                 icon: icon.clone(),
-                title_displayed: show_now,
+                title_displayed: !show_title || show_now,
                 completed: None,
             },
         );
-        show_now.then_some(ToolLine {
+        (show_title && show_now).then_some(ToolLine {
             text: call_title,
             first: true,
             is_diff: false,
@@ -222,6 +237,31 @@ mod tests {
         assert!(released.lines[1].first);
         assert_eq!(released.lines[1].icon.as_deref(), Some(""));
         assert_eq!(released.lines[2].text, "abc: b");
+    }
+
+    #[test]
+    fn silent_calls_release_following_titles_without_rendering_their_own() {
+        let mut ui = ToolUi::default();
+        ui.start_silent(
+            "agent-a".into(),
+            "subagent",
+            &serde_json::json!({"mode":"start","prompt":"inspect a"}),
+        );
+        ui.start_silent(
+            "agent-b".into(),
+            "subagent",
+            &serde_json::json!({"mode":"start","prompt":"inspect b"}),
+        );
+        assert!(
+            ui.start("read".into(), "read", &serde_json::json!({"path":"a.rs"}))
+                .is_none()
+        );
+
+        assert!(ui.output("agent-b", "").lines.is_empty());
+        let released = ui.output("agent-a", "");
+        assert_eq!(released.lines.len(), 1);
+        assert_eq!(released.lines[0].text, "Read a.rs");
+        assert!(released.lines[0].first);
     }
 
     #[test]
