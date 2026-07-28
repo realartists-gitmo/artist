@@ -1,5 +1,7 @@
 # Artist
-A new opinionated, highly customizable, performant, and (reasonably) minimal coding harness.
+A new opinionated, highly customizable, performant, and minimal coding harness.
+<img width="1920" height="389" alt="image" src="https://github.com/user-attachments/assets/f44553c4-70d3-46b1-80a3-fce8a030d3e5" />
+
 
 ## Stability Warning
 
