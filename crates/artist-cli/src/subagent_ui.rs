@@ -81,3 +81,89 @@ fn phase_for(event: &artist_agent::PromptEvent) -> Option<&'static str> {
         artist_agent::PromptEvent::CompletionUsage { .. } => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_events_follow_activity_phases() {
+        let mut statuses = SubagentStatuses::default();
+        statuses.start("a-green-comet".into(), "explorer".into());
+        assert_eq!(statuses.active[0].phase, "thinking");
+
+        statuses.event(
+            "a-green-comet",
+            &artist_agent::PromptEvent::TextDelta("answer".into()),
+        );
+        assert_eq!(statuses.active[0].phase, "responding");
+
+        statuses.event(
+            "a-green-comet",
+            &artist_agent::PromptEvent::ToolExecutionStart {
+                id: "tool".into(),
+                name: "read".into(),
+            },
+        );
+        assert_eq!(statuses.active[0].phase, "working");
+
+        statuses.event(
+            "a-green-comet",
+            &artist_agent::PromptEvent::ToolResult {
+                id: "tool".into(),
+                content: "result".into(),
+                outcome: None,
+                duration_ms: None,
+                images: 0,
+            },
+        );
+        assert_eq!(statuses.active[0].phase, "thinking");
+
+        statuses.event(
+            "a-green-comet",
+            &artist_agent::PromptEvent::CompletionUsage { total_tokens: 42 },
+        );
+        statuses.event(
+            "missing",
+            &artist_agent::PromptEvent::TextDelta("ignored".into()),
+        );
+        assert_eq!(statuses.active[0].phase, "thinking");
+    }
+
+    #[test]
+    fn status_rows_hide_child_text_and_keep_start_order() {
+        let area = Rect::new(0, 0, 72, 2);
+        let mut buffer = Buffer::empty(area);
+        let mut statuses = SubagentStatuses::default();
+        statuses.start("a-green-comet".into(), "explorer".into());
+        statuses.start("a-soft-heron".into(), "worker".into());
+        statuses.event(
+            "a-green-comet",
+            &artist_agent::PromptEvent::TextDelta("secret child output".into()),
+        );
+
+        statuses.render(&mut buffer, area, 0);
+
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace('\u{2800}', " ");
+        assert!(rendered.contains("a-green-comet · explorer · ⋮·⋮·⋮ responding [00:00 elapsed]"));
+        assert!(rendered.contains("a-soft-heron · worker · ⋮·⋮·⋮ thinking [00:00 elapsed]"));
+        assert!(!rendered.contains("secret child output"));
+        assert!(
+            area.positions()
+                .all(|position| buffer[position].bg == crate::theme::PANEL_BACKGROUND)
+        );
+    }
+
+    #[test]
+    fn finishing_removes_the_live_row() {
+        let mut statuses = SubagentStatuses::default();
+        statuses.start("a-green-comet".into(), "explorer".into());
+        statuses.finish("a-green-comet");
+        assert_eq!(statuses.height(), 0);
+    }
+}
