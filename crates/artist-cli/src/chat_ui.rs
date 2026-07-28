@@ -1,5 +1,5 @@
 use crate::{
-    activity_indicator::activation_indicator,
+    activity_indicator::{activation_indicator, activity_status, format_elapsed},
     clipboard, command_ui,
     input_atoms::{ExpandedInput, InputAtoms},
     input_images::ImagePaste,
@@ -9,7 +9,7 @@ use crate::{
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
-    subagent_ui::{self, NestedChat},
+    subagent_ui::SubagentStatuses,
     tool_ui::ToolUi,
 };
 use anyhow::{Context, Result};
@@ -38,7 +38,7 @@ use ratatui::{
 };
 use rig_core::completion::message::Message;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     io::IsTerminal,
     path::Path,
 };
@@ -340,6 +340,8 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+    subagents: &'a SubagentStatuses,
+    animation_frame: usize,
     reasoning: &'a str,
     transcript_gap: bool,
 }
@@ -1905,9 +1907,7 @@ async fn submit(
     let mut response_since_tool = false;
     let mut transcript_gap = false;
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
-    let mut subagents = HashMap::<String, NestedChat>::new();
-    let mut rendered_subagents = HashSet::<String>::new();
-    let mut foreground_subagent_calls = HashSet::<String>::new();
+    let mut subagents = SubagentStatuses::default();
     // Keep the existing viewport on entry so starting a turn does not blink.
     // Width-driven height changes are debounced while the terminal is moving.
     let terminal_size = terminal.size()?;
@@ -1977,6 +1977,8 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
+            subagents: &subagents,
+            animation_frame,
             reasoning: &reasoning,
             transcript_gap: false,
         },
@@ -2129,9 +2131,6 @@ async fn submit(
                     }
                     artist_agent::PromptEvent::ToolCall { id, name, arguments } => {
                         phase = "working";
-                        if name == "subagent" && subagent_ui::is_foreground(&arguments) {
-                            foreground_subagent_calls.insert(id.clone());
-                        }
                         if response_since_tool {
                             if !visible.is_empty() {
                                 insert_response(terminal, &visible, &mut response_renderer)?;
@@ -2159,11 +2158,8 @@ async fn submit(
                     }
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
-                        phase = "working";
-                        let suppress = foreground_subagent_calls.remove(&id)
-                            && subagent_ui::task_id(&content)
-                                .is_some_and(|task_id| rendered_subagents.contains(&task_id));
-                        let output = tools.output(&id, if suppress { "" } else { &content });
+                        phase = "thinking";
+                        let output = tools.output(&id, &content);
                         for line in output.lines {
                             insert_tool_line(
                                 terminal,
@@ -2207,31 +2203,17 @@ async fn submit(
                             }
                         }
                     }
-                    artist_agent::PromptEvent::SubagentStarted { id, role: _, prompt } => {
+                    artist_agent::PromptEvent::SubagentStarted { id, role, prompt: _ } => {
                         phase = "working";
-                        subagent_ui::insert_prompt(terminal, &prompt)?;
-                        subagents.insert(
-                            id,
-                            NestedChat::new(context.extensions.tool_icons()),
-                        );
+                        subagents.start(id, role);
                         transcript_gap = true;
                     }
                     artist_agent::PromptEvent::SubagentEvent { id, event } => {
                         phase = "working";
-                        if let Some(subagent) = subagents.get_mut(&id) {
-                            subagent.event(terminal, *event)?;
-                            transcript_gap = true;
-                        }
+                        subagents.event(&id, &event);
                     }
-                    artist_agent::PromptEvent::SubagentFinished { id, outcome } => {
-                        if let Some(mut subagent) = subagents.remove(&id) {
-                            subagent.finish(terminal)?;
-                            if outcome != "success" && outcome != "completed" {
-                                subagent_ui::insert_status(terminal, &outcome)?;
-                            }
-                            rendered_subagents.insert(id);
-                            transcript_gap = true;
-                        }
+                    artist_agent::PromptEvent::SubagentFinished { id, outcome: _ } => {
+                        subagents.finish(&id);
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
@@ -2274,6 +2256,8 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
+                subagents: &subagents,
+                animation_frame,
                 reasoning: &reasoning,
                 transcript_gap,
             },
@@ -2755,6 +2739,7 @@ fn insert_response(
 
 fn streaming_viewport_height(
     input_height: u16,
+    subagent_height: u16,
     queued_height: u16,
     reasoning_height: u16,
     footer_height: u16,
@@ -2762,6 +2747,7 @@ fn streaming_viewport_height(
     terminal_height: u16,
 ) -> u16 {
     input_height
+        .saturating_add(subagent_height)
         .saturating_add(queued_height)
         .saturating_add(reasoning_height)
         .saturating_add(u16::from(transcript_gap))
@@ -2772,22 +2758,9 @@ fn streaming_viewport_height(
 
 fn status_line(phase: &str, elapsed: std::time::Duration, frame: usize) -> String {
     format!(
-        "  {} {phase} [{} elapsed] · esc to interrupt",
-        activation_indicator(frame),
-        format_elapsed(elapsed)
+        "  {} · esc to interrupt",
+        activity_status(phase, elapsed, frame)
     )
-}
-
-fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let seconds = elapsed.as_secs();
-    let hours = seconds / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let seconds = seconds % 60;
-    if hours == 0 {
-        format!("{minutes:02}:{seconds:02}")
-    } else {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    }
 }
 
 fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Result<()> {
@@ -2822,11 +2795,16 @@ fn draw_streaming(
         .saturating_add(2);
     let transcript_gap_height =
         u16::from(controls.transcript_gap || !controls.reasoning.is_empty());
-    let fixed_height = input_height
+    let base_fixed_height = input_height
         .saturating_add(queued_height)
         .saturating_add(transcript_gap_height)
         .saturating_add(1)
         .saturating_add(footer_height);
+    let subagent_height = controls
+        .subagents
+        .height()
+        .min(layout_height.saturating_sub(base_fixed_height));
+    let fixed_height = base_fixed_height.saturating_add(subagent_height);
     const MAX_LIVE_REASONING_ROWS: u16 = 8;
     let mut reasoning_lines = wrapped_reasoning_lines(controls.reasoning, usize::from(width));
     let reasoning_height = (reasoning_lines.len() as u16)
@@ -2840,6 +2818,7 @@ fn draw_streaming(
     // configured status bar at the bottom.
     let desired = streaming_viewport_height(
         input_height,
+        subagent_height,
         queued_height,
         reasoning_height,
         footer_height,
@@ -2858,7 +2837,16 @@ fn draw_streaming(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let queued_area = Rect::new(area.x, area.y, area.width, queued_height.min(area.height));
+        let subagent_area = Rect::new(area.x, area.y, area.width, subagent_height.min(area.height));
+        controls
+            .subagents
+            .render(frame.buffer_mut(), subagent_area, controls.animation_frame);
+        let queued_area = Rect::new(
+            area.x,
+            subagent_area.bottom(),
+            area.width,
+            queued_height.min(area.height.saturating_sub(subagent_height)),
+        );
         let queued = controls
             .steering
             .displays()
@@ -2884,7 +2872,7 @@ fn draw_streaming(
             area.x,
             queued_area.bottom(),
             area.width,
-            reasoning_height.min(area.height.saturating_sub(queued_height)),
+            reasoning_height.min(area.height.saturating_sub(subagent_height + queued_height)),
         );
         if reasoning_height > 0 {
             frame.render_widget(Paragraph::new(reasoning_lines), reasoning_area);
@@ -2900,7 +2888,9 @@ fn draw_streaming(
             status_top,
             area.width,
             area.height
-                .saturating_sub(queued_height + reasoning_height + transcript_gap_height)
+                .saturating_sub(
+                    subagent_height + queued_height + reasoning_height + transcript_gap_height,
+                )
                 .min(1),
         );
         frame.render_widget(
@@ -2912,7 +2902,12 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height.saturating_sub(
-                queued_height + reasoning_height + transcript_gap_height + 1 + footer_height,
+                subagent_height
+                    + queued_height
+                    + reasoning_height
+                    + transcript_gap_height
+                    + 1
+                    + footer_height,
             ),
         );
         render_input(frame, input_area, controls.input);
@@ -3402,13 +3397,16 @@ mod tests {
 
     #[test]
     fn streamed_transcript_adds_exactly_one_live_viewport_gap() {
-        let without_output = streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, false, 20);
-        let with_output = streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, true, 20);
-        let with_live_reasoning = streaming_viewport_height(3, 0, 1, status_bar::HEIGHT, true, 20);
+        let without_output = streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, false, 20);
+        let with_output = streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, true, 20);
+        let with_live_reasoning =
+            streaming_viewport_height(3, 0, 0, 1, status_bar::HEIGHT, true, 20);
+        let with_subagent = streaming_viewport_height(3, 1, 0, 0, status_bar::HEIGHT, false, 20);
         assert_eq!(with_output, without_output + 1);
         assert_eq!(with_live_reasoning, without_output + 2);
+        assert_eq!(with_subagent, without_output + 1);
         assert_eq!(
-            streaming_viewport_height(3, 0, 0, status_bar::HEIGHT, false, 20),
+            streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, false, 20),
             without_output,
             "a committed spacer disables the live gap"
         );
