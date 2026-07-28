@@ -252,14 +252,14 @@ mod tests {
     fn write_uses_the_same_numbered_diff_preview_as_edit() {
         let result = "Written new.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n";
         let presented = present("write", result);
-        assert_eq!(presented.preview, "   1    1 │ ~new");
+        assert_eq!(presented.preview, "   1 │ ~new");
         assert!(presented.is_diff);
     }
 
     #[test]
     fn edit_rendering_remains_numbered_and_diff_styled() {
         let presented = present("edit", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
-        assert_eq!(presented.preview, "   1    1 │ ~new");
+        assert_eq!(presented.preview, "   1 │ ~new");
         assert!(presented.is_diff);
     }
 

@@ -288,7 +288,7 @@ mod tests {
             &serde_json::json!({"path":"src/lib.rs"}),
         );
         let output = ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
-        assert_eq!(output.lines[0].text, "   1    1 │ ~new");
+        assert_eq!(output.lines[0].text, "   1 │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
@@ -304,7 +304,7 @@ mod tests {
             "w",
             "Written src/lib.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        assert_eq!(output.lines[0].text, "   1    1 │ ~new");
+        assert_eq!(output.lines[0].text, "   1 │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
