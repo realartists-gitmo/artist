@@ -2159,6 +2159,7 @@ async fn submit(
                             insert_tool_line(
                                 terminal,
                                 &title.text,
+                                title.title.as_ref(),
                                 true,
                                 false,
                                 title.icon.as_deref(),
@@ -2180,6 +2181,7 @@ async fn submit(
                             insert_tool_line(
                                 terminal,
                                 &line.text,
+                                line.title.as_ref(),
                                 line.first,
                                 line.is_diff,
                                 line.icon.as_deref(),
@@ -2190,6 +2192,7 @@ async fn submit(
                             insert_tool_line(
                                 terminal,
                                 &format!("[{images} image result(s) not shown]"),
+                                None,
                                 false,
                                 false,
                                 None,
@@ -2425,6 +2428,7 @@ fn insert_history(
                 insert_tool_line(
                     terminal,
                     &line,
+                    None,
                     true,
                     false,
                     crate::tool_ui::icon_for(name, custom_icons),
@@ -2558,74 +2562,83 @@ fn tool_prefix(first: bool, icon: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn tool_icon_color(icon: &str) -> Color {
-    match icon {
-        "" | "" => crate::theme::PASTEL_MINT,
-        "" | "" => crate::theme::PASTEL_BLUSH,
-        "" | "" => crate::theme::PASTEL_YELLOW,
-        "" | "󰒓" => crate::theme::PASTEL_BLUE,
-        "" => crate::theme::PASTEL_PINK,
-        _ => {
-            let index = icon
-                .chars()
-                .fold(0usize, |value, character| value ^ character as usize);
-            crate::theme::cycle_color(index)
-        }
-    }
-}
-
 fn insert_tool_line(
     terminal: &mut ratatui::DefaultTerminal,
     content: &str,
+    title: Option<&crate::tool_ui::ToolTitle>,
     first: bool,
     is_diff: bool,
     icon: Option<&str>,
 ) -> Result<()> {
     let prefix = tool_prefix(first, icon);
     let width = usize::from(terminal.size()?.width.max(1));
-    let text = content
-        .lines()
-        .enumerate()
-        .map(|(index, line)| {
-            // Tabs otherwise skip styled terminal cells. Tool lines are kept
-            // to one terminal row so large diffs cannot dominate the UI.
-            let line = line.replace('\t', "    ");
-            let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
-            let line =
-                truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
-            let diff_content = line
-                .split_once("│ ")
-                .map_or(line.as_str(), |(_, content)| content);
-            let color = if first {
-                crate::theme::PASTEL_WHITE
-            } else if is_diff && diff_content.starts_with('+') {
-                crate::theme::PASTEL_MINT
-            } else if is_diff && diff_content.starts_with('-') {
-                crate::theme::PASTEL_PINK
-            } else {
-                Color::Rgb(175, 175, 175)
-            };
-            let style = Style::default()
-                .fg(color)
-                .bg(crate::theme::PANEL_BACKGROUND);
-            if index == 0 && first {
-                let icon = icon.unwrap_or("󰒓");
-                Line::from(vec![
-                    Span::styled("  ", style),
-                    Span::styled(
-                        icon.to_owned(),
-                        Style::default()
-                            .fg(tool_icon_color(icon))
-                            .bg(crate::theme::PANEL_BACKGROUND)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  {line}"), style),
-                ])
-            } else {
-                Line::styled(format!("{line_prefix}{line}"), style)
-            }
-        })
-        .collect::<Vec<_>>();
+    let text = if first && let Some(title) = title {
+        let icon = icon.unwrap_or("󰒓");
+        let base = Style::default()
+            .fg(crate::theme::PASTEL_WHITE)
+            .bg(crate::theme::PANEL_BACKGROUND);
+        let mut spans = vec![
+            Span::styled("  ", base),
+            Span::styled(
+                icon.to_owned(),
+                Style::default()
+                    .fg(crate::tool_ui::accent_color(icon))
+                    .bg(crate::theme::PANEL_BACKGROUND)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", base),
+        ];
+        spans.extend(crate::tool_ui::title_spans(
+            title,
+            width.saturating_sub(prefix.width()).max(1),
+            crate::tool_ui::accent_color(icon),
+        ));
+        vec![Line::from(spans)]
+    } else {
+        content
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                // Tabs otherwise skip styled terminal cells. Tool lines are kept
+                // to one terminal row so large diffs cannot dominate the UI.
+                let line = line.replace('\t', "    ");
+                let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
+                let line =
+                    truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
+                let diff_content = line
+                    .split_once("│ ")
+                    .map_or(line.as_str(), |(_, content)| content);
+                let color = if first {
+                    crate::theme::PASTEL_WHITE
+                } else if is_diff && diff_content.starts_with('+') {
+                    crate::theme::PASTEL_MINT
+                } else if is_diff && diff_content.starts_with('-') {
+                    crate::theme::PASTEL_PINK
+                } else {
+                    Color::Rgb(175, 175, 175)
+                };
+                let style = Style::default()
+                    .fg(color)
+                    .bg(crate::theme::PANEL_BACKGROUND);
+                if index == 0 && first {
+                    let icon = icon.unwrap_or("󰒓");
+                    Line::from(vec![
+                        Span::styled("  ", style),
+                        Span::styled(
+                            icon.to_owned(),
+                            Style::default()
+                                .fg(crate::tool_ui::accent_color(icon))
+                                .bg(crate::theme::PANEL_BACKGROUND)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(format!("  {line}"), style),
+                    ])
+                } else {
+                    Line::styled(format!("{line_prefix}{line}"), style)
+                }
+            })
+            .collect::<Vec<_>>()
+    };
     let height = text
         .iter()
         .map(|line| line.width().max(1).div_ceil(width))
