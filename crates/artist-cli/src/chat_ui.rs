@@ -9,7 +9,7 @@ use crate::{
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
-    subagent_ui::SubagentStatuses,
+    subagent_ui::{self, SubagentStatuses},
     tool_ui::ToolUi,
 };
 use anyhow::{Context, Result};
@@ -38,7 +38,7 @@ use ratatui::{
 };
 use rig_core::completion::message::Message;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::IsTerminal,
     path::Path,
 };
@@ -1908,6 +1908,7 @@ async fn submit(
     let mut transcript_gap = false;
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
     let mut subagents = SubagentStatuses::default();
+    let mut subagent_launch_calls = HashSet::new();
     // Keep the existing viewport on entry so starting a turn does not blink.
     // Width-driven height changes are debounced while the terminal is moving.
     let terminal_size = terminal.size()?;
@@ -2145,7 +2146,16 @@ async fn submit(
                             reasoning.clear();
                             transcript_gap = false;
                         }
-                        if let Some(title) = tools.start(id, &name, &arguments) {
+                        let is_subagent_launch =
+                            name == "subagent" && subagent_ui::is_launch(&arguments);
+                        let title = if is_subagent_launch {
+                            subagent_launch_calls.insert(id.clone());
+                            tools.start_silent(id, &name, &arguments);
+                            None
+                        } else {
+                            tools.start(id, &name, &arguments)
+                        };
+                        if let Some(title) = title {
                             insert_tool_line(
                                 terminal,
                                 &title.text,
@@ -2159,7 +2169,13 @@ async fn submit(
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
                         phase = "thinking";
-                        let output = tools.output(&id, &content);
+                        let is_subagent_launch = subagent_launch_calls.remove(&id);
+                        let silent_running = is_subagent_launch
+                            && subagent_ui::is_running_output(&content);
+                        let output = tools.output(
+                            &id,
+                            if silent_running { "" } else { &content },
+                        );
                         for line in output.lines {
                             insert_tool_line(
                                 terminal,
@@ -2190,8 +2206,12 @@ async fn submit(
                             steering_input.cursor = 0;
                         }
                         if output.batch_complete {
-                            insert_blank(terminal)?;
-                            transcript_gap = false;
+                            if silent_running {
+                                transcript_gap = true;
+                            } else {
+                                insert_blank(terminal)?;
+                                transcript_gap = false;
+                            }
                             for message in pending_delivered.drain(..) {
                                 insert_message(terminal, &message.display)?;
                                 transcript_gap = true;
@@ -2203,17 +2223,20 @@ async fn submit(
                             }
                         }
                     }
-                    artist_agent::PromptEvent::SubagentStarted { id, role, prompt: _ } => {
+                    artist_agent::PromptEvent::SubagentStarted { id, role, prompt } => {
                         phase = "working";
-                        subagents.start(id, role);
+                        subagents.start_card(id, role, prompt);
                         transcript_gap = true;
                     }
                     artist_agent::PromptEvent::SubagentEvent { id, event } => {
                         phase = "working";
                         subagents.event(&id, &event);
                     }
-                    artist_agent::PromptEvent::SubagentFinished { id, outcome: _ } => {
-                        subagents.finish(&id);
+                    artist_agent::PromptEvent::SubagentFinished { id, outcome } => {
+                        if let Some(status) = subagents.settle(&id, outcome) {
+                            subagent_ui::insert_settled(terminal, status)?;
+                            transcript_gap = true;
+                        }
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
                         if total_tokens > 0 {
@@ -2291,6 +2314,9 @@ async fn submit(
     }
     if !visible.is_empty() {
         insert_response(terminal, &visible, &mut response_renderer)?;
+    }
+    for status in subagents.drain_running() {
+        subagent_ui::insert_settled(terminal, status)?;
     }
     // Compose the failure and elapsed time as one transcript block. This mirrors
     // component-based TUIs (Codex/Pi), where related rows are laid out together
@@ -2803,7 +2829,9 @@ fn draw_streaming(
     let subagent_height = controls
         .subagents
         .height()
-        .min(layout_height.saturating_sub(base_fixed_height));
+        .min(layout_height.saturating_sub(base_fixed_height))
+        / 2
+        * 2;
     let fixed_height = base_fixed_height.saturating_add(subagent_height);
     const MAX_LIVE_REASONING_ROWS: u16 = 8;
     let mut reasoning_lines = wrapped_reasoning_lines(controls.reasoning, usize::from(width));
@@ -3401,10 +3429,10 @@ mod tests {
         let with_output = streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, true, 20);
         let with_live_reasoning =
             streaming_viewport_height(3, 0, 0, 1, status_bar::HEIGHT, true, 20);
-        let with_subagent = streaming_viewport_height(3, 1, 0, 0, status_bar::HEIGHT, false, 20);
+        let with_subagent = streaming_viewport_height(3, 2, 0, 0, status_bar::HEIGHT, false, 20);
         assert_eq!(with_output, without_output + 1);
         assert_eq!(with_live_reasoning, without_output + 2);
-        assert_eq!(with_subagent, without_output + 1);
+        assert_eq!(with_subagent, without_output + 2);
         assert_eq!(
             streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, false, 20),
             without_output,

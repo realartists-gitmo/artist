@@ -29,10 +29,6 @@ pub(crate) struct SettledSubagent {
 }
 
 impl SubagentStatuses {
-    pub(crate) fn start(&mut self, id: String, role: String) {
-        self.start_card(id, role, String::new());
-    }
-
     pub(crate) fn start_card(&mut self, id: String, role: String, prompt: String) {
         self.active.retain(|status| status.id != id);
         self.active.push(SubagentStatus {
@@ -51,10 +47,6 @@ impl SubagentStatuses {
         if let Some(status) = self.active.iter_mut().find(|status| status.id == id) {
             status.phase = phase;
         }
-    }
-
-    pub(crate) fn finish(&mut self, id: &str) {
-        self.active.retain(|status| status.id != id);
     }
 
     pub(crate) fn settle(&mut self, id: &str, outcome: String) -> Option<SettledSubagent> {
