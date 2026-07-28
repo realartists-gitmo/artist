@@ -40,6 +40,6 @@ pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use memory::SessionMemory;
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{
-    ReplayItem, SuperviseItem, SuperviseTool, markdown_fragment, render_markdown, replay_for_ui,
-    rewind_targets, supervise_for_ui, user_prompts, visible_events,
+    ReplayItem, markdown_fragment, render_markdown, replay_for_ui, rewind_targets, user_prompts,
+    visible_events,
 };

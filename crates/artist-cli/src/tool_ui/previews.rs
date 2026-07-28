@@ -5,7 +5,6 @@ use super::{diff::numbered_diff, titles::shortened};
 const DISPLAY_OUTPUT_LIMIT: usize = 1200;
 
 pub(super) struct PresentedOutput {
-    pub semantic_output: String,
     pub preview: String,
     pub is_diff: bool,
 }
@@ -25,25 +24,19 @@ pub(super) fn present(name: &str, arguments: &Value, raw_output: &str) -> Presen
             30,
         ),
         "subagent" => PresentedOutput {
-            semantic_output: raw_output.to_owned(),
             preview: compact_subagent_output(raw_output),
             is_diff: false,
         },
-        _ => {
-            let semantic_output = raw_output.to_owned();
-            PresentedOutput {
-                preview: bounded_bytes(semantic_output.trim(), DISPLAY_OUTPUT_LIMIT),
-                semantic_output,
-                is_diff: false,
-            }
-        }
+        _ => PresentedOutput {
+            preview: bounded_bytes(raw_output.trim(), DISPLAY_OUTPUT_LIMIT),
+            is_diff: false,
+        },
     }
 }
 
 fn line_preview(semantic_output: String, limit: usize) -> PresentedOutput {
     PresentedOutput {
         preview: limited_lines(semantic_output.trim(), limit),
-        semantic_output,
         is_diff: false,
     }
 }
@@ -59,7 +52,7 @@ fn limited_lines(output: &str, limit: usize) -> String {
         preview.push('\n');
     }
     let noun = if omitted == 1 { "line" } else { "lines" };
-    preview.push_str(&format!("[{omitted} {noun} omitted · /supervise]"));
+    preview.push_str(&format!("[{omitted} {noun} omitted]"));
     preview
 }
 
@@ -99,7 +92,6 @@ fn edit_preview(output: &str) -> PresentedOutput {
         .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned());
     PresentedOutput {
         preview: truncate_edit(&semantic_output),
-        semantic_output,
         is_diff: true,
     }
 }
@@ -227,10 +219,9 @@ mod tests {
                 numbered_lines(7)
             ),
         );
-        assert_eq!(presented.semantic_output, numbered_lines(7));
         assert_eq!(
             presented.preview,
-            "line 1\nline 2\nline 3\nline 4\nline 5\n[2 lines omitted · /supervise]"
+            "line 1\nline 2\nline 3\nline 4\nline 5\n[2 lines omitted]"
         );
     }
 
@@ -241,23 +232,20 @@ mod tests {
             &serde_json::json!({"mode":"exec"}),
             "status: completed\nexitCode: Some(0)\ntruncated: false\n",
         );
-        assert_eq!(presented.semantic_output, "status: completed");
         assert_eq!(presented.preview, "status: completed");
     }
 
     #[test]
-    fn applies_exact_line_limits_and_supervise_markers() {
+    fn applies_exact_line_limits_and_omission_markers() {
         for (name, limit) in [("find", 10), ("grep", 10), ("read", 10), ("skill", 30)] {
             let exact = numbered_lines(limit);
             let exact_presented = present(name, &serde_json::json!({}), &exact);
             assert_eq!(exact_presented.preview, exact);
-            assert!(!exact_presented.preview.contains("/supervise"));
 
             let output = numbered_lines(limit + 1);
             let presented = present(name, &serde_json::json!({}), &output);
-            assert_eq!(presented.semantic_output, output);
             assert_eq!(presented.preview.lines().count(), limit + 1);
-            assert!(presented.preview.ends_with("[1 line omitted · /supervise]"));
+            assert!(presented.preview.ends_with("[1 line omitted]"));
         }
     }
 
@@ -269,9 +257,8 @@ mod tests {
             &serde_json::json!({"path":"new.rs","content":content}),
             "Written new.rs.\n\nDiff:\n+not the preview",
         );
-        assert_eq!(presented.semantic_output, numbered_lines(31));
         assert_eq!(presented.preview.lines().count(), 31);
-        assert!(presented.preview.ends_with("[1 line omitted · /supervise]"));
+        assert!(presented.preview.ends_with("[1 line omitted]"));
         assert!(!presented.is_diff);
     }
 
@@ -283,7 +270,6 @@ mod tests {
             "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
         );
         assert_eq!(presented.preview, "   1      │ -old\n        1 │ +new");
-        assert_eq!(presented.preview, presented.semantic_output);
         assert!(presented.is_diff);
     }
 
@@ -293,6 +279,5 @@ mod tests {
         let presented = present("extension_tool", &serde_json::json!({}), &output);
         assert!(presented.preview.len() <= DISPLAY_OUTPUT_LIMIT);
         assert!(presented.preview.ends_with('…'));
-        assert_eq!(presented.semantic_output, output);
     }
 }

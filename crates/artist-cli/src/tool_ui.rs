@@ -6,8 +6,8 @@ mod titles;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub use icons::icon_for;
 use icons::valid_icon;
-pub use icons::{FALLBACK as FALLBACK_ICON, icon_for};
 use previews::present;
 use titles::title;
 
@@ -23,58 +23,6 @@ pub struct ToolUi {
 pub struct ToolOutput {
     pub lines: Vec<ToolLine>,
     pub batch_complete: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToolRecord {
-    pub id: String,
-    pub name: String,
-    pub arguments: Value,
-    pub raw_output: String,
-    /// Full semantic output used to derive the bounded transcript preview.
-    /// This may differ from raw tool protocol text (for example, bash headers
-    /// are stripped and write exposes the requested file content).
-    pub semantic_output: String,
-}
-
-impl ToolRecord {
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: Value,
-        raw_output: impl Into<String>,
-    ) -> Self {
-        let name = name.into();
-        let raw_output = raw_output.into();
-        let semantic_output = present(&name, &arguments, &raw_output).semantic_output;
-        Self {
-            id: id.into(),
-            name,
-            arguments,
-            raw_output,
-            semantic_output,
-        }
-    }
-
-    pub fn title(&self) -> String {
-        title(&self.name, &self.arguments)
-    }
-}
-
-/// Render every semantic output line for the supervise view. Unlike the live
-/// transcript preview, this applies neither line nor byte truncation.
-pub fn expanded_lines(record: &ToolRecord) -> Vec<ToolLine> {
-    let is_diff = record.name == "edit";
-    record
-        .semantic_output
-        .lines()
-        .map(|line| ToolLine {
-            text: line.to_owned(),
-            first: false,
-            is_diff,
-            icon: None,
-        })
-        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -246,11 +194,7 @@ mod tests {
             .join("\n");
         let output = ui.output("f", &raw);
         assert_eq!(output.lines[0].text.lines().count(), 11);
-        assert!(
-            output.lines[0]
-                .text
-                .ends_with("[2 lines omitted · /supervise]")
-        );
+        assert!(output.lines[0].text.ends_with("[2 lines omitted]"));
         assert!(output.batch_complete);
     }
 
@@ -312,7 +256,7 @@ mod tests {
                 .unwrap()
                 .icon
                 .as_deref(),
-            Some(FALLBACK_ICON)
+            Some(icons::FALLBACK)
         );
     }
 
@@ -322,26 +266,5 @@ mod tests {
         let output = ui.output("missing", "result");
         assert_eq!(output.lines[0].text, "= result");
         assert!(output.batch_complete);
-    }
-
-    #[test]
-    fn session_parts_build_the_same_untruncated_expanded_record() {
-        let content = (1..=31)
-            .map(|line| format!("line {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let record = ToolRecord::new(
-            "session-call",
-            "write",
-            serde_json::json!({"path":"src/new.rs","content":content}),
-            "Written src/new.rs.\n\nDiff:\n+ignored",
-        );
-
-        let expanded = expanded_lines(&record);
-        assert_eq!(expanded.len(), 31);
-        assert_eq!(expanded.first().unwrap().text, "line 1");
-        assert_eq!(expanded.last().unwrap().text, "line 31");
-        assert!(expanded.iter().all(|line| !line.is_diff));
-        assert_eq!(record.title(), "Wrote src/new.rs");
     }
 }

@@ -23,7 +23,6 @@ mod startup_splash;
 mod status_bar;
 mod store;
 mod subagent_ui;
-mod supervise;
 mod test_provider;
 mod theme;
 mod tool_ui;

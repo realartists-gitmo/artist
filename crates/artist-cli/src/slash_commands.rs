@@ -28,16 +28,6 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/tools",
     },
     SlashCommand {
-        name: "/supervise",
-        description: "Inspect full tool output",
-        usage: "/supervise",
-    },
-    SlashCommand {
-        name: "/sv",
-        description: "Alias for /supervise",
-        usage: "/sv",
-    },
-    SlashCommand {
         name: "/mcp",
         description: "Manage MCP servers",
         usage: "/mcp [status|start|stop|restart|refresh] [server]",
@@ -110,7 +100,6 @@ pub(crate) enum ParsedCommand<'a> {
     Quit,
     Skills,
     Tools,
-    Supervise,
     StatusBar,
     Mcp {
         action: &'a str,
@@ -217,7 +206,6 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         }),
         ("/skills", []) => Ok(ParsedCommand::Skills),
         ("/tools", []) => Ok(ParsedCommand::Tools),
-        ("/supervise", []) | ("/sv", []) => Ok(ParsedCommand::Supervise),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
             command,
@@ -230,14 +218,6 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         ("/tools", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/tools",
-        }),
-        ("/supervise", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/supervise",
-        }),
-        ("/sv", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/sv",
         }),
         ("/help", _) => Err(ParseError::InvalidUsage {
             command,
@@ -451,8 +431,6 @@ mod tests {
                 "/statusbar",
                 "/skills",
                 "/tools",
-                "/supervise",
-                "/sv",
                 "/mcp",
                 "/rewind",
                 "/compact",
@@ -481,8 +459,6 @@ mod tests {
         assert_eq!(parse("/statusbar"), Some(Ok(ParsedCommand::StatusBar)));
         assert_eq!(parse("/skills"), Some(Ok(ParsedCommand::Skills)));
         assert_eq!(parse("/tools"), Some(Ok(ParsedCommand::Tools)));
-        assert_eq!(parse("/supervise"), Some(Ok(ParsedCommand::Supervise)));
-        assert_eq!(parse("/sv"), Some(Ok(ParsedCommand::Supervise)));
         assert_eq!(
             parse(" /model "),
             Some(Ok(ParsedCommand::Model {
@@ -522,20 +498,6 @@ mod tests {
         assert_eq!(
             parse("/nope"),
             Some(Err(ParseError::UnknownCommand("/nope")))
-        );
-        assert_eq!(
-            parse("/supervise now"),
-            Some(Err(ParseError::InvalidUsage {
-                command: "/supervise",
-                usage: "/supervise"
-            }))
-        );
-        assert_eq!(
-            parse("/sv now"),
-            Some(Err(ParseError::InvalidUsage {
-                command: "/sv",
-                usage: "/sv"
-            }))
         );
         assert!(matches!(
             parse("/help now"),
@@ -644,14 +606,7 @@ mod tests {
         );
         assert_eq!(
             completions("/s").iter().map(|c| c.name).collect::<Vec<_>>(),
-            ["/statusbar", "/skills", "/supervise", "/sv", "/sessions"]
-        );
-        assert_eq!(
-            completions("/sv")
-                .iter()
-                .map(|command| command.name)
-                .collect::<Vec<_>>(),
-            ["/sv"]
+            ["/statusbar", "/skills", "/sessions"]
         );
         assert!(completions("/model ").is_empty());
         assert!(completions("hello").is_empty());

@@ -5,23 +5,13 @@ use std::collections::HashMap;
 use rig_core::completion::Message;
 use rig_core::completion::message::{AssistantContent, ToolResultContent, UserContent};
 
-use crate::replay::{ReplayItem, SuperviseItem, SuperviseTool};
+use crate::replay::ReplayItem;
 
 const TOOL_PREVIEW_CAP: usize = 160;
 
 #[derive(Default)]
 pub(crate) struct ConversationReplay {
     tool_names: HashMap<String, String>,
-}
-
-#[derive(Default)]
-pub(crate) struct SuperviseConversation {
-    tool_calls: HashMap<String, SuperviseCall>,
-}
-
-struct SuperviseCall {
-    name: String,
-    arguments: serde_json::Value,
 }
 
 impl ConversationReplay {
@@ -87,92 +77,6 @@ impl ConversationReplay {
                 }
                 if !text.is_empty() {
                     items.push(ReplayItem::Assistant(text));
-                }
-            }
-        }
-    }
-}
-
-impl SuperviseConversation {
-    pub(crate) fn clear(&mut self) {
-        self.tool_calls.clear();
-    }
-
-    pub(crate) fn observe(&mut self, message: &Message) {
-        self.process(message, None);
-    }
-
-    pub(crate) fn push(&mut self, message: &Message, items: &mut Vec<SuperviseItem>) {
-        self.process(message, Some(items));
-    }
-
-    fn process(&mut self, message: &Message, mut items: Option<&mut Vec<SuperviseItem>>) {
-        match message {
-            Message::System { .. } => {}
-            Message::User { content } => {
-                if let Some(text) = user_message_text(message)
-                    && !text.starts_with("<system-reminder")
-                    && let Some(items) = items.as_mut()
-                {
-                    items.push(SuperviseItem::User(text));
-                }
-                for item in content.iter() {
-                    let UserContent::ToolResult(result) = item else {
-                        continue;
-                    };
-                    let call = self.tool_calls.remove(&result.id);
-                    let result_text = result
-                        .content
-                        .iter()
-                        .filter_map(|content| match content {
-                            ToolResultContent::Text(text) => Some(text.text.as_str()),
-                            ToolResultContent::Image(_) => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if let Some(items) = items.as_mut() {
-                        items.push(SuperviseItem::Tool(SuperviseTool {
-                            id: result.id.clone(),
-                            name: call
-                                .as_ref()
-                                .map(|call| call.name.clone())
-                                .unwrap_or_else(|| "tool".to_owned()),
-                            arguments: call
-                                .map(|call| call.arguments)
-                                .unwrap_or(serde_json::Value::Null),
-                            result: result_text,
-                        }));
-                    }
-                }
-            }
-            Message::Assistant { content, .. } => {
-                let mut text = String::new();
-                let mut reasoning = String::new();
-                for item in content.iter() {
-                    match item {
-                        AssistantContent::Text(value) => text.push_str(&value.text),
-                        AssistantContent::Reasoning(value) => {
-                            reasoning.push_str(&value.display_text());
-                        }
-                        AssistantContent::ToolCall(call) => {
-                            self.tool_calls.insert(
-                                call.id.clone(),
-                                SuperviseCall {
-                                    name: call.function.name.clone(),
-                                    arguments: call.function.arguments.clone(),
-                                },
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(items) = items.as_mut() {
-                    if !reasoning.is_empty() {
-                        items.push(SuperviseItem::Reasoning(reasoning));
-                    }
-                    if !text.is_empty() {
-                        items.push(SuperviseItem::Assistant(text));
-                    }
                 }
             }
         }

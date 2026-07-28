@@ -860,14 +860,6 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Supervise) => handle_supervise(
-                        &mut terminal,
-                        active.as_ref(),
-                        &context.extensions.tool_icons(),
-                        viewport_height,
-                    )
-                    .await
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Sessions) => {
                         handle_sessions(context.sessions, context.project, &active)
                             .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
@@ -1233,34 +1225,6 @@ async fn run_loop(
             _ => {}
         }
     }
-}
-
-async fn handle_supervise(
-    terminal: &mut ratatui::DefaultTerminal,
-    active: Option<&ActiveSession>,
-    custom_icons: &HashMap<String, String>,
-    viewport_height: u16,
-) -> Result<Vec<String>> {
-    let Some(active) = active else {
-        return Ok(vec![
-            "No tool uses to supervise in a fresh session.".to_owned(),
-        ]);
-    };
-    active.recorder.flush().await;
-    let tools = artist_session::supervise_for_ui(&active.events()?)
-        .into_iter()
-        .filter_map(|item| match item {
-            artist_session::SuperviseItem::Tool(tool) => Some(tool),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if tools.is_empty() {
-        return Ok(vec![
-            "No tool uses to supervise in this session.".to_owned(),
-        ]);
-    }
-    crate::supervise::run(terminal, tools, custom_icons, viewport_height)?;
-    Ok(Vec::new())
 }
 
 /// `/rules`: the live rules panel and its actions. Listing shows every

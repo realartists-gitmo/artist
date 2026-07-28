@@ -1,9 +1,7 @@
 //! Display projections: the TUI resume replay and the markdown transcript.
 //! Both are derived views over the event log — the log is truth.
 
-use crate::conversation_replay::{
-    ConversationReplay, SuperviseConversation, markdown_messages, user_message_text,
-};
+use crate::conversation_replay::{ConversationReplay, markdown_messages, user_message_text};
 use crate::event::{ContentBlock, Envelope, SessionEvent};
 use crate::history::resolve_masks;
 
@@ -16,27 +14,6 @@ pub enum ReplayItem {
     Tool { name: String, preview: String },
     Steering(String),
     RuleFired { rule: String, matched: String },
-}
-
-/// One full-fidelity item in the main transcript, for interactive supervision.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SuperviseItem {
-    User(String),
-    Assistant(String),
-    Reasoning(String),
-    Tool(SuperviseTool),
-    Steering(String),
-    RuleFired { rule: String, matched: String },
-}
-
-/// A completed tool call with the complete result required by supervision mode.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SuperviseTool {
-    /// Provider tool-call id when available, otherwise Artist's stable internal id.
-    pub id: String,
-    pub name: String,
-    pub arguments: serde_json::Value,
-    pub result: String,
 }
 
 const TOOL_PREVIEW_CAP: usize = 160;
@@ -113,91 +90,6 @@ pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
             SessionEvent::LegacyTurn(turn) => match turn.role.as_str() {
                 "assistant" => items.push(ReplayItem::Assistant(turn.content)),
                 _ => items.push(ReplayItem::User(turn.content)),
-            },
-            _ => {}
-        }
-    }
-    items
-}
-
-/// Build a full-fidelity supervision transcript from visible main-lineage events.
-///
-/// Unlike [`replay_for_ui`], completed tool items retain their complete result,
-/// arguments, and stable call id. Reset snapshots, migration display offsets,
-/// rewind masks, and native Rig conversation messages follow the same display
-/// ordering as the ordinary TUI replay.
-pub fn supervise_for_ui(events: &[Envelope]) -> Vec<SuperviseItem> {
-    let masks = resolve_masks(events, None);
-    let mut items = Vec::new();
-    let mut conversation = SuperviseConversation::default();
-    for envelope in events {
-        if envelope.lineage != crate::event::MAIN_LINEAGE || masks.covers(envelope.seq) {
-            continue;
-        }
-        match envelope.event() {
-            SessionEvent::ConversationMessages(batch) => {
-                if batch.reset {
-                    conversation.clear();
-                    if batch.display_from == 0 {
-                        items.clear();
-                    } else {
-                        for message in batch.messages.iter().take(batch.display_from) {
-                            conversation.observe(message);
-                        }
-                    }
-                }
-                for message in batch.messages.iter().skip(batch.display_from) {
-                    conversation.push(message, &mut items);
-                }
-            }
-            SessionEvent::TurnUser(turn) => {
-                let text = turn.display.unwrap_or_else(|| blocks_text(&turn.content));
-                if !text.is_empty() {
-                    items.push(SuperviseItem::User(text));
-                }
-            }
-            SessionEvent::ModelTurn(turn) => {
-                let mut reasoning = String::new();
-                let mut text = String::new();
-                for block in &turn.content {
-                    match block {
-                        ContentBlock::ReasoningSummary { text: value, .. } => {
-                            reasoning.push_str(value);
-                        }
-                        ContentBlock::Text { text: value } => text.push_str(value),
-                        _ => {}
-                    }
-                }
-                if !reasoning.is_empty() {
-                    items.push(SuperviseItem::Reasoning(reasoning));
-                }
-                if !text.is_empty() {
-                    items.push(SuperviseItem::Assistant(text));
-                }
-            }
-            SessionEvent::ToolResult(result) => {
-                items.push(SuperviseItem::Tool(SuperviseTool {
-                    id: result
-                        .tool_call_id
-                        .clone()
-                        .unwrap_or_else(|| result.internal_call_id.clone()),
-                    name: result.name,
-                    arguments: result.arguments,
-                    result: result.result,
-                }));
-            }
-            SessionEvent::SteeringDelivered(steering) => {
-                items.push(SuperviseItem::Steering(steering.content));
-            }
-            SessionEvent::RuleFired(fired) => {
-                items.push(SuperviseItem::RuleFired {
-                    rule: fired.rule,
-                    matched: fired.matched,
-                });
-            }
-            SessionEvent::LegacyTurn(turn) => match turn.role.as_str() {
-                "assistant" => items.push(SuperviseItem::Assistant(turn.content)),
-                _ => items.push(SuperviseItem::User(turn.content)),
             },
             _ => {}
         }
@@ -396,14 +288,11 @@ pub fn render_markdown(events: &[Envelope]) -> String {
 mod tests {
     use super::*;
     use crate::event::{
-        ConversationMessages, HistoryRewind, ModelTurn, RuleFired, SCHEMA_VERSION,
-        ToolOutcomeRecord, ToolResultEvent, TurnUser,
+        ConversationMessages, ModelTurn, RuleFired, SCHEMA_VERSION, ToolOutcomeRecord,
+        ToolResultEvent, TurnUser,
     };
     use rig_core::OneOrMany;
-    use rig_core::completion::message::{
-        AssistantContent, Message, ToolCall, ToolFunction, ToolResult, ToolResultContent,
-        UserContent,
-    };
+    use rig_core::completion::message::{Message, UserContent};
 
     fn envelope(seq: u64, lineage: &str, event: SessionEvent) -> Envelope {
         Envelope {
@@ -415,33 +304,6 @@ mod tests {
             lineage: lineage.into(),
             kind: event.kind().to_owned(),
             payload: event.payload(),
-        }
-    }
-
-    fn native_tool_call(id: &str, name: &str, arguments: serde_json::Value) -> Message {
-        Message::Assistant {
-            id: None,
-            content: OneOrMany::one(AssistantContent::ToolCall(ToolCall {
-                id: id.into(),
-                call_id: None,
-                function: ToolFunction {
-                    name: name.into(),
-                    arguments,
-                },
-                signature: None,
-                additional_params: None,
-            })),
-        }
-    }
-
-    fn native_tool_result(id: &str, parts: &[&str]) -> Message {
-        Message::User {
-            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                id: id.into(),
-                call_id: None,
-                content: OneOrMany::many(parts.iter().map(|part| ToolResultContent::text(*part)))
-                    .unwrap(),
-            })),
         }
     }
 
@@ -532,293 +394,6 @@ mod tests {
                     rule: "no-mock".into(),
                     matched: "mock data".into()
                 },
-            ]
-        );
-    }
-
-    #[test]
-    fn supervision_preserves_native_tool_identity_arguments_and_full_result() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![
-                        Message::user("inspect it"),
-                        native_tool_call(
-                            "call-1",
-                            "read",
-                            serde_json::json!({"path": "src/lib.rs"}),
-                        ),
-                        native_tool_result("call-1", &["line one", "line two\nline three"]),
-                        Message::assistant("done"),
-                    ],
-                    reset: false,
-                    display_from: 0,
-                }),
-            ),
-            envelope(
-                1,
-                "main/delegate-1",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![
-                        native_tool_call("hidden", "bash", serde_json::json!({"command": "pwd"})),
-                        native_tool_result("hidden", &["secret"]),
-                    ],
-                    reset: false,
-                    display_from: 0,
-                }),
-            ),
-        ];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![
-                SuperviseItem::User("inspect it".into()),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "call-1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "src/lib.rs"}),
-                    result: "line one\nline two\nline three".into(),
-                }),
-                SuperviseItem::Assistant("done".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn supervision_uses_legacy_tool_ids_and_preserves_transcript_order() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text {
-                        text: "legacy request".into(),
-                    }],
-                    display: None,
-                    source: "prompt".into(),
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::ToolResult(ToolResultEvent {
-                    internal_call_id: "internal-1".into(),
-                    tool_call_id: Some("provider-1".into()),
-                    name: "grep".into(),
-                    arguments: serde_json::json!({"query": "needle"}),
-                    result: "first\nsecond".into(),
-                    outcome: ToolOutcomeRecord::Success,
-                    duration_ms: Some(4),
-                }),
-            ),
-            envelope(
-                2,
-                "main",
-                SessionEvent::ToolResult(ToolResultEvent {
-                    internal_call_id: "internal-2".into(),
-                    tool_call_id: None,
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "README.md"}),
-                    result: "fallback id".into(),
-                    outcome: ToolOutcomeRecord::Success,
-                    duration_ms: None,
-                }),
-            ),
-        ];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![
-                SuperviseItem::User("legacy request".into()),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "provider-1".into(),
-                    name: "grep".into(),
-                    arguments: serde_json::json!({"query": "needle"}),
-                    result: "first\nsecond".into(),
-                }),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "internal-2".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "README.md"}),
-                    result: "fallback id".into(),
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn supervision_observes_hidden_reset_prefix_for_visible_tool_results() {
-        let events = vec![envelope(
-            0,
-            "main",
-            SessionEvent::ConversationMessages(ConversationMessages {
-                messages: vec![
-                    native_tool_call("call-1", "write", serde_json::json!({"path": "notes.txt"})),
-                    native_tool_result("call-1", &["complete output"]),
-                ],
-                reset: true,
-                display_from: 1,
-            }),
-        )];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![SuperviseItem::Tool(SuperviseTool {
-                id: "call-1".into(),
-                name: "write".into(),
-                arguments: serde_json::json!({"path": "notes.txt"}),
-                result: "complete output".into(),
-            })]
-        );
-    }
-
-    #[test]
-    fn supervision_migration_offset_retains_legacy_items_and_adds_native_suffix() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text { text: "old".into() }],
-                    display: None,
-                    source: "prompt".into(),
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![
-                        Message::user("old"),
-                        native_tool_call("new-call", "grep", serde_json::json!({"query": "new"})),
-                        native_tool_result("new-call", &["new result"]),
-                    ],
-                    reset: true,
-                    display_from: 1,
-                }),
-            ),
-        ];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![
-                SuperviseItem::User("old".into()),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "new-call".into(),
-                    name: "grep".into(),
-                    arguments: serde_json::json!({"query": "new"}),
-                    result: "new result".into(),
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn supervision_full_reset_replaces_prior_items() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![Message::user("stale")],
-                    reset: false,
-                    display_from: 0,
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![
-                        Message::user("replacement"),
-                        native_tool_call(
-                            "replacement-call",
-                            "find",
-                            serde_json::json!({"query": "current"}),
-                        ),
-                        native_tool_result("replacement-call", &["current result"]),
-                    ],
-                    reset: true,
-                    display_from: 0,
-                }),
-            ),
-        ];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![
-                SuperviseItem::User("replacement".into()),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "replacement-call".into(),
-                    name: "find".into(),
-                    arguments: serde_json::json!({"query": "current"}),
-                    result: "current result".into(),
-                }),
-            ]
-        );
-    }
-
-    #[test]
-    fn supervision_honors_rewind_masks() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![Message::user("stale")],
-                    reset: false,
-                    display_from: 0,
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::ConversationMessages(ConversationMessages {
-                    messages: vec![
-                        Message::user("replacement"),
-                        native_tool_call("masked", "read", serde_json::json!({"path": "old"})),
-                        native_tool_result("masked", &["masked result"]),
-                    ],
-                    reset: true,
-                    display_from: 0,
-                }),
-            ),
-            envelope(
-                2,
-                "main",
-                SessionEvent::HistoryRewind(HistoryRewind {
-                    to_seq: 0,
-                    reason: "remove replacement".into(),
-                    by: "user".into(),
-                }),
-            ),
-            envelope(
-                3,
-                "main",
-                SessionEvent::ToolResult(ToolResultEvent {
-                    internal_call_id: "kept".into(),
-                    tool_call_id: None,
-                    name: "find".into(),
-                    arguments: serde_json::json!({"query": "current"}),
-                    result: "kept result".into(),
-                    outcome: ToolOutcomeRecord::Success,
-                    duration_ms: None,
-                }),
-            ),
-        ];
-
-        assert_eq!(
-            supervise_for_ui(&events),
-            vec![
-                SuperviseItem::User("stale".into()),
-                SuperviseItem::Tool(SuperviseTool {
-                    id: "kept".into(),
-                    name: "find".into(),
-                    arguments: serde_json::json!({"query": "current"}),
-                    result: "kept result".into(),
-                }),
             ]
         );
     }
