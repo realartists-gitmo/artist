@@ -2603,20 +2603,12 @@ fn insert_tool_line(
                 // to one terminal row so large diffs cannot dominate the UI.
                 let line = line.replace('\t', "    ");
                 let line_prefix = if index == 0 { prefix.as_str() } else { "    " };
-                let line =
-                    truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
                 let diff_content = line
                     .split_once("│ ")
                     .map_or(line.as_str(), |(_, content)| content);
-                let color = if first {
-                    crate::theme::PASTEL_WHITE
-                } else if is_diff && diff_content.starts_with('+') {
-                    crate::theme::PASTEL_MINT
-                } else if is_diff && diff_content.starts_with('-') {
-                    crate::theme::PASTEL_PINK
-                } else {
-                    Color::Rgb(175, 175, 175)
-                };
+                let color = tool_line_color(first, is_diff, diff_content);
+                let line =
+                    truncate_display_line(&line, width.saturating_sub(line_prefix.width()).max(1));
                 let style = Style::default()
                     .fg(color)
                     .bg(crate::theme::PANEL_BACKGROUND);
@@ -2656,6 +2648,20 @@ fn insert_tool_line(
         fill_panel_background(buffer, buffer.area);
     })?;
     Ok(())
+}
+
+fn tool_line_color(first: bool, is_diff: bool, content: &str) -> Color {
+    if first {
+        crate::theme::PASTEL_WHITE
+    } else if is_diff && content.starts_with('+') {
+        crate::theme::PASTEL_MINT
+    } else if is_diff && content.starts_with('-') {
+        crate::theme::PASTEL_PINK
+    } else if is_diff && content.starts_with('~') {
+        crate::theme::PASTEL_YELLOW
+    } else {
+        Color::Rgb(175, 175, 175)
+    }
 }
 
 fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) -> Result<()> {
@@ -3406,6 +3412,14 @@ mod tests {
         assert_eq!(tool_prefix(true, Some("$")), "  $  ");
         assert_eq!(tool_prefix(true, None), "  󰒓  ");
         assert_eq!(tool_prefix(false, Some("$")), "    ");
+    }
+
+    #[test]
+    fn colors_compact_replacements_with_the_pastel_change_accent() {
+        assert_eq!(
+            tool_line_color(false, true, "~- [x] item"),
+            crate::theme::PASTEL_YELLOW
+        );
     }
 
     #[test]

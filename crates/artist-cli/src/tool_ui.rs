@@ -12,9 +12,9 @@ pub(crate) use icons::accent_color;
 pub use icons::icon_for;
 use icons::valid_icon;
 use previews::present;
+pub(crate) use title_model::{TitleSegment, ToolTitle};
 pub(crate) use title_render::title_spans;
 use titles::title;
-pub(crate) use title_model::{TitleSegment, ToolTitle};
 
 /// Standardized presentation state for tool calls, independent of rendering.
 #[derive(Default)]
@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_edit_rendering_unchanged() {
+    fn edit_output_uses_compact_replacement_rows() {
         let mut ui = ToolUi::default();
         ui.start(
             "e".into(),
@@ -288,7 +288,7 @@ mod tests {
             &serde_json::json!({"path":"src/lib.rs"}),
         );
         let output = ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
-        assert_eq!(output.lines[0].text, "   1      │ -old\n        1 │ +new");
+        assert_eq!(output.lines[0].text, "   1    1 │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
@@ -304,7 +304,7 @@ mod tests {
             "w",
             "Written src/lib.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
         );
-        assert_eq!(output.lines[0].text, "   1      │ -old\n        1 │ +new");
+        assert_eq!(output.lines[0].text, "   1    1 │ ~new");
         assert!(output.lines[0].is_diff);
     }
 
