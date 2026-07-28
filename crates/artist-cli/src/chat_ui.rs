@@ -11,7 +11,6 @@ use crate::{
     store::ProviderStore,
     tool_ui::ToolUi,
 };
-use ansi_to_tui::IntoText;
 use anyhow::{Context, Result};
 use artist_rules::{RulesEngine, state::RulesHandle};
 use artist_session::{Envelope, ReplayItem, SteeringDelivered};
@@ -2348,23 +2347,6 @@ async fn submit(
 }
 
 fn take_visible_line(pending: &mut String, width: usize) -> Option<String> {
-    if let Some(open) = pending.find("```") {
-        let after_open = open + 3;
-        let Some(close) = pending[after_open..].find("```") else {
-            // Keep the complete fenced block together so Glamour retains the
-            // language and can syntax-highlight content while it streams.
-            return None;
-        };
-        let mut split = after_open + close + 3;
-        if pending.as_bytes().get(split) == Some(&b'\n') {
-            split += 1;
-        }
-        return Some(pending.drain(..split).collect());
-    }
-    take_plain_visible_line(pending, width)
-}
-
-fn take_plain_visible_line(pending: &mut String, width: usize) -> Option<String> {
     let split = pending.find('\n').map(|index| index + 1).or_else(|| {
         let mut columns = 0;
         pending.char_indices().find_map(|(index, character)| {
@@ -2688,55 +2670,6 @@ fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> 
         rows.push(Line::from(row));
     }
     rows
-}
-
-/// Whether the terminal has a light background, from `COLORFGBG` (`fg;bg`, and
-/// some emulators `fg;default;bg`). A trailing field of 7 (light gray) or 15
-/// (white) means a light background. Defaults to dark when unset/unknown.
-fn terminal_is_light() -> bool {
-    std::env::var("COLORFGBG")
-        .ok()
-        .and_then(|value| {
-            value
-                .rsplit(';')
-                .next()
-                .and_then(|bg| bg.trim().parse::<u8>().ok())
-        })
-        .map(|bg| matches!(bg, 7 | 15))
-        .unwrap_or(false)
-}
-
-fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'static>> {
-    let mut style = if terminal_is_light() {
-        glamour::Style::Light.config()
-    } else {
-        glamour::Style::Dark.config()
-    };
-    style.document.margin = Some(0);
-    let rendered = glamour::Renderer::new()
-        .with_style_config(style)
-        .with_word_wrap(width.saturating_sub(4).max(1))
-        .render(markdown);
-    let mut text = rendered.into_text().context("parse Glamour output")?;
-    while text.lines.first().is_some_and(line_is_blank) {
-        text.lines.remove(0);
-    }
-    while text.lines.last().is_some_and(line_is_blank) {
-        text.lines.pop();
-    }
-    for (index, line) in text.lines.iter_mut().enumerate() {
-        let prefix = if first && index == 0 {
-            "   "
-        } else {
-            "    "
-        };
-        line.spans.insert(0, Span::raw(prefix));
-    }
-    Ok(text)
-}
-
-fn line_is_blank(line: &Line<'_>) -> bool {
-    line.spans.iter().all(|span| span.content.trim().is_empty())
 }
 
 fn insert_response(
@@ -3351,32 +3284,14 @@ mod tests {
     }
 
     #[test]
-    fn glamour_styles_and_indents_responses() {
-        let text = response_text("**hello**", true, 80).unwrap();
-        let rendered = text
-            .lines
-            .iter()
-            .flat_map(|line| &line.spans)
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(rendered.contains(""));
-        assert!(rendered.contains("hello"));
-        assert!(!rendered.contains("**"));
-    }
+    fn markdown_fences_stream_as_plain_lines() {
+        let mut pending = "```rust\nfn main() {}".to_owned();
 
-    #[test]
-    fn glamour_syntax_highlights_fenced_code() {
-        let text = response_text("```rust\nfn main() { let answer = 42; }\n```", true, 80).unwrap();
-        let colors = text
-            .lines
-            .iter()
-            .flat_map(|line| &line.spans)
-            .filter_map(|span| span.style.fg)
-            .collect::<std::collections::HashSet<_>>();
-        assert!(
-            colors.len() > 1,
-            "expected multiple syntax colors: {colors:?}"
+        assert_eq!(
+            take_visible_line(&mut pending, 80).as_deref(),
+            Some("```rust\n")
         );
+        assert_eq!(pending, "fn main() {}");
     }
 
     #[test]
