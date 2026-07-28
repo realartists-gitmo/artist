@@ -7,12 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 fs2 = "0.4"
 rig-core = "0.40.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["sync", "rt"] }
 

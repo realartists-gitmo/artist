@@ -145,6 +145,8 @@ fn extension_engine() -> &'static Engine {
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.wasm_component_model(true);
+        config.wasm_exceptions(false);
+        config.wasm_gc(false);
         config.epoch_interruption(true);
         let engine = Engine::new(&config).expect("extension wasmtime config");
         let ticker = engine.weak();

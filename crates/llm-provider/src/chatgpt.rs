@@ -1,6 +1,6 @@
 use crate::{Auth, Error, Result, Secret};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
+use rand::Rng;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;

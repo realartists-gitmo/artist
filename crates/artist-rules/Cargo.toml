@@ -19,9 +19,9 @@ rig-core = "0.40.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-toml = "0.9"
-wasmtime = { version = "46", optional = true }
-wasmtime-wasi = { version = "46", optional = true }
+toml = "1.1"
+wasmtime = { version = "47", optional = true }
+wasmtime-wasi = { version = "47", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
