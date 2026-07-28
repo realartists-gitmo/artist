@@ -45,6 +45,21 @@ pub(crate) struct DelegateRuntime {
     pub events: UnboundedSender<PromptEvent>,
 }
 
+struct DelegateRun {
+    actor: String,
+    background: bool,
+}
+
+impl DelegateRun {
+    fn new(task_id: Option<String>) -> Self {
+        let background = task_id.is_some();
+        Self {
+            actor: task_id.unwrap_or_else(|| artist_tools::short_id("a")),
+            background,
+        }
+    }
+}
+
 impl Delegate {
     pub fn new(
         provider: SavedProvider,
@@ -149,6 +164,7 @@ impl Tool for Delegate {
                     prompt,
                     args.agent.as_deref().unwrap_or("default"),
                     args.fork.unwrap_or(false),
+                    None,
                 )
                 .await
             }
@@ -160,9 +176,14 @@ impl Tool for Delegate {
                 let task_role = role.clone();
                 Ok(self
                     .jobs
-                    .start(prompt, role, async move {
+                    .start(prompt, role, move |task_id| async move {
                         delegate
-                            .run_agent(task_prompt, &task_role, args.fork.unwrap_or(false))
+                            .run_agent(
+                                task_prompt,
+                                &task_role,
+                                args.fork.unwrap_or(false),
+                                Some(task_id),
+                            )
                             .await
                             .map_err(|error| error.to_string())
                     })
@@ -207,7 +228,9 @@ impl Delegate {
         prompt: String,
         role_name: &str,
         fork: bool,
+        task_id: Option<String>,
     ) -> Result<String, DelegateError> {
+        let run = DelegateRun::new(task_id);
         let role = self
             .subagents
             .role(role_name)
@@ -227,115 +250,115 @@ impl Delegate {
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
         match client {
             crate::rig_provider::RigClient::ChatGpt(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Copilot(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::OpenAiResponses(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::OpenAiChat(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Anthropic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Cohere(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Gemini(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::DeepSeek(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Groq(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::HuggingFace(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Hyperbolic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Mira(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Mistral(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::OpenRouter(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Perplexity(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Together(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::XAi(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Azure(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Llamafile(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Ollama(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Minimax(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::MinimaxAnthropic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Moonshot(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::MoonshotAnthropic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::XiaomiMiMo(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::XiaomiMiMoAnthropic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::ZAi(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::ZAiAnthropic(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model)
+                self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
         }
@@ -348,11 +371,12 @@ impl Delegate {
         role: &crate::subagents::Role,
         fork: bool,
         model: &str,
+        run: &DelegateRun,
     ) -> Result<String, DelegateError>
     where
         C::CompletionModel: 'static,
     {
-        let actor = artist_tools::short_id("a");
+        let actor = run.actor.clone();
         let child_tools = self
             .tools
             .for_actor(&actor)
@@ -369,7 +393,7 @@ impl Delegate {
                 .into_iter()
                 .any(|tool| role.permits(tool)),
             fork,
-            background: false,
+            background: run.background,
         });
         let registered_tools = || {
             let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
@@ -684,4 +708,25 @@ fn shorten(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\n[truncated]", &value[..end])
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::DelegateRun;
+
+    #[test]
+    fn background_run_reuses_reserved_task_id() {
+        let run = DelegateRun::new(Some("a-reserved-task".into()));
+
+        assert_eq!(run.actor, "a-reserved-task");
+        assert!(run.background);
+    }
+
+    #[test]
+    fn foreground_run_allocates_one_actor_id() {
+        let run = DelegateRun::new(None);
+
+        assert!(run.actor.starts_with("a-"));
+        assert!(!run.background);
+    }
 }

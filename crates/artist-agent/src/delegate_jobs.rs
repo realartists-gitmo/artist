@@ -41,8 +41,9 @@ impl DelegateJobs {
         Self { jobs }
     }
 
-    pub async fn start<F>(&self, prompt: String, role: String, future: F) -> String
+    pub async fn start<B, F>(&self, prompt: String, role: String, build: B) -> String
     where
+        B: FnOnce(String) -> F + Send,
         F: Future<Output = Result<String, String>> + Send + 'static,
     {
         self.cleanup().await;
@@ -60,6 +61,7 @@ impl DelegateJobs {
                 break candidate;
             }
         };
+        let future = build(task_id.clone());
         let running_job = job.clone();
         let handle = tokio::spawn(async move {
             let next = match future.await {
@@ -203,7 +205,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let jobs = DelegateJobs::for_project(root.path());
         let started = jobs
-            .start("work".into(), "worker".into(), async {
+            .start("work".into(), "worker".into(), |_| async {
                 Ok("finished".into())
             })
             .await;
@@ -218,7 +220,7 @@ mod tests {
         assert_eq!(result["output"], "finished");
 
         let started = jobs
-            .start("never".into(), "explorer".into(), async {
+            .start("never".into(), "explorer".into(), |_| async {
                 std::future::pending::<Result<String, String>>().await
             })
             .await;
@@ -227,5 +229,25 @@ mod tests {
             .unwrap()
             .to_owned();
         assert!(jobs.cancel(&id).await.unwrap().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn start_passes_the_reserved_task_id_to_the_job() {
+        let root = tempfile::tempdir().unwrap();
+        let jobs = DelegateJobs::for_project(root.path());
+        let (sent_id, received_id) = tokio::sync::oneshot::channel();
+
+        let started = jobs
+            .start("work".into(), "worker".into(), move |task_id| async move {
+                sent_id.send(task_id).unwrap();
+                Ok("finished".into())
+            })
+            .await;
+        let returned_id = serde_json::from_str::<Value>(&started).unwrap()["taskId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        assert_eq!(received_id.await.unwrap(), returned_id);
     }
 }
