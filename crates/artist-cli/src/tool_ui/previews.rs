@@ -14,7 +14,7 @@ pub(super) fn present(name: &str, arguments: &Value, raw_output: &str) -> Presen
         "bash" => line_preview(bash_semantic(raw_output), 5),
         "edit" => edit_preview(raw_output),
         "find" | "grep" | "read" => line_preview(raw_output.to_owned(), 10),
-        "skill" => line_preview(raw_output.to_owned(), 30),
+        "skill" => bounded_line_preview(raw_output.to_owned(), 30),
         "write" => line_preview(
             arguments
                 .get("content")
@@ -37,6 +37,14 @@ pub(super) fn present(name: &str, arguments: &Value, raw_output: &str) -> Presen
 fn line_preview(semantic_output: String, limit: usize) -> PresentedOutput {
     PresentedOutput {
         preview: limited_lines(semantic_output.trim(), limit),
+        is_diff: false,
+    }
+}
+
+fn bounded_line_preview(semantic_output: String, limit: usize) -> PresentedOutput {
+    let preview = limited_lines(semantic_output.trim(), limit);
+    PresentedOutput {
+        preview: bounded_bytes(&preview, DISPLAY_OUTPUT_LIMIT),
         is_diff: false,
     }
 }
@@ -277,6 +285,17 @@ mod tests {
     fn generic_preview_is_utf8_safe_and_strictly_byte_bounded() {
         let output = "界".repeat(DISPLAY_OUTPUT_LIMIT);
         let presented = present("extension_tool", &serde_json::json!({}), &output);
+        assert!(presented.preview.len() <= DISPLAY_OUTPUT_LIMIT);
+        assert!(presented.preview.ends_with('…'));
+    }
+
+    #[test]
+    fn skill_preview_is_line_and_byte_bounded() {
+        let output = (0..20)
+            .map(|_| "界".repeat(100))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let presented = present("skill", &serde_json::json!({"mode":"activate"}), &output);
         assert!(presented.preview.len() <= DISPLAY_OUTPUT_LIMIT);
         assert!(presented.preview.ends_with('…'));
     }
