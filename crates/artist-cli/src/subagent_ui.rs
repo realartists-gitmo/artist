@@ -143,20 +143,33 @@ pub(crate) fn is_running_output(output: &str) -> bool {
 
 fn render_card(buffer: &mut Buffer, area: Rect, role: &str, prompt: &str, status: &str) {
     buffer.set_style(area, Style::default().bg(crate::theme::PANEL_BACKGROUND));
-    Paragraph::new(Line::from(vec![
+    let icon = "";
+    let base = Style::default()
+        .fg(crate::theme::PASTEL_WHITE)
+        .bg(crate::theme::PANEL_BACKGROUND);
+    let title = crate::tool_ui::ToolTitle {
+        segments: vec![
+            crate::tool_ui::TitleSegment::Prose("Started ".into()),
+            crate::tool_ui::TitleSegment::Input(role.into()),
+            crate::tool_ui::TitleSegment::Prose(" subagent: ".into()),
+            crate::tool_ui::TitleSegment::Input(prompt.into()),
+        ],
+    };
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(
-            "",
-            Style::default()
-                .fg(crate::theme::PASTEL_BLUSH)
+            icon,
+            base.fg(crate::tool_ui::accent_color(icon))
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("  Started {role} subagent: {prompt}"),
-            Style::default().fg(crate::theme::PASTEL_WHITE),
-        ),
-    ]))
-    .render(Rect::new(area.x, area.y, area.width, 1), buffer);
+        Span::styled("  ", base),
+    ];
+    spans.extend(crate::tool_ui::title_spans(
+        &title,
+        usize::from(area.width.saturating_sub(5)),
+        crate::tool_ui::accent_color(icon),
+    ));
+    Paragraph::new(Line::from(spans)).render(Rect::new(area.x, area.y, area.width, 1), buffer);
     Paragraph::new(format!("    {status}"))
         .style(Style::default().fg(Color::DarkGray))
         .render(
@@ -258,6 +271,15 @@ mod tests {
         assert!(rendered.contains("Started worker subagent: fix tests"));
         assert!(rendered.contains("a-soft-heron · worker · ⋮·⋮·⋮ thinking [00:00 elapsed]"));
         assert!(!rendered.contains("secret child output"));
+        for input in ["explorer", "inspect files"] {
+            let byte = rendered.find(input).expect("rendered input");
+            let x = unicode_width::UnicodeWidthStr::width(&rendered[..byte]) as u16;
+            assert_eq!(
+                buffer[(x, 0)].fg,
+                crate::theme::PASTEL_BLUSH,
+                "{input} should use the subagent accent"
+            );
+        }
         assert!(
             area.positions()
                 .all(|position| buffer[position].bg == crate::theme::PANEL_BACKGROUND)
