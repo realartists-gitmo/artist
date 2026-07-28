@@ -1,15 +1,20 @@
 mod diff;
 mod icons;
 mod previews;
+mod title_model;
+mod title_render;
 mod titles;
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+pub(crate) use icons::accent_color;
 pub use icons::icon_for;
 use icons::valid_icon;
 use previews::present;
+pub(crate) use title_render::title_spans;
 use titles::title;
+pub(crate) use title_model::{TitleSegment, ToolTitle};
 
 /// Standardized presentation state for tool calls, independent of rendering.
 #[derive(Default)]
@@ -28,6 +33,7 @@ pub struct ToolOutput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolLine {
     pub text: String,
+    pub title: Option<ToolTitle>,
     pub first: bool,
     pub is_diff: bool,
     pub icon: Option<String>,
@@ -35,7 +41,7 @@ pub struct ToolLine {
 
 struct CallState {
     name: String,
-    title: String,
+    title: ToolTitle,
     icon: Option<String>,
     title_displayed: bool,
     completed: Option<CompletedCall>,
@@ -75,6 +81,7 @@ impl ToolUi {
     ) -> Option<ToolLine> {
         let show_now = self.order.is_empty();
         let call_title = title(name, arguments);
+        let title_text = call_title.plain_text();
         let icon = icon_for(name, &self.custom_icons).map(str::to_owned);
         self.pending.insert(id.clone());
         self.order.push_back(id.clone());
@@ -89,7 +96,8 @@ impl ToolUi {
             },
         );
         (show_title && show_now).then_some(ToolLine {
-            text: call_title,
+            text: title_text,
+            title: Some(call_title),
             first: true,
             is_diff: false,
             icon,
@@ -125,6 +133,7 @@ impl ToolUi {
                 };
                 lines.push(ToolLine {
                     text: format!("{prefix}{}", completed.preview),
+                    title: None,
                     first: false,
                     is_diff: completed.is_diff,
                     icon: None,
@@ -149,7 +158,7 @@ impl ToolUi {
             id.to_owned(),
             CallState {
                 name: "tool".into(),
-                title: "Tool".into(),
+                title: title("tool", &Value::Null),
                 icon: icon_for("tool", &self.custom_icons).map(str::to_owned),
                 title_displayed: true,
                 completed: None,
@@ -169,7 +178,8 @@ impl ToolUi {
         }
         next.title_displayed = true;
         lines.push(ToolLine {
-            text: next.title.clone(),
+            text: next.title.plain_text(),
+            title: Some(next.title.clone()),
             first: true,
             is_diff: false,
             icon: next.icon.clone(),
@@ -195,6 +205,7 @@ mod tests {
             ui.start("f".into(), "find", &serde_json::json!({"query":"config"})),
             Some(ToolLine {
                 text: "Searched files for “config”".into(),
+                title: Some(title("find", &serde_json::json!({"query":"config"}),)),
                 first: true,
                 is_diff: false,
                 icon: Some("".into()),
@@ -233,6 +244,13 @@ mod tests {
         assert_eq!(released.lines[1].text, "Read b.rs");
         assert!(released.lines[1].first);
         assert_eq!(released.lines[1].icon.as_deref(), Some(""));
+        assert_eq!(
+            released.lines[1].title.as_ref().unwrap().segments,
+            vec![
+                TitleSegment::Prose("Read ".into()),
+                TitleSegment::Input("b.rs".into())
+            ]
+        );
         assert_eq!(released.lines[2].text, "abc: b");
     }
 

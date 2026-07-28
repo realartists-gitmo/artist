@@ -1,18 +1,20 @@
 use serde_json::Value;
 
-pub(super) fn title(name: &str, arguments: &Value) -> String {
+use super::{TitleSegment, ToolTitle};
+
+pub(super) fn title(name: &str, arguments: &Value) -> ToolTitle {
     let path = string(arguments, "path");
     let query = string(arguments, "query");
     match name {
-        "read" => format!("Read {path}"),
+        "read" => composed([prose("Read "), input(path)]),
         "find" => {
             if query.is_empty() {
-                "Listed project files".into()
+                plain("Listed project files")
             } else {
-                format!("Searched files for “{query}”")
+                composed([prose("Searched files for “"), input(query), prose("”")])
             }
         }
-        "grep" => format!("Searched code for “{query}”"),
+        "grep" => composed([prose("Searched code for “"), input(query), prose("”")]),
         "web_search" => {
             let query = if query.is_empty() {
                 arguments
@@ -29,71 +31,86 @@ pub(super) fn title(name: &str, arguments: &Value) -> String {
             } else {
                 query
             };
-            format!("Web searched for “{}”", shortened(&query, 100))
+            composed([
+                prose("Web searched for “"),
+                input(shortened(&query, 100)),
+                prose("”"),
+            ])
         }
-        "edit" => format!("Edited {path}"),
-        "write" => format!("Wrote {path}"),
+        "edit" => composed([prose("Edited "), input(path)]),
+        "write" => composed([prose("Wrote "), input(path)]),
         "bash" => bash_title(arguments),
         "skill" => skill_title(arguments),
         "subagent" => subagent_title(arguments),
-        _ => humanize(name),
+        _ => plain(humanize(name)),
     }
 }
 
-fn skill_title(arguments: &Value) -> String {
+fn skill_title(arguments: &Value) -> ToolTitle {
     match string(arguments, "mode").as_str() {
-        "" | "list" => "Listed Agent Skills".into(),
-        "activate" => format!("Loaded {} skill", string(arguments, "name")),
-        "readResource" => format!(
-            "Read {} skill resource {}",
-            string(arguments, "name"),
-            string(arguments, "path")
-        ),
-        _ => "Skill".into(),
+        "" | "list" => plain("Listed Agent Skills"),
+        "activate" => composed([
+            prose("Loaded "),
+            input(string(arguments, "name")),
+            prose(" skill"),
+        ]),
+        "readResource" => composed([
+            prose("Read "),
+            input(string(arguments, "name")),
+            prose(" skill resource "),
+            input(string(arguments, "path")),
+        ]),
+        _ => plain("Skill"),
     }
 }
 
-fn bash_title(arguments: &Value) -> String {
+fn bash_title(arguments: &Value) -> ToolTitle {
     match string(arguments, "mode").as_str() {
         "exec" if arguments.get("background").and_then(Value::as_bool) == Some(true) => {
-            format!(
-                "Started shell: {}",
-                shortened(&string(arguments, "command"), 80)
-            )
+            shell_command_title("Started shell: ", arguments)
         }
-        "start" => format!(
-            "Started shell: {}",
-            shortened(&string(arguments, "command"), 80)
-        ),
-        "send" => "Sent input to shell".into(),
-        "read" => "Checked shell output".into(),
-        "stop" => "Stopped shell".into(),
-        "list" => "Listed shell sessions".into(),
-        _ => format!("Ran: {}", shortened(&string(arguments, "command"), 80)),
+        "start" => shell_command_title("Started shell: ", arguments),
+        "send" => plain("Sent input to shell"),
+        "read" => plain("Checked shell output"),
+        "stop" => plain("Stopped shell"),
+        "list" => plain("Listed shell sessions"),
+        _ => shell_command_title("Ran: ", arguments),
     }
 }
 
-fn subagent_title(arguments: &Value) -> String {
+fn shell_command_title(prefix: &str, arguments: &Value) -> ToolTitle {
+    composed([
+        prose(prefix),
+        input(shortened(&string(arguments, "command"), 80)),
+    ])
+}
+
+fn subagent_title(arguments: &Value) -> ToolTitle {
     match string(arguments, "mode").as_str() {
-        "status" | "read" => format!("Checked subagent {}", string(arguments, "taskId")),
-        "wait" => format!("Waited for subagent {}", string(arguments, "taskId")),
-        "cancel" => format!("Cancelled subagent {}", string(arguments, "taskId")),
-        "list" => "Listed subagent tasks".into(),
+        "status" | "read" => subagent_task_title("Checked subagent ", arguments),
+        "wait" => subagent_task_title("Waited for subagent ", arguments),
+        "cancel" => subagent_task_title("Cancelled subagent ", arguments),
+        "list" => plain("Listed subagent tasks"),
         _ if arguments.get("background").and_then(Value::as_bool) == Some(true)
             || string(arguments, "mode") == "start" =>
         {
-            format!(
-                "Started {} subagent: {}",
-                subagent_role(arguments),
-                shortened(&string(arguments, "prompt"), 80)
-            )
+            subagent_launch_title("Started ", arguments)
         }
-        _ => format!(
-            "{} subagent: {}",
-            subagent_role(arguments),
-            shortened(&string(arguments, "prompt"), 80)
-        ),
+        _ => subagent_launch_title("", arguments),
     }
+}
+
+fn subagent_task_title(prefix: &str, arguments: &Value) -> ToolTitle {
+    composed([prose(prefix), input(string(arguments, "taskId"))])
+}
+
+fn subagent_launch_title(prefix: &str, arguments: &Value) -> ToolTitle {
+    composed([
+        prose(prefix),
+        input(subagent_role(arguments)),
+        prose(" subagent: "),
+        input(shortened(&string(arguments, "prompt"), 80)),
+    ])
 }
 
 fn subagent_role(arguments: &Value) -> String {
@@ -132,6 +149,31 @@ fn humanize(name: &str) -> String {
     result
 }
 
+fn plain(text: impl Into<String>) -> ToolTitle {
+    ToolTitle {
+        segments: vec![prose(text)],
+    }
+}
+
+fn composed(segments: impl IntoIterator<Item = TitleSegment>) -> ToolTitle {
+    ToolTitle {
+        segments: segments
+            .into_iter()
+            .filter(|segment| match segment {
+                TitleSegment::Prose(text) | TitleSegment::Input(text) => !text.is_empty(),
+            })
+            .collect(),
+    }
+}
+
+fn prose(text: impl Into<String>) -> TitleSegment {
+    TitleSegment::Prose(text.into())
+}
+
+fn input(text: impl Into<String>) -> TitleSegment {
+    TitleSegment::Input(text.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,14 +181,15 @@ mod tests {
     #[test]
     fn describes_each_skill_operation() {
         assert_eq!(
-            title("skill", &serde_json::json!({})),
+            title("skill", &serde_json::json!({})).plain_text(),
             "Listed Agent Skills"
         );
         assert_eq!(
             title(
                 "skill",
                 &serde_json::json!({"mode":"activate","name":"pdf"})
-            ),
+            )
+            .plain_text(),
             "Loaded pdf skill"
         );
         assert_eq!(
@@ -157,7 +200,8 @@ mod tests {
                     "name":"pdf",
                     "path":"references/forms.md"
                 })
-            ),
+            )
+            .plain_text(),
             "Read pdf skill resource references/forms.md"
         );
     }
