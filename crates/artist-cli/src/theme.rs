@@ -6,6 +6,7 @@ pub(crate) const PASTEL_MINT: Color = Color::Rgb(0xCD, 0xE5, 0xD9);
 pub(crate) const PASTEL_YELLOW: Color = Color::Rgb(0xF2, 0xEB, 0xCC);
 pub(crate) const PASTEL_BLUE: Color = Color::Rgb(0xC6, 0xE2, 0xE7);
 pub(crate) const PASTEL_BLUSH: Color = Color::Rgb(0xF7, 0xDD, 0xE8);
+pub(crate) const PANEL_BACKGROUND: Color = Color::Rgb(32, 32, 32);
 
 pub(crate) const PASTEL_CYCLE: [Color; 6] = [
     PASTEL_PINK,

@@ -160,16 +160,20 @@ pub(crate) fn insert_prompt(terminal: &mut ratatui::DefaultTerminal, text: &str)
     let width = terminal.size()?.width.saturating_sub(INDENT);
     let height = crate::message_box::frame_height(text, width);
     terminal.insert_before(height.saturating_add(1), |buffer| {
-        crate::message_box::render(buffer, nested_area(buffer.area, height), text);
+        render_nested_surface(buffer, height, |buffer, area| {
+            crate::message_box::render(buffer, area, text);
+        });
     })?;
     Ok(())
 }
 
 pub(crate) fn insert_status(terminal: &mut ratatui::DefaultTerminal, status: &str) -> Result<()> {
     terminal.insert_before(1, |buffer| {
-        Paragraph::new(format!("  {status}"))
-            .style(Style::default().fg(Color::DarkGray))
-            .render(nested_area(buffer.area, 1), buffer);
+        render_nested_surface(buffer, 1, |buffer, area| {
+            Paragraph::new(format!("  {status}"))
+                .style(Style::default().fg(Color::DarkGray))
+                .render(area, buffer);
+        });
     })?;
     Ok(())
 }
@@ -183,7 +187,9 @@ fn insert_response(
     let text = renderer.render(output, usize::from(width));
     let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
-        Paragraph::new(text).render(nested_area(buffer.area, height), buffer);
+        render_nested_surface(buffer, height, |buffer, area| {
+            Paragraph::new(text).render(area, buffer);
+        });
     })?;
     Ok(())
 }
@@ -192,7 +198,9 @@ fn insert_reasoning(terminal: &mut ratatui::DefaultTerminal, reasoning: &str) ->
     let text = crate::chat_ui::reasoning_chunk_text(reasoning, true);
     let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
-        Paragraph::new(text).render(nested_area(buffer.area, height), buffer);
+        render_nested_surface(buffer, height, |buffer, area| {
+            Paragraph::new(text).render(area, buffer);
+        });
     })?;
     Ok(())
 }
@@ -251,9 +259,22 @@ fn insert_tool_line(
         .collect::<Vec<_>>();
     let height = rows.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
-        Paragraph::new(Text::from(rows)).render(nested_area(buffer.area, height), buffer);
+        render_nested_surface(buffer, height, |buffer, area| {
+            Paragraph::new(Text::from(rows)).render(area, buffer);
+        });
     })?;
     Ok(())
+}
+
+fn render_nested_surface(
+    buffer: &mut ratatui::buffer::Buffer,
+    height: u16,
+    render: impl FnOnce(&mut ratatui::buffer::Buffer, Rect),
+) {
+    let area = nested_area(buffer.area, height);
+    buffer.set_style(area, Style::default().bg(crate::theme::PANEL_BACKGROUND));
+    render(buffer, area);
+    crate::chat_ui::fill_panel_background(buffer, area);
 }
 
 fn nested_area(area: Rect, height: u16) -> Rect {
@@ -293,5 +314,24 @@ mod tests {
             "background": true,
             "prompt": "inspect"
         })));
+    }
+
+    #[test]
+    fn nested_surface_background_starts_after_the_indent() {
+        let area = Rect::new(0, 0, 12, 2);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+
+        render_nested_surface(&mut buffer, 2, |buffer, area| {
+            Paragraph::new("hello").render(area, buffer);
+        });
+
+        assert_eq!(buffer[(INDENT - 1, 0)].bg, Color::Reset);
+        assert_eq!(buffer[(INDENT, 0)].symbol(), "h");
+        assert!(
+            nested_area(area, 2)
+                .positions()
+                .all(|position| { buffer[position].bg == crate::theme::PANEL_BACKGROUND })
+        );
+        assert_eq!(buffer[(area.right() - 1, 1)].symbol(), "\u{2800}");
     }
 }

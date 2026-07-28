@@ -2522,15 +2522,16 @@ pub(crate) fn truncate_display_line(line: &str, width: usize) -> String {
     output
 }
 
-fn fill_panel_background(buffer: &mut Buffer) {
+pub(crate) fn fill_panel_background(buffer: &mut Buffer, area: Rect) {
     // A printable, one-column blank prevents ratatui's backend from replacing a
     // run of trailing spaces with EraseToEndOfLine. NBSP is still treated as
     // whitespace by some terminal layers, while the blank braille pattern is a
     // regular glyph and therefore reliably carries its cell background.
     const EXPLICIT_BLANK: &str = "\u{2800}";
-    for y in buffer.area.y..buffer.area.bottom() {
-        for x in buffer.area.x..buffer.area.right() {
-            let cell = buffer.cell_mut((x, y)).expect("tool panel cell");
+    let area = area.intersection(buffer.area);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let cell = buffer.cell_mut((x, y)).expect("panel cell");
             if cell.symbol() == " " {
                 cell.set_symbol(EXPLICIT_BLANK);
             }
@@ -2593,7 +2594,9 @@ fn insert_tool_line(
             } else {
                 Color::Rgb(175, 175, 175)
             };
-            let style = Style::default().fg(color).bg(Color::Rgb(32, 32, 32));
+            let style = Style::default()
+                .fg(color)
+                .bg(crate::theme::PANEL_BACKGROUND);
             if index == 0 && first {
                 let icon = icon.unwrap_or("󰒓");
                 Line::from(vec![
@@ -2602,7 +2605,7 @@ fn insert_tool_line(
                         icon.to_owned(),
                         Style::default()
                             .fg(tool_icon_color(icon))
-                            .bg(Color::Rgb(32, 32, 32))
+                            .bg(crate::theme::PANEL_BACKGROUND)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!("  {line}"), style),
@@ -2617,7 +2620,7 @@ fn insert_tool_line(
         .map(|line| line.width().max(1).div_ceil(width))
         .sum::<usize>() as u16;
     terminal.insert_before(height.max(1), |buffer| {
-        let background = Style::default().bg(Color::Rgb(32, 32, 32));
+        let background = Style::default().bg(crate::theme::PANEL_BACKGROUND);
         buffer.set_style(buffer.area, background);
         Paragraph::new(Text::from(text))
             .wrap(Wrap { trim: false })
@@ -2626,7 +2629,7 @@ fn insert_tool_line(
         // sequence, which paints with the default background in terminals that
         // do not support background-color erase (notably herdr). Emit a real
         // blank glyph in every otherwise-empty panel cell instead.
-        fill_panel_background(buffer);
+        fill_panel_background(buffer, buffer.area);
     })?;
     Ok(())
 }
@@ -3373,7 +3376,8 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
         buffer.cell_mut((1, 0)).unwrap().set_symbol("x");
 
-        fill_panel_background(&mut buffer);
+        let area = buffer.area;
+        fill_panel_background(&mut buffer, area);
 
         assert_eq!(buffer.cell((0, 0)).unwrap().symbol(), "\u{2800}");
         assert_eq!(buffer.cell((1, 0)).unwrap().symbol(), "x");
