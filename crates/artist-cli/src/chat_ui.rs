@@ -2293,6 +2293,7 @@ async fn submit(
     } else {
         Some(task.await.context("join Artist agent"))
     };
+    let unfinished_subagents = subagents.finish_turn(cancelled);
     lifecycle_extensions
         .update_context(|value| value.agent_state = serde_json::json!({"state":"idle"}));
     let _ = lifecycle_extensions.publish(artist_extensions::Event {
@@ -2315,7 +2316,7 @@ async fn submit(
     if !visible.is_empty() {
         insert_response(terminal, &visible, &mut response_renderer)?;
     }
-    for status in subagents.drain_running() {
+    for status in unfinished_subagents {
         subagent_ui::insert_settled(terminal, status)?;
     }
     // Compose the failure and elapsed time as one transcript block. This mirrors

@@ -60,7 +60,11 @@ impl SubagentStatuses {
         })
     }
 
-    pub(crate) fn drain_running(&mut self) -> Vec<SettledSubagent> {
+    pub(crate) fn finish_turn(&mut self, cancelled: bool) -> Vec<SettledSubagent> {
+        if cancelled {
+            self.active.clear();
+            return Vec::new();
+        }
         self.active
             .drain(..)
             .map(|status| SettledSubagent {
@@ -270,6 +274,19 @@ mod tests {
         assert_eq!(statuses.height(), 0);
         assert_eq!(settled.id, "a-green-comet");
         assert_eq!(settled.outcome, "completed");
+    }
+
+    #[test]
+    fn turn_finalization_discards_cancelled_rows_and_preserves_background_jobs() {
+        let mut statuses = SubagentStatuses::default();
+        statuses.start_card("a-green-comet".into(), "explorer".into(), "inspect".into());
+        assert!(statuses.finish_turn(true).is_empty());
+        assert_eq!(statuses.height(), 0);
+
+        statuses.start_card("a-soft-heron".into(), "worker".into(), "work".into());
+        let settled = statuses.finish_turn(false);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].outcome, "running");
     }
 
     #[test]
