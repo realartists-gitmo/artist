@@ -2726,7 +2726,7 @@ fn response_text(markdown: &str, first: bool, width: usize) -> Result<Text<'stat
     }
     for (index, line) in text.lines.iter_mut().enumerate() {
         let prefix = if first && index == 0 {
-            "  ⋗ "
+            "   "
         } else {
             "    "
         };
@@ -3359,7 +3359,7 @@ mod tests {
             .flat_map(|line| &line.spans)
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(rendered.contains("⋗"));
+        assert!(rendered.contains(""));
         assert!(rendered.contains("hello"));
         assert!(!rendered.contains("**"));
     }
