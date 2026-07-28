@@ -19,7 +19,6 @@ fs2 = "0.4"
 ansi-to-tui = "8.0.1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 anyhow = "1"
-charmed-glamour = { version = "0.2", features = ["syntax-highlighting"] }
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.11"
 dirs = "6"
