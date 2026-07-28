@@ -1,25 +1,28 @@
 use std::sync::Arc;
 
 use crate::{
-    SessionHandles,
+    PromptEvent, SessionHandles,
     capture::{CaptureHook, ToolMeta},
     delegate_jobs::DelegateJobs,
     resources::Resources,
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
-use artist_session::{DelegateFinished, DelegateStarted, RunFinished, RunStarted};
+use artist_session::{
+    ConversationMessages, DelegateFinished, DelegateStarted, RunFinished, RunStarted,
+};
 use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_core::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
-    completion::Message,
-    streaming::{StreamedAssistantContent, StreamingChat},
+    completion::{Message, message::ToolResultContent},
+    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
     tool::{Tool, ToolDyn},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
 pub(crate) struct Delegate {
@@ -34,6 +37,12 @@ pub(crate) struct Delegate {
     handles: SessionHandles,
     disabled_tools: Vec<String>,
     subagents: crate::subagents::Subagents,
+    events: UnboundedSender<PromptEvent>,
+}
+
+pub(crate) struct DelegateRuntime {
+    pub handles: SessionHandles,
+    pub events: UnboundedSender<PromptEvent>,
 }
 
 impl Delegate {
@@ -42,7 +51,7 @@ impl Delegate {
         tools: ToolBundle,
         context: Arc<Vec<Message>>,
         resources: Resources,
-        handles: SessionHandles,
+        runtime: DelegateRuntime,
         disabled_tools: Vec<String>,
         subagents: crate::subagents::Subagents,
     ) -> Self {
@@ -53,10 +62,32 @@ impl Delegate {
             context,
             jobs,
             resources,
-            handles,
+            handles: runtime.handles,
             disabled_tools,
             subagents,
+            events: runtime.events,
         }
+    }
+
+    fn emit(&self, event: PromptEvent) {
+        // Background delegates can outlive the parent stream that owned the
+        // receiver. Display delivery is therefore best-effort and must never
+        // turn a successful background job into a tool failure.
+        let _ = self.events.send(event);
+    }
+
+    fn emit_child(&self, id: &str, event: PromptEvent) {
+        self.emit(PromptEvent::SubagentEvent {
+            id: id.to_owned(),
+            event: Box::new(event),
+        });
+    }
+
+    fn finish_child(&self, id: &str, outcome: &str) {
+        self.emit(PromptEvent::SubagentFinished {
+            id: id.to_owned(),
+            outcome: outcome.to_owned(),
+        });
     }
 }
 
@@ -326,6 +357,11 @@ impl Delegate {
             .tools
             .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        self.emit(PromptEvent::SubagentStarted {
+            id: actor.clone(),
+            role: role.name.clone(),
+            prompt: prompt.clone(),
+        });
         let recorder = self.handles.recorder.child_lineage(&actor);
         recorder.record(DelegateStarted {
             prompt: prompt.clone(),
@@ -377,6 +413,10 @@ impl Delegate {
         } else {
             Vec::new()
         };
+        // A forked delegate receives the main conversation as input history,
+        // but that prefix belongs to the parent lineage. Only messages accepted
+        // after this boundary are persisted as the child's transcript.
+        let parent_history_len = seed_history.len();
         let mut seed_prompt = Message::user(&prompt);
 
         // Per-run abort-retry budget: this delegate's own counter, isolated
@@ -384,7 +424,7 @@ impl Delegate {
         let retry_budget = self.handles.rules.retry_budget();
         let mut retries_used = 0u32;
         let cache_key = crate::prompt_cache_key(self.tools.project_root(), model);
-        let output = loop {
+        let (output, conversation) = loop {
             let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
             let run_recorder = recorder.with_run(&run_id);
             let ttsr = TtsrShared::new(
@@ -403,15 +443,16 @@ impl Delegate {
                     .as_deref()
                     .or(self.provider.reasoning_effort.as_deref())
                 {
-                    // Summaries off (TOK-5) — subagent reasoning is never surfaced,
-                    // so a summary was pure token waste here.
-                    params["reasoning"] = json!({ "effort": effort });
+                    params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+                } else {
+                    params["reasoning"] = json!({ "summary": "auto" });
                 }
                 builder = builder.additional_params(params);
             }
+            let tool_meta = ToolMeta::default();
             let agent = builder
                 .tools(registered_tools())
-                .add_hook(CaptureHook::new(ToolMeta::default()))
+                .add_hook(CaptureHook::new(tool_meta.clone()))
                 .add_hook(TtsrHook(Arc::clone(&ttsr)))
                 .default_max_turns(usize::MAX)
                 .build();
@@ -430,6 +471,8 @@ impl Delegate {
             // Text of the current model turn; the last turn's text is the
             // delegate's answer (matching the non-streaming `chat` output).
             let mut turn_text = String::new();
+            let mut last_turn_had_text_delta = false;
+            let mut final_messages = None;
             let mut retry = false;
             loop {
                 let item = tokio::select! {
@@ -437,6 +480,7 @@ impl Delegate {
                     _ = self.handles.cancel.cancelled() => {
                         run_recorder.record(RunFinished::Cancelled);
                         recorder.record(DelegateFinished { outcome: "cancelled".into() });
+                        self.finish_child(&actor, "cancelled");
                         return Err(DelegateError::Failed("cancelled".into()));
                     }
                     item = stream.next() => item,
@@ -446,16 +490,32 @@ impl Delegate {
                     break;
                 };
                 match item {
-                    Ok(MultiTurnStreamItem::CompletionCall(_)) => turn_text.clear(),
+                    Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                        last_turn_had_text_delta = !turn_text.is_empty();
+                        turn_text.clear();
+                        self.emit_child(
+                            &actor,
+                            PromptEvent::CompletionUsage {
+                                total_tokens: call.usage.total_tokens,
+                            },
+                        );
+                    }
                     Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                         // The final response is authoritative. Some providers do
                         // not emit text deltas, which previously produced a
                         // successful subagent run with an empty output.
                         turn_text = response.output().to_owned();
+                        if !last_turn_had_text_delta && !turn_text.is_empty() {
+                            self.emit_child(&actor, PromptEvent::TextDelta(turn_text.clone()));
+                        }
+                        final_messages = response.messages().map(ToOwned::to_owned);
                     }
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::Text(text),
-                    )) => turn_text.push_str(&text.text),
+                    )) => {
+                        turn_text.push_str(&text.text);
+                        self.emit_child(&actor, PromptEvent::TextDelta(text.text));
+                    }
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ReasoningDelta {
                             // Match summary (`id: None`) and raw (`id: Some`)
@@ -471,12 +531,72 @@ impl Delegate {
                             let (committed, _) = ttsr.committed();
                             seed_history = committed;
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                            self.emit_child(
+                                &actor,
+                                PromptEvent::RuleFired {
+                                    rule: firing.rule.0.clone(),
+                                    matched: firing.matched.clone(),
+                                },
+                            );
                             run_recorder.record(RunFinished::Cancelled);
                             seed_prompt = reminder_message(&firing);
                             retries_used += 1;
                             retry = true;
                             break;
                         }
+                        self.emit_child(&actor, PromptEvent::ReasoningSummaryDelta(reasoning));
+                    }
+                    Ok(MultiTurnStreamItem::StreamAssistantItem(
+                        StreamedAssistantContent::ToolCall {
+                            tool_call,
+                            internal_call_id,
+                        },
+                    )) => self.emit_child(
+                        &actor,
+                        PromptEvent::ToolCall {
+                            id: internal_call_id,
+                            name: tool_call.function.name,
+                            arguments: tool_call.function.arguments,
+                        },
+                    ),
+                    Ok(MultiTurnStreamItem::ToolExecutionStart {
+                        tool_call,
+                        internal_call_id,
+                    }) => self.emit_child(
+                        &actor,
+                        PromptEvent::ToolExecutionStart {
+                            id: internal_call_id,
+                            name: tool_call.function.name,
+                        },
+                    ),
+                    Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                        tool_result,
+                        internal_call_id,
+                    })) => {
+                        let mut images = 0usize;
+                        let content = tool_result
+                            .content
+                            .into_iter()
+                            .filter_map(|item| match item {
+                                ToolResultContent::Text(text) => Some(text.text),
+                                ToolResultContent::Image(_) => {
+                                    images += 1;
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let meta = tool_meta.take(&internal_call_id);
+                        self.emit_child(
+                            &actor,
+                            PromptEvent::ToolResult {
+                                id: internal_call_id,
+                                content,
+                                outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
+                                duration_ms: meta.map(|(_, duration)| duration),
+                                images,
+                            },
+                        );
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -489,6 +609,13 @@ impl Delegate {
                         {
                             seed_history = chat_history.clone();
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
+                            self.emit_child(
+                                &actor,
+                                PromptEvent::RuleFired {
+                                    rule: firing.rule.0.clone(),
+                                    matched: firing.matched.clone(),
+                                },
+                            );
                             run_recorder.record(RunFinished::Cancelled);
                             seed_prompt = reminder_message(&firing);
                             retries_used += 1;
@@ -501,6 +628,7 @@ impl Delegate {
                         recorder.record(DelegateFinished {
                             outcome: "error".into(),
                         });
+                        self.finish_child(&actor, "error");
                         return Err(DelegateError::Failed(error.to_string()));
                     }
                 }
@@ -508,15 +636,39 @@ impl Delegate {
             if retry {
                 continue;
             }
-            break turn_text;
+            let conversation = final_messages.map(|messages| {
+                child_conversation_messages(&seed_history, parent_history_len, messages)
+            });
+            break (turn_text, conversation);
         };
+        if let Some(conversation) = conversation {
+            recorder.record(conversation);
+        }
         recorder.record(DelegateFinished {
             outcome: "completed".into(),
         });
+        self.finish_child(&actor, "completed");
         Ok(
             json!({"role":role.name,"taskId":actor,"output":shorten(&output, 50 * 1024)})
                 .to_string(),
         )
+    }
+}
+
+pub(crate) fn child_conversation_messages(
+    seed_history: &[Message],
+    parent_history_len: usize,
+    run_messages: Vec<Message>,
+) -> ConversationMessages {
+    let mut messages = seed_history
+        .get(parent_history_len..)
+        .unwrap_or_default()
+        .to_vec();
+    messages.extend(run_messages);
+    ConversationMessages {
+        messages,
+        reset: true,
+        display_from: 0,
     }
 }
 

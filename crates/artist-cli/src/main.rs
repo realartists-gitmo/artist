@@ -22,6 +22,8 @@ mod slash_commands;
 mod startup_splash;
 mod status_bar;
 mod store;
+mod subagent_ui;
+mod supervise;
 mod test_provider;
 mod theme;
 mod tool_ui;
@@ -362,6 +364,13 @@ async fn execute_prompt(
                     PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
                     PromptEvent::ToolExecutionStart { .. } => {}
                     PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
+                    PromptEvent::SubagentStarted { role, .. } => {
+                        eprintln!("Starting {role} subagent...")
+                    }
+                    PromptEvent::SubagentEvent { .. } => {}
+                    PromptEvent::SubagentFinished { .. } => {
+                        eprintln!("Subagent completed.")
+                    }
                     PromptEvent::CompletionUsage { .. } => {}
                     PromptEvent::RuleFired { rule, matched } => {
                         let excerpt: String = matched.chars().take(60).collect();
@@ -490,6 +499,8 @@ fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_age
         PromptEvent::TextDelta(_) => Some("responding"),
         PromptEvent::ToolCall { .. } | PromptEvent::ToolExecutionStart { .. } => Some("working"),
         PromptEvent::ToolResult { .. } => Some("thinking"),
+        PromptEvent::SubagentStarted { .. } | PromptEvent::SubagentEvent { .. } => Some("working"),
+        PromptEvent::SubagentFinished { .. } => Some("thinking"),
         PromptEvent::RuleFired { .. } => Some("rewinding"),
         PromptEvent::CompletionUsage { .. } => None,
     };

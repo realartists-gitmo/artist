@@ -145,7 +145,8 @@ fn extension_engine() -> &'static Engine {
     ENGINE.get_or_init(|| {
         let mut config = Config::new();
         config.wasm_component_model(true);
-        config.wasm_exceptions(false);
+        // Exceptions are compile-time disabled with the intentionally omitted
+        // `gc` feature in Wasmtime 47, so there is no runtime setter to call.
         config.wasm_gc(false);
         config.epoch_interruption(true);
         let engine = Engine::new(&config).expect("extension wasmtime config");

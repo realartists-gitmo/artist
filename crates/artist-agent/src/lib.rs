@@ -5,6 +5,8 @@ pub mod compaction;
 mod conversation;
 mod delegate;
 mod delegate_jobs;
+#[cfg(test)]
+mod delegate_tests;
 pub mod mcp;
 mod prompt_config;
 mod resources;
@@ -54,6 +56,24 @@ use ttsr::{TtsrHook, TtsrShared, reminder_message};
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),
+    /// A delegated agent began running. Its subsequent stream events are
+    /// wrapped in [`PromptEvent::SubagentEvent`] with the same id.
+    SubagentStarted {
+        id: String,
+        role: String,
+        prompt: String,
+    },
+    /// One event from a delegated agent's own streaming tool loop.
+    SubagentEvent {
+        id: String,
+        event: Box<PromptEvent>,
+    },
+    /// A delegated agent stopped. `outcome` mirrors the persisted
+    /// `delegate.finished` lifecycle value.
+    SubagentFinished {
+        id: String,
+        outcome: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -362,6 +382,11 @@ where
         context.push(seed_prompt.clone());
         context
     });
+    // Delegate tools execute inside `stream.next()`. A separate channel lets
+    // their events wake this outer driver while that future is still pending,
+    // instead of buffering the entire child transcript until the tool returns.
+    let (subagent_events_tx, mut subagent_events_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PromptEvent>();
     let visible_steering = handles.steering.clone();
     let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
@@ -407,7 +432,10 @@ where
                 tools.clone(),
                 Arc::clone(&fork_context),
                 resources.clone(),
-                handles.clone(),
+                delegate::DelegateRuntime {
+                    handles: handles.clone(),
+                    events: subagent_events_tx.clone(),
+                },
                 tool_context.disabled.to_vec(),
                 subagents.clone(),
             )),
@@ -470,6 +498,12 @@ where
         loop {
             let item = tokio::select! {
                 biased;
+                event = subagent_events_rx.recv() => {
+                    if let Some(event) = event {
+                        on_event(event)?;
+                    }
+                    continue;
+                }
                 item = stream.next() => item,
                 _ = handles.cancel.cancelled() => {
                     drop(stream);

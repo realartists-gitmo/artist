@@ -9,6 +9,7 @@ use crate::{
     slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
+    subagent_ui::{self, NestedChat},
     tool_ui::ToolUi,
 };
 use anyhow::{Context, Result};
@@ -37,7 +38,7 @@ use ratatui::{
 };
 use rig_core::completion::message::Message;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::IsTerminal,
     path::Path,
 };
@@ -859,6 +860,14 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Supervise) => handle_supervise(
+                        &mut terminal,
+                        active.as_ref(),
+                        &context.extensions.tool_icons(),
+                        viewport_height,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Sessions) => {
                         handle_sessions(context.sessions, context.project, &active)
                             .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
@@ -1224,6 +1233,34 @@ async fn run_loop(
             _ => {}
         }
     }
+}
+
+async fn handle_supervise(
+    terminal: &mut ratatui::DefaultTerminal,
+    active: Option<&ActiveSession>,
+    custom_icons: &HashMap<String, String>,
+    viewport_height: u16,
+) -> Result<Vec<String>> {
+    let Some(active) = active else {
+        return Ok(vec![
+            "No tool uses to supervise in a fresh session.".to_owned(),
+        ]);
+    };
+    active.recorder.flush().await;
+    let tools = artist_session::supervise_for_ui(&active.events()?)
+        .into_iter()
+        .filter_map(|item| match item {
+            artist_session::SuperviseItem::Tool(tool) => Some(tool),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return Ok(vec![
+            "No tool uses to supervise in this session.".to_owned(),
+        ]);
+    }
+    crate::supervise::run(terminal, tools, custom_icons, viewport_height)?;
+    Ok(Vec::new())
 }
 
 /// `/rules`: the live rules panel and its actions. Listing shows every
@@ -1904,6 +1941,9 @@ async fn submit(
     let mut response_since_tool = false;
     let mut transcript_gap = false;
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
+    let mut subagents = HashMap::<String, NestedChat>::new();
+    let mut rendered_subagents = HashSet::<String>::new();
+    let mut foreground_subagent_calls = HashSet::<String>::new();
     // Keep the existing viewport on entry so starting a turn does not blink.
     // Width-driven height changes are debounced while the terminal is moving.
     let terminal_size = terminal.size()?;
@@ -2125,6 +2165,9 @@ async fn submit(
                     }
                     artist_agent::PromptEvent::ToolCall { id, name, arguments } => {
                         phase = "working";
+                        if name == "subagent" && subagent_ui::is_foreground(&arguments) {
+                            foreground_subagent_calls.insert(id.clone());
+                        }
                         if response_since_tool {
                             if !visible.is_empty() {
                                 insert_response(terminal, &visible, &mut response_renderer)?;
@@ -2153,7 +2196,10 @@ async fn submit(
                     artist_agent::PromptEvent::ToolExecutionStart { .. } => phase = "working",
                     artist_agent::PromptEvent::ToolResult { id, content, images, .. } => {
                         phase = "working";
-                        let output = tools.output(&id, &content);
+                        let suppress = foreground_subagent_calls.remove(&id)
+                            && subagent_ui::task_id(&content)
+                                .is_some_and(|task_id| rendered_subagents.contains(&task_id));
+                        let output = tools.output(&id, if suppress { "" } else { &content });
                         for line in output.lines {
                             insert_tool_line(
                                 terminal,
@@ -2195,6 +2241,32 @@ async fn submit(
                                 });
                                 delivered_steering.push(message.content);
                             }
+                        }
+                    }
+                    artist_agent::PromptEvent::SubagentStarted { id, role: _, prompt } => {
+                        phase = "working";
+                        subagent_ui::insert_prompt(terminal, &prompt)?;
+                        subagents.insert(
+                            id,
+                            NestedChat::new(context.extensions.tool_icons()),
+                        );
+                        transcript_gap = true;
+                    }
+                    artist_agent::PromptEvent::SubagentEvent { id, event } => {
+                        phase = "working";
+                        if let Some(subagent) = subagents.get_mut(&id) {
+                            subagent.event(terminal, *event)?;
+                            transcript_gap = true;
+                        }
+                    }
+                    artist_agent::PromptEvent::SubagentFinished { id, outcome } => {
+                        if let Some(mut subagent) = subagents.remove(&id) {
+                            subagent.finish(terminal)?;
+                            if outcome != "success" && outcome != "completed" {
+                                subagent_ui::insert_status(terminal, &outcome)?;
+                            }
+                            rendered_subagents.insert(id);
+                            transcript_gap = true;
                         }
                     }
                     artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
@@ -2467,7 +2539,7 @@ fn insert_blank(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     Ok(())
 }
 
-fn truncate_display_line(line: &str, width: usize) -> String {
+pub(crate) fn truncate_display_line(line: &str, width: usize) -> String {
     if line.width() <= width {
         return line.to_owned();
     }
@@ -2504,9 +2576,25 @@ fn fill_panel_background(buffer: &mut Buffer) {
 
 fn tool_prefix(first: bool, icon: Option<&str>) -> String {
     if first {
-        format!("  {}  ", icon.unwrap_or("🛠"))
+        format!("  {}  ", icon.unwrap_or("󰒓"))
     } else {
         "    ".to_owned()
+    }
+}
+
+pub(crate) fn tool_icon_color(icon: &str) -> Color {
+    match icon {
+        "" | "" => crate::theme::PASTEL_MINT,
+        "" | "" => crate::theme::PASTEL_BLUSH,
+        "" | "" => crate::theme::PASTEL_YELLOW,
+        "" | "󰒓" => crate::theme::PASTEL_BLUE,
+        "" => crate::theme::PASTEL_PINK,
+        _ => {
+            let index = icon
+                .chars()
+                .fold(0usize, |value, character| value ^ character as usize);
+            crate::theme::cycle_color(index)
+        }
     }
 }
 
@@ -2533,18 +2621,31 @@ fn insert_tool_line(
                 .split_once("│ ")
                 .map_or(line.as_str(), |(_, content)| content);
             let color = if first {
-                Color::White
+                crate::theme::PASTEL_WHITE
             } else if is_diff && diff_content.starts_with('+') {
-                Color::Rgb(120, 210, 140)
+                crate::theme::PASTEL_MINT
             } else if is_diff && diff_content.starts_with('-') {
-                Color::Rgb(235, 120, 120)
+                crate::theme::PASTEL_PINK
             } else {
                 Color::Rgb(175, 175, 175)
             };
-            Line::styled(
-                format!("{line_prefix}{line}"),
-                Style::default().fg(color).bg(Color::Rgb(32, 32, 32)),
-            )
+            let style = Style::default().fg(color).bg(Color::Rgb(32, 32, 32));
+            if index == 0 && first {
+                let icon = icon.unwrap_or("󰒓");
+                Line::from(vec![
+                    Span::styled("  ", style),
+                    Span::styled(
+                        icon.to_owned(),
+                        Style::default()
+                            .fg(tool_icon_color(icon))
+                            .bg(Color::Rgb(32, 32, 32))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("  {line}"), style),
+                ])
+            } else {
+                Line::styled(format!("{line_prefix}{line}"), style)
+            }
         })
         .collect::<Vec<_>>();
     let height = text
@@ -2596,7 +2697,7 @@ fn reasoning_text(reasoning: &str) -> Text<'static> {
     reasoning_chunk_text(reasoning, true)
 }
 
-fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
+pub(crate) fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static> {
     Text::from(
         reasoning
             // Providers commonly stream adjacent bold summary headings without
@@ -2931,7 +3032,7 @@ fn render_with_panel(
         Paragraph::new(panel_text).block(
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
-                .border_style(Style::default().fg(Color::White)),
+                .border_style(Style::default().fg(crate::theme::PASTEL_PINK)),
         ),
         panel_area,
     );
@@ -2993,12 +3094,12 @@ fn panel_option_style(option: &str) -> Style {
     // left two items blue.)
     if option.trim_start().starts_with('›') {
         Style::default()
-            .fg(Color::Blue)
+            .fg(crate::theme::PASTEL_BLUE)
             .add_modifier(Modifier::BOLD)
     } else if option.contains("[x]") {
-        Style::default().fg(Color::Green)
+        Style::default().fg(crate::theme::PASTEL_MINT)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(Color::DarkGray)
     }
 }
 
@@ -3079,7 +3180,7 @@ fn hard_wrap_input(text: &str, width: u16) -> String {
     }
     output
 }
-fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+pub(crate) fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     clear_inline(terminal)
 }
 
@@ -3299,9 +3400,10 @@ mod tests {
         assert_eq!(truncate_display_line("ab界cd", 5), "ab界…");
         assert_eq!(truncate_display_line("short", 8), "short");
         assert_eq!(tool_prefix(true, Some("$")), "  $  ");
-        assert_eq!(tool_prefix(true, None), "  🛠  ");
+        assert_eq!(tool_prefix(true, None), "  󰒓  ");
         assert_eq!(tool_prefix(false, Some("$")), "    ");
     }
+
     #[test]
     fn panel_background_uses_printable_blank_cells() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
@@ -3369,10 +3471,13 @@ mod tests {
     #[test]
     fn interactive_selection_uses_color() {
         let selected = panel_option_style("› model");
-        assert_eq!(selected.fg, Some(Color::Blue));
+        assert_eq!(selected.fg, Some(crate::theme::PASTEL_BLUE));
         assert!(selected.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(panel_option_style("Select model").fg, Some(Color::Gray));
-        assert_eq!(panel_option_style("  [x] branch").fg, Some(Color::Green));
+        assert_eq!(panel_option_style("Select model").fg, Some(Color::DarkGray));
+        assert_eq!(
+            panel_option_style("  [x] branch").fg,
+            Some(crate::theme::PASTEL_MINT)
+        );
     }
 
     #[test]
@@ -3391,7 +3496,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_completion_option_is_blue() {
+    fn tab_completion_option_uses_pastel_blue() {
         let backend = TestBackend::new(20, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut input = ChatInput::default();
@@ -3413,7 +3518,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             terminal.backend().buffer().cell((0, 1)).unwrap().fg,
-            Color::Blue
+            crate::theme::PASTEL_BLUE
         );
     }
 

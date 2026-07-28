@@ -1,8 +1,15 @@
+mod diff;
+mod icons;
+mod previews;
+mod titles;
+
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
-use unicode_width::UnicodeWidthStr;
 
-const DISPLAY_OUTPUT_LIMIT: usize = 1200;
+use icons::valid_icon;
+pub use icons::{FALLBACK as FALLBACK_ICON, icon_for};
+use previews::present;
+use titles::title;
 
 /// Standardized presentation state for tool calls, independent of rendering.
 #[derive(Default)]
@@ -18,7 +25,59 @@ pub struct ToolOutput {
     pub batch_complete: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+    pub raw_output: String,
+    /// Full semantic output used to derive the bounded transcript preview.
+    /// This may differ from raw tool protocol text (for example, bash headers
+    /// are stripped and write exposes the requested file content).
+    pub semantic_output: String,
+}
+
+impl ToolRecord {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: Value,
+        raw_output: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let raw_output = raw_output.into();
+        let semantic_output = present(&name, &arguments, &raw_output).semantic_output;
+        Self {
+            id: id.into(),
+            name,
+            arguments,
+            raw_output,
+            semantic_output,
+        }
+    }
+
+    pub fn title(&self) -> String {
+        title(&self.name, &self.arguments)
+    }
+}
+
+/// Render every semantic output line for the supervise view. Unlike the live
+/// transcript preview, this applies neither line nor byte truncation.
+pub fn expanded_lines(record: &ToolRecord) -> Vec<ToolLine> {
+    let is_diff = record.name == "edit";
+    record
+        .semantic_output
+        .lines()
+        .map(|line| ToolLine {
+            text: line.to_owned(),
+            first: false,
+            is_diff,
+            icon: None,
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolLine {
     pub text: String,
     pub first: bool,
@@ -28,10 +87,16 @@ pub struct ToolLine {
 
 struct CallState {
     name: String,
+    arguments: Value,
     title: String,
     icon: Option<String>,
     title_displayed: bool,
-    completed_output: Option<(String, bool)>,
+    completed: Option<CompletedCall>,
+}
+
+struct CompletedCall {
+    preview: String,
+    is_diff: bool,
 }
 
 impl ToolUi {
@@ -55,10 +120,11 @@ impl ToolUi {
             id,
             CallState {
                 name: name.to_owned(),
+                arguments: arguments.clone(),
                 title: call_title.clone(),
                 icon: icon.clone(),
                 title_displayed: show_now,
-                completed_output: None,
+                completed: None,
             },
         );
         show_now.then_some(ToolLine {
@@ -72,32 +138,13 @@ impl ToolUi {
     /// Stores a completed result in its call slot, then emits every contiguous
     /// ready slot in call order. Results may arrive in any execution order.
     pub fn output(&mut self, id: &str, chunk: &str) -> ToolOutput {
-        let call = self
-            .calls
-            .entry(id.to_owned())
-            .or_insert_with(|| CallState {
-                name: "tool".into(),
-                title: "Tool".into(),
-                icon: None,
-                title_displayed: true,
-                completed_output: None,
-            });
-        let compact = compact_output(&call.name, chunk);
-        let mut end = compact.len().min(DISPLAY_OUTPUT_LIMIT);
-        while end > 0 && !compact.is_char_boundary(end) {
-            end -= 1;
-        }
-        let was_truncated = end < compact.len();
-        let is_diff = matches!(call.name.as_str(), "edit" | "write");
-        let prefix = if is_diff { "" } else { "= " };
-        call.completed_output = Some((
-            format!(
-                "{prefix}{}{}",
-                &compact[..end],
-                if was_truncated { "…" } else { "" }
-            ),
-            is_diff,
-        ));
+        self.ensure_call_slot(id);
+        let call = self.calls.get_mut(id).expect("call slot exists");
+        let presented = present(&call.name, &call.arguments, chunk);
+        call.completed = Some(CompletedCall {
+            preview: presented.preview,
+            is_diff: presented.is_diff,
+        });
         self.pending.remove(id);
 
         let mut lines = Vec::new();
@@ -106,313 +153,75 @@ impl ToolUi {
                 self.order.pop_front();
                 continue;
             };
-            let Some((text, is_diff)) = front.completed_output.take() else {
+            let Some(completed) = front.completed.take() else {
                 break;
             };
-            if !text.is_empty() {
+            if !completed.preview.is_empty() {
+                let prefix = if completed.is_diff || is_structured_output(&front.name) {
+                    ""
+                } else {
+                    "= "
+                };
                 lines.push(ToolLine {
-                    text,
+                    text: format!("{prefix}{}", completed.preview),
                     first: false,
-                    is_diff,
+                    is_diff: completed.is_diff,
                     icon: None,
                 });
             }
             self.order.pop_front();
             self.calls.remove(&front_id);
-            if let Some(next_id) = self.order.front()
-                && let Some(next) = self.calls.get_mut(next_id)
-                && !next.title_displayed
-            {
-                next.title_displayed = true;
-                lines.push(ToolLine {
-                    text: next.title.clone(),
-                    first: true,
-                    is_diff: false,
-                    icon: next.icon.clone(),
-                });
-            }
+            self.release_next_title(&mut lines);
         }
         ToolOutput {
             lines,
             batch_complete: self.pending.is_empty() && self.order.is_empty(),
         }
     }
-}
 
-pub fn icon_for<'a>(name: &str, custom_icons: &'a HashMap<String, String>) -> Option<&'a str> {
-    builtin_icon(name).or_else(|| custom_icons.get(name).map(String::as_str))
-}
-
-fn builtin_icon(name: &str) -> Option<&'static str> {
-    match name {
-        "bash" => Some("$"),
-        "subagent" => Some("♟"),
-        "edit" => Some("🖉"),
-        "find" => Some("🗁"),
-        "grep" => Some("⌕"),
-        "read" => Some("🕮"),
-        "skill" => Some("🗡"),
-        "write" => Some("🗎"),
-        _ => None,
-    }
-}
-
-fn valid_icon(icon: &str) -> bool {
-    !icon.is_empty()
-        && icon.chars().count() <= 8
-        && !icon
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        && matches!(UnicodeWidthStr::width(icon), 1..=2)
-}
-
-fn title(name: &str, arguments: &Value) -> String {
-    let path = string(arguments, "path");
-    let query = string(arguments, "query");
-    match name {
-        "read" => format!("Read {path}"),
-        "find" => {
-            if query.is_empty() {
-                "Listed project files".into()
-            } else {
-                format!("Searched files for “{query}”")
-            }
+    fn ensure_call_slot(&mut self, id: &str) {
+        if self.calls.contains_key(id) {
+            return;
         }
-        "grep" => format!("Searched code for “{query}”"),
-        "web_search" => {
-            let query = if query.is_empty() {
-                arguments
-                    .get("queries")
-                    .and_then(Value::as_array)
-                    .map(|queries| {
-                        queries
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    })
-                    .unwrap_or_default()
-            } else {
-                query
-            };
-            format!("Web searched for “{}”", shortened(&query, 100))
+        self.order.push_back(id.to_owned());
+        self.calls.insert(
+            id.to_owned(),
+            CallState {
+                name: "tool".into(),
+                arguments: Value::Object(Default::default()),
+                title: "Tool".into(),
+                icon: icon_for("tool", &self.custom_icons).map(str::to_owned),
+                title_displayed: true,
+                completed: None,
+            },
+        );
+    }
+
+    fn release_next_title(&mut self, lines: &mut Vec<ToolLine>) {
+        let Some(next_id) = self.order.front() else {
+            return;
+        };
+        let Some(next) = self.calls.get_mut(next_id) else {
+            return;
+        };
+        if next.title_displayed {
+            return;
         }
-        "edit" => format!("Edited {path}"),
-        "write" => format!("Wrote {path}"),
-        "bash" => match string(arguments, "mode").as_str() {
-            "exec" if arguments.get("background").and_then(Value::as_bool) == Some(true) => {
-                format!(
-                    "Started shell: {}",
-                    shortened(&string(arguments, "command"), 80)
-                )
-            }
-            "start" => format!(
-                "Started shell: {}",
-                shortened(&string(arguments, "command"), 80)
-            ),
-            "send" => "Sent input to shell".into(),
-            "read" => "Checked shell output".into(),
-            "stop" => "Stopped shell".into(),
-            "list" => "Listed shell sessions".into(),
-            _ => format!("Ran: {}", shortened(&string(arguments, "command"), 80)),
-        },
-        "subagent" => match string(arguments, "mode").as_str() {
-            "status" | "read" => format!("Checked subagent {}", string(arguments, "taskId")),
-            "wait" => format!("Waited for subagent {}", string(arguments, "taskId")),
-            "cancel" => format!("Cancelled subagent {}", string(arguments, "taskId")),
-            "list" => "Listed subagent tasks".into(),
-            _ if arguments.get("background").and_then(Value::as_bool) == Some(true)
-                || string(arguments, "mode") == "start" =>
-            {
-                format!(
-                    "Started {} subagent: {}",
-                    subagent_role(arguments),
-                    shortened(&string(arguments, "prompt"), 80)
-                )
-            }
-            _ => format!(
-                "{} subagent: {}",
-                subagent_role(arguments),
-                shortened(&string(arguments, "prompt"), 80)
-            ),
-        },
-        _ => humanize(name),
+        next.title_displayed = true;
+        lines.push(ToolLine {
+            text: next.title.clone(),
+            first: true,
+            is_diff: false,
+            icon: next.icon.clone(),
+        });
     }
 }
 
-fn compact_output(name: &str, output: &str) -> String {
-    match name {
-        "find" => format!("Found {} files", result_count(output)),
-        "grep" => format!(
-            "Found {} matches",
-            output.lines().filter(|line| line.contains(':')).count()
-        ),
-        "read" => format!(
-            "Read {} lines",
-            output.lines().filter(|line| line.contains(" | ")).count()
-        ),
-        "edit" | "write" => output
-            .split_once("Diff:\n")
-            .map(|(_, diff)| numbered_diff(diff))
-            .unwrap_or_else(|| output.lines().next().unwrap_or("Completed").to_owned()),
-        "subagent" => compact_delegate_output(output),
-        _ => shortened(output.trim(), DISPLAY_OUTPUT_LIMIT),
-    }
-}
-
-fn numbered_diff(diff: &str) -> String {
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
-    let mut output = Vec::new();
-    for line in diff.lines() {
-        if line.starts_with("@@") {
-            let mut ranges = line.split_whitespace().skip(1);
-            old_line = diff_range_start(ranges.next()).unwrap_or(old_line);
-            new_line = diff_range_start(ranges.next()).unwrap_or(new_line);
-            continue;
-        }
-        if line.starts_with("---") || line.starts_with("+++") {
-            continue;
-        }
-        if line.starts_with('-') {
-            output.push(format!("{old_line:>4}      │ {line}"));
-            old_line += 1;
-        } else if line.starts_with('+') {
-            output.push(format!("     {new_line:>4} │ {line}"));
-            new_line += 1;
-        } else if line.starts_with(' ') {
-            output.push(format!("{old_line:>4} {new_line:>4} │ {line}"));
-            old_line += 1;
-            new_line += 1;
-        } else {
-            output.push(format!("          │ {line}"));
-        }
-    }
-    output.join("\n")
-}
-
-fn diff_range_start(range: Option<&str>) -> Option<usize> {
-    range?
-        .trim_start_matches(['-', '+'])
-        .split(',')
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn compact_delegate_output(output: &str) -> String {
-    let Ok(value) = serde_json::from_str::<Value>(output) else {
-        return shortened(output.trim(), DISPLAY_OUTPUT_LIMIT);
-    };
-    if let Some(tasks) = value.as_array() {
-        if tasks.is_empty() {
-            return "No subagent tasks".into();
-        }
-        return tasks
-            .iter()
-            .map(|task| {
-                let id = task
-                    .get("taskId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("delegate");
-                let status = task
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                let role = task
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("default");
-                let prompt = task.get("prompt").and_then(Value::as_str).unwrap_or("");
-                format!(
-                    "{id} · {role} · {status}{}",
-                    if prompt.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" · {prompt}")
-                    }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-    let status = value
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let role = value
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("default");
-    if let Some(result) = value.get("output").and_then(Value::as_str) {
-        return format!("{role} · completed\n{}", truncate_delegate_text(result));
-    }
-    if let Some(error) = value.get("error").and_then(Value::as_str) {
-        return format!("{role} · failed\n{}", truncate_delegate_text(error));
-    }
-    let id = value
-        .get("taskId")
-        .and_then(Value::as_str)
-        .unwrap_or("delegate");
-    format!("{id} · {role} · {status}")
-}
-
-fn truncate_delegate_text(output: &str) -> String {
-    const MAX_LINES: usize = 8;
-    const MAX_BYTES: usize = 600;
-    let lines = output.trim().lines().collect::<Vec<_>>();
-    let limited = lines
-        .iter()
-        .take(MAX_LINES)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let was_truncated = lines.len() > MAX_LINES || limited.len() > MAX_BYTES;
-    let mut result = shortened(&limited, MAX_BYTES);
-    if was_truncated && !result.ends_with('…') {
-        result.push_str("\n…");
-    }
-    result
-}
-
-fn result_count(output: &str) -> usize {
-    output
-        .lines()
-        .filter(|line| !line.starts_with('[') && *line != "No files found.")
-        .count()
-}
-fn subagent_role(arguments: &Value) -> String {
-    let role = string(arguments, "agent");
-    if role.is_empty() {
-        "default".into()
-    } else {
-        role
-    }
-}
-
-fn string(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned()
-}
-fn shortened(value: &str, max: usize) -> String {
-    if value.len() <= max {
-        return value.to_owned();
-    }
-    let mut end = max.saturating_sub(1);
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &value[..end])
-}
-fn humanize(name: &str) -> String {
-    let mut result = name.replace('_', " ");
-    if let Some(initial) = result.get_mut(0..1) {
-        initial.make_ascii_uppercase();
-    }
-    result
+fn is_structured_output(name: &str) -> bool {
+    matches!(
+        name,
+        "bash" | "find" | "grep" | "read" | "skill" | "subagent" | "write"
+    )
 }
 
 #[cfg(test)]
@@ -420,7 +229,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_standard_tool_titles_and_compact_output() {
+    fn formats_titles_and_truncated_previews() {
         let mut ui = ToolUi::default();
         assert_eq!(
             ui.start("f".into(), "find", &serde_json::json!({"query":"config"})),
@@ -428,117 +237,64 @@ mod tests {
                 text: "Searched files for “config”".into(),
                 first: true,
                 is_diff: false,
-                icon: Some("🗁".into()),
+                icon: Some("".into()),
             })
         );
-        let first = ui.output("f", "src/config.rs\nconfig.toml");
-        assert_eq!(first.lines[0].text, "= Found 2 files");
-        assert!(first.batch_complete);
-
-        assert_eq!(
-            ui.start(
-                "w".into(),
-                "web_search",
-                &serde_json::json!({"query":"rust async runtimes"})
-            ),
-            Some(ToolLine {
-                text: "Web searched for “rust async runtimes”".into(),
-                first: true,
-                is_diff: false,
-                icon: None,
-            })
+        let raw = (1..=12)
+            .map(|index| format!("src/config-{index}.rs\t(score {index})"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let output = ui.output("f", &raw);
+        assert_eq!(output.lines[0].text.lines().count(), 11);
+        assert!(
+            output.lines[0]
+                .text
+                .ends_with("[2 lines omitted · /supervise]")
         );
-        ui.output("w", "results");
-        assert_eq!(
-            ui.start(
-                "e".into(),
-                "edit",
-                &serde_json::json!({"path":"src/lib.rs"})
-            ),
-            Some(ToolLine {
-                text: "Edited src/lib.rs".into(),
-                first: true,
-                is_diff: false,
-                icon: Some("🖉".into()),
-            })
-        );
-        assert_eq!(
-            ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n")
-                .lines[0]
-                .text,
-            "   1      │ -old\n        1 │ +new"
-        );
-
-        ui.start(
-            "d".into(),
-            "subagent",
-            &serde_json::json!({"mode":"read","taskId":"delegate-1"}),
-        );
-        assert_eq!(
-            ui.output(
-                "d",
-                r#"{"taskId":"a-quiet-river","role":"explorer","status":"completed","output":"Found the bug."}"#,
-            )
-            .lines[0]
-                .text,
-            "= explorer · completed\nFound the bug."
-        );
-        assert_eq!(
-            numbered_diff("@@ -10,2 +20,2 @@\n context\n-old\n+new\n"),
-            "  10   20 │  context\n  11      │ -old\n       21 │ +new"
-        );
-        assert_eq!(
-            truncate_delegate_text("1\n2\n3\n4\n5\n6\n7\n8\n9"),
-            "1\n2\n3\n4\n5\n6\n7\n8\n…"
-        );
+        assert!(output.batch_complete);
     }
 
     #[test]
-    fn emits_concurrent_calls_and_results_in_call_order() {
+    fn emits_concurrent_calls_results_and_records_in_call_order() {
         let mut ui = ToolUi::default();
         assert!(
             ui.start("a".into(), "find", &serde_json::json!({"query":"a"}))
                 .is_some()
         );
         assert!(
-            ui.start("b".into(), "find", &serde_json::json!({"query":"b"}))
+            ui.start("b".into(), "read", &serde_json::json!({"path":"b.rs"}))
                 .is_none()
         );
 
-        let early_second = ui.output("b", "b.rs");
+        let early_second = ui.output("b", "abc: b");
         assert!(early_second.lines.is_empty());
         assert!(!early_second.batch_complete);
 
-        let released = ui.output("a", "a.rs");
+        let released = ui.output("a", "a.rs\t(score 1)");
         assert!(released.batch_complete);
         assert_eq!(released.lines.len(), 3);
-        assert_eq!(released.lines[0].text, "= Found 1 files");
-        assert_eq!(released.lines[1].text, "Searched files for “b”");
+        assert_eq!(released.lines[0].text, "a.rs\t(score 1)");
+        assert_eq!(released.lines[1].text, "Read b.rs");
         assert!(released.lines[1].first);
-        assert_eq!(released.lines[1].icon.as_deref(), Some("🗁"));
-        assert_eq!(released.lines[2].text, "= Found 1 files");
+        assert_eq!(released.lines[1].icon.as_deref(), Some(""));
+        assert_eq!(released.lines[2].text, "abc: b");
     }
 
     #[test]
-    fn built_in_icons_are_stable() {
-        let icons = HashMap::new();
-        for (name, expected) in [
-            ("bash", "$"),
-            ("subagent", "♟"),
-            ("edit", "🖉"),
-            ("find", "🗁"),
-            ("grep", "⌕"),
-            ("read", "🕮"),
-            ("skill", "🗡"),
-            ("write", "🗎"),
-        ] {
-            assert_eq!(icon_for(name, &icons), Some(expected));
-        }
-        assert_eq!(icon_for("unknown", &icons), None);
+    fn keeps_edit_rendering_unchanged() {
+        let mut ui = ToolUi::default();
+        ui.start(
+            "e".into(),
+            "edit",
+            &serde_json::json!({"path":"src/lib.rs"}),
+        );
+        let output = ui.output("e", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
+        assert_eq!(output.lines[0].text, "   1      │ -old\n        1 │ +new");
+        assert!(output.lines[0].is_diff);
     }
 
     #[test]
-    fn uses_valid_custom_icons_and_falls_back_for_invalid_ones() {
+    fn valid_custom_icons_survive_and_invalid_icons_use_fallback() {
         let mut ui = ToolUi::with_icons(HashMap::from([
             ("deploy".into(), "🚀".into()),
             ("broken".into(), "two words".into()),
@@ -554,8 +310,38 @@ mod tests {
         assert_eq!(
             ui.start("b".into(), "broken", &serde_json::json!({}))
                 .unwrap()
-                .icon,
-            None
+                .icon
+                .as_deref(),
+            Some(FALLBACK_ICON)
         );
+    }
+
+    #[test]
+    fn orphan_result_still_produces_output() {
+        let mut ui = ToolUi::default();
+        let output = ui.output("missing", "result");
+        assert_eq!(output.lines[0].text, "= result");
+        assert!(output.batch_complete);
+    }
+
+    #[test]
+    fn session_parts_build_the_same_untruncated_expanded_record() {
+        let content = (1..=31)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let record = ToolRecord::new(
+            "session-call",
+            "write",
+            serde_json::json!({"path":"src/new.rs","content":content}),
+            "Written src/new.rs.\n\nDiff:\n+ignored",
+        );
+
+        let expanded = expanded_lines(&record);
+        assert_eq!(expanded.len(), 31);
+        assert_eq!(expanded.first().unwrap().text, "line 1");
+        assert_eq!(expanded.last().unwrap().text, "line 31");
+        assert!(expanded.iter().all(|line| !line.is_diff));
+        assert_eq!(record.title(), "Wrote src/new.rs");
     }
 }

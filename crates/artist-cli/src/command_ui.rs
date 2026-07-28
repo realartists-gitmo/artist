@@ -40,11 +40,13 @@ pub async fn run(
     match command {
         // Rewind needs session state and is dispatched in chat_ui before
         // reaching here.
-        ParsedCommand::Rewind { .. } | ParsedCommand::Compact { .. } => Ok(CommandOutput {
-            lines: vec!["that command is only available inside a chat session".to_owned()],
-            context_capacity: None,
-            model_changed: false,
-        }),
+        ParsedCommand::Rewind { .. } | ParsedCommand::Compact { .. } | ParsedCommand::Supervise => {
+            Ok(CommandOutput {
+                lines: vec!["that command is only available inside a chat session".to_owned()],
+                context_capacity: None,
+                model_changed: false,
+            })
+        }
         ParsedCommand::Rules(_) => Ok(CommandOutput {
             lines: vec!["/rules is only available inside a chat session".to_owned()],
             context_capacity: None,
