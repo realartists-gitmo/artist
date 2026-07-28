@@ -1900,7 +1900,7 @@ async fn submit(
     let mut visible = String::new();
     let mut reasoning = String::new();
     let mut response_started = false;
-    let mut response_output_started = false;
+    let mut response_renderer = crate::response_output::Renderer::default();
     let mut response_since_tool = false;
     let mut transcript_gap = false;
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
@@ -2115,8 +2115,7 @@ async fn submit(
                         response_since_tool = true;
                         let width = usize::from(terminal.size()?.width.saturating_sub(4).max(1));
                         while let Some(line) = take_visible_line(&mut visible, width) {
-                            insert_response(terminal, &line, !response_output_started)?;
-                            response_output_started = true;
+                            insert_response(terminal, &line, &mut response_renderer)?;
                             transcript_gap = true;
                         }
                     }
@@ -2128,8 +2127,7 @@ async fn submit(
                         phase = "working";
                         if response_since_tool {
                             if !visible.is_empty() {
-                                insert_response(terminal, &visible, !response_output_started)?;
-                                response_output_started = true;
+                                insert_response(terminal, &visible, &mut response_renderer)?;
                                 visible.clear();
                             }
                             insert_blank(terminal)?;
@@ -2220,7 +2218,7 @@ async fn submit(
                         visible.clear();
                         reasoning.clear();
                         response.clear();
-                        response_output_started = false;
+                        response_renderer.reset();
                         response_started = false;
                         response_since_tool = false;
                         let excerpt: String = matched.chars().take(60).collect();
@@ -2272,7 +2270,7 @@ async fn submit(
         insert_reasoning(terminal, &reasoning)?;
     }
     if !visible.is_empty() {
-        insert_response(terminal, &visible, !response_output_started)?;
+        insert_response(terminal, &visible, &mut response_renderer)?;
     }
     // Compose the failure and elapsed time as one transcript block. This mirrors
     // component-based TUIs (Codex/Pi), where related rows are laid out together
@@ -2366,7 +2364,8 @@ fn insert_history(
         match item {
             ReplayItem::User(text) => insert_message(terminal, text)?,
             ReplayItem::Assistant(text) => {
-                insert_response(terminal, text, true)?;
+                let mut renderer = crate::response_output::Renderer::default();
+                insert_response(terminal, text, &mut renderer)?;
                 insert_blank(terminal)?;
             }
             ReplayItem::Reasoning(text) => insert_reasoning(terminal, text)?,
@@ -2674,11 +2673,11 @@ fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> 
 
 fn insert_response(
     terminal: &mut ratatui::DefaultTerminal,
-    markdown: &str,
-    first: bool,
+    output: &str,
+    renderer: &mut crate::response_output::Renderer,
 ) -> Result<()> {
     let width = usize::from(terminal.size()?.width.max(1));
-    let text = crate::response_output::text(markdown, first, width);
+    let text = renderer.render(output, width);
     let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
         Paragraph::new(text).render(buffer.area, buffer);

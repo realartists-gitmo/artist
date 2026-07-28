@@ -1,87 +1,264 @@
-use ratatui::text::{Line, Span, Text};
+mod syntax;
+
+use ratatui::{
+    style::Style,
+    text::{Line, Span, Text},
+};
 use unicode_width::UnicodeWidthChar;
 
-const PREFIX: &str = "   ";
 const INDENT: &str = "    ";
 
-pub(crate) fn text(output: &str, first: bool, terminal_width: usize) -> Text<'static> {
-    let content_width = terminal_width.saturating_sub(INDENT.len()).max(1);
-    Text::from(
-        wrapped_lines(output, content_width)
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let prefix = if first && index == 0 { PREFIX } else { INDENT };
-                Line::from(vec![Span::raw(prefix), Span::raw(line)])
-            })
-            .collect::<Vec<_>>(),
-    )
+#[derive(Default)]
+pub(crate) struct Renderer {
+    started: bool,
+    fence: Option<FencedBlock>,
 }
 
-fn wrapped_lines(output: &str, width: usize) -> Vec<String> {
+struct FencedBlock {
+    marker: char,
+    marker_len: usize,
+    highlighter: syntax::CodeHighlighter,
+}
+
+impl Renderer {
+    pub(crate) fn render(&mut self, output: &str, terminal_width: usize) -> Text<'static> {
+        let content_width = terminal_width.saturating_sub(INDENT.len()).max(1);
+        let mut lines = Vec::new();
+
+        for (source_line, ends_line) in logical_lines(output) {
+            for mut spans in wrap_spans(self.style_line(source_line, ends_line), content_width) {
+                let mut prefixed = if self.started {
+                    vec![Span::raw(INDENT)]
+                } else {
+                    self.started = true;
+                    vec![
+                        Span::raw("  "),
+                        Span::styled(" ", Style::default().fg(crate::theme::PASTEL_BLUSH)),
+                    ]
+                };
+                prefixed.append(&mut spans);
+                lines.push(Line::from(prefixed));
+            }
+        }
+        Text::from(lines)
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.started = false;
+        self.fence = None;
+    }
+
+    fn style_line(&mut self, line: &str, ends_line: bool) -> Vec<Span<'static>> {
+        if self
+            .fence
+            .as_ref()
+            .is_some_and(|fence| is_closing_fence(line, fence.marker, fence.marker_len))
+        {
+            self.fence = None;
+            return fence_spans(line);
+        }
+        if let Some(fence) = self.fence.as_mut() {
+            return fence.highlighter.highlight_line(line, ends_line);
+        }
+        if let Some((marker, marker_len, language)) = opening_fence(line) {
+            self.fence = Some(FencedBlock {
+                marker,
+                marker_len,
+                highlighter: syntax::CodeHighlighter::new(language),
+            });
+            return fence_spans(line);
+        }
+        markdown_spans(line)
+    }
+}
+
+fn logical_lines(output: &str) -> Vec<(&str, bool)> {
+    if output.is_empty() {
+        return vec![("", false)];
+    }
+    output
+        .split_inclusive('\n')
+        .map(|line| {
+            line.strip_suffix('\n')
+                .map_or((line, false), |line| (line, true))
+        })
+        .collect()
+}
+
+fn fence_candidate(line: &str) -> Option<&str> {
+    let indent = line.bytes().take_while(|&value| value == b' ').count();
+    (indent <= 3).then_some(&line[indent..])
+}
+
+fn opening_fence(line: &str) -> Option<(char, usize, &str)> {
+    let trimmed = fence_candidate(line)?;
+    let marker = trimmed.chars().next()?;
+    if !matches!(marker, '`' | '~') {
+        return None;
+    }
+    let marker_len = trimmed.chars().take_while(|&value| value == marker).count();
+    if marker_len < 3 {
+        return None;
+    }
+    let language = trimmed[marker.len_utf8() * marker_len..]
+        .trim()
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default();
+    Some((marker, marker_len, language))
+}
+
+fn is_closing_fence(line: &str, marker: char, minimum_len: usize) -> bool {
+    let Some(trimmed) = fence_candidate(line) else {
+        return false;
+    };
+    let marker_len = trimmed.chars().take_while(|&value| value == marker).count();
+    marker_len >= minimum_len && trimmed[marker.len_utf8() * marker_len..].trim().is_empty()
+}
+
+fn fence_spans(line: &str) -> Vec<Span<'static>> {
+    vec![Span::styled(
+        line.to_owned(),
+        Style::default().fg(crate::theme::PASTEL_BLUE),
+    )]
+}
+
+fn markdown_spans(line: &str) -> Vec<Span<'static>> {
+    let marker_end = structural_marker_end(line);
+    let mut spans = Vec::new();
+    if marker_end > 0 {
+        spans.push(Span::styled(
+            line[..marker_end].to_owned(),
+            Style::default().fg(crate::theme::PASTEL_MINT),
+        ));
+    }
+    spans.extend(inline_spans(&line[marker_end..]));
+    spans
+}
+
+fn structural_marker_end(line: &str) -> usize {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    if rest.starts_with("> ") || rest.starts_with("- ") || rest.starts_with("+ ") {
+        return indent + 2;
+    }
+    if rest.starts_with("* ") {
+        return indent + 2;
+    }
+    if rest.starts_with('#') {
+        let hashes = rest.bytes().take_while(|&value| value == b'#').count();
+        if rest.as_bytes().get(hashes) == Some(&b' ') {
+            return indent + hashes + 1;
+        }
+    }
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0
+        && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
+        && rest.as_bytes().get(digits + 1) == Some(&b' ')
+    {
+        return indent + digits + 2;
+    }
+    0
+}
+
+fn inline_spans(text: &str) -> Vec<Span<'static>> {
+    let prose = Style::default().fg(crate::theme::PASTEL_WHITE);
+    let code = Style::default().fg(crate::theme::PASTEL_BLUE);
+    let mut spans = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find('`') {
+        if start > 0 {
+            spans.push(Span::styled(rest[..start].to_owned(), prose));
+        }
+        let marker_len = rest[start..]
+            .bytes()
+            .take_while(|&value| value == b'`')
+            .count();
+        let marker = &rest[start..start + marker_len];
+        let after_marker = &rest[start + marker_len..];
+        let Some(end) = after_marker.find(marker) else {
+            spans.push(Span::styled(rest[start..].to_owned(), code));
+            rest = "";
+            break;
+        };
+        spans.push(Span::styled(marker.to_owned(), code));
+        spans.push(Span::styled(after_marker[..end].to_owned(), code));
+        spans.push(Span::styled(marker.to_owned(), code));
+        rest = &after_marker[end + marker_len..];
+    }
+    if !rest.is_empty() || spans.is_empty() {
+        spans.push(Span::styled(rest.to_owned(), prose));
+    }
+    spans
+}
+
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
     let mut lines = Vec::new();
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut columns = 0usize;
 
-    for character in output.chars() {
-        if character == '\n' {
-            lines.push(std::mem::take(&mut line));
-            columns = 0;
-            continue;
-        }
-
-        let character_width = character.width().unwrap_or(0);
-        if character_width > width {
-            if !line.is_empty() {
+    for span in spans {
+        let style = span.style;
+        let mut chunk = String::new();
+        for character in span.content.chars() {
+            let mut character_width = character.width().unwrap_or(0);
+            if columns > 0 && columns.saturating_add(character_width) > width {
+                push_chunk(&mut line, &mut chunk, style);
                 lines.push(std::mem::take(&mut line));
                 columns = 0;
             }
-            lines.push("�".to_owned());
-            continue;
+            if character_width > width {
+                character_width = 1;
+                chunk.push('�');
+            } else {
+                chunk.push(character);
+            }
+            columns = columns.saturating_add(character_width);
         }
-        if columns > 0 && columns.saturating_add(character_width) > width {
-            lines.push(std::mem::take(&mut line));
-            columns = 0;
-        }
-        line.push(character);
-        columns = columns.saturating_add(character_width);
+        push_chunk(&mut line, &mut chunk, style);
     }
-
     if !line.is_empty() || lines.is_empty() {
         lines.push(line);
     }
     lines
 }
 
+fn push_chunk(line: &mut Vec<Span<'static>>, chunk: &mut String, style: Style) {
+    if !chunk.is_empty() {
+        line.push(Span::styled(std::mem::take(chunk), style));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Style;
     use unicode_width::UnicodeWidthStr;
 
     #[test]
-    fn preserves_markdown_as_unstyled_literal_text() {
-        let rendered = text("**bold** and `code`\n```rust", true, 80);
+    fn preserves_markdown_and_accents_inline_code() {
+        let rendered = Renderer::default().render("**bold** and `code`", 80);
         let lines = rendered
             .lines
             .iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, ["   **bold** and `code`", "    ```rust"]);
+        assert_eq!(lines, ["   **bold** and `code`"]);
         assert!(
             rendered
                 .lines
                 .iter()
                 .flat_map(|line| &line.spans)
-                .all(|span| span.style == Style::default())
+                .any(|span| span.content.contains("code")
+                    && span.style.fg == Some(crate::theme::PASTEL_BLUE))
         );
     }
 
     #[test]
     fn wraps_content_with_the_existing_four_column_indent() {
-        let rendered = text("1234567", true, 10);
+        let rendered = Renderer::default().render("1234567", 10);
         let lines = rendered
             .lines
             .iter()
@@ -90,5 +267,43 @@ mod tests {
 
         assert_eq!(lines, ["   123456", "    7"]);
         assert!(lines.iter().all(|line| line.width() <= 10));
+    }
+
+    #[test]
+    fn fence_state_survives_chunks_and_reset() {
+        let mut renderer = Renderer::default();
+        assert_eq!(
+            renderer.render("```rust\n", 80).lines[0].to_string(),
+            "   ```rust"
+        );
+        assert!(renderer.fence.is_some());
+
+        let comment = renderer.render("// explanation", 80);
+        let comment_span = comment
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .find(|span| span.content.contains("explanation"))
+            .expect("highlighted comment span");
+        assert_eq!(comment_span.style.fg, Some(ratatui::style::Color::DarkGray));
+        assert!(
+            comment_span
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+
+        assert_eq!(renderer.render("```", 80).lines[0].to_string(), "    ```");
+        assert!(renderer.fence.is_none());
+
+        renderer.render("~~~haskell", 80);
+        renderer.render("    ~~~", 80);
+        assert!(renderer.fence.is_some());
+        renderer.reset();
+        assert!(renderer.fence.is_none());
+        assert_eq!(
+            renderer.render("prose", 80).lines[0].to_string(),
+            "   prose"
+        );
     }
 }
