@@ -9,20 +9,13 @@ pub(super) struct PresentedOutput {
     pub is_diff: bool,
 }
 
-pub(super) fn present(name: &str, arguments: &Value, raw_output: &str) -> PresentedOutput {
+pub(super) fn present(name: &str, raw_output: &str) -> PresentedOutput {
     match name {
         "bash" => line_preview(bash_semantic(raw_output), 5),
         "edit" => edit_preview(raw_output),
         "find" | "grep" | "read" => line_preview(raw_output.to_owned(), 10),
         "skill" => bounded_line_preview(raw_output.to_owned(), 30),
-        "write" => line_preview(
-            arguments
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            30,
-        ),
+        "write" => edit_preview(raw_output),
         "subagent" => PresentedOutput {
             preview: compact_subagent_output(raw_output),
             is_diff: false,
@@ -221,7 +214,6 @@ mod tests {
     fn strips_bash_protocol_and_limits_terminal_output_to_five_lines() {
         let presented = present(
             "bash",
-            &serde_json::json!({"mode":"exec"}),
             &format!(
                 "status: completed\nexitCode: Some(0)\ntruncated: false\n{}",
                 numbered_lines(7)
@@ -237,7 +229,6 @@ mod tests {
     fn bash_without_terminal_output_falls_back_to_status() {
         let presented = present(
             "bash",
-            &serde_json::json!({"mode":"exec"}),
             "status: completed\nexitCode: Some(0)\ntruncated: false\n",
         );
         assert_eq!(presented.preview, "status: completed");
@@ -247,36 +238,27 @@ mod tests {
     fn applies_exact_line_limits_and_omission_markers() {
         for (name, limit) in [("find", 10), ("grep", 10), ("read", 10), ("skill", 30)] {
             let exact = numbered_lines(limit);
-            let exact_presented = present(name, &serde_json::json!({}), &exact);
+            let exact_presented = present(name, &exact);
             assert_eq!(exact_presented.preview, exact);
 
             let output = numbered_lines(limit + 1);
-            let presented = present(name, &serde_json::json!({}), &output);
+            let presented = present(name, &output);
             assert_eq!(presented.preview.lines().count(), limit + 1);
             assert!(presented.preview.ends_with("[1 line omitted]"));
         }
     }
 
     #[test]
-    fn write_previews_argument_content_instead_of_result_diff() {
-        let content = numbered_lines(31);
-        let presented = present(
-            "write",
-            &serde_json::json!({"path":"new.rs","content":content}),
-            "Written new.rs.\n\nDiff:\n+not the preview",
-        );
-        assert_eq!(presented.preview.lines().count(), 31);
-        assert!(presented.preview.ends_with("[1 line omitted]"));
-        assert!(!presented.is_diff);
+    fn write_uses_the_same_numbered_diff_preview_as_edit() {
+        let result = "Written new.rs.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n";
+        let presented = present("write", result);
+        assert_eq!(presented.preview, "   1      │ -old\n        1 │ +new");
+        assert!(presented.is_diff);
     }
 
     #[test]
     fn edit_rendering_remains_numbered_and_diff_styled() {
-        let presented = present(
-            "edit",
-            &serde_json::json!({}),
-            "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n",
-        );
+        let presented = present("edit", "Applied edit.\n\nDiff:\n@@ -1 +1 @@\n-old\n+new\n");
         assert_eq!(presented.preview, "   1      │ -old\n        1 │ +new");
         assert!(presented.is_diff);
     }
@@ -284,7 +266,7 @@ mod tests {
     #[test]
     fn generic_preview_is_utf8_safe_and_strictly_byte_bounded() {
         let output = "界".repeat(DISPLAY_OUTPUT_LIMIT);
-        let presented = present("extension_tool", &serde_json::json!({}), &output);
+        let presented = present("extension_tool", &output);
         assert!(presented.preview.len() <= DISPLAY_OUTPUT_LIMIT);
         assert!(presented.preview.ends_with('…'));
     }
@@ -295,7 +277,7 @@ mod tests {
             .map(|_| "界".repeat(100))
             .collect::<Vec<_>>()
             .join("\n");
-        let presented = present("skill", &serde_json::json!({"mode":"activate"}), &output);
+        let presented = present("skill", &output);
         assert!(presented.preview.len() <= DISPLAY_OUTPUT_LIMIT);
         assert!(presented.preview.ends_with('…'));
     }

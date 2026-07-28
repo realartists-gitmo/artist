@@ -35,7 +35,6 @@ pub struct ToolLine {
 
 struct CallState {
     name: String,
-    arguments: Value,
     title: String,
     icon: Option<String>,
     title_displayed: bool,
@@ -83,7 +82,6 @@ impl ToolUi {
             id,
             CallState {
                 name: name.to_owned(),
-                arguments: arguments.clone(),
                 title: call_title.clone(),
                 icon: icon.clone(),
                 title_displayed: !show_title || show_now,
@@ -103,7 +101,7 @@ impl ToolUi {
     pub fn output(&mut self, id: &str, chunk: &str) -> ToolOutput {
         self.ensure_call_slot(id);
         let call = self.calls.get_mut(id).expect("call slot exists");
-        let presented = present(&call.name, &call.arguments, chunk);
+        let presented = present(&call.name, chunk);
         call.completed = Some(CompletedCall {
             preview: presented.preview,
             is_diff: presented.is_diff,
@@ -151,7 +149,6 @@ impl ToolUi {
             id.to_owned(),
             CallState {
                 name: "tool".into(),
-                arguments: Value::Object(Default::default()),
                 title: "Tool".into(),
                 icon: icon_for("tool", &self.custom_icons).map(str::to_owned),
                 title_displayed: true,
