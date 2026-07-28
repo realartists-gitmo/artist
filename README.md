@@ -14,7 +14,7 @@ Of course there are many coding harnesses out there. We built Artist because eve
 
 Later, a Codex-app-like desktop app developed in native-Rust via **GPUI** will be implemented, creating a performant desktop app experience.
 
-## Compatibility Roadmap
+## Model Compatibility Roadmap
 - [x] Rig provided models
 - [ ] Generic OpenAI key support
 - [x] ChatGPT subscription support
@@ -26,6 +26,7 @@ Later, a Codex-app-like desktop app developed in native-Rust via **GPUI** will b
 - [x] Extensions, with customizable tools
 - [x] AGENTS.md, and .agents/skills protocol support
 - [ ] First class Herdr support
+- [ ] ACP support
 - [ ] Customizable system prompt
 - [ ] Customizable TUI
 - [ ] GPUI-based desktop app.
