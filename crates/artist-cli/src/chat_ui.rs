@@ -2745,7 +2745,7 @@ fn insert_response(
     first: bool,
 ) -> Result<()> {
     let width = usize::from(terminal.size()?.width.max(1));
-    let text = response_text(markdown, first, width)?;
+    let text = crate::response_output::text(markdown, first, width);
     let height = text.lines.len().max(1) as u16;
     terminal.insert_before(height, |buffer| {
         Paragraph::new(text).render(buffer.area, buffer);

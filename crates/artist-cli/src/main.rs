@@ -15,6 +15,7 @@ mod message_box;
 mod models;
 mod prompt;
 mod provider_commands;
+mod response_output;
 mod sessions;
 mod settings;
 mod slash_commands;
