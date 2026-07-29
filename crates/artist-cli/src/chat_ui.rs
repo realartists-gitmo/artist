@@ -2796,7 +2796,9 @@ fn streaming_viewport_height(
         .saturating_add(subagent_height)
         .saturating_add(queued_height)
         .saturating_add(reasoning_height)
+        // The transcript and timer separators are distinct rows.
         .saturating_add(u16::from(transcript_gap))
+        .saturating_add(1)
         .saturating_add(1)
         .saturating_add(footer_height)
         .min(terminal_height)
@@ -2839,11 +2841,17 @@ fn draw_streaming(
         .input
         .visual_lines(width.saturating_sub(2).max(1))
         .saturating_add(2);
+    let has_live_content =
+        controls.subagents.height() > 0 || queued_height > 0 || !controls.reasoning.is_empty();
+    // When there is no live content, the timer's own leading gap already
+    // separates it from scrollback; do not stack a second blank row.
     let transcript_gap_height =
-        u16::from(controls.transcript_gap || !controls.reasoning.is_empty());
+        u16::from(has_live_content && (controls.transcript_gap || !controls.reasoning.is_empty()));
+    const TIMER_GAP_HEIGHT: u16 = 1;
     let base_fixed_height = input_height
         .saturating_add(queued_height)
         .saturating_add(transcript_gap_height)
+        .saturating_add(TIMER_GAP_HEIGHT)
         .saturating_add(1)
         .saturating_add(footer_height);
     let subagent_height = controls
@@ -2885,7 +2893,13 @@ fn draw_streaming(
     }
     terminal.draw(|frame| {
         let area = frame.area();
-        let subagent_area = Rect::new(area.x, area.y, area.width, subagent_height.min(area.height));
+        let live_top = area.y.saturating_add(transcript_gap_height);
+        let subagent_area = Rect::new(
+            area.x,
+            live_top,
+            area.width,
+            subagent_height.min(area.height.saturating_sub(transcript_gap_height)),
+        );
         controls
             .subagents
             .render(frame.buffer_mut(), subagent_area, controls.animation_frame);
@@ -2925,19 +2939,20 @@ fn draw_streaming(
         if reasoning_height > 0 {
             frame.render_widget(Paragraph::new(reasoning_lines), reasoning_area);
         }
-        // Keep one live blank row between streamed transcript output and the
-        // activity timer. A committed spacer disables the live one, so tool
-        // completion and output transitions never double the spacing.
-        let status_top = reasoning_area
-            .bottom()
-            .saturating_add(transcript_gap_height);
+        // Gaps have one owner each: transcript_gap_height is above every live
+        // element, while TIMER_GAP_HEIGHT is immediately above the timer.
+        let status_top = reasoning_area.bottom().saturating_add(TIMER_GAP_HEIGHT);
         let status_area = Rect::new(
             area.x,
             status_top,
             area.width,
             area.height
                 .saturating_sub(
-                    subagent_height + queued_height + reasoning_height + transcript_gap_height,
+                    transcript_gap_height
+                        + subagent_height
+                        + queued_height
+                        + reasoning_height
+                        + TIMER_GAP_HEIGHT,
                 )
                 .min(1),
         );
@@ -2950,10 +2965,11 @@ fn draw_streaming(
             status_area.bottom(),
             area.width,
             area.height.saturating_sub(
-                subagent_height
+                transcript_gap_height
+                    + subagent_height
                     + queued_height
                     + reasoning_height
-                    + transcript_gap_height
+                    + TIMER_GAP_HEIGHT
                     + 1
                     + footer_height,
             ),
@@ -3452,20 +3468,17 @@ mod tests {
     }
 
     #[test]
-    fn streamed_transcript_adds_exactly_one_live_viewport_gap() {
+    fn streaming_viewport_accounts_for_independent_transcript_and_timer_gaps() {
         let without_output = streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, false, 20);
         let with_output = streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, true, 20);
         let with_live_reasoning =
             streaming_viewport_height(3, 0, 0, 1, status_bar::HEIGHT, true, 20);
         let with_subagent = streaming_viewport_height(3, 2, 0, 0, status_bar::HEIGHT, false, 20);
+
+        assert_eq!(without_output, 3 + 1 + 1 + status_bar::HEIGHT);
         assert_eq!(with_output, without_output + 1);
         assert_eq!(with_live_reasoning, without_output + 2);
         assert_eq!(with_subagent, without_output + 2);
-        assert_eq!(
-            streaming_viewport_height(3, 0, 0, 0, status_bar::HEIGHT, false, 20),
-            without_output,
-            "a committed spacer disables the live gap"
-        );
     }
 
     #[test]
