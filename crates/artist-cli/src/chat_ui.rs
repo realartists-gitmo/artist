@@ -343,6 +343,7 @@ struct StreamingControls<'a> {
 struct StreamingViewport {
     height: u16,
     terminal_size: (u16, u16),
+    resize_locked: bool,
 }
 
 impl StreamingViewport {
@@ -350,17 +351,17 @@ impl StreamingViewport {
         Self {
             height,
             terminal_size: (terminal_size.width, terminal_size.height),
+            resize_locked: false,
         }
     }
 
-    fn update_terminal_size(&mut self, size: Size) -> bool {
+    fn can_resize_viewport(&mut self, size: Size) -> bool {
         let size = (size.width, size.height);
-        if size == self.terminal_size {
-            return false;
+        if size != self.terminal_size {
+            self.terminal_size = size;
+            self.resize_locked = true;
         }
-        self.terminal_size = size;
-        self.height = size.1;
-        true
+        !self.resize_locked
     }
 }
 
@@ -1899,21 +1900,9 @@ async fn submit(
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
     let mut subagents = SubagentStatuses::default();
     let mut subagent_launch_calls = HashSet::new();
-    // Ratatui's inline viewport reserves rows by appending terminal lines. If
-    // its height follows every streamed wrap, the viewport origin—and therefore
-    // the bottom bar—bounces. Reserve one terminal-height surface for the turn.
+    // Keep the existing viewport on entry so submitting does not consume the screen.
     let terminal_size = terminal.size()?;
-    let mut stream_viewport = StreamingViewport::new(terminal_size.height, terminal_size);
-    execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
-    clear_inline(terminal)?;
-    *terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(stream_viewport.height),
-    });
-    execute!(
-        std::io::stdout(),
-        EnableBracketedPaste,
-        EndSynchronizedUpdate
-    )?;
+    let mut stream_viewport = StreamingViewport::new(viewport_height, terminal_size);
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
@@ -2804,21 +2793,13 @@ fn draw_streaming(
     controls: StreamingControls<'_>,
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
-    let mut terminal_size = terminal.size()?;
-    if viewport.update_terminal_size(terminal_size) {
-        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
-        clear_inline(terminal)?;
-        *terminal = ratatui::init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(viewport.height),
-        });
-        execute!(
-            std::io::stdout(),
-            EnableBracketedPaste,
-            EndSynchronizedUpdate
-        )?;
-        terminal_size = terminal.size()?;
-    }
-    let layout_height = terminal_size.height;
+    let terminal_size = terminal.size()?;
+    let can_resize = viewport.can_resize_viewport(terminal_size);
+    let layout_height = if can_resize {
+        terminal_size.height
+    } else {
+        viewport.height.min(terminal_size.height)
+    };
     let width = terminal_size.width.max(1);
     let footer_height = footer.height(width);
     let queued_height = controls.steering.displays().count() as u16;
@@ -2855,7 +2836,25 @@ fn draw_streaming(
         .len()
         .saturating_sub(usize::from(reasoning_height));
     reasoning_lines.drain(..keep_from);
-
+    let desired = streaming_viewport_height(
+        input_height,
+        subagent_height,
+        queued_height,
+        reasoning_height,
+        footer_height,
+        transcript_gap_height > 0,
+        layout_height,
+    );
+    let resized = desired != viewport.height && can_resize;
+    if resized {
+        viewport.height = desired;
+        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
+        clear_inline(terminal)?;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(desired),
+        });
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
+    }
     terminal.draw(|frame| {
         let area = frame.area();
         let live_top = area.y.saturating_add(transcript_gap_height);
@@ -2951,6 +2950,9 @@ fn draw_streaming(
         );
     })?;
     terminal.show_cursor()?;
+    if resized {
+        execute!(std::io::stdout(), EndSynchronizedUpdate)?;
+    }
     Ok(())
 }
 
@@ -3240,12 +3242,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_viewport_updates_only_for_physical_terminal_resizes() {
-        let mut viewport = StreamingViewport::new(24, Size::new(80, 24));
-        assert!(!viewport.update_terminal_size(Size::new(80, 24)));
-        assert!(viewport.update_terminal_size(Size::new(100, 30)));
-        assert_eq!(viewport.height, 30);
-        assert!(!viewport.update_terminal_size(Size::new(100, 30)));
+    fn streaming_viewport_stays_locked_after_terminal_resize() {
+        let mut viewport = StreamingViewport::new(6, Size::new(80, 24));
+        assert!(viewport.can_resize_viewport(Size::new(80, 24)));
+        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
+        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
+        assert_eq!(viewport.height, 6);
     }
 
     #[test]
