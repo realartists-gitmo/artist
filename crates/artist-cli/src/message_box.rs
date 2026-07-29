@@ -5,15 +5,14 @@ use ratatui::{
     text::Text,
     widgets::{Paragraph, Widget, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn frame_height(text: &str, width: u16) -> u16 {
-    let inner_width = usize::from(width.saturating_sub(2).max(1));
-    let content_height = text
+    let inner_width = width.saturating_sub(2).max(1);
+    let content_height = crate::text_wrap::plain(text, inner_width)
         .split('\n')
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(inner_width))
-        .sum::<usize>()
+        .count()
         .max(1) as u16;
+
     content_height.saturating_add(2)
 }
 

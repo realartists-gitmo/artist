@@ -207,12 +207,13 @@ struct StyledCharacter {
     width: usize,
 }
 
-fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
     let characters = styled_characters(spans, width);
     let mut lines = Vec::new();
     let mut line = Vec::new();
     let mut columns = 0usize;
+    let mut pending_space: Vec<StyledCharacter> = Vec::new();
     let mut index = 0;
 
     while index < characters.len() {
@@ -225,18 +226,32 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
         let token_width = token.iter().map(|character| character.width).sum::<usize>();
 
         if whitespace {
-            if columns > 0 && columns.saturating_add(token_width) <= width {
-                append_characters(&mut line, token);
-                columns += token_width;
-            }
-        } else if token_width <= width {
-            if columns > 0 && columns.saturating_add(token_width) > width {
+            pending_space.clear();
+            pending_space.extend_from_slice(token);
+            index = end;
+            continue;
+        }
+
+        let space_width = pending_space
+            .iter()
+            .map(|character| character.width)
+            .sum::<usize>();
+        if token_width <= width {
+            if columns > 0 && columns.saturating_add(space_width + token_width) > width {
                 lines.push(std::mem::take(&mut line));
                 columns = 0;
+            }
+            if columns > 0 {
+                append_characters(&mut line, &pending_space);
+                columns += space_width;
             }
             append_characters(&mut line, token);
             columns += token_width;
         } else {
+            if columns > 0 {
+                lines.push(std::mem::take(&mut line));
+                columns = 0;
+            }
             for character in token {
                 if columns > 0 && columns.saturating_add(character.width) > width {
                     lines.push(std::mem::take(&mut line));
@@ -246,6 +261,7 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>
                 columns += character.width;
             }
         }
+        pending_space.clear();
         index = end;
     }
 

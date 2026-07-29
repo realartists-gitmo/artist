@@ -24,6 +24,7 @@ mod status_bar;
 mod store;
 mod subagent_ui;
 mod test_provider;
+mod text_wrap;
 mod theme;
 mod tool_ui;
 
