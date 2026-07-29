@@ -203,15 +203,9 @@ impl ChatInput {
     }
 
     fn visual_lines(&self, inner_width: u16) -> u16 {
-        let width = usize::from(inner_width.max(1));
-        let (_, row) = wrap_end(&self.text, width);
-        (row + 1) as u16
-    }
-
-    fn cursor_position(&self, inner_width: u16) -> (u16, u16) {
-        let width = usize::from(inner_width.max(1));
-        let (col, row) = wrap_end(&self.text[..self.cursor], width);
-        (col as u16, row as u16)
+        crate::text_wrap::with_cursor(&self.text, self.text.len(), inner_width)
+            .row
+            .saturating_add(1)
     }
 }
 
@@ -1909,10 +1903,21 @@ async fn submit(
     let mut tools = ToolUi::with_icons(context.extensions.tool_icons());
     let mut subagents = SubagentStatuses::default();
     let mut subagent_launch_calls = HashSet::new();
-    // Keep the existing viewport on entry so starting a turn does not blink.
-    // Width-driven height changes are debounced while the terminal is moving.
+    // Ratatui's inline viewport reserves rows by appending terminal lines. If
+    // its height follows every streamed wrap, the viewport origin—and therefore
+    // the bottom bar—bounces. Reserve one terminal-height surface for the turn.
     let terminal_size = terminal.size()?;
-    let mut stream_viewport = StreamingViewport::new(viewport_height, terminal_size);
+    let mut stream_viewport = StreamingViewport::new(terminal_size.height, terminal_size);
+    execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
+    clear_inline(terminal)?;
+    *terminal = ratatui::init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(stream_viewport.height),
+    });
+    execute!(
+        std::io::stdout(),
+        EnableBracketedPaste,
+        EndSynchronizedUpdate
+    )?;
     let mut phase = "thinking";
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
@@ -2674,17 +2679,15 @@ fn insert_reasoning_chunk(
     reasoning: &str,
     first: bool,
 ) -> Result<()> {
-    let text = reasoning_chunk_text(reasoning, first);
-    let width = usize::from(terminal.size()?.width.max(1));
-    let height = text
-        .lines
-        .iter()
-        .map(|line| line.width().max(1).div_ceil(width))
-        .sum::<usize>() as u16;
-    terminal.insert_before(height.max(1), |buffer| {
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .render(buffer.area, buffer);
+    let width = terminal.size()?.width.max(1);
+    let text = Text::from(wrapped_reasoning_lines_with_prefix(
+        reasoning,
+        usize::from(width),
+        first,
+    ));
+    let height = text.lines.len().max(1) as u16;
+    terminal.insert_before(height, |buffer| {
+        Paragraph::new(text).render(buffer.area, buffer);
     })?;
     Ok(())
 }
@@ -2735,40 +2738,18 @@ pub(crate) fn reasoning_chunk_text(reasoning: &str, first: bool) -> Text<'static
 }
 
 fn wrapped_reasoning_lines(reasoning: &str, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut rows = Vec::new();
-    for line in reasoning_chunk_text(reasoning, true).lines {
-        let mut row = Vec::new();
-        let mut used = 0usize;
-        for span in line.spans {
-            let style = span.style;
-            let mut chunk = String::new();
-            for character in span.content.chars() {
-                let mut character_width = character.width().unwrap_or(0);
-                if used > 0 && used.saturating_add(character_width) > width {
-                    if !chunk.is_empty() {
-                        row.push(Span::styled(std::mem::take(&mut chunk), style));
-                    }
-                    rows.push(Line::from(std::mem::take(&mut row)));
-                    used = 0;
-                }
-                if character_width > width {
-                    chunk.push('�');
-                    character_width = 1;
-                } else {
-                    chunk.push(character);
-                }
-                used = used.saturating_add(character_width);
-            }
-            if !chunk.is_empty() {
-                row.push(Span::styled(chunk, style));
-            }
-        }
-        rows.push(Line::from(row));
-    }
-    rows
+    wrapped_reasoning_lines_with_prefix(reasoning, width, true)
 }
 
+fn wrapped_reasoning_lines_with_prefix(
+    reasoning: &str,
+    width: usize,
+    first: bool,
+) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(4).max(1) as u16;
+    let wrapped = crate::text_wrap::plain(reasoning, content_width);
+    reasoning_chunk_text(&wrapped, first).lines
+}
 fn insert_response(
     terminal: &mut ratatui::DefaultTerminal,
     output: &str,
@@ -2870,27 +2851,7 @@ fn draw_streaming(
         .len()
         .saturating_sub(usize::from(reasoning_height));
     reasoning_lines.drain(..keep_from);
-    // Show the activity/cancel hint above the input while preserving the
-    // configured status bar at the bottom.
-    let desired = streaming_viewport_height(
-        input_height,
-        subagent_height,
-        queued_height,
-        reasoning_height,
-        footer_height,
-        transcript_gap_height > 0,
-        layout_height,
-    );
-    let resized = desired != viewport.height && can_resize;
-    if resized {
-        viewport.height = desired;
-        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
-        clear_inline(terminal)?;
-        *terminal = ratatui::init_with_options(TerminalOptions {
-            viewport: Viewport::Inline(desired),
-        });
-        execute!(std::io::stdout(), EnableBracketedPaste)?;
-    }
+
     terminal.draw(|frame| {
         let area = frame.area();
         let live_top = area.y.saturating_add(transcript_gap_height);
@@ -2986,9 +2947,6 @@ fn draw_streaming(
         );
     })?;
     terminal.show_cursor()?;
-    if resized {
-        execute!(std::io::stdout(), EndSynchronizedUpdate)?;
-    }
     Ok(())
 }
 
@@ -3140,12 +3098,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
         area.height.saturating_sub(2),
     );
     let input_style = Style::default().fg(crate::theme::PASTEL_WHITE);
-    let paragraph =
-        Paragraph::new(Text::raw(hard_wrap_input(&input.text, inner_width))).style(input_style);
+    let wrapped = crate::text_wrap::with_cursor(&input.text, input.cursor, inner_width);
+    let paragraph = Paragraph::new(Text::raw(wrapped.text.clone())).style(input_style);
     frame.render_widget(paragraph, input_area);
 
     if input_area.width > 0 && input_area.height > 0 {
-        let (x, y) = input.cursor_position(inner_width);
+        let (x, y) = (wrapped.column, wrapped.row);
         frame.set_cursor_position((
             input_area.x + x.min(inner_width.saturating_sub(1)),
             input_area.y + y.min(input_area.height.saturating_sub(1)),
@@ -3153,59 +3111,6 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, input: &ChatInput) {
     }
 }
 
-/// Walk `text` under the exact rules `hard_wrap_input` uses, returning the
-/// (column, row) the cursor occupies after the final character. Both the input
-/// box height and the cursor position derive from this so they stay aligned
-/// with the rendered wrap — wide glyphs and exact-width boundaries used to
-/// drift when height/cursor were computed with independent modular math.
-fn wrap_end(text: &str, width: usize) -> (usize, usize) {
-    let width = width.max(1);
-    let mut column = 0usize;
-    let mut row = 0usize;
-    for character in text.chars() {
-        if character == '\n' {
-            row += 1;
-            column = 0;
-            continue;
-        }
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if column > 0 && column + character_width > width {
-            row += 1;
-            column = 0;
-        }
-        column += character_width;
-        if column == width {
-            row += 1;
-            column = 0;
-        }
-    }
-    (column, row)
-}
-
-fn hard_wrap_input(text: &str, width: u16) -> String {
-    let width = usize::from(width.max(1));
-    let mut output = String::with_capacity(text.len());
-    let mut column = 0usize;
-    for character in text.chars() {
-        if character == '\n' {
-            output.push(character);
-            column = 0;
-            continue;
-        }
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if column > 0 && column + character_width > width {
-            output.push('\n');
-            column = 0;
-        }
-        output.push(character);
-        column += character_width;
-        if column == width {
-            output.push('\n');
-            column = 0;
-        }
-    }
-    output
-}
 pub(crate) fn finish_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     clear_inline(terminal)
 }
@@ -3322,7 +3227,7 @@ mod tests {
                 atoms: InputAtoms::default(),
             }
             .visual_lines(4),
-            2
+            1
         );
         input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(input.text, "a\n");
@@ -3384,10 +3289,10 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(tail.trim_end().ends_with('e'));
-
-        let narrow = wrapped_reasoning_lines("界", 1);
-        assert!(narrow.iter().all(|line| line.width() <= 1));
-        assert_eq!(narrow.last().unwrap().spans[0].content, "�");
+        let wrapped_words = wrapped_reasoning_lines("one two", 8);
+        assert_eq!(wrapped_words.len(), 2);
+        assert!(wrapped_words[0].to_string().trim_end().ends_with("one"));
+        assert!(wrapped_words[1].to_string().trim_end().ends_with("two"));
     }
 
     #[test]
