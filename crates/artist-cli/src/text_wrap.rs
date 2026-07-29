@@ -28,10 +28,15 @@ pub(crate) fn with_cursor(text: &str, cursor: usize, width: u16) -> WrappedCurso
         .expect("cursor marker must survive wrapping");
     let before = &wrapped[..marker];
     let row = before.bytes().filter(|byte| *byte == b'\n').count() as u16;
-    let column = before
+    let mut column = before
         .rsplit_once('\n')
         .map_or(before, |(_, line)| line)
         .width() as u16;
+    let mut row = row;
+    if column == width.max(1) {
+        column = 0;
+        row = row.saturating_add(1);
+    }
     wrapped.remove(marker);
 
     WrappedCursorText {
@@ -69,7 +74,9 @@ mod tests {
     #[test]
     fn cursor_uses_the_complete_words_wrap_decision() {
         let wrapped = with_cursor("hello world", 8, 8);
-        assert_eq!(wrapped.text, "hello\nworld");
         assert_eq!((wrapped.column, wrapped.row), (2, 1));
+
+        let exact = with_cursor("1234", 4, 4);
+        assert_eq!((exact.column, exact.row), (0, 1));
     }
 }

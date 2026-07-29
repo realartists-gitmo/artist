@@ -214,6 +214,7 @@ pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Spa
     let mut line = Vec::new();
     let mut columns = 0usize;
     let mut pending_space: Vec<StyledCharacter> = Vec::new();
+    let mut pending_is_leading = false;
     let mut index = 0;
 
     while index < characters.len() {
@@ -228,14 +229,21 @@ pub(crate) fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Spa
         if whitespace {
             pending_space.clear();
             pending_space.extend_from_slice(token);
+            pending_is_leading = index == 0;
             index = end;
             continue;
         }
 
-        let space_width = pending_space
+        let mut space_width = pending_space
             .iter()
             .map(|character| character.width)
             .sum::<usize>();
+        if columns == 0 && pending_is_leading && space_width < width {
+            append_characters(&mut line, &pending_space);
+            columns = space_width;
+            pending_space.clear();
+            space_width = 0;
+        }
         if token_width <= width {
             if columns > 0 && columns.saturating_add(space_width + token_width) > width {
                 lines.push(std::mem::take(&mut line));
@@ -417,6 +425,12 @@ mod tests {
 
         assert_eq!(lines, ["   ok", "    extrao", "    rdinar", "    y"]);
         assert!(lines.iter().all(|line| line.width() <= 10));
+    }
+
+    #[test]
+    fn preserves_leading_indentation_in_prose() {
+        let rendered = Renderer::default().render("  nested item", 20);
+        assert_eq!(rendered.lines[0].to_string(), "     nested item");
     }
 
     #[test]

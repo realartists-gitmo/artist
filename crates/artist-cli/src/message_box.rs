@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::Style,
     text::Text,
-    widgets::{Paragraph, Widget, Wrap},
+    widgets::{Paragraph, Widget},
 };
 
 pub(crate) fn frame_height(text: &str, width: u16) -> u16 {
@@ -25,11 +25,11 @@ pub(crate) fn render(buffer: &mut Buffer, area: Rect, text: &str) {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
+    let wrapped = crate::text_wrap::plain(text, content_area.width.max(1));
     Paragraph::new(Text::styled(
-        text,
+        wrapped,
         Style::default().fg(crate::theme::PASTEL_WHITE),
     ))
-    .wrap(Wrap { trim: false })
     .render(content_area, buffer);
 }
 

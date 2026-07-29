@@ -343,7 +343,6 @@ struct StreamingControls<'a> {
 struct StreamingViewport {
     height: u16,
     terminal_size: (u16, u16),
-    resize_locked: bool,
 }
 
 impl StreamingViewport {
@@ -351,20 +350,17 @@ impl StreamingViewport {
         Self {
             height,
             terminal_size: (terminal_size.width, terminal_size.height),
-            resize_locked: false,
         }
     }
 
-    fn can_resize_viewport(&mut self, size: Size) -> bool {
+    fn update_terminal_size(&mut self, size: Size) -> bool {
         let size = (size.width, size.height);
-        if size != self.terminal_size {
-            self.terminal_size = size;
-            // Recreating an inline viewport after the host terminal moves it can
-            // scroll old frames into view. Keep its height fixed for the rest of
-            // this streaming turn; the normal post-turn redraw will size it once.
-            self.resize_locked = true;
+        if size == self.terminal_size {
+            return false;
         }
-        !self.resize_locked
+        self.terminal_size = size;
+        self.height = size.1;
+        true
     }
 }
 
@@ -2808,13 +2804,21 @@ fn draw_streaming(
     controls: StreamingControls<'_>,
     viewport: &mut StreamingViewport,
 ) -> Result<()> {
-    let terminal_size = terminal.size()?;
-    let can_resize = viewport.can_resize_viewport(terminal_size);
-    let layout_height = if can_resize {
-        terminal_size.height
-    } else {
-        viewport.height.min(terminal_size.height)
-    };
+    let mut terminal_size = terminal.size()?;
+    if viewport.update_terminal_size(terminal_size) {
+        execute!(std::io::stdout(), BeginSynchronizedUpdate)?;
+        clear_inline(terminal)?;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(viewport.height),
+        });
+        execute!(
+            std::io::stdout(),
+            EnableBracketedPaste,
+            EndSynchronizedUpdate
+        )?;
+        terminal_size = terminal.size()?;
+    }
+    let layout_height = terminal_size.height;
     let width = terminal_size.width.max(1);
     let footer_height = footer.height(width);
     let queued_height = controls.steering.displays().count() as u16;
@@ -3227,7 +3231,7 @@ mod tests {
                 atoms: InputAtoms::default(),
             }
             .visual_lines(4),
-            1
+            2
         );
         input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(input.text, "a\n");
@@ -3236,12 +3240,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_viewport_stays_locked_after_terminal_resize() {
-        let mut viewport = StreamingViewport::new(6, Size::new(80, 24));
-        assert!(viewport.can_resize_viewport(Size::new(80, 24)));
-        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
-        assert!(!viewport.can_resize_viewport(Size::new(20, 24)));
-        assert_eq!(viewport.height, 6);
+    fn streaming_viewport_updates_only_for_physical_terminal_resizes() {
+        let mut viewport = StreamingViewport::new(24, Size::new(80, 24));
+        assert!(!viewport.update_terminal_size(Size::new(80, 24)));
+        assert!(viewport.update_terminal_size(Size::new(100, 30)));
+        assert_eq!(viewport.height, 30);
+        assert!(!viewport.update_terminal_size(Size::new(100, 30)));
     }
 
     #[test]
