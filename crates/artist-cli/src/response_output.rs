@@ -26,7 +26,14 @@ impl Renderer {
         let mut lines = Vec::new();
 
         for (source_line, ends_line) in logical_lines(output) {
-            for mut spans in wrap_spans(self.style_line(source_line, ends_line), content_width) {
+            let code_line = self.fence.is_some();
+            let styled = self.style_line(source_line, ends_line);
+            let wrapped = if code_line {
+                wrap_spans_by_character(styled, content_width)
+            } else {
+                wrap_spans(styled, content_width)
+            };
+            for mut spans in wrapped {
                 let mut prefixed = if self.started {
                     vec![Span::raw(INDENT)]
                 } else {
@@ -193,8 +200,109 @@ fn inline_spans(text: &str) -> Vec<Span<'static>> {
     spans
 }
 
+#[derive(Clone)]
+struct StyledCharacter {
+    character: char,
+    style: Style,
+    width: usize,
+}
+
 fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     let width = width.max(1);
+    let characters = styled_characters(spans, width);
+    let mut lines = Vec::new();
+    let mut line = Vec::new();
+    let mut columns = 0usize;
+    let mut index = 0;
+
+    while index < characters.len() {
+        let whitespace = characters[index].character.is_whitespace();
+        let end = characters[index..]
+            .iter()
+            .position(|character| character.character.is_whitespace() != whitespace)
+            .map_or(characters.len(), |offset| index + offset);
+        let token = &characters[index..end];
+        let token_width = token.iter().map(|character| character.width).sum::<usize>();
+
+        if whitespace {
+            if columns > 0 && columns.saturating_add(token_width) <= width {
+                append_characters(&mut line, token);
+                columns += token_width;
+            }
+        } else if token_width <= width {
+            if columns > 0 && columns.saturating_add(token_width) > width {
+                lines.push(std::mem::take(&mut line));
+                columns = 0;
+            }
+            append_characters(&mut line, token);
+            columns += token_width;
+        } else {
+            for character in token {
+                if columns > 0 && columns.saturating_add(character.width) > width {
+                    lines.push(std::mem::take(&mut line));
+                    columns = 0;
+                }
+                append_character(&mut line, character);
+                columns += character.width;
+            }
+        }
+        index = end;
+    }
+
+    if !line.is_empty() || lines.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn styled_characters(spans: Vec<Span<'static>>, width: usize) -> Vec<StyledCharacter> {
+    spans
+        .into_iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content
+                .chars()
+                .map(move |character| {
+                    let character_width = character.width().unwrap_or(0);
+                    if character_width > width {
+                        StyledCharacter {
+                            character: '�',
+                            style,
+                            width: 1,
+                        }
+                    } else {
+                        StyledCharacter {
+                            character,
+                            style,
+                            width: character_width,
+                        }
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn append_characters(line: &mut Vec<Span<'static>>, characters: &[StyledCharacter]) {
+    for character in characters {
+        append_character(line, character);
+    }
+}
+
+fn append_character(line: &mut Vec<Span<'static>>, character: &StyledCharacter) {
+    if let Some(span) = line.last_mut()
+        && span.style == character.style
+    {
+        span.content.to_mut().push(character.character);
+    } else {
+        line.push(Span::styled(
+            character.character.to_string(),
+            character.style,
+        ));
+    }
+}
+
+fn wrap_spans_by_character(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     let mut lines = Vec::new();
     let mut line = Vec::new();
     let mut columns = 0usize;
@@ -267,6 +375,53 @@ mod tests {
 
         assert_eq!(lines, ["   123456", "    7"]);
         assert!(lines.iter().all(|line| line.width() <= 10));
+    }
+
+    #[test]
+    fn wraps_prose_at_word_boundaries_and_keeps_punctuation_attached() {
+        let rendered = Renderer::default().render("hello, world! next", 14);
+        let lines = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, ["   hello,", "    world!", "    next"]);
+        assert!(lines.iter().all(|line| line.width() <= 14));
+    }
+
+    #[test]
+    fn splits_only_words_that_are_wider_than_a_content_line() {
+        let rendered = Renderer::default().render("ok extraordinary", 10);
+        let lines = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines, ["   ok", "    extrao", "    rdinar", "    y"]);
+        assert!(lines.iter().all(|line| line.width() <= 10));
+    }
+
+    #[test]
+    fn word_wrapping_preserves_inline_styles_across_lines() {
+        let rendered = Renderer::default().render("before `code` after", 15);
+        assert!(
+            rendered
+                .lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("code")
+                    && span.style.fg == Some(crate::theme::PASTEL_BLUE))
+        );
+        assert_eq!(
+            rendered
+                .lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>(),
+            ["   before", "    `code`", "    after"]
+        );
     }
 
     #[test]
