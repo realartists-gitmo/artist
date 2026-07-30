@@ -54,6 +54,63 @@ pub(crate) async fn compact(
     else {
         return Ok(None);
     };
+
+    // Custom instructions are a local summarizer feature; never silently drop
+    // them on the provider-side path. Other providers likewise remain local.
+    if custom_instructions.is_none()
+        && matches!(
+            provider.provider,
+            llm_provider::ProviderKind::Openai | llm_provider::ProviderKind::Chatgpt
+        )
+    {
+        let model = provider
+            .model
+            .as_deref()
+            .context("no model selected; run `artist model` first")?;
+        match artist_agent::compaction::remote(
+            provider,
+            history.clone(),
+            &active.session.id,
+            active.provider_context.clone(),
+            model,
+        )
+        .await?
+        {
+            artist_agent::compaction::RemoteCompaction::Compacted { .. } => {
+                let tokens_before = measured_tokens.unwrap_or(plan.tokens_before);
+                let summarized_messages = history.len();
+                // The opaque canonical item now lives solely in the durable
+                // provider sidecar. Reset Rig memory so it cannot resend the
+                // superseded portable transcript; display projection remains
+                // append-only because SessionMemory::compact hides this reset.
+                active
+                    .memory
+                    .compact(
+                        Vec::new(),
+                        ConversationCompacted {
+                            summary: "Context compacted by OpenAI Responses".to_owned(),
+                            tokens_before,
+                            kept_messages: 0,
+                            reason: reason.to_owned(),
+                            read_files: plan.read_files.clone(),
+                            modified_files: plan.modified_files.clone(),
+                        },
+                    )
+                    .await
+                    .context("persist provider-compacted conversation")?;
+                return Ok(Some(CompactionResult {
+                    history: Vec::new(),
+                    summarized_messages,
+                    tokens_before,
+                }));
+            }
+            artist_agent::compaction::RemoteCompaction::Unsupported => {
+                // No sidecar or memory mutation occurred; use the existing
+                // local summary path below.
+            }
+        }
+    }
+
     let summary = artist_agent::compaction::summarize(
         provider,
         &plan,

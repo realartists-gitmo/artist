@@ -2,8 +2,63 @@
 
 use crate::rig_provider::RigClient;
 use anyhow::{Context, Result, bail};
-use artist_session::compaction::{CompactionPlan, format_file_operations};
+use artist_session::{
+    ProviderContextHandle,
+    compaction::{CompactionPlan, format_file_operations},
+};
 use llm_provider::SavedProvider;
+use rig_core::{
+    OneOrMany,
+    completion::{CompletionRequest, Message},
+};
+
+/// Outcome of provider-side Responses compaction. Unsupported endpoints are
+/// reported separately so callers can fall back without having mutated state.
+pub enum RemoteCompaction {
+    Compacted { canonical_items: usize },
+    Unsupported,
+}
+
+/// Ask an OpenAI Responses-compatible provider to compact the current Rig
+/// history. Conversion uses Rig's vendored Responses mapping, preserving tool
+/// call IDs and encrypted reasoning items. The provider context is committed
+/// by the transport only after a successful, parseable response.
+pub async fn remote(
+    provider: &SavedProvider,
+    history: Vec<Message>,
+    conversation_id: &str,
+    provider_context: ProviderContextHandle,
+    model: &str,
+) -> Result<RemoteCompaction> {
+    let request = CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: OneOrMany::many(history)
+            .map_err(|_| anyhow::anyhow!("cannot compact empty history"))?,
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+    let wire = crate::openai_responses::Request::try_from((model.to_owned(), request))?.input;
+    let RigClient::ArtistOpenAi(client) = RigClient::build(provider)? else {
+        bail!("remote compaction requires OpenAI Responses or ChatGPT")
+    };
+    let client = client.with_provider_context(conversation_id, provider_context);
+    match client.compact(model, wire).await {
+        Ok(items) => Ok(RemoteCompaction::Compacted {
+            canonical_items: items.len(),
+        }),
+        Err(error) if crate::openai_responses::is_unsupported_compaction(&error) => {
+            Ok(RemoteCompaction::Unsupported)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
 const SYSTEM_PROMPT: &str = r#"You are a context summarization assistant. Read the supplied conversation and produce the requested structured checkpoint.
 
