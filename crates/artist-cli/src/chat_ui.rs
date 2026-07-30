@@ -1885,6 +1885,7 @@ async fn submit(
         recorder: active.recorder.clone(),
         memory: std::sync::Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
+        provider_context: active.provider_context.clone(),
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {

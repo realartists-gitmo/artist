@@ -286,6 +286,7 @@ async fn execute_prompt(
         recorder: active.recorder.clone(),
         memory: Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
+        provider_context: active.provider_context.clone(),
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));

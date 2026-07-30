@@ -98,10 +98,45 @@ impl CompletionClient for Client {
     type CompletionModel = ArtistOpenAiModel;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ArtistOpenAiModel {
     client: Client,
     model: String,
+    provider_context: artist_session::ProviderContextHandle,
+    conversation_id: String,
+}
+
+impl ArtistOpenAiModel {
+    /// Opt-in wiring for the Artist-owned adapter. Production dispatch does not use this yet.
+    pub fn with_provider_context(
+        mut self,
+        conversation_id: impl Into<String>,
+        provider_context: artist_session::ProviderContextHandle,
+    ) -> Self {
+        self.conversation_id = conversation_id.into();
+        self.provider_context = provider_context;
+        self
+    }
+
+    async fn prepare(&self, mut body: Request) -> Request {
+        let saved = self
+            .provider_context
+            .items(&self.conversation_id, "openai.responses")
+            .await;
+        body.input = merge_inputs(saved, body.input);
+        body
+    }
+
+    async fn save(&self, output: &[OutputItem]) {
+        let mut items = self
+            .provider_context
+            .items(&self.conversation_id, "openai.responses")
+            .await;
+        items.extend(output.iter().map(|item| item.wire().clone()));
+        self.provider_context
+            .commit(&self.conversation_id, "openai.responses", items)
+            .await;
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +165,8 @@ impl CompletionModel for ArtistOpenAiModel {
         Self {
             client: client.clone(),
             model: model.into(),
+            provider_context: artist_session::ProviderContextHandle::noop(),
+            conversation_id: "default".into(),
         }
     }
     fn composes_native_output_with_tools(&self) -> bool {
@@ -142,6 +179,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<completion::CompletionResponse<Response>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
+        let body = self.prepare(body).await;
         let response = self
             .client
             .http
@@ -161,6 +199,7 @@ impl CompletionModel for ArtistOpenAiModel {
         }
         let wire: Value = serde_json::from_str(&text)?;
         let output = parse_output(&wire)?;
+        self.save(&output).await;
         let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
             serde_json::from_value(wire.clone())?;
         let normalized: completion::CompletionResponse<_> = upstream.try_into()?;
@@ -176,8 +215,9 @@ impl CompletionModel for ArtistOpenAiModel {
         &self,
         request: completion::CompletionRequest,
     ) -> Result<StreamingCompletionResponse<StreamResponse>, CompletionError> {
-        let mut body = Request::try_from((self.model.clone(), request))
+        let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
+        let mut body = self.prepare(body).await;
         body.stream = Some(true);
         let response = self
             .client
@@ -197,6 +237,8 @@ impl CompletionModel for ArtistOpenAiModel {
             )));
         }
         let mut bytes = response.bytes_stream();
+        let context = self.provider_context.clone();
+        let conversation_id = self.conversation_id.clone();
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
             while let Some(chunk) = bytes.next().await {
@@ -210,7 +252,14 @@ impl CompletionModel for ArtistOpenAiModel {
                             let data = event.lines().filter_map(|l| l.strip_prefix("data:").map(str::trim)).collect::<Vec<_>>().join("\n");
                             if data.is_empty() || data == "[DONE]" { continue; }
                             match parse_event(&data) {
-                                Ok(events) => for event in events { yield Ok(event); },
+                                Ok(events) => for event in events {
+                                    if let RawStreamingChoice::FinalResponse(final_response) = &event {
+                                        let mut saved = context.items(&conversation_id, "openai.responses").await;
+                                        saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
+                                        context.commit(&conversation_id, "openai.responses", saved).await;
+                                    }
+                                    yield Ok(event);
+                                },
                                 Err(e) => { yield Err(e); return; }
                             }
                         }
@@ -220,6 +269,16 @@ impl CompletionModel for ArtistOpenAiModel {
         });
         Ok(StreamingCompletionResponse::stream(stream))
     }
+}
+
+fn merge_inputs(saved: Vec<Value>, fresh: Vec<Value>) -> Vec<Value> {
+    let overlap = (0..=saved.len().min(fresh.len()))
+        .rev()
+        .find(|&n| saved[saved.len() - n..] == fresh[..n])
+        .unwrap_or(0);
+    let mut merged = saved;
+    merged.extend(fresh.into_iter().skip(overlap));
+    merged
 }
 
 fn sanitize(body: &str) -> String {
@@ -355,6 +414,17 @@ mod transport_tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[test]
+    fn provider_context_merge_preserves_order_and_deduplicates_overlap() {
+        let a = serde_json::json!({"type":"reasoning","encrypted_content":"opaque"});
+        let b = serde_json::json!({"type":"function_call","call_id":"c"});
+        let c = serde_json::json!({"type":"function_call_output","call_id":"c"});
+        assert_eq!(
+            merge_inputs(vec![a.clone(), b.clone()], vec![b.clone(), c.clone()]),
+            vec![a, b, c]
+        );
+    }
 
     fn request() -> CompletionRequest {
         CompletionRequest {

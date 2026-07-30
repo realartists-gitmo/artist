@@ -66,6 +66,7 @@ pub struct ActiveSession {
     pub recorder: Recorder,
     pub memory: artist_session::SessionMemory,
     pub attachments: AttachmentStore,
+    pub provider_context: artist_session::ProviderContextHandle,
     task: WriterTask,
 }
 
@@ -419,7 +420,10 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
     let dir = session.dir().to_owned();
     let writer = EventLogWriter::open(&dir, &session.id)?;
     let attachments = AttachmentStore::new(dir.join("attachments"));
+    let existing_events = EventLogReader::new(&dir).read_all()?;
     let (recorder, task) = spawn_writer(writer, Some(session.transcript.clone()));
+    let provider_context =
+        artist_session::ProviderContextHandle::from_events(&existing_events, recorder.clone());
     let memory = artist_session::SessionMemory::new(
         session.id.clone(),
         &dir,
@@ -431,6 +435,7 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
         recorder,
         memory,
         attachments,
+        provider_context,
         task,
     })
 }

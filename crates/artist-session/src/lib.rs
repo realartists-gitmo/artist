@@ -24,6 +24,7 @@ mod event;
 mod history;
 mod log;
 mod memory;
+mod provider_context;
 mod recorder;
 mod replay;
 
@@ -31,13 +32,14 @@ pub use attachments::AttachmentStore;
 pub use convert::{assistant_to_blocks, blocks_to_assistant, blocks_to_user, user_to_blocks};
 pub use event::{
     ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished, DelegateStarted,
-    Envelope, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection,
-    RuleRetroFindings, RunFinished, RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent,
-    SteeringDelivered, ToolOutcomeRecord, ToolResultEvent, TurnUser,
+    Envelope, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn, ProviderContext, RuleFired,
+    RuleInjection, RuleRetroFindings, RunFinished, RunStarted, SCHEMA_VERSION, SessionCreated,
+    SessionEvent, SteeringDelivered, ToolOutcomeRecord, ToolResultEvent, TurnUser,
 };
 pub use history::{HistoryOptions, build as build_history};
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use memory::SessionMemory;
+pub use provider_context::{PROVIDER_CONTEXT_SCHEMA, ProviderContextHandle};
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{
     ReplayItem, markdown_fragment, render_markdown, replay_for_ui, rewind_targets, user_prompts,

@@ -126,6 +126,8 @@ pub struct SessionHandles {
     pub recorder: Recorder,
     pub memory: Arc<dyn ConversationMemory>,
     pub conversation_id: String,
+    /// Provider-private opaque context; currently only consumed by the opt-in OpenAI adapter.
+    pub provider_context: artist_session::ProviderContextHandle,
     pub cancel: CancellationToken,
 }
 
@@ -138,6 +140,7 @@ impl Default for SessionHandles {
             recorder: Recorder::noop(),
             memory: Arc::new(InMemoryConversationMemory::new()),
             conversation_id: "default".to_owned(),
+            provider_context: artist_session::ProviderContextHandle::noop(),
             cancel: CancellationToken::new(),
         }
     }

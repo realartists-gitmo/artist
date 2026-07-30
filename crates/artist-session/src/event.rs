@@ -59,6 +59,7 @@ pub enum SessionEvent {
     RuleFired(RuleFired),
     RuleInjection(RuleInjection),
     RuleRetroFindings(RuleRetroFindings),
+    ProviderContext(ProviderContext),
     /// Forward-compat: a kind this binary does not understand.
     Unknown {
         kind: String,
@@ -130,7 +131,18 @@ event_kinds!(
     (RuleFired, RuleFired, "rule.fired"),
     (RuleInjection, RuleInjection, "rule.injection"),
     (RuleRetroFindings, RuleRetroFindings, "rule.retro_findings"),
+    (ProviderContext, ProviderContext, "provider.context.v1"),
 );
+
+/// A durable, provider-private context snapshot. Values are deliberately
+/// opaque: projections must never interpret or render them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProviderContext {
+    pub conversation_id: String,
+    pub provider: String,
+    pub schema: u32,
+    pub items: Vec<serde_json::Value>,
+}
 
 /// One content block inside a message. Structurally mirrors rig's content
 /// types but with explicit tags so the on-disk format survives rig upgrades.
