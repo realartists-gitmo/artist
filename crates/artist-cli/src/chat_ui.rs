@@ -334,6 +334,7 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+    suggestions: &'a [String],
     subagents: &'a SubagentStatuses,
     animation_frame: usize,
     reasoning: &'a str,
@@ -1913,6 +1914,8 @@ async fn submit(
     let mut delivered_steering: Vec<String> = Vec::new();
     let mut pending_delivered = Vec::new();
     let mut steering_input = ChatInput::default();
+    let mut deferred_commands = Vec::new();
+    let mut suggestion_index = 0usize;
     let mut cancelled = false;
     let mut animation_frame = 0;
     let cancel = CancellationToken::new();
@@ -1968,6 +1971,7 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
+            suggestions: &[],
             subagents: &subagents,
             animation_frame,
             reasoning: &reasoning,
@@ -1976,6 +1980,24 @@ async fn submit(
         &mut stream_viewport,
     )?;
     while !task.is_finished() || !rx.is_empty() {
+        let slash_suggestions = slash_commands::completions(&steering_input.text);
+        suggestion_index = suggestion_index.min(slash_suggestions.len().saturating_sub(1));
+        let suggestions = slash_suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                format!(
+                    "{}{}  {}",
+                    if index == suggestion_index {
+                        "› "
+                    } else {
+                        ""
+                    },
+                    command.name,
+                    command.description
+                )
+            })
+            .collect::<Vec<_>>();
         tokio::select! {
             // The context-size fetch resolves concurrently; update the readout
             // when it lands. Disabled once done via the `if` guard.
@@ -2026,6 +2048,10 @@ async fn submit(
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !steering_input.text.trim().is_empty() =>
                         {
+                            if !slash_suggestions.is_empty() {
+                                steering_input.text = slash_suggestions[suggestion_index].name.into();
+                                steering_input.cursor = steering_input.text.len();
+                            }
                             let display = steering_input.text.clone();
                             let history_atoms = steering_input.atoms.clone();
                             let expanded = steering_input.take_expanded();
@@ -2035,27 +2061,29 @@ async fn submit(
                                 images: expanded.images,
                                 history_atoms,
                             };
-                            let applied = if let Some(index) = steering.selected() {
-                                let mutation = steering_handle
-                                    .edit_pending(index, prompt.content.clone());
-                                collect_messages(
-                                    mutation.delivered,
-                                    &mut steering,
-                                    &mut pending_delivered,
-                                );
-                                mutation.applied
+                            if prompt.content.trim_start().starts_with('/') {
+                                deferred_commands.push(prompt);
                             } else {
                                 steering_handle.enqueue(prompt.content.clone());
-                                true
-                            };
-                            if applied {
-                                steering.submit(
-                                    display,
-                                    prompt.content,
-                                    prompt.images,
-                                    prompt.history_atoms,
-                                );
+                                steering.submit(display, prompt.content, prompt.images, prompt.history_atoms);
                             }
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                            && !slash_suggestions.is_empty() =>
+                        {
+                            suggestion_index = if key.code == KeyCode::Up {
+                                suggestion_index.checked_sub(1).unwrap_or(slash_suggestions.len() - 1)
+                            } else {
+                                (suggestion_index + 1) % slash_suggestions.len()
+                            };
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Tab
+                            && !slash_suggestions.is_empty() =>
+                        {
+                            steering_input.text = slash_suggestions[suggestion_index].name.into();
+                            steering_input.cursor = steering_input.text.len();
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
@@ -2272,6 +2300,7 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
+                suggestions: &suggestions,
                 subagents: &subagents,
                 animation_frame,
                 reasoning: &reasoning,
@@ -2368,15 +2397,14 @@ async fn submit(
     let delivered = delivered_steering;
     Ok(SubmitResult {
         viewport_height: stream_viewport.height,
-        queued: steering
-            .take()
+        queued: deferred_commands
             .into_iter()
-            .map(|entry| SubmittedPrompt {
+            .chain(steering.take().into_iter().map(|entry| SubmittedPrompt {
                 display: entry.display,
                 content: entry.content,
                 images: entry.images,
                 history_atoms: entry.atoms,
-            })
+            }))
             .collect(),
         delivered,
         leftover_input: steering_input,
@@ -2803,6 +2831,11 @@ fn draw_streaming(
     let width = terminal_size.width.max(1);
     let footer_height = footer.height(width);
     let queued_height = controls.steering.displays().count() as u16;
+    let suggestions_height = if controls.suggestions.is_empty() {
+        0
+    } else {
+        controls.suggestions.len() as u16 + 2
+    };
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
@@ -2816,6 +2849,7 @@ fn draw_streaming(
     const TIMER_GAP_HEIGHT: u16 = 1;
     let base_fixed_height = input_height
         .saturating_add(queued_height)
+        .saturating_add(suggestions_height)
         .saturating_add(transcript_gap_height)
         .saturating_add(TIMER_GAP_HEIGHT)
         .saturating_add(1)
@@ -2839,7 +2873,7 @@ fn draw_streaming(
     let desired = streaming_viewport_height(
         input_height,
         subagent_height,
-        queued_height,
+        queued_height.saturating_add(suggestions_height),
         reasoning_height,
         footer_height,
         transcript_gap_height > 0,
@@ -2924,15 +2958,33 @@ fn draw_streaming(
             Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
             status_area,
         );
-        let input_area = Rect::new(
+        let suggestions_area = Rect::new(
             area.x,
             status_area.bottom(),
+            area.width,
+            suggestions_height.min(area.height.saturating_sub(footer_height)),
+        );
+        if suggestions_height > 0 {
+            let text = controls
+                .suggestions
+                .iter()
+                .map(|option| Line::styled(option.clone(), panel_option_style(option)))
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                Paragraph::new(text)
+                    .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray))),
+                suggestions_area,
+            );
+        }
+        let input_area = Rect::new(
+            area.x,
+            suggestions_area.bottom(),
             area.width,
             area.height.saturating_sub(
                 transcript_gap_height
                     + subagent_height
                     + queued_height
-                    + reasoning_height
+                    + suggestions_height
                     + TIMER_GAP_HEIGHT
                     + 1
                     + footer_height,
