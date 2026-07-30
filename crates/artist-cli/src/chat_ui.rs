@@ -1388,6 +1388,8 @@ async fn handle_rewind(
         });
         current.recorder.flush().await;
         let events = current.events()?;
+        current.memory.reload_from_events(&events)?;
+        current.provider_context.restore_from_events(&events).await;
         *history = artist_session::build_history(
             &events,
             &current.attachments,

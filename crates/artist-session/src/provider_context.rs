@@ -74,6 +74,14 @@ impl ProviderContextHandle {
         }
     }
 
+    /// Restore the currently visible durable snapshots into this shared handle.
+    /// This mutates the shared map so every existing clone sees the restored state.
+    pub async fn restore_from_events(&self, events: &[Envelope]) {
+        let restored = Self::from_events(events, self.recorder.clone());
+        let snapshots = restored.inner.lock().await.clone();
+        *self.inner.lock().await = snapshots;
+    }
+
     pub async fn items(&self, conversation_id: &str, provider: &str) -> Vec<Value> {
         self.inner
             .lock()

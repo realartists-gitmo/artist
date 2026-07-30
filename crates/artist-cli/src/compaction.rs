@@ -19,6 +19,19 @@ pub(crate) fn should_compact(
     settings.enabled && context_tokens > context_window.saturating_sub(settings.reserve_tokens)
 }
 
+fn supports_remote_compaction(provider: &SavedProvider) -> bool {
+    supports_remote_compaction_transport(provider.provider, provider.api)
+}
+
+fn supports_remote_compaction_transport(
+    provider: llm_provider::ProviderKind,
+    api: Option<llm_provider::OpenAiApi>,
+) -> bool {
+    provider == llm_provider::ProviderKind::Chatgpt
+        || (provider == llm_provider::ProviderKind::Openai
+            && api == Some(llm_provider::OpenAiApi::Responses))
+}
+
 pub(crate) fn projected_context_tokens(
     history: &[Message],
     last_usage: Option<u64>,
@@ -57,12 +70,7 @@ pub(crate) async fn compact(
 
     // Custom instructions are a local summarizer feature; never silently drop
     // them on the provider-side path. Other providers likewise remain local.
-    if custom_instructions.is_none()
-        && matches!(
-            provider.provider,
-            llm_provider::ProviderKind::Openai | llm_provider::ProviderKind::Chatgpt
-        )
-    {
+    if custom_instructions.is_none() && supports_remote_compaction(provider) {
         let model = provider
             .model
             .as_deref()
@@ -166,6 +174,23 @@ mod tests {
                 enabled: false,
                 ..settings
             }
+        ));
+    }
+
+    #[test]
+    fn remote_compaction_excludes_openai_chat_completions() {
+        use llm_provider::{OpenAiApi, ProviderKind};
+        assert!(supports_remote_compaction_transport(
+            ProviderKind::Chatgpt,
+            None
+        ));
+        assert!(supports_remote_compaction_transport(
+            ProviderKind::Openai,
+            Some(OpenAiApi::Responses)
+        ));
+        assert!(!supports_remote_compaction_transport(
+            ProviderKind::Openai,
+            Some(OpenAiApi::ChatCompletions)
         ));
     }
 

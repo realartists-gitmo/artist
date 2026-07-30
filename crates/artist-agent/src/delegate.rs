@@ -476,7 +476,11 @@ impl Delegate {
                 self.provider.api,
                 overload_retry.cache_key(),
                 reasoning_effort,
-                self.handles.effective_context_window,
+                delegate_context_window(
+                    model,
+                    self.provider.model.as_deref(),
+                    self.handles.effective_context_window,
+                ),
             ) {
                 builder = builder.additional_params(params);
             }
@@ -728,6 +732,16 @@ pub(crate) fn child_conversation_messages(
     }
 }
 
+fn delegate_context_window(
+    delegate_model: &str,
+    main_model: Option<&str>,
+    main_window: Option<u64>,
+) -> Option<u64> {
+    (main_model == Some(delegate_model))
+        .then_some(main_window)
+        .flatten()
+}
+
 fn required<T>(value: Option<T>, name: &str) -> Result<T, DelegateError> {
     value.ok_or_else(|| DelegateError::Failed(format!("{name} is required")))
 }
@@ -744,7 +758,20 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::DelegateRun;
+    use super::{DelegateRun, delegate_context_window};
+
+    #[test]
+    fn model_override_does_not_inherit_main_context_window() {
+        assert_eq!(
+            delegate_context_window("main", Some("main"), Some(100_000)),
+            Some(100_000)
+        );
+        assert_eq!(
+            delegate_context_window("small", Some("main"), Some(100_000)),
+            None
+        );
+        assert_eq!(delegate_context_window("small", None, Some(100_000)), None);
+    }
 
     #[test]
     fn background_run_reuses_reserved_task_id() {
