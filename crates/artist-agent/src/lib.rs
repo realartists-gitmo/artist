@@ -9,6 +9,7 @@ mod delegate_jobs;
 mod delegate_tests;
 pub mod mcp;
 mod prompt_config;
+mod provider_retry;
 mod resources;
 mod rig_provider;
 mod ttsr;
@@ -395,9 +396,13 @@ where
     // from concurrent delegate runs (each has its own counter).
     let retry_budget = handles.rules.retry_budget();
     let mut retries_used = 0u32;
-    // Stable per-project+model prompt-cache key so a session's turns route to
-    // the same server-side prefix cache — better hit rate, fewer billed tokens.
-    let cache_key = prompt_cache_key(tools.project_root(), model);
+    // Keep cache affinity within a conversation rather than pinning every main
+    // agent and delegate in the project to the same provider route.
+    let mut overload_retry = provider_retry::OverloadRetry::new(
+        tools.project_root(),
+        model,
+        &format!("main:{}", handles.conversation_id),
+    );
     'retry: loop {
         let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
         let run_recorder = handles.recorder.with_run(&run_id);
@@ -414,7 +419,7 @@ where
         // parameter shapes differ.
         if let Some(params) = request_params(
             provider.provider,
-            &cache_key,
+            overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
         ) {
             builder = builder.additional_params(params);
@@ -495,11 +500,23 @@ where
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
         let mut streamed_assistant_text = String::new();
         let mut streamed_turn = ttsr.turn();
+        // Retrying after any visible model or tool event could duplicate output
+        // or side effects. Provider overloads are retried only while pristine.
+        let mut attempt_observed = false;
         loop {
+            // A tool round trip can advance Rig to a new model turn before
+            // that turn emits text. Never retain the preceding turn's text as
+            // though it were a partial answer from the failed turn.
+            let current_turn = ttsr.turn();
+            if current_turn != streamed_turn {
+                streamed_assistant_text.clear();
+                streamed_turn = current_turn;
+            }
             let item = tokio::select! {
                 biased;
                 event = subagent_events_rx.recv() => {
                     if let Some(event) = event {
+                        attempt_observed = true;
                         on_event(event)?;
                     }
                     continue;
@@ -535,8 +552,30 @@ where
                 run_recorder.record(RunFinished::Error {
                     error: error.to_string(),
                 });
+                let (committed, _) = ttsr.committed();
+                let mut interrupted_delta = if committed.is_empty() {
+                    let mut fallback = seed_history.clone();
+                    fallback.push(seed_prompt.clone());
+                    fallback
+                } else {
+                    committed
+                };
+                interrupted_delta =
+                    interrupted_delta[durable_history_len.min(interrupted_delta.len())..].to_vec();
+                conversation::retain_provider_interrupted_turn(
+                    handles.memory.as_ref(),
+                    &handles.conversation_id,
+                    interrupted_delta,
+                    streamed_assistant_text,
+                    &error.to_string(),
+                )
+                .await
+                .context("retain prematurely-ended turn in conversation memory")?;
                 return Err(error);
             };
+            if item.is_ok() {
+                attempt_observed = true;
+            }
             match item {
                 Ok(MultiTurnStreamItem::FinalResponse(_)) => {
                     if let Err(error) = persistence.result() {
@@ -666,9 +705,58 @@ where
                         retries_used += 1;
                         continue 'retry;
                     }
+                    let error_text = error.to_string();
                     run_recorder.record(RunFinished::Error {
-                        error: error.to_string(),
+                        error: error_text.clone(),
                     });
+                    if !attempt_observed
+                        && provider_retry::is_overload(provider.provider, &error)
+                        && let Some(delay) = overload_retry.schedule()
+                    {
+                        drop(stream);
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => continue 'retry,
+                            _ = handles.cancel.cancelled() => {
+                                let mut cancelled_delta = seed_history.clone();
+                                cancelled_delta.push(seed_prompt.clone());
+                                cancelled_delta = cancelled_delta
+                                    [durable_history_len.min(cancelled_delta.len())..]
+                                    .to_vec();
+                                conversation::retain_cancelled_turn(
+                                    handles.memory.as_ref(),
+                                    &handles.conversation_id,
+                                    cancelled_delta,
+                                    String::new(),
+                                )
+                                .await
+                                .context("retain cancelled turn during provider retry")?;
+                                return Ok(RunOutcome::Cancelled);
+                            }
+                        }
+                    }
+
+                    // Preserve the prompt and any partial answer just like a
+                    // user cancellation, but tell the next turn why it ended.
+                    let (committed, _) = ttsr.committed();
+                    let mut interrupted_delta = if committed.is_empty() {
+                        let mut fallback = seed_history.clone();
+                        fallback.push(seed_prompt.clone());
+                        fallback
+                    } else {
+                        committed
+                    };
+                    interrupted_delta = interrupted_delta
+                        [durable_history_len.min(interrupted_delta.len())..]
+                        .to_vec();
+                    conversation::retain_provider_interrupted_turn(
+                        handles.memory.as_ref(),
+                        &handles.conversation_id,
+                        interrupted_delta,
+                        streamed_assistant_text,
+                        &error_text,
+                    )
+                    .await
+                    .context("retain provider-interrupted turn in conversation memory")?;
                     return Err(error).context("stream Artist agent");
                 }
             }
@@ -694,17 +782,6 @@ fn request_params(
         None => json!({ "summary": "auto" }),
     };
     Some(params)
-}
-
-/// A stable `prompt_cache_key` derived from the project root and model, so a
-/// project's turns route to the same server-side prefix cache. Deterministic
-/// across process runs (`DefaultHasher` uses fixed keys).
-pub(crate) fn prompt_cache_key(project_root: &std::path::Path, model: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    project_root.hash(&mut hasher);
-    model.hash(&mut hasher);
-    format!("artist-{:016x}", hasher.finish())
 }
 
 /// Log rule bookkeeping; Rig conversation memory persists the reminder prompt

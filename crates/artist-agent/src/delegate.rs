@@ -447,7 +447,11 @@ impl Delegate {
         // from the main agent and any sibling delegates.
         let retry_budget = self.handles.rules.retry_budget();
         let mut retries_used = 0u32;
-        let cache_key = crate::prompt_cache_key(self.tools.project_root(), model);
+        let mut overload_retry = crate::provider_retry::OverloadRetry::new(
+            self.tools.project_root(),
+            model,
+            &format!("delegate:{actor}"),
+        );
         let (output, conversation) = loop {
             let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
             let run_recorder = recorder.with_run(&run_id);
@@ -459,7 +463,7 @@ impl Delegate {
             );
             let mut builder = client.agent(model).preamble(&policy);
             if self.provider.provider == llm_provider::ProviderKind::Chatgpt {
-                let mut params = json!({ "prompt_cache_key": cache_key.clone() });
+                let mut params = json!({ "prompt_cache_key": overload_retry.cache_key() });
                 // The subagent's own `reasoning` arg overrides the main agent's
                 // effort (main b9d9193); fall back to the provider default.
                 if let Some(effort) = role
@@ -498,6 +502,7 @@ impl Delegate {
             let mut last_turn_had_text_delta = false;
             let mut final_messages = None;
             let mut retry = false;
+            let mut attempt_observed = false;
             loop {
                 let item = tokio::select! {
                     biased;
@@ -513,6 +518,9 @@ impl Delegate {
                     run_recorder.record(RunFinished::Completed);
                     break;
                 };
+                if item.is_ok() {
+                    attempt_observed = true;
+                }
                 match item {
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                         last_turn_had_text_delta = !turn_text.is_empty();
@@ -649,6 +657,23 @@ impl Delegate {
                         run_recorder.record(RunFinished::Error {
                             error: error.to_string(),
                         });
+                        if !attempt_observed
+                            && crate::provider_retry::is_overload(self.provider.provider, &error)
+                            && let Some(delay) = overload_retry.schedule()
+                        {
+                            drop(stream);
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {
+                                    retry = true;
+                                    break;
+                                }
+                                _ = self.handles.cancel.cancelled() => {
+                                    recorder.record(DelegateFinished { outcome: "cancelled".into() });
+                                    self.finish_child(&actor, "cancelled");
+                                    return Err(DelegateError::Failed("cancelled".into()));
+                                }
+                            }
+                        }
                         recorder.record(DelegateFinished {
                             outcome: "error".into(),
                         });
