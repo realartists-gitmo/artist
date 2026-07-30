@@ -128,6 +128,9 @@ pub struct SessionHandles {
     pub conversation_id: String,
     /// Provider-private opaque context; currently only consumed by the opt-in OpenAI adapter.
     pub provider_context: artist_session::ProviderContextHandle,
+    /// Effective model context window from the normalized catalog. Unknown
+    /// models use the adapter's conservative fallback.
+    pub effective_context_window: Option<u64>,
     pub cancel: CancellationToken,
 }
 
@@ -141,6 +144,7 @@ impl Default for SessionHandles {
             memory: Arc::new(InMemoryConversationMemory::new()),
             conversation_id: "default".to_owned(),
             provider_context: artist_session::ProviderContextHandle::noop(),
+            effective_context_window: None,
             cancel: CancellationToken::new(),
         }
     }
@@ -258,10 +262,12 @@ pub async fn stream_chat(
 ) -> Result<RunOutcome> {
     match rig_provider::RigClient::build(provider)? {
         rig_provider::RigClient::ArtistOpenAi(client) => {
-            let client = client.with_provider_context(
-                handles.conversation_id.clone(),
-                handles.provider_context.clone(),
-            );
+            let client = client
+                .with_provider_context(
+                    handles.conversation_id.clone(),
+                    handles.provider_context.clone(),
+                )
+                .with_effective_context_window(handles.effective_context_window);
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
         rig_provider::RigClient::Copilot(client) => {
@@ -427,6 +433,7 @@ where
             provider.provider,
             overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
+            handles.effective_context_window,
         ) {
             builder = builder.additional_params(params);
         }
@@ -773,6 +780,7 @@ fn request_params(
     provider: llm_provider::ProviderKind,
     cache_key: &str,
     reasoning_effort: Option<&str>,
+    effective_context_window: Option<u64>,
 ) -> Option<serde_json::Value> {
     if !matches!(
         provider,
@@ -780,14 +788,16 @@ fn request_params(
     ) {
         return None;
     }
-    // 100k is a conservative fallback below the smallest currently supported
-    // Responses reasoning-model context window; model-specific metadata can
-    // lower this value when it becomes available at this boundary.
+    // Leave output headroom within the catalog's already-normalized effective
+    // window. Only unknown metadata uses the conservative fixed fallback.
+    let compact_threshold = effective_context_window
+        .map(|window| window.saturating_mul(9) / 10)
+        .unwrap_or(100_000);
     let mut params = json!({
         "store": false,
         "include": ["reasoning.encrypted_content"],
         "prompt_cache_key": cache_key,
-        "context_management": [{"type": "compaction", "compact_threshold": 100000}]
+        "context_management": [{"type": "compaction", "compact_threshold": compact_threshold}]
     });
     // Request a provider-generated trace for the live UI even when the model's
     // default effort is in use. Rig's memory policy is independent: streaming
@@ -869,11 +879,11 @@ mod tests {
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {
-        let params = request_params(ProviderKind::Chatgpt, "cache", Some("high")).unwrap();
+        let params = request_params(ProviderKind::Chatgpt, "cache", Some("high"), None).unwrap();
         assert_eq!(params["reasoning"]["effort"], "high");
         assert_eq!(params["reasoning"]["summary"], "auto");
 
-        let default_effort = request_params(ProviderKind::Chatgpt, "cache", None).unwrap();
+        let default_effort = request_params(ProviderKind::Chatgpt, "cache", None, None).unwrap();
         assert_eq!(default_effort["reasoning"]["summary"], "auto");
         assert!(default_effort["reasoning"].get("effort").is_none());
     }
@@ -881,8 +891,22 @@ mod tests {
     #[test]
     fn responses_policy_is_sent_to_openai_too() {
         assert_eq!(
-            request_params(ProviderKind::Openai, "cache", Some("high")).unwrap()["prompt_cache_key"],
+            request_params(ProviderKind::Openai, "cache", Some("high"), None).unwrap()["prompt_cache_key"],
             "cache"
+        );
+    }
+
+    #[test]
+    fn compaction_threshold_uses_effective_model_window() {
+        let params = request_params(ProviderKind::Openai, "cache", None, Some(200_000)).unwrap();
+        assert_eq!(
+            params["context_management"][0]["compact_threshold"],
+            180_000
+        );
+        let unknown = request_params(ProviderKind::Openai, "cache", None, None).unwrap();
+        assert_eq!(
+            unknown["context_management"][0]["compact_threshold"],
+            100_000
         );
     }
 }

@@ -279,6 +279,16 @@ async fn execute_prompt(
     let rules_engine = artist_rules::RulesEngine::discover(&project);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
+    let effective_context_window =
+        models::catalog(&session_provider)
+            .await
+            .ok()
+            .and_then(|catalog| {
+                catalog
+                    .iter()
+                    .find(|model| Some(&model.slug) == session_provider.model.as_ref())
+                    .and_then(|model| model.effective_context_window())
+            });
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
         rules: artist_rules::state::RulesHandle::default(),
@@ -287,6 +297,7 @@ async fn execute_prompt(
         memory: Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
+        effective_context_window,
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));

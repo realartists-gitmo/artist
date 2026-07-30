@@ -1886,6 +1886,7 @@ async fn submit(
         memory: std::sync::Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
+        effective_context_window: status.context_capacity,
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {

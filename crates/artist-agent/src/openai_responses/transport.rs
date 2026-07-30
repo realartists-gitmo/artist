@@ -14,7 +14,11 @@ use rig_core::{
     },
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 #[derive(Clone, Debug)]
 pub enum Credentials {
@@ -32,6 +36,8 @@ pub struct Client {
     credentials: Credentials,
     provider_context: artist_session::ProviderContextHandle,
     conversation_id: String,
+    effective_context_window: Option<u64>,
+    unsupported_context_management: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Client {
@@ -42,6 +48,8 @@ impl Client {
             credentials: Credentials::ApiKey(key.into()),
             provider_context: artist_session::ProviderContextHandle::noop(),
             conversation_id: "default".into(),
+            effective_context_window: None,
+            unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn chatgpt(
@@ -58,6 +66,8 @@ impl Client {
             },
             provider_context: artist_session::ProviderContextHandle::noop(),
             conversation_id: "default".into(),
+            effective_context_window: None,
+            unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn with_provider_context(
@@ -68,6 +78,52 @@ impl Client {
         self.conversation_id = conversation_id.into();
         self.provider_context = provider_context;
         self
+    }
+    pub fn with_effective_context_window(mut self, window: Option<u64>) -> Self {
+        self.effective_context_window = window;
+        self
+    }
+
+    /// Compact the full canonical sidecar plus current context. The sidecar is
+    /// replaced only after a successful, parseable response.
+    pub async fn compact(
+        &self,
+        model: &str,
+        current: Vec<Value>,
+    ) -> Result<Vec<Value>, CompletionError> {
+        let saved = self
+            .provider_context
+            .items(&self.conversation_id, "openai.responses")
+            .await;
+        let input = merge_inputs(saved, current);
+        let response = self
+            .http
+            .post(format!(
+                "{}/responses/compact",
+                self.endpoint.trim_end_matches('/')
+            ))
+            .headers(self.headers()?)
+            .json(&json!({"model": model, "input": input, "store": false}))
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        let text = response.text().await.map_err(transport)?;
+        if !status.is_success() {
+            return Err(CompletionError::ProviderError(format!(
+                "Responses compact HTTP {status}: {}",
+                sanitize(&text)
+            )));
+        }
+        let wire: Value = serde_json::from_str(&text)?;
+        let items = parse_output(&wire)?
+            .into_iter()
+            .map(|item| item.wire().clone())
+            .collect::<Vec<_>>();
+        self.provider_context
+            .commit(&self.conversation_id, "openai.responses", items.clone())
+            .await;
+        Ok(items)
     }
 
     fn headers(&self) -> Result<HeaderMap, CompletionError> {
@@ -235,23 +291,49 @@ impl CompletionModel for ArtistOpenAiModel {
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
         let mut body = self.prepare(body).await;
         body.stream = Some(true);
-        let response = self
+        if self
             .client
-            .http
-            .post(self.client.url())
-            .headers(self.client.headers()?)
-            .json(&body)
-            .send()
-            .await
-            .map_err(transport)?;
-        let status = response.status();
-        if !status.is_success() {
+            .unsupported_context_management
+            .lock()
+            .unwrap()
+            .contains(&self.model)
+        {
+            body.context_management.clear();
+        }
+        let mut retried = false;
+        let response = loop {
+            let response = self
+                .client
+                .http
+                .post(self.client.url())
+                .headers(self.client.headers()?)
+                .json(&body)
+                .send()
+                .await
+                .map_err(transport)?;
+            let status = response.status();
+            if status.is_success() {
+                break response;
+            }
             let text = response.text().await.map_err(transport)?;
+            if !retried
+                && !body.context_management.is_empty()
+                && context_management_unsupported(status.as_u16(), &text)
+            {
+                retried = true;
+                body.context_management.clear();
+                self.client
+                    .unsupported_context_management
+                    .lock()
+                    .unwrap()
+                    .insert(self.model.clone());
+                continue;
+            }
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
             )));
-        }
+        };
         let mut bytes = response.bytes_stream();
         let context = self.provider_context.clone();
         let conversation_id = self.conversation_id.clone();
@@ -295,6 +377,14 @@ fn merge_inputs(saved: Vec<Value>, fresh: Vec<Value>) -> Vec<Value> {
     let mut merged = saved;
     merged.extend(fresh.into_iter().skip(overlap));
     merged
+}
+
+fn context_management_unsupported(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 404 | 422)
+        && body.to_ascii_lowercase().contains("context_management")
+        && ["unsupported", "unknown", "unrecognized", "not supported"]
+            .iter()
+            .any(|needle| body.to_ascii_lowercase().contains(needle))
 }
 
 fn sanitize(body: &str) -> String {
@@ -492,6 +582,55 @@ mod transport_tests {
         assert!(sent.contains("post /responses"));
         assert!(sent.contains("\"input\""));
         assert_eq!(result.raw_response.output[0].phase(), Some("final"));
+    }
+
+    #[test]
+    fn unsupported_detection_is_explicit_and_conservative() {
+        assert!(context_management_unsupported(
+            400,
+            r#"{"error":{"message":"context_management is unsupported"}}"#
+        ));
+        assert!(!context_management_unsupported(
+            500,
+            "context_management unsupported"
+        ));
+        assert!(!context_management_unsupported(
+            400,
+            "unrelated bad request"
+        ));
+    }
+
+    #[tokio::test]
+    async fn standalone_compact_sends_canonical_context_and_replaces_sidecar() {
+        let response = r#"{"output":[{"type":"compaction","encrypted_content":"new"},{"type":"message","role":"assistant","content":[]}]}"#;
+        let (url, captured) = server(response, "application/json").await;
+        let context = artist_session::ProviderContextHandle::noop();
+        context
+            .commit(
+                "conversation",
+                "openai.responses",
+                vec![serde_json::json!({"type":"reasoning","encrypted_content":"old"})],
+            )
+            .await;
+        let client =
+            Client::api_key(url, "secret").with_provider_context("conversation", context.clone());
+        let output = client
+            .compact(
+                "gpt-test",
+                vec![serde_json::json!({"role":"user","content":"now"})],
+            )
+            .await
+            .unwrap();
+        assert_eq!(output[0]["encrypted_content"], "new");
+        assert_eq!(
+            context.items("conversation", "openai.responses").await,
+            output
+        );
+        let sent = captured.await.unwrap();
+        assert!(sent.starts_with("POST /responses/compact"));
+        assert!(sent.contains("\"store\":false"));
+        assert!(sent.contains("\"encrypted_content\":\"old\""));
+        assert!(sent.contains("\"content\":\"now\""));
     }
 
     #[tokio::test]
