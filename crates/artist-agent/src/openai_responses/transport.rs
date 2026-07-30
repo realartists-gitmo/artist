@@ -434,11 +434,21 @@ fn reconcile_inputs(
     fresh: Vec<Value>,
     fingerprints: &[String],
 ) -> Vec<Value> {
-    let common = checkpoint
-        .iter()
-        .zip(fingerprints)
-        .take_while(|(a, b)| a == b)
-        .count();
+    let common = if checkpoint.is_empty() && !saved.is_empty() {
+        // Schema-v1 snapshots did not record a cursor. Rig history contains prior
+        // assistant turns, so migrate conservatively at the last such boundary;
+        // everything after it is the new user/tool-result suffix.
+        fresh
+            .iter()
+            .rposition(|item| item.get("role").and_then(Value::as_str) == Some("assistant"))
+            .map_or(0, |index| index + 1)
+    } else {
+        checkpoint
+            .iter()
+            .zip(fingerprints)
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
     let mut merged = saved;
     // A diverged history is intentionally appended from its divergence point. In the
     // normal growing-history case this adds only genuinely new framework items.
@@ -624,6 +634,27 @@ mod transport_tests {
             &fingerprints_tool,
         );
         assert_eq!(restarted, compacted);
+
+        let legacy_output =
+            json!({"type":"message","id":"provider-output","role":"assistant","content":[]});
+        let legacy_fresh = vec![
+            json!({"role":"user","content":"old"}),
+            json!({"role":"assistant","content":"answer"}),
+            json!({"role":"user","content":"new"}),
+        ];
+        let legacy_fingerprints = legacy_fresh
+            .iter()
+            .map(wire_fingerprint)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reconcile_inputs(
+                vec![legacy_output.clone()],
+                &[],
+                legacy_fresh,
+                &legacy_fingerprints
+            ),
+            vec![legacy_output, json!({"role":"user","content":"new"})]
+        );
     }
 
     fn request() -> CompletionRequest {
