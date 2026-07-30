@@ -7,19 +7,24 @@ A new opinionated, highly customizable, performant, and minimal coding harness.
 
 Artist is **early in development**. Updates can and probably will **break extensions**. Expect bugs.
 
-## Runtime transition
+## Why use it?
+Of course there are many coding harnesses out there. We built Artist because every coding harness had a set of problems to reconcile:
+- **Claude Code** (and Codex, but much less): massive frontend specific instructions and form guidance inapplicable to most devs. Artist mirror's **Pi**'s minimal prompt with a customizable system, so your models act how **you** want and preserve context.
+- **Pi** and **OpenCode**: Typescript-managed harnesses and TUIs makes parallel usage explode system resource usage. Artist is built on **Rig** and **Ratatui** in **Rust**, creating a small native executable. Artist extensions are compiled to WASM, meaning they can be developed in any supported language but will execute fast while maintaining customizability.
 
-The previous Rig-native provider and chat runtime has been removed. The `artist`
-binary currently exposes only offline rule and session maintenance commands and
-cannot authenticate with, discover, or call model APIs. Existing provider
-credential files are left untouched for the upcoming project-owned runtime.
+Later, a Codex-app-like desktop app developed in native-Rust via **GPUI** will be implemented, creating a performant desktop app experience.
+
+## Model Compatibility Roadmap
+- [x] Rig provided models
+- [ ] Generic OpenAI key support
+- [x] ChatGPT subscription support
+- [ ] ZAI, OpenCode, other subscription support
 
 ## Features Roadmap
-- [ ] Project-owned model runtime
-- [ ] MCP
-- [ ] Skills
-- [ ] Extensions, with customizable tools
-- [ ] AGENTS.md, and .agents/skills protocol support
+- [x] MCP
+- [x] Skills
+- [x] Extensions, with customizable tools
+- [x] AGENTS.md, and .agents/skills protocol support
 - [ ] First class Herdr support
 - [ ] ACP support
 - [ ] Customizable system prompt
