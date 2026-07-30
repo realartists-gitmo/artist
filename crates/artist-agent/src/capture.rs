@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use artist_session::ToolOutcomeRecord;
-use rig_core::agent::{AgentHook, Flow, HookContext, StepEvent, StepEventKind};
+use rig_agent::agent::{AgentHook, Flow, HookContext, StepEvent, StepEventKind};
 use rig_core::completion::CompletionModel;
 use rig_core::tool::ToolOutcome;
 

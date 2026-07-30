@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use artist_rules::matcher::{RuleSet, StreamMatcher};
 use artist_rules::state::RulesHandle;
 use artist_rules::types::{Firing, MatchTarget, RuleId};
-use rig_core::agent::{AgentHook, Flow, HookContext, RequestPatch, StepEvent, StepEventKind};
+use rig_agent::agent::{AgentHook, Flow, HookContext, RequestPatch, StepEvent, StepEventKind};
 use rig_core::completion::message::Message;
 use rig_core::completion::{CompletionModel, Document};
 

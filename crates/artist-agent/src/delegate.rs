@@ -18,7 +18,7 @@ use rig_core::{
     client::CompletionClient,
     completion::{Message, message::ToolResultContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
-    tool::{Tool, ToolDyn},
+    tool::{PortableDynamicTool, PortableTool},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -126,7 +126,7 @@ pub(crate) enum DelegateError {
     Failed(String),
 }
 
-impl Tool for Delegate {
+impl PortableTool for Delegate {
     const NAME: &'static str = "subagent";
     type Error = DelegateError;
     type Args = DelegateArgs;
@@ -633,7 +633,7 @@ impl Delegate {
                     Ok(_) => {}
                     Err(error) => {
                         if let Some(firing) = ttsr.take_pending()
-                            && let rig_core::agent::StreamingError::Prompt(boxed) = &error
+                            && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
                             && let rig_core::completion::PromptError::PromptCancelled {
                                 chat_history,
                                 ..

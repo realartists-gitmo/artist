@@ -688,7 +688,7 @@ where
                     // A TTSR abort surfaces as PromptCancelled with the
                     // committed history (rig excludes the partial turn).
                     if let Some(firing) = ttsr.take_pending()
-                        && let rig_core::agent::StreamingError::Prompt(boxed) = &error
+                        && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
                         && let rig_core::completion::PromptError::PromptCancelled {
                             chat_history,
                             ..
