@@ -2064,8 +2064,27 @@ async fn submit(
                             if prompt.content.trim_start().starts_with('/') {
                                 deferred_commands.push(prompt);
                             } else {
-                                steering_handle.enqueue(prompt.content.clone());
-                                steering.submit(display, prompt.content, prompt.images, prompt.history_atoms);
+                                let applied = if let Some(index) = steering.selected() {
+                                    let mutation = steering_handle
+                                        .edit_pending(index, prompt.content.clone());
+                                    collect_messages(
+                                        mutation.delivered,
+                                        &mut steering,
+                                        &mut pending_delivered,
+                                    );
+                                    mutation.applied
+                                } else {
+                                    steering_handle.enqueue(prompt.content.clone());
+                                    true
+                                };
+                                if applied {
+                                    steering.submit(
+                                        display,
+                                        prompt.content,
+                                        prompt.images,
+                                        prompt.history_atoms,
+                                    );
+                                }
                             }
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
