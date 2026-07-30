@@ -13,6 +13,33 @@ use crate::event::{Envelope, HistoryRewind, SCHEMA_VERSION, SessionEvent};
 
 pub const EVENTS_FILE: &str = "events.jsonl";
 const WRITER_LOCK_FILE: &str = "writer.lock";
+/// How long [`acquire_writer_lock`] tolerates a contended lock before calling
+/// the session genuinely active elsewhere.
+const LOCK_HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+const LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Take the writer lock, tolerating a brief handoff from the previous owner.
+///
+/// The lock is advisory and lives on the owner's open file handle, so it is
+/// released by that handle's close — which happens on the writer task's thread,
+/// not the caller's. `WriterTask::close()` awaits the task's *result*, which is
+/// published before the kernel has necessarily dropped the lock, so reopening a
+/// session immediately after closing it (resume, fork, rewind) can momentarily
+/// observe the outgoing owner. A session that is genuinely open in another
+/// process holds the lock for its entire run, so a short bounded retry tells the
+/// two apart without weakening the guarantee.
+fn acquire_writer_lock(lock: &File) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + LOCK_HANDOFF_GRACE;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            // Only contention is transient; anything else fails immediately.
+            Err(error) if error.kind() != std::io::ErrorKind::WouldBlock => return Err(error),
+            Err(error) if std::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => std::thread::sleep(LOCK_RETRY_INTERVAL),
+        }
+    }
+}
 
 /// Read-only view of a session's event log.
 pub struct EventLogReader {
@@ -88,8 +115,7 @@ impl EventLogWriter {
             .truncate(false)
             .open(&lock_path)
             .with_context(|| format!("open {}", lock_path.display()))?;
-        lock.try_lock_exclusive()
-            .context("session is active in another process")?;
+        acquire_writer_lock(&lock).context("session is active in another process")?;
 
         // Repair a torn tail from a crash mid-append: without this, the next
         // append would concatenate onto the partial line and both records
@@ -292,10 +318,53 @@ mod tests {
     }
 
     #[test]
-    fn second_writer_fails_fast() {
+    fn writer_lock_reopens_immediately_after_the_previous_owner_closes() {
         let dir = tempfile::tempdir().unwrap();
-        let _writer = EventLogWriter::open(dir.path(), "s-1").unwrap();
-        assert!(EventLogWriter::open(dir.path(), "s-1").is_err());
+        for _ in 0..50 {
+            let writer = EventLogWriter::open(dir.path(), "s-1").unwrap();
+            drop(writer);
+            EventLogWriter::open(dir.path(), "s-1").expect("reopen after close");
+        }
+    }
+
+    #[test]
+    fn writer_lock_still_refuses_a_session_held_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = EventLogWriter::open(dir.path(), "s-1").unwrap();
+
+        let started = std::time::Instant::now();
+        let Err(error) = EventLogWriter::open(dir.path(), "s-1") else {
+            panic!("a genuinely held session must still be refused");
+        };
+
+        // The retry must not silently succeed, and must give up promptly.
+        assert!(
+            error.to_string().contains("active in another process"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            started.elapsed() >= LOCK_HANDOFF_GRACE,
+            "should have retried across the grace window"
+        );
+        assert!(
+            started.elapsed() < LOCK_HANDOFF_GRACE * 4,
+            "gave up too slowly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The retry loop only treats contention as transient, so the mapping from
+    /// `fs2`'s contended `flock` to `WouldBlock` has to hold.
+    #[test]
+    fn contended_lock_surfaces_as_would_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.lock");
+        let held = File::create(&path).unwrap();
+        held.try_lock_exclusive().unwrap();
+
+        let second = File::create(&path).unwrap();
+        let error = second.try_lock_exclusive().expect_err("must contend");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[test]
