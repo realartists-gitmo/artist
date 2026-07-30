@@ -45,7 +45,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const NO_PROVIDER_NOTICE: &str = "No OpenAI account configured — run /login to connect one.";
+const NO_PROVIDER_NOTICE: &str = "No provider configured — run /login to connect one.";
 
 #[derive(Default)]
 pub(crate) struct ChatInput {
@@ -917,9 +917,7 @@ async fn run_loop(
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let Some(provider_index) = context.provider_index else {
-                            command_panel = vec![
-                                "No OpenAI account configured — run /login to connect one.".into(),
-                            ];
+                            command_panel = vec![NO_PROVIDER_NOTICE.into()];
                             continue;
                         };
                         let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
@@ -999,8 +997,7 @@ async fn run_loop(
                     None,
                 )?;
                 let Some(provider_index) = context.provider_index else {
-                    command_panel =
-                        vec!["No OpenAI account configured — run /login to connect one.".into()];
+                    command_panel = vec![NO_PROVIDER_NOTICE.into()];
                     continue;
                 };
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
