@@ -1655,11 +1655,23 @@ async fn handle_login(
         DisableBracketedPaste
     );
     ratatui::restore();
+    // Treat login, required model selection, and persistence as one transaction.
+    // In particular, cancellation from either prompt must not leave a provider
+    // in memory that was never made usable (or change the previous default).
+    let previous = store.clone();
     let before = store.providers.len();
-    let outcome = crate::login::openai(store).await;
-    if outcome.is_ok() {
-        let _ = store.save(store_path);
+    let attempted: Result<Option<usize>> = async {
+        crate::login::openai(store).await?;
+        let index = (store.providers.len() > before).then_some(store.providers.len() - 1);
+        if let Some(index) = index
+            && store.providers[index].model.is_none()
+        {
+            models::select(&mut store.providers[index]).await?;
+        }
+        Ok(index)
     }
+    .await;
+    let outcome = finish_login_transaction(store, previous, store_path, attempted);
     // Re-enter the inline viewport and re-arm the enhanced-key / paste modes
     // the chat loop relies on.
     *terminal = ratatui::init_with_options(TerminalOptions {
@@ -1672,19 +1684,33 @@ async fn handle_login(
     );
     terminal.show_cursor()?;
     match outcome {
-        Ok(()) if store.providers.len() > before => {
-            let index = store.providers.len() - 1;
-            if store.providers[index].model.is_none() {
-                models::select(&mut store.providers[index]).await?;
-                store.save(store_path)?;
-            }
-            Ok((
-                vec!["Logged in and selected for this session.".to_owned()],
-                Some(index),
-            ))
-        }
-        Ok(()) => Ok((vec!["Login completed.".to_owned()], None)),
+        Ok(Some(index)) => Ok((
+            vec!["Logged in and selected for this session.".to_owned()],
+            Some(index),
+        )),
+        Ok(None) => Ok((vec!["Login completed.".to_owned()], None)),
         Err(error) => Ok((vec![format!("Login failed: {error:#}")], None)),
+    }
+}
+
+fn finish_login_transaction(
+    store: &mut ProviderStore,
+    previous: ProviderStore,
+    store_path: &Path,
+    attempted: Result<Option<usize>>,
+) -> Result<Option<usize>> {
+    match attempted {
+        Ok(index) => {
+            if let Err(error) = store.save(store_path) {
+                *store = previous;
+                return Err(error);
+            }
+            Ok(index)
+        }
+        Err(error) => {
+            *store = previous;
+            Err(error)
+        }
     }
 }
 
@@ -3303,6 +3329,47 @@ mod tests {
         assert_eq!(store.default_provider.as_ref().unwrap().as_str(), "two");
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.default_provider.unwrap().as_str(), "two");
+    }
+
+    #[test]
+    fn login_selection_cancel_restores_exact_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut store = ProviderStore::default();
+        store.add(test_account("existing"));
+        let before = toml::to_string(&store).unwrap();
+        let previous = store.clone();
+        store.add(test_account("partial"));
+        store.default_provider = Some(store.providers[1].id.clone());
+
+        let result = finish_login_transaction(
+            &mut store,
+            previous,
+            &path,
+            Err(anyhow::anyhow!("selection cancelled")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(toml::to_string(&store).unwrap(), before);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn successful_login_selection_is_saved_once_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut store = ProviderStore::default();
+        let previous = store.clone();
+        store.add(test_account("selected"));
+        store.providers[0].model = Some("chosen-model".to_owned());
+
+        let index = finish_login_transaction(&mut store, previous, &path, Ok(Some(0))).unwrap();
+
+        assert_eq!(index, Some(0));
+        let loaded = ProviderStore::load(&path).unwrap();
+        assert_eq!(loaded.providers.len(), 1);
+        assert_eq!(loaded.providers[0].id.as_str(), "selected");
+        assert!(loaded.providers[0].model.is_some());
     }
 
     #[test]

@@ -127,7 +127,11 @@ async fn run() -> Result<()> {
                     .model
                     .is_none()
             {
-                bail!("no model selected — run `artist model` to choose one first");
+                // Legacy/incomplete provider records should recover through the
+                // interactive model setup instead of referring to the removed
+                // standalone model command.
+                models::select(&mut store.providers[selected]).await?;
+                store.save(&path)?;
             }
             // Resolve an interactive resume before entering inline TUI mode so the
             // selector cannot be painted underneath the splash and input viewport.
