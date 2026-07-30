@@ -142,6 +142,10 @@ pub struct ProviderContext {
     pub provider: String,
     pub schema: u32,
     pub items: Vec<serde_json::Value>,
+    /// Stable fingerprints of the framework history incorporated into `items`.
+    /// Absent on schema-v1 snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_fingerprints: Vec<String>,
 }
 
 /// One content block inside a message. Structurally mirrors rig's content

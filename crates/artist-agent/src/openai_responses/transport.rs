@@ -91,11 +91,12 @@ impl Client {
         model: &str,
         current: Vec<Value>,
     ) -> Result<Vec<Value>, CompletionError> {
-        let saved = self
+        let (saved, checkpoint) = self
             .provider_context
-            .items(&self.conversation_id, "openai.responses")
+            .snapshot(&self.conversation_id, "openai.responses")
             .await;
-        let input = merge_inputs(saved, current);
+        let fingerprints = current.iter().map(wire_fingerprint).collect::<Vec<_>>();
+        let input = reconcile_inputs(saved, &checkpoint, current, &fingerprints);
         let response = self
             .http
             .post(format!(
@@ -121,7 +122,12 @@ impl Client {
             .map(|item| item.wire().clone())
             .collect::<Vec<_>>();
         self.provider_context
-            .commit(&self.conversation_id, "openai.responses", items.clone())
+            .commit_checkpoint(
+                &self.conversation_id,
+                "openai.responses",
+                items.clone(),
+                fingerprints,
+            )
             .await;
         Ok(items)
     }
@@ -190,23 +196,30 @@ impl ArtistOpenAiModel {
         self
     }
 
-    async fn prepare(&self, mut body: Request) -> Request {
-        let saved = self
+    async fn prepare(&self, mut body: Request) -> (Request, Vec<String>) {
+        let (saved, checkpoint) = self
             .provider_context
-            .items(&self.conversation_id, "openai.responses")
+            .snapshot(&self.conversation_id, "openai.responses")
             .await;
-        body.input = merge_inputs(saved, body.input);
-        body
+        let fresh_fingerprints = body.input.iter().map(wire_fingerprint).collect::<Vec<_>>();
+        body.input = reconcile_inputs(saved, &checkpoint, body.input.clone(), &fresh_fingerprints);
+        (body, fresh_fingerprints)
     }
 
-    async fn save(&self, output: &[OutputItem]) {
-        let mut items = self
-            .provider_context
-            .items(&self.conversation_id, "openai.responses")
-            .await;
-        items.extend(output.iter().map(|item| item.wire().clone()));
+    async fn save(
+        &self,
+        mut canonical: Vec<Value>,
+        checkpoint: Vec<String>,
+        output: &[OutputItem],
+    ) {
+        canonical.extend(output.iter().map(|item| item.wire().clone()));
         self.provider_context
-            .commit(&self.conversation_id, "openai.responses", items)
+            .commit_checkpoint(
+                &self.conversation_id,
+                "openai.responses",
+                canonical,
+                checkpoint,
+            )
             .await;
     }
 }
@@ -251,27 +264,53 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<completion::CompletionResponse<Response>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let body = self.prepare(body).await;
-        let response = self
+        let (mut body, checkpoint) = self.prepare(body).await;
+        if self
             .client
-            .http
-            .post(self.client.url())
-            .headers(self.client.headers()?)
-            .json(&body)
-            .send()
-            .await
-            .map_err(transport)?;
-        let status = response.status();
-        let text = response.text().await.map_err(transport)?;
-        if !status.is_success() {
+            .unsupported_context_management
+            .lock()
+            .unwrap()
+            .contains(&self.model)
+        {
+            body.context_management.clear();
+        }
+        let mut retried = false;
+        let response = loop {
+            let response = self
+                .client
+                .http
+                .post(self.client.url())
+                .headers(self.client.headers()?)
+                .json(&body)
+                .send()
+                .await
+                .map_err(transport)?;
+            let status = response.status();
+            let text = response.text().await.map_err(transport)?;
+            if status.is_success() {
+                break text;
+            }
+            if !retried
+                && !body.context_management.is_empty()
+                && context_management_unsupported(status.as_u16(), &text)
+            {
+                retried = true;
+                body.context_management.clear();
+                self.client
+                    .unsupported_context_management
+                    .lock()
+                    .unwrap()
+                    .insert(self.model.clone());
+                continue;
+            }
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
             )));
-        }
-        let wire: Value = serde_json::from_str(&text)?;
+        };
+        let wire: Value = serde_json::from_str(&response)?;
         let output = parse_output(&wire)?;
-        self.save(&output).await;
+        self.save(body.input.clone(), checkpoint, &output).await;
         let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
             serde_json::from_value(wire.clone())?;
         let normalized: completion::CompletionResponse<_> = upstream.try_into()?;
@@ -289,7 +328,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<StreamingCompletionResponse<StreamResponse>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let mut body = self.prepare(body).await;
+        let (mut body, checkpoint) = self.prepare(body).await;
         body.stream = Some(true);
         if self
             .client
@@ -337,6 +376,7 @@ impl CompletionModel for ArtistOpenAiModel {
         let mut bytes = response.bytes_stream();
         let context = self.provider_context.clone();
         let conversation_id = self.conversation_id.clone();
+        let canonical_input = body.input.clone();
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
             while let Some(chunk) = bytes.next().await {
@@ -352,9 +392,9 @@ impl CompletionModel for ArtistOpenAiModel {
                             match parse_event(&data) {
                                 Ok(events) => for event in events {
                                     if let RawStreamingChoice::FinalResponse(final_response) = &event {
-                                        let mut saved = context.items(&conversation_id, "openai.responses").await;
+                                        let mut saved = canonical_input.clone();
                                         saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
-                                        context.commit(&conversation_id, "openai.responses", saved).await;
+                                        context.commit_checkpoint(&conversation_id, "openai.responses", saved, checkpoint.clone()).await;
                                     }
                                     yield Ok(event);
                                 },
@@ -369,13 +409,40 @@ impl CompletionModel for ArtistOpenAiModel {
     }
 }
 
-fn merge_inputs(saved: Vec<Value>, fresh: Vec<Value>) -> Vec<Value> {
-    let overlap = (0..=saved.len().min(fresh.len()))
-        .rev()
-        .find(|&n| saved[saved.len() - n..] == fresh[..n])
-        .unwrap_or(0);
+fn wire_fingerprint(value: &Value) -> String {
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys = map.keys().collect::<Vec<_>>();
+                keys.sort();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&map[key])))
+                        .collect(),
+                )
+            }
+            Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&canonical(value)).expect("JSON values serialize")
+}
+
+fn reconcile_inputs(
+    saved: Vec<Value>,
+    checkpoint: &[String],
+    fresh: Vec<Value>,
+    fingerprints: &[String],
+) -> Vec<Value> {
+    let common = checkpoint
+        .iter()
+        .zip(fingerprints)
+        .take_while(|(a, b)| a == b)
+        .count();
     let mut merged = saved;
-    merged.extend(fresh.into_iter().skip(overlap));
+    // A diverged history is intentionally appended from its divergence point. In the
+    // normal growing-history case this adds only genuinely new framework items.
+    merged.extend(fresh.into_iter().skip(common));
     merged
 }
 
@@ -522,14 +589,41 @@ mod transport_tests {
     };
 
     #[test]
-    fn provider_context_merge_preserves_order_and_deduplicates_overlap() {
-        let a = serde_json::json!({"type":"reasoning","encrypted_content":"opaque"});
-        let b = serde_json::json!({"type":"function_call","call_id":"c"});
-        let c = serde_json::json!({"type":"function_call_output","call_id":"c"});
+    fn checkpoint_replay_adds_only_new_history_across_turns_tools_and_compaction() {
+        let user1 = json!({"type":"message","role":"user","content":"one"});
+        let user2 = json!({"type":"message","role":"user","content":"two"});
+        let call = json!({"type":"function_call","id":"fc1","call_id":"c"});
+        let result = json!({"type":"function_call_output","call_id":"c","output":"ok"});
+        let output = json!({"type":"message","id":"m1","role":"assistant","content":[]});
+        let fresh1 = vec![user1.clone()];
+        let checkpoint1 = fresh1.iter().map(wire_fingerprint).collect::<Vec<_>>();
+        let canonical = vec![user1.clone(), output.clone()];
+
+        let fresh2 = vec![user1.clone(), user2.clone()];
+        let fingerprints2 = fresh2.iter().map(wire_fingerprint).collect::<Vec<_>>();
         assert_eq!(
-            merge_inputs(vec![a.clone(), b.clone()], vec![b.clone(), c.clone()]),
-            vec![a, b, c]
+            reconcile_inputs(canonical.clone(), &checkpoint1, fresh2, &fingerprints2),
+            vec![user1.clone(), output.clone(), user2.clone()]
         );
+
+        let fresh_tool = vec![user1.clone(), user2.clone(), call.clone(), result.clone()];
+        let fingerprints_tool = fresh_tool.iter().map(wire_fingerprint).collect::<Vec<_>>();
+        let merged = reconcile_inputs(canonical, &checkpoint1, fresh_tool, &fingerprints_tool);
+        assert_eq!(merged, vec![user1, output, user2, call, result]);
+
+        let compacted = vec![json!({"type":"compaction","encrypted_content":"opaque"})];
+        let restarted = reconcile_inputs(
+            compacted.clone(),
+            &fingerprints_tool,
+            vec![
+                json!({"type":"message","role":"user","content":"one"}),
+                json!({"type":"message","role":"user","content":"two"}),
+                json!({"type":"function_call","id":"fc1","call_id":"c"}),
+                json!({"type":"function_call_output","call_id":"c","output":"ok"}),
+            ],
+            &fingerprints_tool,
+        );
+        assert_eq!(restarted, compacted);
     }
 
     fn request() -> CompletionRequest {
