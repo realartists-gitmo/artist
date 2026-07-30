@@ -10,16 +10,87 @@ use tokio::{
 };
 use url::Url;
 
-/// Interactive OpenAI login. API keys are read without echo and validated
+/// Authentication categories and providers are deliberately separate so new
+/// providers can be registered without leaking provider names into `/login`'s
+/// first picker.
+#[derive(Clone, Copy)]
+enum AuthKind {
+    Subscription,
+    ApiKey,
+}
+
+impl AuthKind {
+    const ALL: [Self; 2] = [Self::Subscription, Self::ApiKey];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Subscription => "Subscription",
+            Self::ApiKey => "API key",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LoginProvider {
+    OpenAiCodex,
+    OpenAi,
+}
+
+impl LoginProvider {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OpenAiCodex => "OpenAI Codex",
+            Self::OpenAi => "OpenAI",
+        }
+    }
+}
+
+fn providers(kind: AuthKind) -> &'static [LoginProvider] {
+    match kind {
+        AuthKind::Subscription => &[LoginProvider::OpenAiCodex],
+        AuthKind::ApiKey => &[LoginProvider::OpenAi],
+    }
+}
+
+/// Interactive provider login. API keys are read without echo and validated
 /// before they are ever written to the provider store.
-pub async fn openai(store: &mut ProviderStore) -> Result<()> {
-    let choices = vec![
-        "OpenAI Codex subscription".to_owned(),
-        "OpenAI API key".to_owned(),
-    ];
-    match crate::prompt::select("OpenAI login", &choices, 0)? {
-        0 => chatgpt(store).await,
-        _ => api_key(store).await,
+pub async fn login(store: &mut ProviderStore) -> Result<()> {
+    let categories = AuthKind::ALL.map(|kind| kind.label().to_owned());
+    let kind = AuthKind::ALL[crate::prompt::select("Authentication method", &categories, 0)?];
+    let available = providers(kind);
+    let choices = available
+        .iter()
+        .map(|provider| provider.label().to_owned())
+        .collect::<Vec<_>>();
+    let provider = available[crate::prompt::select("Provider", &choices, 0)?];
+    match provider {
+        LoginProvider::OpenAiCodex => chatgpt(store).await,
+        LoginProvider::OpenAi => api_key(store).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn login_registry_has_generic_categories_and_nested_provider_labels() {
+        assert_eq!(
+            AuthKind::ALL.map(AuthKind::label),
+            ["Subscription", "API key"]
+        );
+        assert_eq!(
+            providers(AuthKind::Subscription)
+                .iter()
+                .map(|p| p.label())
+                .collect::<Vec<_>>(),
+            ["OpenAI Codex"]
+        );
+        assert_eq!(
+            providers(AuthKind::ApiKey)
+                .iter()
+                .map(|p| p.label())
+                .collect::<Vec<_>>(),
+            ["OpenAI"]
+        );
     }
 }
 

@@ -409,6 +409,8 @@ impl CompletionModel for ArtistOpenAiModel {
         let input_checkpoint = checkpoint;
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
+            let mut accumulated_text = String::new();
+            let mut accumulated_items: Vec<Value> = Vec::new();
             while let Some(chunk) = bytes.next().await {
                 match chunk {
                     Err(e) => { yield Err(transport(e)); break; }
@@ -417,19 +419,45 @@ impl CompletionModel for ArtistOpenAiModel {
                         while let Some(event) = take_sse_event(&mut buffer) {
                             let data = event.lines().filter_map(|l| l.strip_prefix("data:").map(str::trim)).collect::<Vec<_>>().join("\n");
                             if data.is_empty() || data == "[DONE]" { continue; }
+                            let parsed: Value = match serde_json::from_str(&data) {
+                                Ok(value) => value,
+                                Err(_) => { yield Err(CompletionError::ResponseError("malformed Responses SSE event".into())); return; }
+                            };
+                            let kind = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+                            let had_text = !accumulated_text.is_empty();
+                            if kind == "response.output_text.delta" {
+                                accumulated_text.push_str(parsed.get("delta").and_then(Value::as_str).unwrap_or(""));
+                            } else if kind == "response.output_text.done" && accumulated_text.is_empty() {
+                                accumulated_text.push_str(parsed.get("text").and_then(Value::as_str).unwrap_or(""));
+                            } else if matches!(kind, "response.output_item.added" | "response.output_item.done") {
+                                if let Some(item) = parsed.get("item") {
+                                    let id = item.get("id").and_then(Value::as_str);
+                                    if !accumulated_items.iter().any(|old| id.is_some() && old.get("id").and_then(Value::as_str) == id) {
+                                        accumulated_items.push(item.clone());
+                                    } else if kind.ends_with(".done") && let Some(position) = accumulated_items.iter().position(|old| id.is_some() && old.get("id").and_then(Value::as_str) == id) {
+                                        accumulated_items[position] = item.clone();
+                                    }
+                                }
+                            }
                             match parse_event(&data) {
-                                Ok(events) => for event in events {
+                                Ok(mut events) => {
+                                    if kind == "response.output_text.done" && !had_text && !accumulated_text.is_empty() {
+                                        events.push(RawStreamingChoice::Message(accumulated_text.clone()));
+                                    }
+                                    for event in events {
                                     if let RawStreamingChoice::FinalResponse(final_response) = &event {
                                         let mut saved = canonical_input.clone();
                                         saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
                                         let mut full_checkpoint = input_checkpoint.clone();
-                                        match represented_output_from_wire(&final_response.wire) {
+                                        let normalized_wire = normalized_terminal_wire(&final_response.wire, &accumulated_text, &accumulated_items);
+                                        match represented_output_from_wire(&normalized_wire) {
                                             Ok(represented) => full_checkpoint.extend(represented.iter().map(wire_fingerprint)),
                                             Err(error) => { yield Err(error); return; }
                                         }
                                         context.commit_checkpoint(&conversation_id, &provider_namespace, saved, full_checkpoint).await;
                                     }
                                     yield Ok(event);
+                                    }
                                 },
                                 Err(e) => { yield Err(e); return; }
                             }
@@ -464,6 +492,44 @@ fn represented_assistant_input(
     Request::try_from(("checkpoint".to_owned(), request))
         .map(|request| request.input)
         .map_err(|error| CompletionError::ResponseError(error.to_string()))
+}
+
+fn normalized_terminal_wire(wire: &Value, text: &str, streamed_items: &[Value]) -> Value {
+    let mut normalized = wire.clone();
+    let has_terminal_choice = wire
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("message" | "function_call")
+                )
+            })
+        });
+    if has_terminal_choice {
+        return normalized;
+    }
+
+    let output = normalized.get_mut("output").and_then(Value::as_array_mut);
+    if let Some(output) = output {
+        // Prefer completed tool items. Otherwise synthesize the assistant message
+        // represented by text events; opaque reasoning stays only in raw output.
+        let tools = streamed_items
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !tools.is_empty() {
+            output.extend(tools);
+        } else if !text.is_empty() {
+            output.push(json!({
+                "type": "message", "id": "artist_streamed_message", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}]
+            }));
+        }
+    }
+    normalized
 }
 
 fn represented_output_from_wire(wire: &Value) -> Result<Vec<Value>, CompletionError> {
@@ -901,6 +967,30 @@ mod transport_tests {
         assert!(sent.contains("\"store\":false"));
         assert!(sent.contains("\"encrypted_content\":\"old\""));
         assert!(sent.contains("\"content\":\"now\""));
+    }
+
+    #[test]
+    fn streamed_text_synthesizes_normalized_terminal_without_mutating_opaque_output() {
+        let raw = json!({
+            "id":"resp_1", "object":"response", "created_at":1, "status":"completed",
+            "error":null, "incomplete_details":null, "instructions":null,
+            "max_output_tokens":null, "model":"codex", "tools":[],
+            "usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},
+            "output":[
+                {"type":"compaction","id":"cmp_1","encrypted_content":"opaque"},
+                {"type":"reasoning","id":"rs_1","encrypted_content":"private"}
+            ]
+        });
+        let normalized = normalized_terminal_wire(&raw, "Hi! How can I help?", &[]);
+        let represented = represented_output_from_wire(&normalized).unwrap();
+        assert!(
+            !represented.is_empty(),
+            "Rig must receive a terminal assistant choice"
+        );
+        assert_eq!(raw["output"].as_array().unwrap().len(), 2);
+        assert_eq!(raw["output"][0]["encrypted_content"], "opaque");
+        let serialized = serde_json::to_string(&represented).unwrap();
+        assert!(serialized.contains("Hi! How can I help?"));
     }
 
     #[tokio::test]

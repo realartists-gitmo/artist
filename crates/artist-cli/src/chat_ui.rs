@@ -1636,9 +1636,9 @@ fn handle_accounts(
     }
 }
 
-/// `/login`: run the ChatGPT OAuth flow for an additional account. The inline
-/// viewport and its input modes are suspended for the flow (which prints and
-/// opens a browser like standalone `artist login`), then restored.
+/// `/login`: select an authentication method and provider for an additional
+/// account. The inline viewport and its input modes are suspended for the flow,
+/// then restored.
 async fn handle_login(
     terminal: &mut ratatui::DefaultTerminal,
     store: &mut ProviderStore,
@@ -1658,7 +1658,7 @@ async fn handle_login(
     let previous = store.clone();
     let before = store.providers.len();
     let attempted: Result<Option<usize>> = async {
-        crate::login::openai(store).await?;
+        crate::login::login(store).await?;
         let index = (store.providers.len() > before).then_some(store.providers.len() - 1);
         if let Some(index) = index
             && store.providers[index].model.is_none()

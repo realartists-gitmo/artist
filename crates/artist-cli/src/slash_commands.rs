@@ -9,7 +9,7 @@ pub(crate) struct SlashCommand {
 pub(crate) static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/login",
-        description: "Log in with OpenAI",
+        description: "Connect an authentication provider",
         usage: "/login",
     },
     SlashCommand {
