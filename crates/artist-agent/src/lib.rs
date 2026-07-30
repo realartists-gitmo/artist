@@ -431,6 +431,7 @@ where
         // parameter shapes differ.
         if let Some(params) = request_params(
             provider.provider,
+            provider.api,
             overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
             handles.effective_context_window,
@@ -776,16 +777,17 @@ where
 }
 
 /// Provider parameters shared by every request attempt in a turn.
-fn request_params(
+pub(crate) fn request_params(
     provider: llm_provider::ProviderKind,
+    api: Option<llm_provider::OpenAiApi>,
     cache_key: &str,
     reasoning_effort: Option<&str>,
     effective_context_window: Option<u64>,
 ) -> Option<serde_json::Value> {
-    if !matches!(
-        provider,
-        llm_provider::ProviderKind::Chatgpt | llm_provider::ProviderKind::Openai
-    ) {
+    if provider != llm_provider::ProviderKind::Chatgpt
+        && !(provider == llm_provider::ProviderKind::Openai
+            && api.unwrap_or_default() == llm_provider::OpenAiApi::Responses)
+    {
         return None;
     }
     // Leave output headroom within the catalog's already-normalized effective
@@ -879,31 +881,64 @@ mod tests {
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {
-        let params = request_params(ProviderKind::Chatgpt, "cache", Some("high"), None).unwrap();
+        let params =
+            request_params(ProviderKind::Chatgpt, None, "cache", Some("high"), None).unwrap();
         assert_eq!(params["reasoning"]["effort"], "high");
         assert_eq!(params["reasoning"]["summary"], "auto");
 
-        let default_effort = request_params(ProviderKind::Chatgpt, "cache", None, None).unwrap();
+        let default_effort =
+            request_params(ProviderKind::Chatgpt, None, "cache", None, None).unwrap();
         assert_eq!(default_effort["reasoning"]["summary"], "auto");
         assert!(default_effort["reasoning"].get("effort").is_none());
     }
 
     #[test]
-    fn responses_policy_is_sent_to_openai_too() {
+    fn responses_policy_is_sent_only_to_responses_transports() {
         assert_eq!(
-            request_params(ProviderKind::Openai, "cache", Some("high"), None).unwrap()["prompt_cache_key"],
+            request_params(
+                ProviderKind::Openai,
+                Some(llm_provider::OpenAiApi::Responses),
+                "cache",
+                Some("high"),
+                None
+            )
+            .unwrap()["prompt_cache_key"],
             "cache"
+        );
+        assert!(
+            request_params(
+                ProviderKind::Openai,
+                Some(llm_provider::OpenAiApi::ChatCompletions),
+                "cache",
+                None,
+                None,
+            )
+            .is_none()
         );
     }
 
     #[test]
     fn compaction_threshold_uses_effective_model_window() {
-        let params = request_params(ProviderKind::Openai, "cache", None, Some(200_000)).unwrap();
+        let params = request_params(
+            ProviderKind::Openai,
+            Some(llm_provider::OpenAiApi::Responses),
+            "cache",
+            None,
+            Some(200_000),
+        )
+        .unwrap();
         assert_eq!(
             params["context_management"][0]["compact_threshold"],
             180_000
         );
-        let unknown = request_params(ProviderKind::Openai, "cache", None, None).unwrap();
+        let unknown = request_params(
+            ProviderKind::Openai,
+            Some(llm_provider::OpenAiApi::Responses),
+            "cache",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             unknown["context_management"][0]["compact_threshold"],
             100_000

@@ -133,17 +133,26 @@ impl Client {
     }
 
     fn context_namespace(&self) -> String {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hash = DefaultHasher::new();
-        self.endpoint.hash(&mut hash);
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(self.endpoint.as_bytes());
+        digest.update([0]);
         match &self.credentials {
-            Credentials::ApiKey(_) => "api-key".hash(&mut hash),
+            Credentials::ApiKey(key) => {
+                digest.update(b"api-key\0");
+                digest.update(key.as_bytes());
+            }
             Credentials::ChatGpt { account_id, .. } => {
-                "chatgpt".hash(&mut hash);
-                account_id.hash(&mut hash);
+                digest.update(b"chatgpt\0");
+                digest.update(account_id.as_bytes());
             }
         }
-        format!("openai.responses:{:016x}", hash.finish())
+        let digest = digest.finalize();
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("openai.responses:{hex}")
     }
 
     fn headers(&self) -> Result<HeaderMap, CompletionError> {
@@ -220,9 +229,15 @@ impl ArtistOpenAiModel {
         (body, fresh_fingerprints)
     }
 
-    async fn save(&self, mut canonical: Vec<Value>, output: &[OutputItem]) {
+    async fn save(
+        &self,
+        mut canonical: Vec<Value>,
+        output: &[OutputItem],
+        mut checkpoint: Vec<String>,
+        represented_output: &[Value],
+    ) {
         canonical.extend(output.iter().map(|item| item.wire().clone()));
-        let checkpoint = canonical.iter().map(wire_fingerprint).collect();
+        checkpoint.extend(represented_output.iter().map(wire_fingerprint));
         self.provider_context
             .commit_checkpoint(
                 &self.conversation_id,
@@ -274,7 +289,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<completion::CompletionResponse<Response>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let (mut body, _checkpoint) = self.prepare(body).await;
+        let (mut body, checkpoint) = self.prepare(body).await;
         if self
             .client
             .unsupported_context_management
@@ -321,10 +336,12 @@ impl CompletionModel for ArtistOpenAiModel {
         let wire: Value = serde_json::from_str(&response)?;
         let output = parse_output(&wire)?;
         validate_success(&wire)?;
-        self.save(body.input.clone(), &output).await;
         let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
             serde_json::from_value(wire.clone())?;
         let normalized: completion::CompletionResponse<_> = upstream.try_into()?;
+        let represented = represented_assistant_input(normalized.choice.clone())?;
+        self.save(body.input.clone(), &output, checkpoint, &represented)
+            .await;
         Ok(completion::CompletionResponse {
             choice: normalized.choice,
             usage: normalized.usage,
@@ -339,7 +356,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<StreamingCompletionResponse<StreamResponse>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let (mut body, _checkpoint) = self.prepare(body).await;
+        let (mut body, checkpoint) = self.prepare(body).await;
         body.stream = Some(true);
         if self
             .client
@@ -389,6 +406,7 @@ impl CompletionModel for ArtistOpenAiModel {
         let conversation_id = self.conversation_id.clone();
         let canonical_input = body.input.clone();
         let provider_namespace = self.client.context_namespace();
+        let input_checkpoint = checkpoint;
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
             while let Some(chunk) = bytes.next().await {
@@ -396,9 +414,7 @@ impl CompletionModel for ArtistOpenAiModel {
                     Err(e) => { yield Err(transport(e)); break; }
                     Ok(chunk) => {
                         buffer.push_str(&String::from_utf8_lossy(&chunk));
-                        while let Some(pos) = buffer.find("\n\n") {
-                            let event = buffer[..pos].replace("\r", "");
-                            buffer.drain(..pos + 2);
+                        while let Some(event) = take_sse_event(&mut buffer) {
                             let data = event.lines().filter_map(|l| l.strip_prefix("data:").map(str::trim)).collect::<Vec<_>>().join("\n");
                             if data.is_empty() || data == "[DONE]" { continue; }
                             match parse_event(&data) {
@@ -406,7 +422,11 @@ impl CompletionModel for ArtistOpenAiModel {
                                     if let RawStreamingChoice::FinalResponse(final_response) = &event {
                                         let mut saved = canonical_input.clone();
                                         saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
-                                        let full_checkpoint = saved.iter().map(wire_fingerprint).collect();
+                                        let mut full_checkpoint = input_checkpoint.clone();
+                                        match represented_output_from_wire(&final_response.wire) {
+                                            Ok(represented) => full_checkpoint.extend(represented.iter().map(wire_fingerprint)),
+                                            Err(error) => { yield Err(error); return; }
+                                        }
                                         context.commit_checkpoint(&conversation_id, &provider_namespace, saved, full_checkpoint).await;
                                     }
                                     yield Ok(event);
@@ -420,6 +440,56 @@ impl CompletionModel for ArtistOpenAiModel {
         });
         Ok(StreamingCompletionResponse::stream(stream))
     }
+}
+
+fn represented_assistant_input(
+    choice: rig_core::OneOrMany<rig_core::message::AssistantContent>,
+) -> Result<Vec<Value>, CompletionError> {
+    let request = completion::CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: rig_core::OneOrMany::one(completion::Message::Assistant {
+            id: None,
+            content: choice,
+        }),
+        documents: vec![],
+        tools: vec![],
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        additional_params: None,
+        output_schema: None,
+        record_telemetry_content: false,
+    };
+    Request::try_from(("checkpoint".to_owned(), request))
+        .map(|request| request.input)
+        .map_err(|error| CompletionError::ResponseError(error.to_string()))
+}
+
+fn represented_output_from_wire(wire: &Value) -> Result<Vec<Value>, CompletionError> {
+    let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
+        serde_json::from_value(wire.clone())?;
+    let normalized: completion::CompletionResponse<_> = upstream.try_into()?;
+    represented_assistant_input(normalized.choice)
+}
+
+fn take_sse_event(buffer: &mut String) -> Option<String> {
+    let lf = buffer.find("\n\n").map(|pos| (pos, 2));
+    let crlf = buffer.find("\r\n\r\n").map(|pos| (pos, 4));
+    let (pos, delimiter_len) = match (lf, crlf) {
+        (Some(a), Some(b)) => {
+            if a.0 <= b.0 {
+                a
+            } else {
+                b
+            }
+        }
+        (Some(found), None) | (None, Some(found)) => found,
+        (None, None) => return None,
+    };
+    let event = buffer[..pos].replace('\r', "");
+    buffer.drain(..pos + delimiter_len);
+    Some(event)
 }
 
 fn wire_fingerprint(value: &Value) -> String {
@@ -628,16 +698,32 @@ mod transport_tests {
 
     #[test]
     fn checkpoint_replay_adds_only_new_history_across_turns_tools_and_compaction() {
-        let user1 = json!({"type":"message","role":"user","content":"one"});
-        let user2 = json!({"type":"message","role":"user","content":"two"});
-        let call = json!({"type":"function_call","id":"fc1","call_id":"c"});
+        let user1 =
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]});
+        let user2 =
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"two"}]});
+        let call = json!({"type":"function_call","id":"fc1","call_id":"c","name":"lookup","arguments":"{}"});
         let result = json!({"type":"function_call_output","call_id":"c","output":"ok"});
-        let output = json!({"type":"message","id":"m1","role":"assistant","content":[]});
+        // Provider output carries output-only status/phase/output_text fields.
+        let output = json!({"type":"message","id":"m1","role":"assistant","status":"completed","phase":"final","content":[{"type":"output_text","text":"answer","annotations":[]}]});
+        // Convert the validated provider response through Rig's response and
+        // assistant-message representations, then back through its request converter.
+        let response_wire = json!({
+            "id":"resp_1","object":"response","created_at":1,"status":"completed",
+            "error":null,"incomplete_details":null,"instructions":null,
+            "max_output_tokens":null,"model":"gpt-test",
+            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},
+            "output":[output.clone()],"tools":[]
+        });
+        let represented_items = represented_output_from_wire(&response_wire).unwrap();
+        assert_eq!(represented_items.len(), 1);
+        let represented = represented_items[0].clone();
+        assert_ne!(wire_fingerprint(&output), wire_fingerprint(&represented));
         let canonical = vec![user1.clone(), output.clone()];
-        let checkpoint1 = canonical.iter().map(wire_fingerprint).collect::<Vec<_>>();
+        let checkpoint1 = vec![wire_fingerprint(&user1), wire_fingerprint(&represented)];
 
         // Rig supplies the complete prior assistant/function history again.
-        let fresh2 = vec![user1.clone(), output.clone(), user2.clone()];
+        let fresh2 = vec![user1.clone(), represented.clone(), user2.clone()];
         let fingerprints2 = fresh2.iter().map(wire_fingerprint).collect::<Vec<_>>();
         assert_eq!(
             reconcile_inputs(canonical.clone(), &checkpoint1, fresh2, &fingerprints2),
@@ -646,7 +732,7 @@ mod transport_tests {
 
         let fresh_tool = vec![
             user1.clone(),
-            output.clone(),
+            represented.clone(),
             user2.clone(),
             call.clone(),
             result.clone(),
@@ -689,6 +775,29 @@ mod transport_tests {
             ),
             vec![legacy_output, json!({"role":"user","content":"new"})]
         );
+    }
+
+    #[test]
+    fn sse_framing_handles_lf_crlf_and_split_crlf_delimiters() {
+        let mut buffer = "data: one\n\ndata: two\r\n\r".to_owned();
+        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: one"));
+        assert!(take_sse_event(&mut buffer).is_none());
+        buffer.push_str("\n");
+        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: two"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn context_namespace_isolated_by_endpoint_key_and_account_without_exposure() {
+        let a = Client::api_key("https://one", "key-a").context_namespace();
+        let b = Client::api_key("https://one", "key-b").context_namespace();
+        let c = Client::api_key("https://two", "key-a").context_namespace();
+        let account = Client::chatgpt("https://one", "token", "acct").context_namespace();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, account);
+        assert!(!a.contains("key-a"));
+        assert!(!account.contains("acct"));
     }
 
     fn request() -> CompletionRequest {
