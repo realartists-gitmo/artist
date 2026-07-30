@@ -7,10 +7,14 @@
 mod conversion;
 mod output;
 mod request;
+mod transport;
 
 pub use conversion::ConversionError;
 pub use output::OutputItem;
 pub use request::{ContextManagement, Reasoning, Request};
+pub use transport::{
+    ArtistOpenAiModel, Client as CompletionClient, Credentials, Response, StreamResponse,
+};
 
 #[cfg(test)]
 mod tests;
