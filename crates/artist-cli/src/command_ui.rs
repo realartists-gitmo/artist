@@ -38,6 +38,7 @@ pub async fn run(
     mut draw: impl FnMut(&[String]) -> Result<()>,
 ) -> Result<CommandOutput> {
     match command {
+        ParsedCommand::Login => unreachable!("login is handled by the chat UI"),
         // Rewind needs session state and is dispatched in chat_ui before
         // reaching here.
         ParsedCommand::Rewind { .. } | ParsedCommand::Compact { .. } => Ok(CommandOutput {

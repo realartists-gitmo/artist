@@ -1,12 +1,55 @@
 use crate::store::ProviderStore;
 use anyhow::{Context, Result, bail};
-use llm_provider::{ChatGptOAuth, ProviderId, SavedProvider};
+use llm_provider::{
+    ChatGptOAuth, Credentials, OpenAiApi, ProviderId, ProviderKind, SavedProvider, Secret,
+};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 use url::Url;
+
+/// Interactive OpenAI login. API keys are read without echo and validated
+/// before they are ever written to the provider store.
+pub async fn openai(store: &mut ProviderStore) -> Result<()> {
+    let choices = vec![
+        "OpenAI Codex subscription".to_owned(),
+        "OpenAI API key".to_owned(),
+    ];
+    match crate::prompt::select("OpenAI login", &choices, 0)? {
+        0 => chatgpt(store).await,
+        _ => api_key(store).await,
+    }
+}
+
+async fn api_key(store: &mut ProviderStore) -> Result<()> {
+    let key = dialoguer::Password::new()
+        .with_prompt("OpenAI API key")
+        .interact()?;
+    if key.trim().is_empty() {
+        bail!("API key cannot be empty");
+    }
+    let provider = SavedProvider {
+        id: ProviderId::new(unique_id(store, "openai"))?,
+        name: "OpenAI".into(),
+        provider: ProviderKind::Openai,
+        base_url: Url::parse("https://api.openai.com/v1/")?,
+        api: Some(OpenAiApi::Responses),
+        api_version: None,
+        model: None,
+        reasoning_effort: None,
+        credentials: Credentials::ApiKey {
+            api_key: Secret::new(key),
+        },
+    };
+    crate::models::catalog(&provider)
+        .await
+        .context("OpenAI API key validation failed")?;
+    store.add(provider);
+    println!("Validated and saved OpenAI API key.");
+    Ok(())
+}
 
 pub async fn chatgpt(store: &mut ProviderStore) -> Result<()> {
     // The callback port must stay 1455 to match the registered redirect URI, so

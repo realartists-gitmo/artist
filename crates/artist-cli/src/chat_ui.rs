@@ -863,6 +863,14 @@ async fn run_loop(
                         status.session_tokens = 0;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
+                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
+                        &mut terminal,
+                        context.store,
+                        context.store_path,
+                        viewport_height,
+                    )
+                    .await
+                    .unwrap_or_else(|error| vec![format!("Login failed: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
                         context.sessions,
                         context.project,
@@ -1605,7 +1613,7 @@ async fn handle_login(
     );
     ratatui::restore();
     let before = store.providers.len();
-    let outcome = crate::login::chatgpt(store).await;
+    let outcome = crate::login::openai(store).await;
     if outcome.is_ok() {
         let _ = store.save(store_path);
     }

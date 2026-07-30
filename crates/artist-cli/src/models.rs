@@ -12,6 +12,16 @@ struct ModelsResponse {
     models: Vec<SelectableModel>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct SelectableModel {
     pub slug: String,
@@ -186,6 +196,26 @@ async fn fetch(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
         .await?
         .error_for_status()
         .context("ChatGPT model discovery failed")?;
+    if provider.provider == ProviderKind::Openai {
+        return Ok(response
+            .json::<OpenAiModelsResponse>()
+            .await
+            .context("invalid OpenAI models response")?
+            .data
+            .into_iter()
+            .map(|model| SelectableModel {
+                display_name: model.id.clone(),
+                slug: model.id,
+                description: None,
+                priority: 0,
+                visibility: "list".into(),
+                default_reasoning_level: None,
+                supported_reasoning_levels: Vec::new(),
+                context_window: None,
+                effective_context_window_percent: 100,
+            })
+            .collect());
+    }
     Ok(response
         .json::<ModelsResponse>()
         .await
@@ -222,6 +252,14 @@ mod tests {
 
     fn provider() -> SavedProvider {
         serde_json::from_value(serde_json::json!({"id":"x","name":"x","base_url":"https://example.com/","auth":{"access_token":"token","refresh_token":"refresh","account_id":"account"}})).unwrap()
+    }
+
+    #[test]
+    fn parses_openai_model_catalog_shape() {
+        let response: OpenAiModelsResponse =
+            serde_json::from_str(r#"{"object":"list","data":[{"id":"gpt-5","object":"model"}]}"#)
+                .unwrap();
+        assert_eq!(response.data[0].id, "gpt-5");
     }
 
     #[test]

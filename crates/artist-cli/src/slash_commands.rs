@@ -8,6 +8,11 @@ pub(crate) struct SlashCommand {
 
 pub(crate) static COMMANDS: &[SlashCommand] = &[
     SlashCommand {
+        name: "/login",
+        description: "Log in with OpenAI",
+        usage: "/login",
+    },
+    SlashCommand {
         name: "/model",
         description: "Select a model and reasoning effort",
         usage: "/model [model] [reasoning]",
@@ -77,6 +82,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParsedCommand<'a> {
     Help,
+    Login,
     Quit,
     Skills,
     Tools,
@@ -153,6 +159,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     }
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
+        ("/login", []) => Ok(ParsedCommand::Login),
+        ("/login", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/login",
+        }),
         ("/help", []) => Ok(ParsedCommand::Help),
         ("/quit", []) => Ok(ParsedCommand::Quit),
         ("/quit", _) => Err(ParseError::InvalidUsage {
@@ -313,6 +324,7 @@ mod tests {
         assert_eq!(
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
             [
+                "/login",
                 "/model",
                 "/statusbar",
                 "/skills",
@@ -436,7 +448,12 @@ mod tests {
             parse("/accounts"),
             Some(Err(ParseError::UnknownCommand(_)))
         ));
-        for removed in ["/login", "/providers", "/provider", "/provider set work"] {
+        assert_eq!(parse("/login"), Some(Ok(ParsedCommand::Login)));
+        assert!(matches!(
+            parse("/login extra"),
+            Some(Err(ParseError::InvalidUsage { .. }))
+        ));
+        for removed in ["/providers", "/provider", "/provider set work", "/accounts"] {
             assert!(matches!(
                 parse(removed),
                 Some(Err(ParseError::UnknownCommand(_)))
