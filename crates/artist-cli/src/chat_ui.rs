@@ -687,7 +687,7 @@ async fn run_loop(
         let extension_suggestions = extension_command_completions(&input.text, &extension_commands);
         let custom_suggestions = crate::custom_commands::completions(&custom_commands, &input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
-        let provider_suggestions = slash_commands::provider_completions(&input.text);
+        let provider_suggestions: Vec<slash_commands::ArgumentCompletion> = Vec::new();
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
             suggestion_index = 0;
@@ -710,11 +710,6 @@ async fn run_loop(
                         .iter()
                         .map(|command| format!("{}  {}", command.name, command.description)),
                 )
-                .collect()
-        } else if !provider_suggestions.is_empty() {
-            provider_suggestions
-                .iter()
-                .map(|completion| format!("{}  {}", completion.value, completion.description))
                 .collect()
         } else if !mcp_suggestions.is_empty() {
             mcp_suggestions.clone()
@@ -878,30 +873,6 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Provider { action }) => handle_provider(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        &mut context.provider_index,
-                        action,
-                        viewport_height,
-                        context.settings,
-                    )
-                    .await
-                    .map(|(lines, changed)| {
-                        if changed {
-                            session_provider = context
-                                .settings
-                                .apply_to(context.store.providers[context.provider_index].clone());
-                            // Capacity is provider/model-specific and is resolved from
-                            // that provider's catalog before the next submission.
-                            status.context_capacity = None;
-                            status.used_tokens = None;
-                            status.refresh(&context.store.status_bar, context.project);
-                        }
-                        lines
-                    })
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Accounts { id }) => handle_accounts(
                         context.store,
                         context.store_path,
@@ -921,24 +892,8 @@ async fn run_loop(
                         panel
                     })
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        viewport_height,
-                    )
-                    .await
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
-                        let active_provider_edited = match command {
-                            slash_commands::ParsedCommand::Provider {
-                                action: slash_commands::ProviderAction::Edit { id },
-                            } => id.is_none_or(|id| {
-                                context.store.providers[context.provider_index].id.as_str() == id
-                            }),
-                            _ => false,
-                        };
                         let command_input = ChatInput::default();
                         match command_ui::run(
                             context.store,
@@ -978,7 +933,7 @@ async fn run_loop(
                                     )?
                                     .denied_tools;
                                 }
-                                if output.model_changed || active_provider_edited {
+                                if output.model_changed {
                                     if output.model_changed {
                                         status.context_capacity = output.context_capacity;
                                         status.used_tokens = None;

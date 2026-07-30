@@ -63,24 +63,9 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/resume [id]",
     },
     SlashCommand {
-        name: "/provider",
-        description: "Manage providers",
-        usage: "/provider <add|edit|remove|list|set|test> [id|kind]",
-    },
-    SlashCommand {
-        name: "/providers",
-        description: "List configured providers",
-        usage: "/providers",
-    },
-    SlashCommand {
         name: "/accounts",
         description: "Alias for /providers, or switch by id",
         usage: "/accounts [id]",
-    },
-    SlashCommand {
-        name: "/login",
-        description: "Log in to another ChatGPT account",
-        usage: "/login",
     },
     SlashCommand {
         name: "/help",
@@ -125,15 +110,10 @@ pub(crate) enum ParsedCommand<'a> {
     Resume {
         id: Option<&'a str>,
     },
-    Provider {
-        action: ProviderAction<'a>,
-    },
     /// List logged-in accounts, or switch to one by id.
     Accounts {
         id: Option<&'a str>,
     },
-    /// Log in to another account.
-    Login,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -280,63 +260,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/resume [id]",
         }),
-        ("/providers", []) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::List,
-        }),
-        ("/providers", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/providers",
-        }),
-        ("/provider", []) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Add { kind: None },
-        }),
-        ("/provider", ["list"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::List,
-        }),
-        ("/provider", ["add"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Add { kind: None },
-        }),
-        ("/provider", ["add", kind]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Add { kind: Some(kind) },
-        }),
-        ("/provider", ["edit"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Edit { id: None },
-        }),
-        ("/provider", ["edit", id]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Edit { id: Some(id) },
-        }),
-        ("/provider", ["remove"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Remove { id: None },
-        }),
-        ("/provider", ["remove", id]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Remove { id: Some(id) },
-        }),
-        ("/provider", ["set"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Set { id: None },
-        }),
-        ("/provider", ["set", id]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Set { id: Some(id) },
-        }),
-        ("/provider", ["test"]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Test { id: None },
-        }),
-        ("/provider", ["test", id]) => Ok(ParsedCommand::Provider {
-            action: ProviderAction::Test { id: Some(id) },
-        }),
-        ("/provider", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/provider <add|edit|remove|list|set|test> [id|kind]",
-        }),
         ("/accounts", []) => Ok(ParsedCommand::Accounts { id: None }),
         ("/accounts", [id]) => Ok(ParsedCommand::Accounts { id: Some(id) }),
         ("/accounts", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/accounts [id]",
-        }),
-        ("/login", []) => Ok(ParsedCommand::Login),
-        ("/login", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/login",
         }),
         _ => Err(ParseError::UnknownCommand(command)),
     })
@@ -358,33 +286,6 @@ pub(crate) fn completions(input: &str) -> Vec<&'static SlashCommand> {
 pub(crate) struct ArgumentCompletion {
     pub value: String,
     pub description: &'static str,
-}
-
-/// Returns provider subcommands formatted like the top-level command menu.
-pub(crate) fn provider_completions(input: &str) -> Vec<ArgumentCompletion> {
-    const ACTIONS: &[(&str, &str)] = &[
-        ("add", "Add a provider"),
-        ("edit", "Edit a provider"),
-        ("remove", "Remove a provider"),
-        ("list", "List configured providers"),
-        ("set", "Set the active provider"),
-        ("test", "Test a provider"),
-    ];
-    let trimmed = input.trim_start();
-    let Some(fragment) = trimmed.strip_prefix("/provider ") else {
-        return Vec::new();
-    };
-    if fragment.contains(char::is_whitespace) {
-        return Vec::new();
-    }
-    ACTIONS
-        .iter()
-        .filter(|(action, _)| action.starts_with(fragment))
-        .map(|(action, description)| ArgumentCompletion {
-            value: format!("/provider {action}"),
-            description,
-        })
-        .collect()
 }
 
 /// Returns complete command lines matching the MCP argument currently being typed.
@@ -438,10 +339,7 @@ mod tests {
                 "/new",
                 "/sessions",
                 "/resume",
-                "/provider",
-                "/providers",
                 "/accounts",
-                "/login",
                 "/help",
                 "/quit"
             ]
@@ -560,39 +458,14 @@ mod tests {
                 id: Some("chatgpt-2")
             }))
         );
-        assert_eq!(parse("/login"), Some(Ok(ParsedCommand::Login)));
-        assert_eq!(
-            parse("/providers"),
-            Some(Ok(ParsedCommand::Provider {
-                action: ProviderAction::List
-            }))
-        );
-        assert_eq!(
-            parse("/provider"),
-            Some(Ok(ParsedCommand::Provider {
-                action: ProviderAction::Add { kind: None }
-            }))
-        );
-        assert_eq!(
-            parse("/provider set work"),
-            Some(Ok(ParsedCommand::Provider {
-                action: ProviderAction::Set { id: Some("work") }
-            }))
-        );
-        assert_eq!(
-            parse("/provider add anthropic"),
-            Some(Ok(ParsedCommand::Provider {
-                action: ProviderAction::Add {
-                    kind: Some("anthropic")
-                }
-            }))
-        );
+        for removed in ["/login", "/providers", "/provider", "/provider set work"] {
+            assert!(matches!(
+                parse(removed),
+                Some(Err(ParseError::UnknownCommand(_)))
+            ));
+        }
         assert!(matches!(
             parse("/new now"),
-            Some(Err(ParseError::InvalidUsage { .. }))
-        ));
-        assert!(matches!(
-            parse("/login extra"),
             Some(Err(ParseError::InvalidUsage { .. }))
         ));
     }
@@ -610,18 +483,6 @@ mod tests {
         );
         assert!(completions("/model ").is_empty());
         assert!(completions("hello").is_empty());
-    }
-
-    #[test]
-    fn completes_provider_actions_with_descriptions() {
-        assert_eq!(
-            provider_completions("/provider s"),
-            vec![ArgumentCompletion {
-                value: "/provider set".into(),
-                description: "Set the active provider",
-            }]
-        );
-        assert_eq!(provider_completions("/provider set "), Vec::new());
     }
 
     #[test]
