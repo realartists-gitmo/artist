@@ -87,7 +87,11 @@ impl RulesEngine {
             }
         }
         let mut diagnostics = Vec::new();
+        let previous = self.snapshot();
         let rules = Self::compile(&self.roots, &mut diagnostics);
+        // Preserve wasm session KV for plugins that still exist across the
+        // reload (they'd otherwise reset on any rule-file change).
+        rules.inherit_wasm_kv(&previous);
         let mut inner = self.write();
         inner.rules = rules;
         inner.fingerprint = fingerprint;

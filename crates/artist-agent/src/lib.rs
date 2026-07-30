@@ -124,6 +124,9 @@ pub struct SessionHandles {
     pub memory: Arc<dyn ConversationMemory>,
     pub conversation_id: String,
     pub cancel: CancellationToken,
+    /// Blob store for tool-result image payloads. `None` for inert handles,
+    /// where nothing is recorded and so nothing needs storing.
+    pub attachments: Option<artist_session::AttachmentStore>,
 }
 
 impl Default for SessionHandles {
@@ -136,6 +139,7 @@ impl Default for SessionHandles {
             memory: Arc::new(InMemoryConversationMemory::new()),
             conversation_id: "default".to_owned(),
             cancel: CancellationToken::new(),
+            attachments: None,
         }
     }
 }
@@ -633,11 +637,6 @@ where
     {
         content.insert(0, UserContent::text(skill_section));
     }
-    let fork_context = Arc::new({
-        let mut context = seed_history.clone();
-        context.push(seed_prompt.clone());
-        context
-    });
     // Delegate tools execute inside `stream.next()`. A separate channel lets
     // their events wake this outer driver while that future is still pending,
     // instead of buffering the entire child transcript until the tool returns.
@@ -663,6 +662,28 @@ where
             false,
             retries_used < retry_budget,
         );
+        // Rebuilt per attempt from the *current* seed, so a `fork=true` delegate
+        // spawned after a TTSR retry inherits the reminder-injected history
+        // rather than the stale original turn.
+        let fork_context = Arc::new({
+            let mut context = seed_history.clone();
+            context.push(seed_prompt.clone());
+            context
+        });
+        // A display-callback failure ends the run like any other error, so it
+        // must record a terminal event first. Propagating the error directly
+        // would leave `run.started` with no `run.finished`, which replay reads
+        // as a run still in flight.
+        macro_rules! emit {
+            ($event:expr) => {
+                if let Err(error) = on_event($event) {
+                    run_recorder.record(RunFinished::Error {
+                        error: error.to_string(),
+                    });
+                    return Err(error);
+                }
+            };
+        }
 
         let mut builder = client.agent(model);
         // These fields belong to the ChatGPT subscription transport. Keep them
@@ -686,7 +707,7 @@ where
             Box::new(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
-                Arc::clone(&fork_context),
+                fork_context,
                 resources.clone(),
                 delegate::DelegateRuntime {
                     handles: handles.clone(),
@@ -756,7 +777,7 @@ where
                 biased;
                 event = subagent_events_rx.recv() => {
                     if let Some(event) = event {
-                        on_event(event)?;
+                        emit!(event);
                     }
                     continue;
                 }
@@ -795,6 +816,24 @@ where
             };
             match item {
                 Ok(MultiTurnStreamItem::FinalResponse(_)) => {
+                    // The turn is over: match any trailing text/reasoning that
+                    // never reached the coalesce threshold. Short trailing
+                    // content without a newline is otherwise never evaluated.
+                    if ttsr.finalize_reasoning() || ttsr.finalize_text() {
+                        let firing = ttsr.take_pending().expect("finalize stashed the firing");
+                        drop(stream);
+                        let (committed, _) = ttsr.committed();
+                        seed_history = committed;
+                        record_firing_events(&run_recorder, &ttsr, &firing);
+                        emit!(PromptEvent::RuleFired {
+                            rule: firing.rule.0.clone(),
+                            matched: firing.matched.clone(),
+                        });
+                        run_recorder.record(RunFinished::Cancelled);
+                        seed_prompt = reminder_message(&firing);
+                        retries_used += 1;
+                        continue 'retry;
+                    }
                     if let Err(error) = persistence.result() {
                         run_recorder.record(RunFinished::Error {
                             error: error.clone(),
@@ -813,7 +852,7 @@ where
                         streamed_turn = turn;
                     }
                     streamed_assistant_text.push_str(&text.text);
-                    on_event(PromptEvent::TextDelta(text.text))?;
+                    emit!(PromptEvent::TextDelta(text.text));
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta {
@@ -838,67 +877,83 @@ where
                         // `committed` includes the current seed prompt; the
                         // reminder becomes the new prompt.
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        emit!(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        });
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
                         retries_used += 1;
                         continue 'retry;
                     }
-                    on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?;
+                    emit!(PromptEvent::ReasoningSummaryDelta(reasoning));
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ToolCall {
                         tool_call,
                         internal_call_id,
                     },
-                )) => on_event(PromptEvent::ToolCall {
+                )) => emit!(PromptEvent::ToolCall {
                     id: internal_call_id,
                     name: tool_call.function.name,
                     arguments: tool_call.function.arguments,
-                })?,
+                }),
                 Ok(MultiTurnStreamItem::ToolExecutionStart {
                     tool_call,
                     internal_call_id,
-                }) => on_event(PromptEvent::ToolExecutionStart {
+                }) => emit!(PromptEvent::ToolExecutionStart {
                     id: internal_call_id,
                     name: tool_call.function.name,
-                })?,
+                }),
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
-                    on_event(PromptEvent::CompletionUsage {
+                    emit!(PromptEvent::CompletionUsage {
                         total_tokens: call.usage.total_tokens,
-                    })?;
+                    });
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                     tool_result,
                     internal_call_id,
                 })) => {
+                    // The capture hook only sees result text; persist any images
+                    // here (the display path) into the attachment store and log
+                    // their references so history replay can reattach them.
+                    let mut image_blocks = Vec::new();
                     let mut images = 0usize;
                     let content = tool_result
                         .content
                         .into_iter()
                         .filter_map(|item| match item {
                             ToolResultContent::Text(text) => Some(text.text),
-                            ToolResultContent::Image(_) => {
+                            ToolResultContent::Image(image) => {
                                 images += 1;
+                                if let Some(store) = &handles.attachments
+                                    && let Some(block) =
+                                        artist_session::store_tool_image(&image, store)
+                                {
+                                    image_blocks.push(block);
+                                }
                                 None
                             }
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
+                    if !image_blocks.is_empty() {
+                        run_recorder.record(artist_session::ToolResultImagesEvent {
+                            internal_call_id: internal_call_id.clone(),
+                            images: image_blocks,
+                        });
+                    }
                     let content = visible_steering
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
-                    on_event(PromptEvent::ToolResult {
+                    emit!(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,
                         outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
                         duration_ms: meta.map(|(_, duration)| duration),
                         images,
-                    })?;
+                    });
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -913,10 +968,10 @@ where
                     {
                         seed_history = chat_history.clone();
                         record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
+                        emit!(PromptEvent::RuleFired {
                             rule: firing.rule.0.clone(),
                             matched: firing.matched.clone(),
-                        })?;
+                        });
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
                         retries_used += 1;

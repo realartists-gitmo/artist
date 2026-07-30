@@ -793,6 +793,7 @@ async fn run_loop(
                         &mut active,
                         &mut history,
                         &mut input,
+                        context.rules_handle,
                         target,
                         fork,
                     )
@@ -1374,12 +1375,14 @@ async fn handle_rules(
 /// before the nth-most-recent user turn (append-only — nothing is deleted),
 /// optionally forking into a new session that shares the prefix. The chosen
 /// turn's text is pre-filled into the input for editing.
+#[allow(clippy::too_many_arguments)]
 async fn handle_rewind(
     terminal: &mut ratatui::DefaultTerminal,
     sessions: &SessionStore,
     active: &mut Option<ActiveSession>,
     history: &mut Vec<Message>,
     input: &mut ChatInput,
+    rules_handle: &RulesHandle,
     target: Option<usize>,
     fork: bool,
 ) -> Result<Vec<String>> {
@@ -1432,6 +1435,9 @@ async fn handle_rewind(
             &forked.attachments,
             &artist_session::HistoryOptions::default(),
         )?;
+        // Rebuild rule state from the fork's prefix so once-per-session fires
+        // and injections match the new history (mirrors /resume).
+        rules_handle.restore_from_log(&events);
         if let Some(old) = active.replace(forked) {
             old.close().await?;
         }
@@ -1448,6 +1454,9 @@ async fn handle_rewind(
             &current.attachments,
             &artist_session::HistoryOptions::default(),
         )?;
+        // The masking `HistoryRewind` event hides the tail; recompute rule state
+        // from the now-visible prefix so masked fires/injections don't linger.
+        rules_handle.restore_from_log(&events);
         marker = format!(
             "  \u{23EA} rewound to before \"{}\" \u{2014} history after this point is masked, not deleted",
             display.lines().next().unwrap_or("")
@@ -1939,6 +1948,7 @@ async fn submit(
         memory: std::sync::Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
+        attachments: Some(active.attachments.clone()),
     };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat(

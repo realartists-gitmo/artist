@@ -150,6 +150,23 @@ impl SavedProvider {
         }
     }
 
+    /// Base URL guaranteed to end in `/`, so `Url::join("models")` appends to
+    /// the path instead of replacing its last segment — without this, Groq's
+    /// `https://api.groq.com/openai/v1` joins to `/openai/models` and loses the
+    /// version. rig's own client tolerates either form; our metadata fetches use
+    /// `Url::join`, so they need the terminator.
+    ///
+    /// Normalizing on read rather than at construction also repairs providers
+    /// already saved without the trailing slash.
+    pub fn api_base(&self) -> Url {
+        let mut base = self.base_url.clone();
+        if !base.path().ends_with('/') {
+            let terminated = format!("{}/", base.path());
+            base.set_path(&terminated);
+        }
+        base
+    }
+
     pub fn chatgpt_auth(&self) -> Result<&Auth> {
         match &self.credentials {
             Credentials::Chatgpt(auth) => Ok(auth),
@@ -200,6 +217,50 @@ pub struct RequestAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_base_is_slash_terminated_so_join_appends() {
+        let mut provider = SavedProvider::chatgpt(
+            ProviderId::new("groq").unwrap(),
+            "Groq",
+            Auth {
+                access_token: Secret::new("access"),
+                refresh_token: Secret::new("refresh"),
+                account_id: "acct".into(),
+                email: None,
+                expires_at: None,
+            },
+        );
+        provider.base_url = Url::parse("https://api.groq.com/openai/v1").unwrap();
+
+        assert_eq!(
+            provider.api_base().as_str(),
+            "https://api.groq.com/openai/v1/"
+        );
+        // Joining appends to the path rather than dropping its last segment.
+        assert_eq!(
+            provider.api_base().join("models").unwrap().as_str(),
+            "https://api.groq.com/openai/v1/models"
+        );
+    }
+
+    #[test]
+    fn api_base_leaves_an_already_terminated_url_alone() {
+        let mut provider = SavedProvider::chatgpt(
+            ProviderId::new("x").unwrap(),
+            "X",
+            Auth {
+                access_token: Secret::new("a"),
+                refresh_token: Secret::new("r"),
+                account_id: "acct".into(),
+                email: None,
+                expires_at: None,
+            },
+        );
+        provider.base_url = Url::parse("https://example.com/v1/").unwrap();
+        assert_eq!(provider.api_base().as_str(), "https://example.com/v1/");
+    }
+
     #[test]
     fn provider_model_round_trips() {
         let mut provider = SavedProvider::chatgpt(

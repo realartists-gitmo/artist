@@ -12,11 +12,14 @@ pub const OUTPUT_CAP: usize = 50 * 1024;
 /// keeps its `-`/`+` prefix. The prefix survives after the `│` so the TUI can
 /// still color the row.
 pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]) -> String {
+    // `AnchoredLine`s are built by an in-order enumerate, so `line_number` is
+    // strictly ascending and the gutter lookup can binary-search instead of
+    // scanning — the linear form is quadratic over a large diff.
     let anchor_at = |lines: &[AnchoredLine], number: usize| {
         lines
-            .iter()
-            .find(|line| line.line_number == number)
-            .map(|line| line.anchor.clone())
+            .binary_search_by_key(&number, |line| line.line_number)
+            .ok()
+            .map(|index| lines[index].anchor.clone())
             .unwrap_or_default()
     };
     let mut old_line = 0usize;

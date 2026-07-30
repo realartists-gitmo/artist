@@ -99,6 +99,7 @@ fn infinite_loop_traps_on_deadline_and_poisons() {
     let firing = artist_rules::types::Firing {
         rule: id.clone(),
         target: artist_rules::types::MatchTarget::AssistantText,
+        tool: None,
         matched: "INFINITE_LOOP strike zone".into(),
         reminder: String::new(),
         persistence: Default::default(),
@@ -123,6 +124,7 @@ fn memory_bomb_hits_the_store_limit_and_poisons() {
     let firing = artist_rules::types::Firing {
         rule: id.clone(),
         target: artist_rules::types::MatchTarget::AssistantText,
+        tool: None,
         matched: "MEMORY_BOMB strike zone".into(),
         reminder: String::new(),
         persistence: Default::default(),

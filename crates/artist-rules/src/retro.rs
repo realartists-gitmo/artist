@@ -21,47 +21,64 @@ pub struct RetroFinding {
 /// tool-call arguments) with the given rule set. Rule-injection turns and
 /// rewound ranges are skipped.
 pub fn scan(rules: &RuleSet, events: &[Envelope]) -> Vec<RetroFinding> {
-    let mut findings = Vec::new();
-    for envelope in visible_events(events) {
-        let candidates = match envelope.event() {
-            SessionEvent::ModelTurn(turn) => turn
-                .content
-                .iter()
-                .filter_map(block_candidate)
-                .collect::<Vec<_>>(),
-            SessionEvent::ConversationMessages(batch) => batch
-                .messages
-                .iter()
-                .skip(batch.display_from)
-                .flat_map(message_candidates)
-                .collect(),
-            _ => continue,
-        };
-        for (target, text, tool) in candidates {
-            for (rule, excerpt) in rules.scan_all(target, &text, tool.as_deref()) {
-                // Wasm-backed rules judge their prefilter hits in scans too,
-                // so a plugin's pass never shows up as a false finding.
-                let firing = crate::types::Firing {
-                    rule,
-                    target,
-                    matched: excerpt,
-                    reminder: String::new(),
-                    persistence: Default::default(),
-                    fire: Default::default(),
-                };
-                let Some(firing) = rules.verdict(firing, 0) else {
-                    continue;
-                };
-                findings.push(RetroFinding {
-                    rule: firing.rule,
-                    target,
-                    seq: envelope.seq,
-                    excerpt: firing.matched,
-                });
+    // Judging wasm plugins here would advance their state; snapshot + restore
+    // their KV so a dry-run scan never mutates live plugin state.
+    rules.with_isolated_wasm(|| {
+        let mut findings = Vec::new();
+        for envelope in visible_events(events) {
+            let candidates = match envelope.event() {
+                SessionEvent::ModelTurn(turn) => turn
+                    .content
+                    .iter()
+                    .filter_map(block_candidate)
+                    .collect::<Vec<_>>(),
+                SessionEvent::ConversationMessages(batch) => batch
+                    .messages
+                    .iter()
+                    .skip(batch.display_from)
+                    .flat_map(message_candidates)
+                    .collect(),
+                _ => continue,
+            };
+            // Rule scope is keyed on the event's agent lineage, matching the
+            // live path (main-only rules skip delegate output and vice-versa).
+            let is_delegate = envelope.lineage != "main";
+            for (target, text, tool) in candidates {
+                for (rule, excerpt) in rules.scan_all(target, &text, tool.as_deref()) {
+                    if let Some(compiled) = rules.get(&rule) {
+                        let in_scope = match is_delegate {
+                            true => compiled.rule.scope.delegate,
+                            false => compiled.rule.scope.main,
+                        };
+                        if !in_scope {
+                            continue;
+                        }
+                    }
+                    // Wasm-backed rules judge their prefilter hits in scans too,
+                    // so a plugin's pass never shows up as a false finding.
+                    let firing = crate::types::Firing {
+                        rule,
+                        target,
+                        tool: tool.clone(),
+                        matched: excerpt,
+                        reminder: String::new(),
+                        persistence: Default::default(),
+                        fire: Default::default(),
+                    };
+                    let Some(firing) = rules.verdict(firing, 0) else {
+                        continue;
+                    };
+                    findings.push(RetroFinding {
+                        rule: firing.rule,
+                        target,
+                        seq: envelope.seq,
+                        excerpt: firing.matched,
+                    });
+                }
             }
         }
-    }
-    findings
+        findings
+    })
 }
 
 fn block_candidate(block: &ContentBlock) -> Option<(MatchTarget, String, Option<String>)> {

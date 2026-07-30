@@ -300,23 +300,29 @@ async fn execute_prompt(
     // (a throwaway clone, never persisted).
     let session_provider = effective.apply_to(store.providers[selected].clone());
     let tools = tool_bundle(config_root, &project)?;
-    let (active, _) = match load_resumed(&sessions, &project, resume)? {
+    let (active, resumed_events) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
     compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
         .await?;
     let rules_engine = artist_rules::RulesEngine::discover(&project);
+    // Restore prior rule state (once-per-session fires, persistent injections)
+    // when resuming — the TUI path does this too; `-p` must match or a resumed
+    // session re-fires once-only rules.
+    let rules = artist_rules::state::RulesHandle::default();
+    rules.restore_from_log(&resumed_events);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
-        rules: artist_rules::state::RulesHandle::default(),
+        rules,
         rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
         memory: Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
+        attachments: Some(active.attachments.clone()),
     };
     extension_control.set_steering(Some(steering));
     extensions

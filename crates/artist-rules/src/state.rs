@@ -28,6 +28,30 @@ struct SessionState {
     hits: Vec<(RuleId, u32)>,
 }
 
+/// Shared firing bookkeeping under a held lock: mark the rule fired (once /
+/// per-turn), tally the hit, and activate a session-persistent injection.
+/// Used by both `mark_fired` and `try_mark_fired`.
+fn record_firing(state: &mut SessionState, firing: &Firing, fire: FirePolicy) {
+    state.fired.insert(firing.rule.clone());
+    if fire == FirePolicy::PerTurn {
+        state.per_turn_fired.insert(firing.rule.clone());
+    }
+    match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
+        Some((_, count)) => *count += 1,
+        None => state.hits.push((firing.rule.clone(), 1)),
+    }
+    if firing.persistence == Persistence::Session
+        && !state
+            .active_injections
+            .iter()
+            .any(|(rule, _)| *rule == firing.rule)
+    {
+        state
+            .active_injections
+            .push((firing.rule.clone(), firing.reminder.clone()));
+    }
+}
+
 /// Clonable handle to one session's rule state. Shared by the CLI, the TTSR
 /// hook inside the agent run, and delegate subagent runs (making
 /// once-per-session global across main + delegates).
@@ -87,26 +111,22 @@ impl RulesHandle {
     /// it is per-run state on the TTSR hook, so one run can't drain another's
     /// budget and a new user turn can't reset a mid-flight delegate's.
     pub fn mark_fired(&self, firing: &Firing, fire: FirePolicy) {
+        record_firing(&mut self.lock(), firing, fire);
+    }
+
+    /// Atomically claim a firing: if the rule is still armed (not already
+    /// fired, not disabled) record it exactly as [`mark_fired`](Self::mark_fired)
+    /// and return `true`; otherwise return `false` so a concurrent run's
+    /// duplicate claim is suppressed. Closes the check-then-act gap between a
+    /// separate `is_armed` and `mark_fired` when main + delegate runs share the
+    /// handle.
+    pub fn try_mark_fired(&self, firing: &Firing, fire: FirePolicy) -> bool {
         let mut state = self.lock();
-        state.fired.insert(firing.rule.clone());
-        if fire == FirePolicy::PerTurn {
-            state.per_turn_fired.insert(firing.rule.clone());
+        if state.fired.contains(&firing.rule) || state.disabled.contains(&firing.rule) {
+            return false;
         }
-        match state.hits.iter_mut().find(|(rule, _)| *rule == firing.rule) {
-            Some((_, count)) => *count += 1,
-            None => state.hits.push((firing.rule.clone(), 1)),
-        }
-        if firing.persistence == Persistence::Session {
-            let already = state
-                .active_injections
-                .iter()
-                .any(|(rule, _)| *rule == firing.rule);
-            if !already {
-                state
-                    .active_injections
-                    .push((firing.rule.clone(), firing.reminder.clone()));
-            }
-        }
+        record_firing(&mut state, firing, fire);
+        true
     }
 
     /// Active session-persistent reminders, for per-turn re-injection.
@@ -158,7 +178,16 @@ impl RulesHandle {
     /// once-semantics and injections survive process restarts (`-r`).
     pub fn restore_from_log(&self, events: &[Envelope]) {
         let mut state = self.lock();
-        for envelope in events {
+        // Rebuild from scratch so repeated restores (resume, rewind, fork)
+        // don't accumulate. Runtime `disabled` and the retry budget aren't
+        // derived from the log, so they're preserved.
+        state.fired.clear();
+        state.per_turn_fired.clear();
+        state.active_injections.clear();
+        state.hits.clear();
+        // Rewound/masked events are excluded — a fire hidden behind a
+        // `HistoryRewind` must not count as fired on resume.
+        for envelope in artist_session::visible_events(events) {
             match envelope.event() {
                 SessionEvent::RuleFired(fired) => {
                     let rule = RuleId(fired.rule.clone());
@@ -202,6 +231,7 @@ mod tests {
         Firing {
             rule: RuleId(rule.into()),
             target: MatchTarget::AssistantText,
+            tool: None,
             matched: "x".into(),
             reminder: format!("reminder for {rule}"),
             persistence,
@@ -221,6 +251,27 @@ mod tests {
             !handle.is_armed(&rule),
             "once rules stay fired across turns"
         );
+    }
+
+    #[test]
+    fn try_mark_fired_claims_once_and_suppresses_the_duplicate() {
+        let handle = RulesHandle::default();
+        let rule = RuleId("r".into());
+        let claim = || handle.try_mark_fired(&firing("r", Persistence::Session), FirePolicy::Once);
+
+        assert!(claim(), "first claim wins");
+        assert!(!claim(), "a concurrent run's duplicate claim is suppressed");
+        assert!(!handle.is_armed(&rule));
+        // The suppressed claim must not double-count the hit or re-inject.
+        assert_eq!(handle.hits(), vec![(rule, 1)]);
+        assert_eq!(handle.injections().len(), 1);
+    }
+
+    #[test]
+    fn try_mark_fired_refuses_a_disabled_rule() {
+        let handle = RulesHandle::default();
+        handle.set_disabled(RuleId("r".into()), true);
+        assert!(!handle.try_mark_fired(&firing("r", Persistence::Session), FirePolicy::Once));
     }
 
     #[test]

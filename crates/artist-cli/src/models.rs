@@ -168,7 +168,7 @@ pub async fn select(provider: &mut SavedProvider) -> Result<()> {
 }
 
 async fn fetch(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
-    let mut endpoint = provider.base_url.join("models")?;
+    let mut endpoint = provider.api_base().join("models")?;
     endpoint
         .query_pairs_mut()
         .append_pair("client_version", CODEX_PROTOCOL_VERSION);

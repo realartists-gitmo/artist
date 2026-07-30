@@ -386,20 +386,32 @@ impl McpProxyTool {
         if text.len() > MAX_OUTPUT {
             // Truncating serialized JSON at a byte boundary would hand the
             // model malformed JSON; wrap the prefix in a valid envelope with
-            // an explicit truncation marker instead.
-            let boundary = text
-                .char_indices()
-                .map(|(index, _)| index)
-                .take_while(|index| *index <= MAX_OUTPUT)
-                .last()
-                .unwrap_or(0);
+            // an explicit truncation marker instead. The prefix is re-escaped
+            // inside a JSON string (quotes/backslashes double), so the envelope
+            // can still exceed MAX_OUTPUT — shrink the prefix until the
+            // *serialized envelope* fits.
+            let floor = |text: &str, max: usize| {
+                text.char_indices()
+                    .map(|(index, _)| index)
+                    .take_while(|index| *index <= max)
+                    .last()
+                    .unwrap_or(0)
+            };
             let original_bytes = text.len();
-            text.truncate(boundary);
-            text = serde_json::to_string(&serde_json::json!({
-                "truncated": true,
-                "original_bytes": original_bytes,
-                "partial_output": text,
-            }))?;
+            let mut boundary = floor(&text, MAX_OUTPUT);
+            loop {
+                let envelope = serde_json::to_string(&serde_json::json!({
+                    "truncated": true,
+                    "original_bytes": original_bytes,
+                    "partial_output": &text[..boundary],
+                }))?;
+                if envelope.len() <= MAX_OUTPUT || boundary == 0 {
+                    text = envelope;
+                    break;
+                }
+                let overflow = envelope.len() - MAX_OUTPUT;
+                boundary = floor(&text, boundary.saturating_sub(overflow.max(64)));
+            }
         }
         Ok(text)
     }
