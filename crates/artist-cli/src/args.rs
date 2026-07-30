@@ -69,7 +69,9 @@ mod tests {
     use super::*;
     #[test]
     fn parses_requested_forms() {
-        assert!(Cli::try_parse_from(["artist", "provider"]).is_err());
+        let provider = Cli::try_parse_from(["artist", "provider"]).unwrap();
+        assert!(provider.command.is_none());
+        assert_eq!(provider.prompt.as_deref(), Some("provider"));
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
         assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));
