@@ -643,8 +643,8 @@ async fn run_loop(
     let mut suggestion_input = String::new();
     // The provider the session actually runs with: the selected account plus
     // any settings model/reasoning override, applied to a throwaway clone so
-    // the override is never persisted. Rebuilt when the account changes
-    // (`/accounts`) or before a turn (to carry a freshly-refreshed token).
+    // the override is never persisted. Rebuilt before a turn to carry a
+    // freshly-refreshed token.
     let mut session_provider = context
         .settings
         .apply_to(context.store.providers[context.provider_index].clone());
@@ -872,25 +872,6 @@ async fn run_loop(
                         id,
                     )
                     .await
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Accounts { id }) => handle_accounts(
-                        context.store,
-                        context.store_path,
-                        context.provider_index,
-                        id,
-                    )
-                    .map(|(panel, switch)| {
-                        if let Some(new_index) = switch {
-                            context.provider_index = new_index;
-                            status.context_capacity = None;
-                            status.used_tokens = None;
-                            status.refresh(&context.store.status_bar, context.project);
-                            session_provider = context
-                                .settings
-                                .apply_to(context.store.providers[context.provider_index].clone());
-                        }
-                        panel
-                    })
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
                         let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);

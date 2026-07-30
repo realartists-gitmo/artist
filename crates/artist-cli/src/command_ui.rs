@@ -52,14 +52,13 @@ pub async fn run(
         }),
         // Session and account verbs need live session/store state and are
         // dispatched in chat_ui before reaching here.
-        ParsedCommand::New
-        | ParsedCommand::Sessions
-        | ParsedCommand::Resume { .. }
-        | ParsedCommand::Accounts { .. } => Ok(CommandOutput {
-            lines: vec!["that command is only available inside a chat session".to_owned()],
-            context_capacity: None,
-            model_changed: false,
-        }),
+        ParsedCommand::New | ParsedCommand::Sessions | ParsedCommand::Resume { .. } => {
+            Ok(CommandOutput {
+                lines: vec!["that command is only available inside a chat session".to_owned()],
+                context_capacity: None,
+                model_changed: false,
+            })
+        }
         ParsedCommand::Quit => Ok(CommandOutput {
             lines: vec!["/quit exits artist".to_owned()],
             context_capacity: None,

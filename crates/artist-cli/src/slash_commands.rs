@@ -63,11 +63,6 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/resume [id]",
     },
     SlashCommand {
-        name: "/accounts",
-        description: "Alias for /providers, or switch by id",
-        usage: "/accounts [id]",
-    },
-    SlashCommand {
         name: "/help",
         description: "Show available commands",
         usage: "/help",
@@ -108,10 +103,6 @@ pub(crate) enum ParsedCommand<'a> {
     Sessions,
     /// Switch to another session; without an id, list the candidates.
     Resume {
-        id: Option<&'a str>,
-    },
-    /// List logged-in accounts, or switch to one by id.
-    Accounts {
         id: Option<&'a str>,
     },
 }
@@ -260,12 +251,6 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             command,
             usage: "/resume [id]",
         }),
-        ("/accounts", []) => Ok(ParsedCommand::Accounts { id: None }),
-        ("/accounts", [id]) => Ok(ParsedCommand::Accounts { id: Some(id) }),
-        ("/accounts", _) => Err(ParseError::InvalidUsage {
-            command,
-            usage: "/accounts [id]",
-        }),
         _ => Err(ParseError::UnknownCommand(command)),
     })
 }
@@ -339,7 +324,6 @@ mod tests {
                 "/new",
                 "/sessions",
                 "/resume",
-                "/accounts",
                 "/help",
                 "/quit"
             ]
@@ -448,16 +432,10 @@ mod tests {
             parse("/resume abc123"),
             Some(Ok(ParsedCommand::Resume { id: Some("abc123") }))
         );
-        assert_eq!(
+        assert!(matches!(
             parse("/accounts"),
-            Some(Ok(ParsedCommand::Accounts { id: None }))
-        );
-        assert_eq!(
-            parse("/accounts chatgpt-2"),
-            Some(Ok(ParsedCommand::Accounts {
-                id: Some("chatgpt-2")
-            }))
-        );
+            Some(Err(ParseError::UnknownCommand(_)))
+        ));
         for removed in ["/login", "/providers", "/provider", "/provider set work"] {
             assert!(matches!(
                 parse(removed),
