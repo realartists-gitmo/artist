@@ -49,6 +49,7 @@ fn estimate_user_content(item: &UserContent) -> usize {
             .map(|item| match item {
                 ToolResultContent::Text(text) => text.text.len(),
                 ToolResultContent::Image(_) => ESTIMATED_IMAGE_CHARS,
+                ToolResultContent::Json { value } => value.to_string().len(),
             })
             .sum(),
         UserContent::Image(_) => ESTIMATED_IMAGE_CHARS,

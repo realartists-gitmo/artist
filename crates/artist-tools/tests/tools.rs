@@ -1,5 +1,5 @@
 use artist_tools::{BashTool, ToolBundle, Workspace};
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde_json::json;
 
 fn workspace(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, Workspace) {
@@ -14,7 +14,7 @@ fn workspace(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, W
     (root, state, workspace)
 }
 
-async fn call<T: Tool<Output = String>>(tool: &T, value: serde_json::Value) -> String
+async fn call<T: PortableTool<Output = String>>(tool: &T, value: serde_json::Value) -> String
 where
     T::Error: std::fmt::Debug,
 {

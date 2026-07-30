@@ -20,14 +20,14 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use llm_provider::SavedProvider;
+use rig_agent::agent::MultiTurnStreamItem;
+use rig_agent::client::CompletionClient;
+use rig_agent::streaming::{StreamedAssistantContent, StreamingChat};
 use rig_core::OneOrMany;
-use rig_core::agent::MultiTurnStreamItem;
-use rig_core::client::CompletionClient;
 use rig_core::completion::message::{
     AssistantContent, Message, Text, ToolResult, ToolResultContent, UserContent,
 };
 use rig_core::providers::chatgpt;
-use rig_core::streaming::{StreamedAssistantContent, StreamingChat};
 
 fn load_provider() -> Result<SavedProvider> {
     let config_dir = std::env::var("ARTIST_CONFIG_DIR")
@@ -78,7 +78,7 @@ async fn replayed_tool_history_is_accepted_cross_process() -> Result<()> {
     #[error("never")]
     struct Never;
     struct Lookup;
-    impl rig_core::tool::Tool for Lookup {
+    impl rig_core::tool::PortableTool for Lookup {
         const NAME: &'static str = "lookup_build_id";
         type Error = Never;
         type Args = LookupArgs;
@@ -98,20 +98,20 @@ async fn replayed_tool_history_is_accepted_cross_process() -> Result<()> {
     use std::sync::{Arc, Mutex};
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Message>>>);
-    impl<M: rig_core::completion::CompletionModel> rig_core::agent::AgentHook<M> for Capture {
+    impl<M: rig_core::completion::CompletionModel> rig_agent::agent::AgentHook<M> for Capture {
         async fn on_event(
             &self,
-            _ctx: &rig_core::agent::HookContext,
-            event: rig_core::agent::StepEvent<'_, M>,
-        ) -> rig_core::agent::Flow {
+            _ctx: &rig_agent::agent::HookContext,
+            event: rig_agent::agent::StepEvent<'_, M>,
+        ) -> rig_agent::agent::Flow {
             match event {
-                rig_core::agent::StepEvent::ModelTurnFinished { content, .. } => {
+                rig_agent::agent::StepEvent::ModelTurnFinished { content, .. } => {
                     self.0.lock().unwrap().push(Message::Assistant {
                         id: None,
                         content: content.clone(),
                     });
                 }
-                rig_core::agent::StepEvent::ToolResult {
+                rig_agent::agent::StepEvent::ToolResult {
                     tool_call_id,
                     result,
                     ..
@@ -141,7 +141,7 @@ async fn replayed_tool_history_is_accepted_cross_process() -> Result<()> {
                 }
                 _ => {}
             }
-            rig_core::agent::Flow::cont()
+            rig_agent::agent::Flow::cont()
         }
     }
 

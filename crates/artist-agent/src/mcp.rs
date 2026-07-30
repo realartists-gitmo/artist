@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use rmcp::{RoleClient, ServiceExt, model::Tool as McpDefinition, service::RunningService};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -325,7 +325,7 @@ pub struct McpProxyTool {
     server: String,
     tool: CachedTool,
 }
-impl Tool for McpProxyTool {
+impl PortableTool for McpProxyTool {
     const NAME: &'static str = "mcp";
     type Error = McpCallError;
     type Args = serde_json::Value;

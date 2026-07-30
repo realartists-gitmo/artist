@@ -33,7 +33,7 @@ syntect = { version = "5.3", default-features = false, features = ["default-fanc
 textwrap = { version = "0.16", features = ["unicode-linebreak", "unicode-width"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"] }
 tokio-util = "0.7"
-rig-core = "0.40.0"
+rig-core = "0.41.0"
 toml = "1.1"
 unicode-width = "0.2"
 url = "2"

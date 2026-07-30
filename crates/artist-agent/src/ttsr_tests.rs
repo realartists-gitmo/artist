@@ -15,10 +15,10 @@ use artist_rules::matcher::RuleSet;
 use artist_rules::state::RulesHandle;
 use artist_rules::types::Firing;
 use futures::StreamExt;
-use rig_core::agent::{AgentBuilder, MultiTurnStreamItem, StreamingError};
+use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem, StreamingError};
+use rig_agent::streaming::{StreamedAssistantContent, StreamingChat};
 use rig_core::completion::message::Message;
 use rig_core::completion::{CompletionRequest, PromptError};
-use rig_core::streaming::{StreamedAssistantContent, StreamingChat};
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use crate::steering::{SteeringHandle, SteeringHook};
@@ -50,7 +50,7 @@ struct CountingTool {
 #[error("never")]
 struct Never;
 
-impl rig_core::tool::Tool for CountingTool {
+impl rig_core::tool::PortableTool for CountingTool {
     const NAME: &'static str = "write";
     type Error = Never;
     type Args = serde_json::Value;
