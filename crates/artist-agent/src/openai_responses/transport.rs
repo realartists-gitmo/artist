@@ -93,7 +93,7 @@ impl Client {
     ) -> Result<Vec<Value>, CompletionError> {
         let (saved, checkpoint) = self
             .provider_context
-            .snapshot(&self.conversation_id, "openai.responses")
+            .snapshot(&self.conversation_id, &self.context_namespace())
             .await;
         let fingerprints = current.iter().map(wire_fingerprint).collect::<Vec<_>>();
         let input = reconcile_inputs(saved, &checkpoint, current, &fingerprints);
@@ -124,12 +124,26 @@ impl Client {
         self.provider_context
             .commit_checkpoint(
                 &self.conversation_id,
-                "openai.responses",
+                &self.context_namespace(),
                 items.clone(),
                 fingerprints,
             )
             .await;
         Ok(items)
+    }
+
+    fn context_namespace(&self) -> String {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let mut hash = DefaultHasher::new();
+        self.endpoint.hash(&mut hash);
+        match &self.credentials {
+            Credentials::ApiKey(_) => "api-key".hash(&mut hash),
+            Credentials::ChatGpt { account_id, .. } => {
+                "chatgpt".hash(&mut hash);
+                account_id.hash(&mut hash);
+            }
+        }
+        format!("openai.responses:{:016x}", hash.finish())
     }
 
     fn headers(&self) -> Result<HeaderMap, CompletionError> {
@@ -199,24 +213,20 @@ impl ArtistOpenAiModel {
     async fn prepare(&self, mut body: Request) -> (Request, Vec<String>) {
         let (saved, checkpoint) = self
             .provider_context
-            .snapshot(&self.conversation_id, "openai.responses")
+            .snapshot(&self.conversation_id, &self.client.context_namespace())
             .await;
         let fresh_fingerprints = body.input.iter().map(wire_fingerprint).collect::<Vec<_>>();
         body.input = reconcile_inputs(saved, &checkpoint, body.input.clone(), &fresh_fingerprints);
         (body, fresh_fingerprints)
     }
 
-    async fn save(
-        &self,
-        mut canonical: Vec<Value>,
-        checkpoint: Vec<String>,
-        output: &[OutputItem],
-    ) {
+    async fn save(&self, mut canonical: Vec<Value>, output: &[OutputItem]) {
         canonical.extend(output.iter().map(|item| item.wire().clone()));
+        let checkpoint = canonical.iter().map(wire_fingerprint).collect();
         self.provider_context
             .commit_checkpoint(
                 &self.conversation_id,
-                "openai.responses",
+                &self.client.context_namespace(),
                 canonical,
                 checkpoint,
             )
@@ -264,7 +274,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<completion::CompletionResponse<Response>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let (mut body, checkpoint) = self.prepare(body).await;
+        let (mut body, _checkpoint) = self.prepare(body).await;
         if self
             .client
             .unsupported_context_management
@@ -310,7 +320,8 @@ impl CompletionModel for ArtistOpenAiModel {
         };
         let wire: Value = serde_json::from_str(&response)?;
         let output = parse_output(&wire)?;
-        self.save(body.input.clone(), checkpoint, &output).await;
+        validate_success(&wire)?;
+        self.save(body.input.clone(), &output).await;
         let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
             serde_json::from_value(wire.clone())?;
         let normalized: completion::CompletionResponse<_> = upstream.try_into()?;
@@ -328,7 +339,7 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<StreamingCompletionResponse<StreamResponse>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let (mut body, checkpoint) = self.prepare(body).await;
+        let (mut body, _checkpoint) = self.prepare(body).await;
         body.stream = Some(true);
         if self
             .client
@@ -377,6 +388,7 @@ impl CompletionModel for ArtistOpenAiModel {
         let context = self.provider_context.clone();
         let conversation_id = self.conversation_id.clone();
         let canonical_input = body.input.clone();
+        let provider_namespace = self.client.context_namespace();
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
             while let Some(chunk) = bytes.next().await {
@@ -394,7 +406,8 @@ impl CompletionModel for ArtistOpenAiModel {
                                     if let RawStreamingChoice::FinalResponse(final_response) = &event {
                                         let mut saved = canonical_input.clone();
                                         saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
-                                        context.commit_checkpoint(&conversation_id, "openai.responses", saved, checkpoint.clone()).await;
+                                        let full_checkpoint = saved.iter().map(wire_fingerprint).collect();
+                                        context.commit_checkpoint(&conversation_id, &provider_namespace, saved, full_checkpoint).await;
                                     }
                                     yield Ok(event);
                                 },
@@ -475,10 +488,26 @@ fn sanitize(body: &str) -> String {
         .take(300)
         .collect()
 }
+fn validate_success(wire: &Value) -> Result<(), CompletionError> {
+    if wire
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s != "completed")
+    {
+        return Err(CompletionError::ProviderError(
+            "Responses request did not complete".into(),
+        ));
+    }
+    if !wire.get("output").is_some_and(Value::is_array) {
+        return Err(CompletionError::ResponseError(
+            "Responses response missing output array".into(),
+        ));
+    }
+    Ok(())
+}
 fn parse_output(wire: &Value) -> Result<Vec<OutputItem>, CompletionError> {
-    Ok(serde_json::from_value(
-        wire.get("output").cloned().unwrap_or(Value::Array(vec![])),
-    )?)
+    validate_success(wire)?;
+    Ok(serde_json::from_value(wire["output"].clone())?)
 }
 fn usage(v: &Value) -> Usage {
     let u = v.get("usage").unwrap_or(&Value::Null);
@@ -507,12 +536,11 @@ fn parse_event(data: &str) -> Result<Vec<RawStreamingChoice<StreamResponse>>, Co
         "response.output_text.delta" => out.push(RawStreamingChoice::Message(
             v.get("delta").and_then(Value::as_str).unwrap_or("").into(),
         )),
-        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
-            out.push(RawStreamingChoice::ReasoningDelta {
-                id: v.get("item_id").and_then(Value::as_str).map(str::to_owned),
-                reasoning: v.get("delta").and_then(Value::as_str).unwrap_or("").into(),
-            })
-        }
+        "response.reasoning_summary_text.delta" => out.push(RawStreamingChoice::ReasoningDelta {
+            id: v.get("item_id").and_then(Value::as_str).map(str::to_owned),
+            reasoning: v.get("delta").and_then(Value::as_str).unwrap_or("").into(),
+        }),
+        "response.reasoning_text.delta" => {}
         "response.output_item.done" => {
             if let Some(item) = v.get("item") {
                 match item.get("type").and_then(Value::as_str) {
@@ -605,18 +633,24 @@ mod transport_tests {
         let call = json!({"type":"function_call","id":"fc1","call_id":"c"});
         let result = json!({"type":"function_call_output","call_id":"c","output":"ok"});
         let output = json!({"type":"message","id":"m1","role":"assistant","content":[]});
-        let fresh1 = vec![user1.clone()];
-        let checkpoint1 = fresh1.iter().map(wire_fingerprint).collect::<Vec<_>>();
         let canonical = vec![user1.clone(), output.clone()];
+        let checkpoint1 = canonical.iter().map(wire_fingerprint).collect::<Vec<_>>();
 
-        let fresh2 = vec![user1.clone(), user2.clone()];
+        // Rig supplies the complete prior assistant/function history again.
+        let fresh2 = vec![user1.clone(), output.clone(), user2.clone()];
         let fingerprints2 = fresh2.iter().map(wire_fingerprint).collect::<Vec<_>>();
         assert_eq!(
             reconcile_inputs(canonical.clone(), &checkpoint1, fresh2, &fingerprints2),
             vec![user1.clone(), output.clone(), user2.clone()]
         );
 
-        let fresh_tool = vec![user1.clone(), user2.clone(), call.clone(), result.clone()];
+        let fresh_tool = vec![
+            user1.clone(),
+            output.clone(),
+            user2.clone(),
+            call.clone(),
+            result.clone(),
+        ];
         let fingerprints_tool = fresh_tool.iter().map(wire_fingerprint).collect::<Vec<_>>();
         let merged = reconcile_inputs(canonical, &checkpoint1, fresh_tool, &fingerprints_tool);
         assert_eq!(merged, vec![user1, output, user2, call, result]);
@@ -730,15 +764,15 @@ mod transport_tests {
         let response = r#"{"output":[{"type":"compaction","encrypted_content":"new"},{"type":"message","role":"assistant","content":[]}]}"#;
         let (url, captured) = server(response, "application/json").await;
         let context = artist_session::ProviderContextHandle::noop();
+        let client =
+            Client::api_key(url, "secret").with_provider_context("conversation", context.clone());
         context
             .commit(
                 "conversation",
-                "openai.responses",
+                &client.context_namespace(),
                 vec![serde_json::json!({"type":"reasoning","encrypted_content":"old"})],
             )
             .await;
-        let client =
-            Client::api_key(url, "secret").with_provider_context("conversation", context.clone());
         let output = client
             .compact(
                 "gpt-test",
@@ -748,7 +782,9 @@ mod transport_tests {
             .unwrap();
         assert_eq!(output[0]["encrypted_content"], "new");
         assert_eq!(
-            context.items("conversation", "openai.responses").await,
+            context
+                .items("conversation", &client.context_namespace())
+                .await,
             output
         );
         let sent = captured.await.unwrap();
@@ -786,6 +822,11 @@ mod transport_tests {
         );
         assert!(
             matches!(&parse_event(r#"{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"why"}"#).unwrap()[0], RawStreamingChoice::ReasoningDelta { reasoning, .. } if reasoning == "why")
+        );
+        assert!(
+            parse_event(r#"{"type":"response.reasoning_text.delta","delta":"private"}"#)
+                .unwrap()
+                .is_empty()
         );
         let tool = parse_event(r#"{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}}"#).unwrap();
         assert!(

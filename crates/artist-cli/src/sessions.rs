@@ -77,9 +77,13 @@ impl ActiveSession {
         let Self {
             recorder,
             memory,
+            provider_context,
             task,
             ..
         } = self;
+        // Every recorder clone must be gone before the writer can observe its
+        // channel closing. The provider sidecar owns one too.
+        drop(provider_context);
         drop(recorder);
         drop(memory);
         task.close().await
@@ -505,7 +509,9 @@ mod tests {
         active.recorder.record(user_turn("first prompt"));
         active.recorder.flush().await;
         let transcript = active.session.transcript.clone();
-        active.close().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), active.close())
+            .await
+            .context("session close timed out while sidecar held recorder")??;
 
         // transcript projection was appended incrementally
         let markdown = fs::read_to_string(&transcript)?;

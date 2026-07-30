@@ -36,7 +36,26 @@ impl ProviderContextHandle {
 
     pub fn from_events(events: &[Envelope], recorder: Recorder) -> Self {
         let mut contexts = HashMap::new();
+        // Rewinds mask provider snapshots just like model-facing history. A
+        // snapshot from a divergent future must never be resurrected.
+        let mut masks = Vec::new();
+        for envelope in events.iter().rev() {
+            if let SessionEvent::HistoryRewind(rewind) = envelope.event() {
+                if !masks
+                    .iter()
+                    .any(|(start, end)| *start <= envelope.seq && envelope.seq <= *end)
+                {
+                    masks.push((rewind.to_seq.saturating_add(1), envelope.seq));
+                }
+            }
+        }
         for envelope in events {
+            if masks
+                .iter()
+                .any(|(start, end)| *start <= envelope.seq && envelope.seq <= *end)
+            {
+                continue;
+            }
             if let SessionEvent::ProviderContext(context) = envelope.event() {
                 if context.schema == 1 || context.schema == PROVIDER_CONTEXT_SCHEMA {
                     contexts.insert(

@@ -464,8 +464,16 @@ impl Delegate {
                 retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
-            if self.provider.provider == llm_provider::ProviderKind::Chatgpt {
-                let mut params = json!({ "prompt_cache_key": overload_retry.cache_key() });
+            if self.provider.provider == llm_provider::ProviderKind::Chatgpt
+                || (self.provider.provider == llm_provider::ProviderKind::Openai
+                    && self.provider.api.unwrap_or_default() == llm_provider::OpenAiApi::Responses)
+            {
+                let mut params = json!({
+                    "store": false,
+                    "include": ["reasoning.encrypted_content"],
+                    "prompt_cache_key": overload_retry.cache_key(),
+                    "context_management": [{"type": "compaction", "compact_threshold": 0.8}]
+                });
                 // The subagent's own `reasoning` arg overrides the main agent's
                 // effort (main b9d9193); fall back to the provider default.
                 if let Some(effort) = role
@@ -473,9 +481,10 @@ impl Delegate {
                     .as_deref()
                     .or(self.provider.reasoning_effort.as_deref())
                 {
-                    params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
+                    params["reasoning"] =
+                        json!({ "effort": effort, "summary": "auto", "context": "all_turns" });
                 } else {
-                    params["reasoning"] = json!({ "summary": "auto" });
+                    params["reasoning"] = json!({ "summary": "auto", "context": "all_turns" });
                 }
                 builder = builder.additional_params(params);
             }
