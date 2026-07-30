@@ -29,7 +29,7 @@ mod theme;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
+use args::{Cli, Command, RulesCommand, SessionsCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
@@ -79,36 +79,6 @@ async fn run() -> Result<()> {
         .await;
     }
     match cli.command {
-        Some(Command::Provider(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
-            match (args.login, args.action) {
-                (Some(LoginKind::Chatgpt), None) => {
-                    login::chatgpt(&mut store).await?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Add)) => {
-                    provider_commands::add(&mut store)?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Edit { id })) => {
-                    provider_commands::edit(&mut store, id.as_deref())?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Remove { id })) => {
-                    provider_commands::remove(&mut store, id.as_deref())?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::List)) => list(&store),
-                (None, Some(ProviderAction::Set)) => {
-                    set_default(&mut store)?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Test)) => {
-                    test_selected(&mut store, &path).await?;
-                    store.save(&path)?;
-                }
-                _ => bail!("choose --login chatgpt or a provider subcommand"),
-            }
-        }
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
             let selected = default_index(&store)?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
