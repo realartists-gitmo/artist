@@ -8,6 +8,7 @@ mod delegate_jobs;
 #[cfg(test)]
 mod delegate_tests;
 pub mod mcp;
+pub mod openai_responses;
 mod prompt_config;
 mod provider_retry;
 mod resources;
