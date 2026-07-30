@@ -13,7 +13,7 @@ pub use conversion::ConversionError;
 pub use output::OutputItem;
 pub use request::{ContextManagement, Reasoning, Request};
 pub use transport::{
-    ArtistOpenAiModel, Client as CompletionClient, Credentials, Response, StreamResponse,
+    ArtistOpenAiModel, Client as ArtistOpenAiClient, Credentials, Response, StreamResponse,
 };
 
 #[cfg(test)]

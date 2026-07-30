@@ -257,13 +257,14 @@ pub async fn stream_chat(
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
     match rig_provider::RigClient::build(provider)? {
-        rig_provider::RigClient::ChatGpt(client) => {
+        rig_provider::RigClient::ArtistOpenAi(client) => {
+            let client = client.with_provider_context(
+                handles.conversation_id.clone(),
+                handles.provider_context.clone(),
+            );
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
         rig_provider::RigClient::Copilot(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
-        }
-        rig_provider::RigClient::OpenAiResponses(client) => {
             stream_chat_with(client, provider, input, tool_context, handles, on_event).await
         }
         rig_provider::RigClient::OpenAiChat(client) => {
@@ -773,16 +774,27 @@ fn request_params(
     cache_key: &str,
     reasoning_effort: Option<&str>,
 ) -> Option<serde_json::Value> {
-    if provider != llm_provider::ProviderKind::Chatgpt {
+    if !matches!(
+        provider,
+        llm_provider::ProviderKind::Chatgpt | llm_provider::ProviderKind::Openai
+    ) {
         return None;
     }
-    let mut params = json!({ "prompt_cache_key": cache_key });
+    // 100k is a conservative fallback below the smallest currently supported
+    // Responses reasoning-model context window; model-specific metadata can
+    // lower this value when it becomes available at this boundary.
+    let mut params = json!({
+        "store": false,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": cache_key,
+        "context_management": [{"type": "compaction", "compact_threshold": 100000}]
+    });
     // Request a provider-generated trace for the live UI even when the model's
     // default effort is in use. Rig's memory policy is independent: streaming
     // this summary does not make the CLI responsible for model context.
     params["reasoning"] = match reasoning_effort {
-        Some(effort) => json!({ "effort": effort, "summary": "auto" }),
-        None => json!({ "summary": "auto" }),
+        Some(effort) => json!({ "effort": effort, "summary": "auto", "context": "all_turns" }),
+        None => json!({ "summary": "auto", "context": "all_turns" }),
     };
     Some(params)
 }
@@ -867,7 +879,10 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_only_params_are_not_sent_to_openai() {
-        assert!(request_params(ProviderKind::Openai, "cache", Some("high")).is_none());
+    fn responses_policy_is_sent_to_openai_too() {
+        assert_eq!(
+            request_params(ProviderKind::Openai, "cache", Some("high")).unwrap()["prompt_cache_key"],
+            "cache"
+        );
     }
 }

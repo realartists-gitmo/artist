@@ -5,9 +5,9 @@ use llm_provider::{Credentials, OpenAiApi, ProviderKind, SavedProvider};
 use rig_agent::client::AgentClientExt;
 use rig_agent::prelude::Prompt;
 use rig_core::providers::{
-    anthropic, azure, chatgpt, cohere, copilot, deepseek, gemini, groq, huggingface, hyperbolic,
-    llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together,
-    xai, xiaomimimo, zai,
+    anthropic, azure, cohere, copilot, deepseek, gemini, groq, huggingface, hyperbolic, llamafile,
+    minimax, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai,
+    xiaomimimo, zai,
 };
 
 fn secure_token_dir(path: &std::path::Path) -> Result<()> {
@@ -29,9 +29,8 @@ fn secure_token_dir(path: &std::path::Path) -> Result<()> {
 }
 
 pub(crate) enum RigClient {
-    ChatGpt(chatgpt::Client),
+    ArtistOpenAi(crate::openai_responses::ArtistOpenAiClient),
     Copilot(copilot::Client),
-    OpenAiResponses(openai::Client),
     OpenAiChat(openai::CompletionsClient),
     Anthropic(anthropic::Client),
     Cohere(cohere::Client),
@@ -71,17 +70,12 @@ impl RigClient {
         match provider.provider {
             ProviderKind::Chatgpt => {
                 let auth = provider.chatgpt_auth()?;
-                Ok(Self::ChatGpt(
-                    chatgpt::Client::builder()
-                        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-                            access_token: auth.access_token.expose().to_owned(),
-                            account_id: Some(auth.account_id.clone()),
-                        })
-                        .base_url(provider.base_url.as_str())
-                        .originator("artist")
-                        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-                        .build()
-                        .context("build ChatGPT client")?,
+                Ok(Self::ArtistOpenAi(
+                    crate::openai_responses::ArtistOpenAiClient::chatgpt(
+                        provider.base_url.as_str(),
+                        auth.access_token.expose(),
+                        auth.account_id.clone(),
+                    ),
                 ))
             }
             ProviderKind::Copilot => {
@@ -146,15 +140,20 @@ impl RigClient {
                 let Credentials::ApiKey { api_key } = &provider.credentials else {
                     bail!("OpenAI API-key credentials required")
                 };
+                if provider.api.unwrap_or_default() == OpenAiApi::Responses {
+                    return Ok(Self::ArtistOpenAi(
+                        crate::openai_responses::ArtistOpenAiClient::api_key(
+                            provider.base_url.as_str(),
+                            api_key.expose(),
+                        ),
+                    ));
+                }
                 let client = openai::Client::builder()
                     .api_key(api_key.expose())
                     .base_url(provider.base_url.as_str())
                     .build()
                     .context("build OpenAI client")?;
-                Ok(match provider.api.unwrap_or_default() {
-                    OpenAiApi::Responses => Self::OpenAiResponses(client),
-                    OpenAiApi::ChatCompletions => Self::OpenAiChat(client.completions_api()),
-                })
+                Ok(Self::OpenAiChat(client.completions_api()))
             }
             kind @ (ProviderKind::Minimax
             | ProviderKind::Moonshot
@@ -278,9 +277,8 @@ impl RigClient {
             }};
         }
         Ok(match self {
-            Self::ChatGpt(client) => run!(client),
+            Self::ArtistOpenAi(client) => run!(client),
             Self::Copilot(client) => run!(client),
-            Self::OpenAiResponses(client) => run!(client),
             Self::OpenAiChat(client) => run!(client),
             Self::Anthropic(client) => run!(client),
             Self::Cohere(client) => run!(client),

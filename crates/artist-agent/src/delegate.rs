@@ -250,15 +250,16 @@ impl Delegate {
         let client = crate::rig_provider::RigClient::build(&self.provider)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
         match client {
-            crate::rig_provider::RigClient::ChatGpt(client) => {
+            crate::rig_provider::RigClient::ArtistOpenAi(client) => {
+                // Delegates have isolated provider-private lineage even when
+                // their portable conversation is seeded from the parent.
+                let lineage = format!("{}:delegate:{}", self.handles.conversation_id, run.actor);
+                let client =
+                    client.with_provider_context(lineage, self.handles.provider_context.clone());
                 self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }
             crate::rig_provider::RigClient::Copilot(client) => {
-                self.run_agent_with(client, prompt, &role, fork, model, &run)
-                    .await
-            }
-            crate::rig_provider::RigClient::OpenAiResponses(client) => {
                 self.run_agent_with(client, prompt, &role, fork, model, &run)
                     .await
             }

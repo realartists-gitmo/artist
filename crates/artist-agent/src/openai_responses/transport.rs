@@ -25,11 +25,13 @@ pub enum Credentials {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     endpoint: String,
     credentials: Credentials,
+    provider_context: artist_session::ProviderContextHandle,
+    conversation_id: String,
 }
 
 impl Client {
@@ -38,6 +40,8 @@ impl Client {
             http: reqwest::Client::new(),
             endpoint: endpoint.into(),
             credentials: Credentials::ApiKey(key.into()),
+            provider_context: artist_session::ProviderContextHandle::noop(),
+            conversation_id: "default".into(),
         }
     }
     pub fn chatgpt(
@@ -52,8 +56,20 @@ impl Client {
                 access_token: token.into(),
                 account_id: account_id.into(),
             },
+            provider_context: artist_session::ProviderContextHandle::noop(),
+            conversation_id: "default".into(),
         }
     }
+    pub fn with_provider_context(
+        mut self,
+        conversation_id: impl Into<String>,
+        provider_context: artist_session::ProviderContextHandle,
+    ) -> Self {
+        self.conversation_id = conversation_id.into();
+        self.provider_context = provider_context;
+        self
+    }
+
     fn headers(&self) -> Result<HeaderMap, CompletionError> {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -165,8 +181,8 @@ impl CompletionModel for ArtistOpenAiModel {
         Self {
             client: client.clone(),
             model: model.into(),
-            provider_context: artist_session::ProviderContextHandle::noop(),
-            conversation_id: "default".into(),
+            provider_context: client.provider_context.clone(),
+            conversation_id: client.conversation_id.clone(),
         }
     }
     fn composes_native_output_with_tools(&self) -> bool {
