@@ -106,7 +106,9 @@ async fn run() -> Result<()> {
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
-            let selected = default_index(&store)?;
+            let selected = (!store.providers.is_empty())
+                .then(|| default_index(&store))
+                .transpose()?;
             let project = std::env::current_dir().context("find current project directory")?;
             // Layered settings (global ~/.config/artist + project .artist) resolve the
             // model/reasoning overrides and the effective tool denylist.
@@ -119,10 +121,11 @@ async fn run() -> Result<()> {
             // Catch a missing effective model before the TUI takes over. Legacy
             // settings scalars supply ChatGPT only; other providers must have a
             // provider-local selection.
-            if effective
-                .apply_to(store.providers[selected].clone())
-                .model
-                .is_none()
+            if let Some(selected) = selected
+                && effective
+                    .apply_to(store.providers[selected].clone())
+                    .model
+                    .is_none()
             {
                 bail!("no model selected — run `artist model` to choose one first");
             }
@@ -134,11 +137,16 @@ async fn run() -> Result<()> {
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let show_splash = resumed.is_none() && cli.prompt.is_none();
             let extension_control = extension_control::ExtensionControl::default();
-            let mut refreshed_provider = store.providers[selected].clone();
+            let mut refreshed_provider = selected.map(|index| store.providers[index].clone());
             let (mcp, extensions, refreshed) = tokio::join!(
                 artist_agent::mcp::McpManager::load(config_root),
                 extension_manager(config_root, &store, extension_control.clone()),
-                refresh_if_needed(&mut refreshed_provider)
+                async {
+                    match refreshed_provider.as_mut() {
+                        Some(provider) => refresh_if_needed(provider).await,
+                        None => Ok(false),
+                    }
+                }
             );
             let mcp = mcp?;
             let extensions = extensions?;
@@ -146,9 +154,11 @@ async fn run() -> Result<()> {
                 show_splash,
                 cli.prompt.is_some(),
                 &extensions.extension_ids(),
+                selected.is_none(),
             )?;
             if refreshed? {
-                store.providers[selected] = refreshed_provider;
+                let selected = selected.expect("a refreshed provider is selected");
+                store.providers[selected] = refreshed_provider.expect("refreshed provider exists");
                 store.save(&path)?;
             }
             let tools = tool_bundle(config_root, &project)?;

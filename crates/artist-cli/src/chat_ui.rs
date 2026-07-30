@@ -45,6 +45,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const NO_PROVIDER_NOTICE: &str = "No OpenAI account configured — run /login to connect one.";
+
 #[derive(Default)]
 pub(crate) struct ChatInput {
     text: String,
@@ -251,20 +253,22 @@ fn provider_with_session_selection(
 
 fn footer_view(
     config: &StatusBarConfig,
-    provider: &SavedProvider,
+    provider: Option<&SavedProvider>,
     project: &Path,
     runtime: &StatusRuntime,
 ) -> status_bar::StatusView {
-    status_bar::view(status_bar::segments(
-        config,
-        project,
-        provider,
-        runtime.git_branch.as_deref(),
-        runtime.used_tokens,
-        runtime.context_capacity,
-        runtime.session_tokens,
-        &runtime.extension_values,
-    ))
+    provider.map_or_else(status_bar::StatusView::default, |provider| {
+        status_bar::view(status_bar::segments(
+            config,
+            project,
+            provider,
+            runtime.git_branch.as_deref(),
+            runtime.used_tokens,
+            runtime.context_capacity,
+            runtime.session_tokens,
+            &runtime.extension_values,
+        ))
+    })
 }
 
 struct SubmitContext<'a> {
@@ -368,7 +372,7 @@ impl StreamingViewport {
 
 struct ChatContext<'a> {
     store: &'a mut ProviderStore,
-    provider_index: usize,
+    provider_index: Option<usize>,
     store_path: &'a Path,
     sessions: &'a SessionStore,
     project: &'a Path,
@@ -407,6 +411,7 @@ pub fn start_terminal(
     show_splash: bool,
     thinking: bool,
     extension_ids: &[String],
+    needs_login: bool,
 ) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
@@ -434,8 +439,17 @@ pub fn start_terminal(
     // than reserving it inside — so it simply scrolls away as the chat grows and
     // never forces a viewport resize.
     if show_splash && !thinking {
-        terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
+        let notice_rows = u16::from(needs_login);
+        terminal.insert_before(crate::startup_splash::HEIGHT + 1 + notice_rows, |buffer| {
             crate::startup_splash::render_buffer(buffer, extension_ids);
+            if needs_login {
+                buffer.set_string(
+                    2,
+                    crate::startup_splash::HEIGHT,
+                    NO_PROVIDER_NOTICE,
+                    Style::default().fg(crate::theme::PASTEL_YELLOW),
+                );
+            }
         })?;
     }
     terminal.show_cursor()?;
@@ -461,7 +475,7 @@ impl Drop for TerminalModeGuard {
 pub async fn run(
     mut terminal: ratatui::DefaultTerminal,
     store: &mut ProviderStore,
-    provider_index: usize,
+    provider_index: Option<usize>,
     store_path: &Path,
     resources: ChatResources<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
@@ -645,13 +659,15 @@ async fn run_loop(
     // any settings model/reasoning override, applied to a throwaway clone so
     // the override is never persisted. Rebuilt before a turn to carry a
     // freshly-refreshed token.
-    let mut session_provider = context
-        .settings
-        .apply_to(context.store.providers[context.provider_index].clone());
+    let mut session_provider = context.provider_index.map(|index| {
+        context
+            .settings
+            .apply_to(context.store.providers[index].clone())
+    });
     if resumed_session {
         let footer = footer_view(
             &context.store.status_bar,
-            &session_provider,
+            session_provider.as_ref(),
             context.project,
             &status,
         );
@@ -673,8 +689,10 @@ async fn run_loop(
     }
     loop {
         context.extensions.update_context(|extension_context| {
-            extension_context.model = session_provider.model.clone();
-            extension_context.reasoning = session_provider.reasoning_effort.clone();
+            extension_context.model = session_provider.as_ref().and_then(|p| p.model.clone());
+            extension_context.reasoning = session_provider
+                .as_ref()
+                .and_then(|p| p.reasoning_effort.clone());
         });
         status.extension_values = context.extensions.status_items();
         // Prompt execution can change any external status (notably the checked-out
@@ -730,7 +748,7 @@ async fn run_loop(
         };
         let footer = footer_view(
             &context.store.status_bar,
-            &session_provider,
+            session_provider.as_ref(),
             context.project,
             &status,
         );
@@ -795,6 +813,10 @@ async fn run_loop(
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Compact { instructions }) => {
+                        let Some(provider) = session_provider.as_ref() else {
+                            command_panel = vec![NO_PROVIDER_NOTICE.into()];
+                            continue;
+                        };
                         let Some(active_session) = active.as_ref() else {
                             command_panel = vec!["Nothing to compact in a fresh session.".into()];
                             continue;
@@ -812,7 +834,7 @@ async fn run_loop(
                         )?;
                         match crate::compaction::compact(
                             active_session,
-                            &session_provider,
+                            provider,
                             context.settings.compaction,
                             instructions,
                             "manual",
@@ -863,14 +885,26 @@ async fn run_loop(
                         status.session_tokens = 0;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
-                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
+                    Ok(slash_commands::ParsedCommand::Login) => match handle_login(
                         &mut terminal,
                         context.store,
                         context.store_path,
                         viewport_height,
                     )
                     .await
-                    .unwrap_or_else(|error| vec![format!("Login failed: {error:#}")]),
+                    {
+                        Ok((lines, Some(index))) => {
+                            context.provider_index = Some(index);
+                            session_provider = Some(
+                                context
+                                    .settings
+                                    .apply_to(context.store.providers[index].clone()),
+                            );
+                            lines
+                        }
+                        Ok((lines, None)) => lines,
+                        Err(error) => vec![format!("Login failed: {error:#}")],
+                    },
                     Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
                         context.sessions,
                         context.project,
@@ -882,11 +916,17 @@ async fn run_loop(
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
+                        let Some(provider_index) = context.provider_index else {
+                            command_panel = vec![
+                                "No OpenAI account configured — run /login to connect one.".into(),
+                            ];
+                            continue;
+                        };
                         let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
                         let command_input = ChatInput::default();
                         match command_ui::run(
                             context.store,
-                            context.provider_index,
+                            provider_index,
                             context.store_path,
                             command,
                             &skills,
@@ -932,11 +972,11 @@ async fn run_loop(
                                     // newly persisted choice directly rather than reapplying
                                     // those defaults over it.
                                     session_provider = if output.model_changed {
-                                        context.store.providers[context.provider_index].clone()
+                                        Some(context.store.providers[provider_index].clone())
                                     } else {
-                                        context.settings.apply_to(
-                                            context.store.providers[context.provider_index].clone(),
-                                        )
+                                        Some(context.settings.apply_to(
+                                            context.store.providers[provider_index].clone(),
+                                        ))
                                     };
                                 }
                                 output.lines
@@ -958,13 +998,16 @@ async fn run_loop(
                     false,
                     None,
                 )?;
+                let Some(provider_index) = context.provider_index else {
+                    command_panel =
+                        vec!["No OpenAI account configured — run /login to connect one.".into()];
+                    continue;
+                };
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
                 // Refresh the access token at the turn boundary so a session
                 // that outlives the token lifetime keeps working instead of
                 // failing with an unrecoverable 401 (AUTH-1).
-                if crate::refresh_if_needed(&mut context.store.providers[context.provider_index])
-                    .await?
-                {
+                if crate::refresh_if_needed(&mut context.store.providers[provider_index]).await? {
                     context
                         .store
                         .save(context.store_path)
@@ -972,14 +1015,14 @@ async fn run_loop(
                 }
                 // Carry refreshed account credentials into the request without
                 // clobbering a model/reasoning choice made via `/model`.
-                session_provider = provider_with_session_selection(
-                    context.store.providers[context.provider_index].clone(),
-                    &session_provider,
-                );
+                session_provider = Some(provider_with_session_selection(
+                    context.store.providers[provider_index].clone(),
+                    session_provider.as_ref().expect("provider initialized"),
+                ));
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
-                        provider: &session_provider,
+                        provider: session_provider.as_ref().expect("provider initialized"),
                         sessions: context.sessions,
                         project: context.project,
                         status_config: &context.store.status_bar,
@@ -1005,9 +1048,7 @@ async fn run_loop(
                 // its recorded expiry. Force-refresh it now (non-blocking to the
                 // rest of the loop's state) so the user's resend succeeds.
                 if result.auth_expired {
-                    match crate::force_refresh(&mut context.store.providers[context.provider_index])
-                        .await
-                    {
+                    match crate::force_refresh(&mut context.store.providers[provider_index]).await {
                         Ok(()) => match context.store.save(context.store_path) {
                             Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
                             Err(error) => insert_status(
@@ -1606,7 +1647,7 @@ async fn handle_login(
     store: &mut ProviderStore,
     store_path: &Path,
     viewport_height: u16,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Option<usize>)> {
     finish_inline(terminal)?;
     let _ = execute!(
         std::io::stdout(),
@@ -1631,11 +1672,19 @@ async fn handle_login(
     );
     terminal.show_cursor()?;
     match outcome {
-        Ok(()) if store.providers.len() > before => Ok(vec![
-            "Logged in and saved. Switch to it with /accounts.".to_owned(),
-        ]),
-        Ok(()) => Ok(vec!["Login completed.".to_owned()]),
-        Err(error) => Ok(vec![format!("Login failed: {error:#}")]),
+        Ok(()) if store.providers.len() > before => {
+            let index = store.providers.len() - 1;
+            if store.providers[index].model.is_none() {
+                models::select(&mut store.providers[index]).await?;
+                store.save(store_path)?;
+            }
+            Ok((
+                vec!["Logged in and selected for this session.".to_owned()],
+                Some(index),
+            ))
+        }
+        Ok(()) => Ok((vec!["Login completed.".to_owned()], None)),
+        Err(error) => Ok((vec![format!("Login failed: {error:#}")], None)),
     }
 }
 
@@ -1825,7 +1874,7 @@ async fn submit(
     let empty_input = ChatInput::default();
     let mut footer = footer_view(
         context.status_config,
-        context.provider,
+        Some(context.provider),
         context.project,
         status,
     );
@@ -1959,7 +2008,7 @@ async fn submit(
                 });
                 footer = footer_view(
                     context.status_config,
-                    context.provider,
+                    Some(context.provider),
                     context.project,
                     status,
                 );
@@ -2233,7 +2282,7 @@ async fn submit(
                         }
                         footer = footer_view(
                             context.status_config,
-                            context.provider,
+                            Some(context.provider),
                             context.project,
                             status,
                         );
@@ -3163,6 +3212,27 @@ mod tests {
     use super::*;
     use llm_provider::{Auth, ProviderId, SavedProvider, Secret};
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn onboarding_notice_is_actionable_and_tui_only() {
+        assert!(NO_PROVIDER_NOTICE.contains("/login"));
+        assert!(!NO_PROVIDER_NOTICE.contains("artist provider"));
+    }
+
+    #[test]
+    fn empty_provider_footer_is_safe() {
+        let runtime = StatusRuntime {
+            git_branch: None,
+            used_tokens: None,
+            context_capacity: None,
+            session_tokens: 0,
+            extension_values: Vec::new(),
+        };
+        assert_eq!(
+            footer_view(&StatusBarConfig::default(), None, Path::new("."), &runtime).height(80),
+            0
+        );
+    }
 
     fn test_account(id: &str) -> SavedProvider {
         SavedProvider::chatgpt(
