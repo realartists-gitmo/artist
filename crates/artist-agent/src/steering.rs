@@ -1,7 +1,4 @@
-use rig_core::{
-    agent::{AgentHook, Flow, HookContext, StepEvent},
-    completion::CompletionModel,
-};
+use rig_agent::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -69,16 +66,13 @@ impl SteeringHandle {
 #[derive(Clone)]
 pub(crate) struct SteeringHook(pub SteeringHandle);
 
-impl<M: CompletionModel> AgentHook<M> for SteeringHook {
-    async fn on_event(&self, _context: &HookContext, event: StepEvent<'_, M>) -> Flow {
-        let StepEvent::ToolResult {
-            result,
-            internal_call_id,
-            ..
-        } = event
-        else {
-            return Flow::cont();
-        };
+impl AgentHook for SteeringHook {
+    async fn on_tool_result(
+        &self,
+        _context: &HookContext,
+        event: ToolResultEvent<'_>,
+    ) -> ToolResultAction {
+        let result = event.presentation.as_text().unwrap_or_default();
         let messages = {
             let mut state = self.0.lock();
             let messages = state.pending.drain(..).collect::<Vec<_>>();
@@ -86,19 +80,19 @@ impl<M: CompletionModel> AgentHook<M> for SteeringHook {
             if !messages.is_empty() {
                 state
                     .original_results
-                    .insert(internal_call_id.to_owned(), result.to_owned());
+                    .insert(event.internal_call_id.to_owned(), result.to_owned());
             }
             messages
         };
         if messages.is_empty() {
-            return Flow::cont();
+            return ToolResultAction::keep();
         }
         let steering = messages
             .iter()
             .map(|message| format!("<user_steering>\n{message}\n</user_steering>"))
             .collect::<Vec<_>>()
             .join("\n\n");
-        Flow::rewrite_result(format!("{result}\n\n{steering}"))
+        ToolResultAction::rewrite(format!("{result}\n\n{steering}"))
     }
 }
 

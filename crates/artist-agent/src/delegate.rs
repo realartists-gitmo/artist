@@ -13,11 +13,12 @@ use artist_session::{
 use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
+use rig_agent::client::AgentClientExt;
+use rig_agent::{agent::MultiTurnStreamItem, prelude::PromptError, streaming::StreamingChat};
 use rig_core::{
-    agent::MultiTurnStreamItem,
     client::CompletionClient,
     completion::{Message, message::ToolResultContent},
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
+    streaming::{StreamedAssistantContent, StreamedUserContent},
     tool::{PortableDynamicTool, PortableTool},
 };
 use serde::Deserialize;
@@ -396,27 +397,27 @@ impl Delegate {
             background: run.background,
         });
         let registered_tools = || {
-            let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+            let mut tools: Vec<PortableDynamicTool> = Vec::new();
             if role.permits("read") {
-                tools.push(Box::new(child_tools.read.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.read.clone()));
             }
             if role.permits("find") {
-                tools.push(Box::new(child_tools.find.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.find.clone()));
             }
             if role.permits("grep") {
-                tools.push(Box::new(child_tools.grep.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.grep.clone()));
             }
             if role.permits("skill") {
-                tools.push(Box::new(self.resources.skill_tool()));
+                tools.push(crate::tool_prompt::dynamic(self.resources.skill_tool()));
             }
             if role.permits("bash") {
-                tools.push(Box::new(child_tools.bash.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.bash.clone()));
             }
             if role.permits("edit") {
-                tools.push(Box::new(child_tools.edit.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.edit.clone()));
             }
             if role.permits("write") {
-                tools.push(Box::new(child_tools.write.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.write.clone()));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
             tools
@@ -479,7 +480,12 @@ impl Delegate {
             }
             let tool_meta = ToolMeta::default();
             let agent = builder
-                .tools(registered_tools())
+                .dynamic_tools(
+                    registered_tools()
+                        .into_iter()
+                        .map(rig_agent::tool::DynamicTool::from)
+                        .collect(),
+                )
                 .add_hook(CaptureHook::new(tool_meta.clone()))
                 .add_hook(TtsrHook(Arc::clone(&ttsr)))
                 .default_max_turns(usize::MAX)
@@ -591,7 +597,7 @@ impl Delegate {
                             arguments: tool_call.function.arguments,
                         },
                     ),
-                    Ok(MultiTurnStreamItem::ToolExecutionStart {
+                    Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                         tool_call,
                         internal_call_id,
                     }) => self.emit_child(
@@ -615,6 +621,7 @@ impl Delegate {
                                     images += 1;
                                     None
                                 }
+                                ToolResultContent::Json { value } => Some(value.to_string()),
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -634,10 +641,8 @@ impl Delegate {
                     Err(error) => {
                         if let Some(firing) = ttsr.take_pending()
                             && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
-                            && let rig_core::completion::PromptError::PromptCancelled {
-                                chat_history,
-                                ..
-                            } = boxed.as_ref()
+                            && let PromptError::PromptCancelled { chat_history, .. } =
+                                boxed.as_ref()
                         {
                             seed_history = chat_history.clone();
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);

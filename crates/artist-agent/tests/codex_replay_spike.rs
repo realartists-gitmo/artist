@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_agent::agent::MultiTurnStreamItem;
-use rig_agent::client::CompletionClient;
+use rig_agent::client::AgentClientExt;
 use rig_agent::streaming::{StreamedAssistantContent, StreamingChat};
 use rig_core::OneOrMany;
 use rig_core::completion::message::{
@@ -98,50 +98,43 @@ async fn replayed_tool_history_is_accepted_cross_process() -> Result<()> {
     use std::sync::{Arc, Mutex};
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<Vec<Message>>>);
-    impl<M: rig_core::completion::CompletionModel> rig_agent::agent::AgentHook<M> for Capture {
-        async fn on_event(
+    impl rig_agent::agent::AgentHook for Capture {
+        async fn on_model_turn_finished(
             &self,
             _ctx: &rig_agent::agent::HookContext,
-            event: rig_agent::agent::StepEvent<'_, M>,
-        ) -> rig_agent::agent::Flow {
-            match event {
-                rig_agent::agent::StepEvent::ModelTurnFinished { content, .. } => {
-                    self.0.lock().unwrap().push(Message::Assistant {
-                        id: None,
-                        content: content.clone(),
-                    });
-                }
-                rig_agent::agent::StepEvent::ToolResult {
-                    tool_call_id,
-                    result,
-                    ..
-                } => {
-                    // Pair with the committed assistant tool call, as the
-                    // history builder does.
-                    let mut messages = self.0.lock().unwrap();
-                    let call = messages.iter().rev().find_map(|message| match message {
-                        Message::Assistant { content, .. } => {
-                            content.iter().find_map(|item| match item {
-                                AssistantContent::ToolCall(call) => Some(call.clone()),
-                                _ => None,
-                            })
-                        }
-                        _ => None,
-                    });
-                    if let Some(call) = call {
-                        let _ = tool_call_id;
-                        messages.push(Message::User {
-                            content: OneOrMany::one(UserContent::ToolResult(ToolResult {
-                                id: call.id.clone(),
-                                call_id: call.call_id.clone(),
-                                content: OneOrMany::one(ToolResultContent::Text(Text::new(result))),
-                            })),
-                        });
-                    }
-                }
-                _ => {}
+            event: rig_agent::agent::ModelTurnFinished<'_>,
+        ) -> rig_agent::agent::ModelTurnAction {
+            self.0.lock().unwrap().push(Message::Assistant {
+                id: None,
+                content: event.content.clone(),
+            });
+            rig_agent::agent::ModelTurnAction::continue_run()
+        }
+        async fn on_tool_result(
+            &self,
+            _ctx: &rig_agent::agent::HookContext,
+            event: rig_agent::agent::ToolResultEvent<'_>,
+        ) -> rig_agent::agent::ToolResultAction {
+            let mut messages = self.0.lock().unwrap();
+            let call = messages.iter().rev().find_map(|message| match message {
+                Message::Assistant { content, .. } => content.iter().find_map(|item| match item {
+                    AssistantContent::ToolCall(call) => Some(call.clone()),
+                    _ => None,
+                }),
+                _ => None,
+            });
+            if let Some(call) = call {
+                messages.push(Message::User {
+                    content: OneOrMany::one(UserContent::ToolResult(ToolResult {
+                        id: call.id.clone(),
+                        call_id: call.call_id.clone(),
+                        content: OneOrMany::one(ToolResultContent::Text(Text::new(
+                            event.presentation.as_text().unwrap_or_default(),
+                        ))),
+                    })),
+                });
             }
-            rig_agent::agent::Flow::cont()
+            rig_agent::agent::ToolResultAction::keep()
         }
     }
 

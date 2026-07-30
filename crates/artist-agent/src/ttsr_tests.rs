@@ -16,9 +16,10 @@ use artist_rules::state::RulesHandle;
 use artist_rules::types::Firing;
 use futures::StreamExt;
 use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem, StreamingError};
+use rig_agent::prelude::PromptError;
 use rig_agent::streaming::{StreamedAssistantContent, StreamingChat};
+use rig_core::completion::CompletionRequest;
 use rig_core::completion::message::Message;
-use rig_core::completion::{CompletionRequest, PromptError};
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use crate::steering::{SteeringHandle, SteeringHook};

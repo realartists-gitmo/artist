@@ -2,14 +2,12 @@
 
 use anyhow::{Context, Result, bail};
 use llm_provider::{Credentials, OpenAiApi, ProviderKind, SavedProvider};
-use rig_core::{
-    client::CompletionClient,
-    completion::Prompt,
-    providers::{
-        anthropic, azure, chatgpt, cohere, copilot, deepseek, gemini, groq, huggingface,
-        hyperbolic, llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter,
-        perplexity, together, xai, xiaomimimo, zai,
-    },
+use rig_agent::client::AgentClientExt;
+use rig_agent::prelude::Prompt;
+use rig_core::providers::{
+    anthropic, azure, chatgpt, cohere, copilot, deepseek, gemini, groq, huggingface, hyperbolic,
+    llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together,
+    xai, xiaomimimo, zai,
 };
 
 fn secure_token_dir(path: &std::path::Path) -> Result<()> {

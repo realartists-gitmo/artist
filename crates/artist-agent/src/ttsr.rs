@@ -18,9 +18,12 @@ use std::sync::{Arc, Mutex};
 use artist_rules::matcher::{RuleSet, StreamMatcher};
 use artist_rules::state::RulesHandle;
 use artist_rules::types::{Firing, MatchTarget, RuleId};
-use rig_agent::agent::{AgentHook, Flow, HookContext, RequestPatch, StepEvent, StepEventKind};
+use rig_agent::agent::{
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, ObservationAction,
+    RequestPatch, StepEventKind, TextDelta, ToolCall, ToolCallAction, ToolCallDelta,
+};
+use rig_core::completion::Document;
 use rig_core::completion::message::Message;
-use rig_core::completion::{CompletionModel, Document};
 
 pub(crate) struct TtsrShared {
     handle: RulesHandle,
@@ -176,7 +179,7 @@ fn injection_document(injections: &[(RuleId, String)]) -> Document {
 
 pub(crate) struct TtsrHook(pub Arc<TtsrShared>);
 
-impl<M: CompletionModel> AgentHook<M> for TtsrHook {
+impl AgentHook for TtsrHook {
     fn observes(&self, kind: StepEventKind) -> bool {
         match kind {
             StepEventKind::CompletionCall => true,
@@ -188,82 +191,70 @@ impl<M: CompletionModel> AgentHook<M> for TtsrHook {
         }
     }
 
-    async fn on_event(&self, _context: &HookContext, event: StepEvent<'_, M>) -> Flow {
+    async fn on_completion_call(
+        &self,
+        _ctx: &HookContext,
+        event: CompletionCallEvent<'_>,
+    ) -> CompletionCallAction {
         let shared = &*self.0;
-        match event {
-            StepEvent::CompletionCall {
-                prompt,
-                history,
-                turn,
-            } => {
-                {
-                    let mut inner = shared.lock();
-                    inner.matcher.reset_turn();
-                    inner.committed = history.to_vec();
-                    inner.committed.push(prompt.clone());
-                    inner.turn = turn as u32;
-                }
-                let injections = shared.handle.injections();
-                if injections.is_empty() {
-                    Flow::cont()
-                } else {
-                    Flow::patch_request(
-                        RequestPatch::new().extra_context([injection_document(&injections)]),
-                    )
-                }
-            }
-            StepEvent::TextDelta { delta, .. } => {
-                let firing = shared
-                    .lock()
-                    .matcher
-                    .push_text(delta, &|rule| shared.armed(rule));
-                terminate_if_fired(shared, firing)
-            }
-            StepEvent::ToolCallDelta {
-                internal_call_id,
-                tool_name,
-                delta,
-                ..
-            } => {
-                let firing = shared.lock().matcher.push_tool_arg_delta(
-                    internal_call_id,
-                    tool_name,
-                    delta,
-                    &|rule| shared.armed(rule),
-                );
-                terminate_if_fired(shared, firing)
-            }
-            // Final check on complete arguments — fires BEFORE the tool
-            // executes (rig honors Terminate on ToolCall).
-            StepEvent::ToolCall {
-                tool_name,
-                internal_call_id,
-                args,
-                ..
-            } => {
-                let firing = shared.lock().matcher.tool_call_complete(
-                    internal_call_id,
-                    tool_name,
-                    args,
-                    &|rule| shared.armed(rule),
-                );
-                terminate_if_fired(shared, firing)
-            }
-            _ => Flow::cont(),
+        {
+            let mut inner = shared.lock();
+            inner.matcher.reset_turn();
+            inner.committed = event.history.to_vec();
+            inner.committed.push(event.prompt.clone());
+            inner.turn = event.turn as u32;
         }
+        let injections = shared.handle.injections();
+        if injections.is_empty() {
+            CompletionCallAction::continue_run()
+        } else {
+            CompletionCallAction::patch(
+                RequestPatch::new().extra_context([injection_document(&injections)]),
+            )
+        }
+    }
+
+    async fn on_text_delta(&self, _ctx: &HookContext, event: TextDelta<'_>) -> ObservationAction {
+        let shared = &*self.0;
+        let firing = shared
+            .lock()
+            .matcher
+            .push_text(event.delta, &|rule| shared.armed(rule));
+        fire_reason(shared, firing)
+            .map_or_else(ObservationAction::continue_run, ObservationAction::stop)
+    }
+
+    async fn on_tool_call_delta(
+        &self,
+        _ctx: &HookContext,
+        event: ToolCallDelta<'_>,
+    ) -> ObservationAction {
+        let shared = &*self.0;
+        let firing = shared.lock().matcher.push_tool_arg_delta(
+            event.internal_call_id,
+            event.tool_name,
+            event.delta,
+            &|rule| shared.armed(rule),
+        );
+        fire_reason(shared, firing)
+            .map_or_else(ObservationAction::continue_run, ObservationAction::stop)
+    }
+
+    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
+        let shared = &*self.0;
+        let firing = shared.lock().matcher.tool_call_complete(
+            event.internal_call_id,
+            event.tool_name,
+            event.args,
+            &|rule| shared.armed(rule),
+        );
+        fire_reason(shared, firing).map_or_else(ToolCallAction::run, ToolCallAction::stop)
     }
 }
 
-fn terminate_if_fired(shared: &TtsrShared, firing: Option<Firing>) -> Flow {
-    match firing {
-        Some(firing) => {
-            let rule = firing.rule.clone();
-            if shared.fire(firing) {
-                Flow::terminate(format!("ttsr:{rule}"))
-            } else {
-                Flow::cont()
-            }
-        }
-        None => Flow::cont(),
-    }
+fn fire_reason(shared: &TtsrShared, firing: Option<Firing>) -> Option<String> {
+    firing.and_then(|firing| {
+        let rule = firing.rule.clone();
+        shared.fire(firing).then(|| format!("ttsr:{rule}"))
+    })
 }

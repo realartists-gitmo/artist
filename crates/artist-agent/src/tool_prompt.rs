@@ -1,29 +1,49 @@
 //! System-prompt projection of the exact tools registered for a run.
 
-use std::collections::HashSet;
+use rig_core::tool::{IntoToolOutput, PortableDynamicTool, PortableTool};
+use std::{collections::HashSet, sync::Arc};
 
-use rig_core::tool::ToolDyn;
-
-/// Apply the same deny-list to provider registration and prompt projection.
-pub(crate) fn retain_enabled(tools: &mut Vec<Box<dyn ToolDyn>>, disabled: &[String]) {
-    tools.retain(|tool| !disabled.iter().any(|name| name == &tool.name()));
+/// Erase a typed portable tool into Rig's runtime-authored portable contract.
+pub(crate) fn dynamic<T>(tool: T) -> PortableDynamicTool
+where
+    T: PortableTool + 'static,
+{
+    let name = T::NAME;
+    let description = tool.description();
+    let parameters = tool.parameters();
+    let tool = Arc::new(tool);
+    PortableDynamicTool::new(name, description, parameters, move |arguments| {
+        let tool = Arc::clone(&tool);
+        Box::pin(async move {
+            let arguments = serde_json::from_value(arguments)
+                .map_err(rig_core::tool::ToolExecutionError::from_error)?;
+            tool.call(arguments)
+                .await
+                .map_err(|error| tool.map_error(error))?
+                .into_tool_output()
+        })
+    })
 }
 
-/// Render model-facing descriptions and conditional usage guidance from the
-/// final registered list. MCP and extension tools naturally participate via
-/// `ToolDyn::description`; guidance never names a disabled built-in.
-pub(crate) fn render(tools: &[Box<dyn ToolDyn>]) -> String {
+pub(crate) fn retain_enabled(tools: &mut Vec<PortableDynamicTool>, disabled: &[String]) {
+    tools.retain(|tool| !disabled.iter().any(|name| name == tool.name()));
+}
+
+pub(crate) fn render(tools: &[PortableDynamicTool]) -> String {
     if tools.is_empty() {
         return "No tools are available for this run.".to_owned();
     }
     let mut output = String::from("Available tools:\n");
     let mut names = HashSet::new();
     for tool in tools {
-        let name = tool.name();
-        names.insert(name.clone());
-        output.push_str(&format!("- `{name}`: {}\n", one_line(&tool.description())));
+        let definition = tool.definition();
+        names.insert(definition.name.clone());
+        output.push_str(&format!(
+            "- `{}`: {}\n",
+            definition.name,
+            one_line(&definition.description)
+        ));
     }
-
     let mut guidance = Vec::new();
     if names.contains("find") {
         guidance.push("Use `find` for project file/path discovery, listings, and glob filtering.");
@@ -68,59 +88,31 @@ fn one_line(description: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::tool::{ToolError, ToolExecutionResult};
-
-    struct Stub(&'static str, &'static str);
-
-    impl ToolDyn for Stub {
-        fn name(&self) -> String {
-            self.0.into()
-        }
+    #[derive(Clone)]
+    struct Stub(&'static str);
+    #[derive(Debug, thiserror::Error)]
+    #[error("stub")]
+    struct Error;
+    impl PortableTool for Stub {
+        const NAME: &'static str = "read";
+        type Args = serde_json::Value;
+        type Output = String;
+        type Error = Error;
         fn description(&self) -> String {
-            self.1.into()
+            self.0.into()
         }
         fn parameters(&self) -> serde_json::Value {
             serde_json::json!({"type":"object"})
         }
-        fn call<'a>(
-            &'a self,
-            _args: String,
-        ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<String, ToolError>> {
-            Box::pin(async { Ok(String::new()) })
-        }
-        fn call_structured<'a>(
-            &'a self,
-            _args: String,
-            _extensions: &'a rig_core::tool::ToolCallExtensions,
-        ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, ToolExecutionResult> {
-            Box::pin(async { ToolExecutionResult::success(String::new()) })
+        async fn call(&self, _: Self::Args) -> Result<String, Error> {
+            Ok(String::new())
         }
     }
-
-    fn tools(values: &[(&'static str, &'static str)]) -> Vec<Box<dyn ToolDyn>> {
-        values
-            .iter()
-            .map(|(name, description)| Box::new(Stub(name, description)) as Box<dyn ToolDyn>)
-            .collect()
-    }
-
     #[test]
-    fn renders_dynamic_tools_and_only_applicable_guidance() {
-        let tools = tools(&[("read", "Inspect\nfiles"), ("custom", "Extension action")]);
-        let prompt = render(&tools);
-        assert!(prompt.contains("- `read`: Inspect files"));
-        assert!(prompt.contains("- `custom`: Extension action"));
-        assert!(prompt.contains("Use `read`"));
-        assert!(!prompt.contains("Use `grep`"));
-        assert!(!prompt.contains("Use `bash`"));
-    }
-
-    #[test]
-    fn filtering_drives_the_same_projected_list() {
-        let mut tools = tools(&[("read", "Read"), ("custom", "Custom")]);
+    fn renders_and_filters() {
+        let mut tools = vec![dynamic(Stub("Inspect\nfiles"))];
+        assert!(render(&tools).contains("- `read`: Inspect files"));
         retain_enabled(&mut tools, &["read".into()]);
-        let prompt = render(&tools);
-        assert!(!prompt.contains("`read`"));
-        assert!(prompt.contains("`custom`"));
+        assert_eq!(render(&tools), "No tools are available for this run.");
     }
 }

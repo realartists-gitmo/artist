@@ -36,15 +36,16 @@ use artist_tools::ToolBundle;
 use base64::Engine;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
+use rig_agent::client::AgentClientExt;
+use rig_agent::{agent::MultiTurnStreamItem, prelude::PromptError, streaming::StreamingPrompt};
 use rig_core::{
     OneOrMany,
-    agent::MultiTurnStreamItem,
     client::CompletionClient,
     completion::message::{
         DocumentSourceKind, Image, ImageMediaType, Message, ToolResultContent, UserContent,
     },
     memory::{ConversationMemory, InMemoryConversationMemory},
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt},
+    streaming::{StreamedAssistantContent, StreamedUserContent},
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -424,15 +425,15 @@ where
         ) {
             builder = builder.additional_params(params);
         }
-        let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
-            Box::new(tools.bash.clone()),
-            Box::new(tools.read.clone()),
-            Box::new(tools.find.clone()),
-            Box::new(tools.grep.clone()),
-            Box::new(tools.edit.clone()),
-            Box::new(tools.write.clone()),
-            Box::new(resources.skill_tool()),
-            Box::new(delegate::Delegate::new(
+        let mut registered: Vec<rig_core::tool::PortableDynamicTool> = vec![
+            tool_prompt::dynamic(tools.bash.clone()),
+            tool_prompt::dynamic(tools.read.clone()),
+            tool_prompt::dynamic(tools.find.clone()),
+            tool_prompt::dynamic(tools.grep.clone()),
+            tool_prompt::dynamic(tools.edit.clone()),
+            tool_prompt::dynamic(tools.write.clone()),
+            tool_prompt::dynamic(resources.skill_tool()),
+            tool_prompt::dynamic(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
                 Arc::clone(&fork_context),
@@ -445,12 +446,7 @@ where
                 subagents.clone(),
             )),
         ];
-        registered.extend(
-            mcp_tools
-                .iter()
-                .cloned()
-                .map(|tool| Box::new(tool) as Box<dyn rig_core::tool::ToolDyn>),
-        );
+        registered.extend(mcp_tools.iter().cloned());
         if let Some(extensions) = tool_context.extensions {
             registered.extend(extensions.tools());
         }
@@ -484,7 +480,12 @@ where
             .preamble(&system_prompt)
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
-            .tools(registered)
+            .dynamic_tools(
+                registered
+                    .into_iter()
+                    .map(rig_agent::tool::DynamicTool::from)
+                    .collect(),
+            )
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(tool_meta.clone()))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
@@ -642,7 +643,7 @@ where
                     name: tool_call.function.name,
                     arguments: tool_call.function.arguments,
                 })?,
-                Ok(MultiTurnStreamItem::ToolExecutionStart {
+                Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                     tool_call,
                     internal_call_id,
                 }) => on_event(PromptEvent::ToolExecutionStart {
@@ -668,6 +669,7 @@ where
                                 images += 1;
                                 None
                             }
+                            ToolResultContent::Json { value } => Some(value.to_string()),
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -689,10 +691,7 @@ where
                     // committed history (rig excludes the partial turn).
                     if let Some(firing) = ttsr.take_pending()
                         && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
-                        && let rig_core::completion::PromptError::PromptCancelled {
-                            chat_history,
-                            ..
-                        } = boxed.as_ref()
+                        && let PromptError::PromptCancelled { chat_history, .. } = boxed.as_ref()
                     {
                         seed_history = chat_history.clone();
                         record_firing_events(&run_recorder, &ttsr, &firing);
