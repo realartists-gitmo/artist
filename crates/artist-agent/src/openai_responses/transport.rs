@@ -446,10 +446,18 @@ impl CompletionModel for ArtistOpenAiModel {
                                     }
                                     for event in events {
                                     if let RawStreamingChoice::FinalResponse(final_response) = &event {
+                                        let normalized_wire = normalized_terminal_wire(
+                                            &final_response.wire,
+                                            &accumulated_text,
+                                            &accumulated_items,
+                                        );
+                                        let normalized_output = match parse_output(&normalized_wire) {
+                                            Ok(output) => output,
+                                            Err(error) => { yield Err(error); return; }
+                                        };
                                         let mut saved = canonical_input.clone();
-                                        saved.extend(final_response.output.iter().map(|item| item.wire().clone()));
+                                        saved.extend(normalized_output.iter().map(|item| item.wire().clone()));
                                         let mut full_checkpoint = input_checkpoint.clone();
-                                        let normalized_wire = normalized_terminal_wire(&final_response.wire, &accumulated_text, &accumulated_items);
                                         match represented_output_from_wire(&normalized_wire) {
                                             Ok(represented) => full_checkpoint.extend(represented.iter().map(wire_fingerprint)),
                                             Err(error) => { yield Err(error); return; }
