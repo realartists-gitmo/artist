@@ -2,9 +2,7 @@ cargo-features = ["profile-rustflags"]
 
 [workspace]
 members = [
-    "crates/llm-provider",
     "crates/artist-cli",
-    "crates/artist-agent",
     "crates/artist-tools",
     "crates/artist-session",
     "crates/artist-rules",
