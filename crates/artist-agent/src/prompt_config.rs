@@ -25,39 +25,73 @@ pub(crate) fn scaffold(root: &Path) -> Vec<String> {
         ));
         return diagnostics;
     }
+    if let Err(error) = std::fs::create_dir_all(root.join("prompts")) {
+        diagnostics.push(format!(
+            "{}: cannot create prompt directory: {error}",
+            root.join("prompts").display()
+        ));
+        return diagnostics;
+    }
+    create(
+        &root.join("prompts/main.md"),
+        include_str!("system_prompt.md"),
+        &mut diagnostics,
+    );
     for name in BUILTIN_NAMES {
         create(
             &profile_dir.join(format!("{name}.md")),
-            &profile_file(name, root),
+            &profile_file(name),
             &mut diagnostics,
         );
     }
     diagnostics
 }
 
-fn profile_file(name: &str, root: &Path) -> String {
+/// The shared prompt every profile is composed on top of.
+///
+/// A profile body says what makes that profile different; this says what is
+/// true of every agent in the harness. Prepending it means a focused profile
+/// is a few lines rather than a copy of the whole prompt.
+pub(crate) fn base_prompt() -> (String, Vec<String>) {
+    load_base(config_root().as_deref())
+}
+
+fn load_base(root: Option<&Path>) -> (String, Vec<String>) {
+    let fallback = include_str!("system_prompt.md").trim_end().to_owned();
+    let Some(root) = root else {
+        return (fallback, Vec::new());
+    };
+    let mut diagnostics = scaffold(root);
+    let path = root.join("prompts/main.md");
+    match std::fs::read_to_string(&path) {
+        Ok(value) if !value.trim().is_empty() => (value.trim_end().to_owned(), diagnostics),
+        Ok(_) => {
+            diagnostics.push(format!(
+                "{}: shared prompt is empty; using built-in",
+                path.display()
+            ));
+            (fallback, diagnostics)
+        }
+        Err(error) => {
+            diagnostics.push(format!(
+                "{}: cannot read shared prompt ({error}); using built-in",
+                path.display()
+            ));
+            (fallback, diagnostics)
+        }
+    }
+}
+
+fn profile_file(name: &str) -> String {
     let tools = match name {
         "explorer" | "planner" | "reviewer" => "tools:\n  allow: [read, find, grep, skill]\n",
         _ => "",
     };
-    let body = match name {
-        "default" => inherited_main_prompt(root),
-        _ => profile_prompt(name).to_owned(),
-    };
     format!(
-        "---\ndescription: {}\n{tools}---\n\n{body}",
+        "---\ndescription: {}\n{tools}---\n\n{}",
         profile_description(name),
+        profile_prompt(name)
     )
-}
-
-/// Before profiles, the session prompt lived in `prompts/main.md`. Seed the
-/// default profile from a customized copy so upgrading does not silently
-/// discard the user's edits.
-fn inherited_main_prompt(root: &Path) -> String {
-    std::fs::read_to_string(root.join("prompts/main.md"))
-        .ok()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| include_str!("system_prompt.md").to_owned())
 }
 
 fn create(path: &Path, contents: &str, diagnostics: &mut Vec<String>) {
@@ -71,7 +105,7 @@ fn create(path: &Path, contents: &str, diagnostics: &mut Vec<String>) {
 
 pub(crate) fn profile_description(name: &str) -> &'static str {
     match name {
-        "default" => "General-purpose agent carrying the full session prompt",
+        "default" => "General-purpose agent with no additional specialization",
         "worker" => "Implementation-focused agent for bounded changes and verification",
         "explorer" => "Read-heavy agent for tracing code and gathering evidence",
         "planner" => {
@@ -83,9 +117,8 @@ pub(crate) fn profile_description(name: &str) -> &'static str {
 
 pub(crate) fn profile_prompt(name: &str) -> &'static str {
     match name {
-        // The session root is instantiated from `default`, so this profile
-        // carries the full system prompt rather than a delegation blurb.
-        "default" => include_str!("system_prompt.md"),
+        // Adds nothing beyond the shared prompt every profile already gets.
+        "default" => "",
         "worker" => {
             "Implement the requested change, verify it, and report modified files and residual risks.\n"
         }
@@ -117,33 +150,38 @@ mod tests {
         }
     }
 
-    /// Upgrading from the pre-profile layout must not discard a customized
-    /// system prompt: the default profile is seeded from `prompts/main.md`.
+    /// A customized shared prompt is what every profile composes on, so editing
+    /// it reaches the focused profiles too rather than only the default.
     #[test]
-    fn a_customized_main_prompt_seeds_the_default_profile() {
+    fn a_customized_shared_prompt_is_used_verbatim() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join("prompts")).unwrap();
-        std::fs::write(d.path().join("prompts/main.md"), "my careful prompt").unwrap();
-
         scaffold(d.path());
-
-        let default = std::fs::read_to_string(d.path().join("profiles/default.md")).unwrap();
-        assert!(default.contains("my careful prompt"), "{default}");
-        let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
-        assert_eq!(
-            profiles.get("default").unwrap().instructions,
-            "my careful prompt"
-        );
+        std::fs::write(d.path().join("prompts/main.md"), "my careful prompt").unwrap();
+        let (base, diagnostics) = load_base(Some(d.path()));
+        assert_eq!(base, "my careful prompt");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
-    fn a_fresh_install_seeds_the_default_profile_from_the_builtin_prompt() {
+    fn an_unreadable_shared_prompt_falls_back_to_the_builtin() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("prompts/main.md")).unwrap();
+        let (base, diagnostics) = load_base(Some(d.path()));
+        assert_eq!(base, include_str!("system_prompt.md").trim_end());
+        assert!(diagnostics.iter().any(|d| d.contains("using built-in")));
+    }
+
+    /// `default` contributes nothing of its own — the shared prompt is the
+    /// whole of it, so composing must not duplicate anything.
+    #[test]
+    fn the_default_profile_adds_nothing_to_the_shared_prompt() {
         let d = tempfile::tempdir().unwrap();
         scaffold(d.path());
         let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
-        assert_eq!(
-            profiles.get("default").unwrap().instructions,
-            include_str!("system_prompt.md").trim()
+        assert!(profiles.get("default").unwrap().instructions.is_empty());
+        assert!(
+            !profiles.get("planner").unwrap().instructions.is_empty(),
+            "a focused profile still contributes its own guidance"
         );
     }
 

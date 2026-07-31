@@ -709,14 +709,23 @@ where
         // profile can trim a bloated server down to the handful it needs.
         registered.retain(|tool| profile.permits(tool.name()));
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
+        // Every profile is composed on the shared prompt: the body says what is
+        // different about this profile, not what is true of every agent.
+        let (base, base_diagnostics) = prompt_config::base_prompt();
+        let persona = if profile.instructions.trim().is_empty() {
+            base
+        } else {
+            format!("{base}\n\n{}", profile.instructions)
+        };
         let prompt_diagnostics = profiles
             .diagnostics()
             .iter()
+            .chain(base_diagnostics.iter())
             .map(|d| format!("<diagnostic>{}</diagnostic>", d))
             .collect::<String>();
         let system_prompt = format!(
             "{}\n\n{}{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}",
-            profile.instructions,
+            persona,
             prompt_diagnostics,
             tool_prompt::render(&registered),
             resources.prompt_section(),

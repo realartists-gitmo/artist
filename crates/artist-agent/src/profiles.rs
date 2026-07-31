@@ -340,9 +340,6 @@ fn parse(path: &Path) -> Result<Raw, String> {
     if name.is_empty() {
         return Err("profile has no name".into());
     }
-    if body.trim().is_empty() {
-        return Err(format!("profile {name} has an empty prompt"));
-    }
     let inline = Candidate {
         provider: front.provider,
         model: front.model,
@@ -488,6 +485,11 @@ fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
         ),
         _ => (None, Vec::new()),
     }
+}
+
+#[cfg(test)]
+fn catalog_contains(profiles: &Profiles, needle: &str) -> bool {
+    profiles.catalog().contains(needle)
 }
 
 fn escape(value: &str) -> String {
@@ -683,10 +685,6 @@ mod tests {
             "---\nmodel: gpt-5\n---\nprompt\n",
         );
         write(
-            &dir.path().join(".artist/profiles/empty.md"),
-            "---\ndescription: empty\n---\n\n",
-        );
-        write(
             &dir.path().join(".artist/profiles/both.md"),
             "---\ndescription: both\nmodel: gpt-5\ncandidates:\n  - model: gpt-4\n---\nprompt\n",
         );
@@ -696,12 +694,9 @@ mod tests {
         );
         let profiles = Profiles::discover_from(dir.path(), None);
         assert!(profiles.get("nodesc").is_err());
-        assert!(profiles.get("empty").is_err());
         assert!(profiles.get("both").is_err());
         assert!(profiles.get("fine").is_ok());
-        let catalog = profiles.catalog();
-        assert!(catalog.contains("empty prompt"));
-        assert!(catalog.contains("both `candidates`"));
+        assert!(catalog_contains(&profiles, "both `candidates`"));
     }
 
     fn account(id: &str, name: &str, kind: llm_provider::ProviderKind, model: &str) -> llm_provider::SavedProvider {
@@ -779,6 +774,19 @@ mod tests {
             ..Candidate::default()
         };
         assert!(candidate.resolve(&set, &parent).is_err());
+    }
+
+    /// An empty body means "the shared prompt is the whole of it", which is
+    /// how `default` is expressed.
+    #[test]
+    fn an_empty_body_is_valid_and_contributes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join(".artist/profiles/plain.md"),
+            "---\ndescription: plain\n---\n\n",
+        );
+        let profiles = Profiles::discover_from(dir.path(), None);
+        assert_eq!(profiles.get("plain").unwrap().instructions, "");
     }
 
     #[test]

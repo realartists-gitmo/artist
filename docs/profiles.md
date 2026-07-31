@@ -41,8 +41,12 @@ The implementation is invalid if any of these invariants is violated:
 
 ## The profile object
 
-Defined in markdown with YAML frontmatter, one file per profile. The body of the
-file is the system prompt. Discovery layers project over global, project
+Defined in markdown with YAML frontmatter, one file per profile. The body says
+what makes this profile different; it is composed onto the shared prompt in
+`prompts/main.md`, which says what is true of every agent in the harness. A
+focused profile is therefore a few lines rather than a copy of the whole prompt,
+and editing the shared prompt reaches every profile. An empty body means the
+shared prompt is the whole of it — that is how `default` is expressed. Discovery layers project over global, project
 winning by name; built-in profiles are replaced by a same-named definition at
 either layer.
 
@@ -135,15 +139,9 @@ names none. It is an ordinary profile and can be replaced by a same-named
 definition at either configuration layer. There are no capability flags:
 every profile can be launched, delegated to, and handed off to.
 
-Because the session root is instantiated from it, `default` carries the **full
-system prompt** as its body rather than a delegation blurb — a profile's
-instructions are its complete prompt, which is what makes launching a focused
-profile genuinely leaner. Delegating to `default` therefore hands a subagent the
-whole prompt; `worker` is the lean general-purpose alternative.
-
-Upgrading preserves customization: when `profiles/default.md` is first
-scaffolded and a pre-profile `prompts/main.md` exists, the profile is seeded
-from it.
+`default` has an empty body: it adds nothing to the shared prompt. Composition
+is unconditional and has no opt-out — a profile that wants to drop the shared
+guidance edits `prompts/main.md`, which is shared by construction.
 
 ## Instantiation modes
 

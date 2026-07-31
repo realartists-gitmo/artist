@@ -471,8 +471,9 @@ impl Delegate {
             tools
         };
         let prompt_tools = registered_tools();
+        let (base, _) = crate::prompt_config::base_prompt();
         let policy = format!(
-            "You are the '{}' subagent profile.\n{}\n\n{}{}\nCurrent working directory: {}",
+            "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}{}\nCurrent working directory: {}",
             role.name,
             role.instructions,
             crate::tool_prompt::render(&prompt_tools),
