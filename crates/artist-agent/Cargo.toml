@@ -9,6 +9,11 @@ rust-version.workspace = true
 anyhow = "1"
 async-stream = "0.3"
 artist-memory = { path = "../artist-memory" }
+# `ranking` only — the code-search tools rank artist-memory's hits; the index,
+# embedder and model download stay out.
+artist-ast = { path = "../artist-ast", default-features = false, features = [
+    "ranking",
+] }
 artist-rules = { path = "../artist-rules" }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }

@@ -124,7 +124,9 @@ impl Harness {
             config.path().to_path_buf(),
         )
         .unwrap();
-        let mcp = artist_agent::mcp::McpManager::load(config.path()).await.unwrap();
+        let mcp = artist_agent::mcp::McpManager::load(config.path())
+            .await
+            .unwrap();
         Self {
             native: artist_tools::ToolBundle::new(workspace),
             _project: project,
@@ -173,7 +175,11 @@ async fn a_tool_result_is_paired_into_the_next_request() {
     assert!(outcome.is_ok(), "{outcome:?}");
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "the tool result should drive a second turn");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the tool result should drive a second turn"
+    );
     let second = &requests[1];
     assert!(
         second.contains("function_call_output"),
@@ -210,9 +216,16 @@ async fn a_call_to_an_unregistered_tool_is_reported_back_to_the_model() {
     )
     .await;
 
-    assert!(outcome.is_ok(), "an unknown tool must not end the run: {outcome:?}");
+    assert!(
+        outcome.is_ok(),
+        "an unknown tool must not end the run: {outcome:?}"
+    );
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "the model should get a chance to recover");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the model should get a chance to recover"
+    );
     assert!(
         requests[1].contains("call_1"),
         "the failure must be reported against the call: {}",
@@ -249,9 +262,16 @@ async fn a_panicking_tool_fails_that_call_rather_than_the_run() {
     )
     .await;
 
-    assert!(outcome.is_ok(), "a tool panic must not end the run: {outcome:?}");
+    assert!(
+        outcome.is_ok(),
+        "a tool panic must not end the run: {outcome:?}"
+    );
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "the model should get a chance to recover");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the model should get a chance to recover"
+    );
     assert!(
         requests[1].contains("call_1"),
         "the failed call must still be answered: {}",

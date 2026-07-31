@@ -1,9 +1,7 @@
 use crate::{ToolError, Workspace};
 use base64::Engine as _;
 use hashline_tools::ReadFileRequest;
-use rig_core::completion::message::{
-    DocumentSourceKind, Image, ImageMediaType, ToolResultContent,
-};
+use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType, ToolResultContent};
 use rig_core::tool::{PortableTool, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,8 +44,10 @@ impl PortableTool for ReadTool {
             .and_then(|v| v.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif"]
-            .contains(&extension.as_str())
+        if [
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif",
+        ]
+        .contains(&extension.as_str())
         {
             let size = tokio::fs::metadata(&path).await?.len();
             let Some(media_type) = image_media_type(&extension) else {

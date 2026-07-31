@@ -213,6 +213,15 @@ impl AnchorBook {
         }
     }
 
+    /// The element that currently holds keyboard focus, if a backend said so.
+    ///
+    /// What a `key` step actually aims at. Populated from the surface's own
+    /// state — an AT-SPI state set, a CDP `focused` property — so a model that
+    /// names what it expects Enter to activate can be checked against reality.
+    pub fn focused(&self) -> Option<&Node> {
+        self.live.values().find(|node| node.state.focused)
+    }
+
     /// Resolve an anchor to the node it currently names.
     pub fn resolve(&self, anchor: &str) -> Result<&Node, AnchorError> {
         let handle = anchor.trim().to_ascii_lowercase();

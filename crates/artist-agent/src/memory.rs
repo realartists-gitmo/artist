@@ -111,7 +111,7 @@ impl MemoryHandle {
     ///
     /// Without one, retrieval degrades to the lexical leg rather than failing:
     /// a missing model should cost recall quality, not break the session.
-    async fn query_vector(&self, text: &str) -> Vec<f32> {
+    pub async fn query_vector(&self, text: &str) -> Vec<f32> {
         match &self.embedder {
             Some(embedder) => embedder.embed_query(text).await.unwrap_or_default(),
             None => Vec::new(),
@@ -142,7 +142,6 @@ impl MemoryHandle {
             .await
             .unwrap_or_default()
     }
-
 }
 
 impl MemoryWriter {
@@ -350,14 +349,7 @@ impl PortableTool for MemoryTool {
                 }
                 Ok(hits
                     .iter()
-                    .map(|h| {
-                        format!(
-                            "[{}] ({}) {}",
-                            h.id,
-                            h.scope.as_str(),
-                            h.text.trim()
-                        )
-                    })
+                    .map(|h| format!("[{}] ({}) {}", h.id, h.scope.as_str(), h.text.trim()))
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
@@ -655,7 +647,6 @@ impl MemoryHook {
         hits.retain(|h| seen.insert((h.scope.as_str(), h.id)));
         hits
     }
-
 }
 
 fn floor_char_boundary(value: &str, mut index: usize) -> usize {

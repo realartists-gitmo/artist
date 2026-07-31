@@ -18,8 +18,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    AgentIdentity, EditRequest, EditResult, FileToolConfig, FileToolManager, HashlineError,
-    HashlineErrorCode, ReadFileRequest, ReadFileResult, StateStore,
+    AgentIdentity, Drift, DriftCandidate, DriftKind, EditRequest, EditResult, FileToolConfig,
+    FileToolManager, HashlineError, HashlineErrorCode, ReadFileRequest, ReadFileResult, StateStore,
 };
 
 /// Conditions for whole-file write (separate from line-level edit anchors).
@@ -58,6 +58,14 @@ pub struct FileCoordinator {
     managers: Arc<Mutex<HashMap<String, Arc<Mutex<FileToolManager>>>>>,
     path_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     lock_directory: Arc<PathBuf>,
+    /// Last actor to write each path, and the hash of what they wrote.
+    ///
+    /// In-memory, so a write from another process is correctly unattributed
+    /// rather than guessed at. The hash is what makes attribution a *claim*
+    /// rather than a guess within this process too: an agent wrote this path
+    /// once, but the user may have edited it since, and naming the agent then
+    /// would send the model coordinating with one that did not do it.
+    last_writers: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 struct PathTransaction {
@@ -85,6 +93,7 @@ impl FileCoordinator {
             managers: Arc::new(Mutex::new(HashMap::new())),
             path_locks: Arc::new(Mutex::new(HashMap::new())),
             lock_directory: Arc::new(lock_directory),
+            last_writers: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -196,13 +205,15 @@ impl FileCoordinator {
             .await?;
         let state = manager.export_issued_prefixes();
         drop(manager);
+        let hash = content_hash(content.as_bytes());
+        self.note_writer(&normalized, actor, hash.clone()).await;
         self.state
             .replace_anchor_state(&actor.id, &state)
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(CoordinatedReadResult {
             result,
-            content_hash: content_hash(content.as_bytes()),
+            content_hash: hash,
         })
     }
 
@@ -274,13 +285,15 @@ impl FileCoordinator {
             .with_context(|| format!("failed to read {normalized} after edit"))?;
         let state = manager.export_issued_prefixes();
         drop(manager);
+        let hash = content_hash(&bytes);
+        self.note_writer(&normalized, actor, hash.clone()).await;
         self.state
             .replace_anchor_state(&actor.id, &state)
             .await
             .map_err(anyhow::Error::msg)?;
         Ok(CoordinatedEditResult {
             result,
-            content_hash: content_hash(&bytes),
+            content_hash: hash,
         })
     }
 
@@ -307,6 +320,75 @@ impl FileCoordinator {
             result,
             content_hash: content_hash(&bytes),
         })
+    }
+
+    /// Files this actor has been shown that no longer match disk.
+    ///
+    /// Runs after every tool call, so the shape matters more than it looks.
+    /// Three phases, and the middle one is the reason:
+    ///
+    /// 1. take the candidate list under the manager lock — no I/O,
+    /// 2. stat them with the lock *released*, because this is the phase that
+    ///    runs every time and touches every tracked file,
+    /// 3. re-take the lock only for paths that actually moved, where reading
+    ///    and reconciling is affordable because it is rare.
+    ///
+    /// Collapsing this into one locked pass would put a stat storm inside the
+    /// mutex that every edit contends for, on a hot path, to answer "nothing
+    /// changed" nearly every time.
+    pub async fn drifted(&self, actor: &AgentIdentity) -> Result<Vec<Drift>> {
+        let manager = self.manager_for(actor).await?;
+
+        let candidates = { manager.lock().await.drift_candidates() };
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase two, unlocked. `spawn_blocking` because this is real filesystem
+        // I/O on an async executor, and the tracked set grows with the session.
+        let moved = tokio::task::spawn_blocking(move || {
+            candidates
+                .into_iter()
+                .filter(DriftCandidate::may_have_moved)
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        if moved.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut drifts = { manager.lock().await.describe_drift(&moved) };
+
+        // Attribution is the coordinator's to give: it is the only layer that
+        // sees every actor. A write we made ourselves is not drift worth
+        // reporting to the actor that made it, but one from another session is
+        // a coordination signal.
+        let writers = self.last_writers.lock().await;
+        for drift in &mut drifts {
+            let DriftKind::Modified { after_text, .. } = &drift.kind else {
+                // Nothing to check a hash against, so nothing to claim.
+                continue;
+            };
+            let Some((writer, hash)) = writers.get(&drift.path) else {
+                continue;
+            };
+            // Only claim it if the file still holds exactly what that agent
+            // wrote. Without this the last agent to touch a path is blamed for
+            // every later change to it, including the user's own edits.
+            if writer != &actor.id.0 && *hash == content_hash(after_text.as_bytes()) {
+                drift.writer = Some(writer.clone());
+            }
+        }
+        Ok(drifts)
+    }
+
+    /// Record who wrote a path and what they left there, for drift attribution.
+    async fn note_writer(&self, path: &str, actor: &AgentIdentity, hash: String) {
+        self.last_writers
+            .lock()
+            .await
+            .insert(path.to_owned(), (actor.id.0.clone(), hash));
     }
 
     async fn manager_for(&self, actor: &AgentIdentity) -> Result<Arc<Mutex<FileToolManager>>> {
@@ -427,3 +509,196 @@ pub fn content_hash(bytes: &[u8]) -> String {
 
 /// How models should use anchors returned in `anchor: line` views.
 pub const ANCHOR_USAGE: &str = "Use only the bare mnemonic token before ': '. For the rendered line 'time: beta', pass anchor \"time\" (not \"time: beta\").";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ReadFileRequest;
+
+    /// One coordinator over one store and lock directory, which is what a
+    /// parent and its subagents share: `FileCoordinator` is `Clone` over `Arc`
+    /// fields, so cloning it into a child keeps one set of maps.
+    fn coordinator(name: &str) -> (FileCoordinator, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "artist-coord-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let config = FileToolConfig {
+            workspace_root: Some(root.clone()),
+            ..FileToolConfig::default()
+        };
+        let files = FileCoordinator::open(config, root.join("anchors.sqlite"), root.join("locks"))
+            .expect("coordinator");
+        (files, root)
+    }
+
+    fn agent(id: &str) -> AgentIdentity {
+        AgentIdentity::from_id(id).expect("identity")
+    }
+
+    async fn read(files: &FileCoordinator, actor: &AgentIdentity, path: &str) {
+        files
+            .read_file(
+                actor,
+                ReadFileRequest {
+                    path: path.to_owned(),
+                    start_line: 1,
+                    max_lines: None,
+                },
+            )
+            .await
+            .expect("read");
+    }
+
+    /// The melting-pot case: two sessions, one worktree. What one writes, the
+    /// other has to hear about — and hear *who*, because another agent working
+    /// the same file is a coordination signal rather than just a stale view.
+    #[tokio::test]
+    async fn another_agents_write_is_attributed_to_it() {
+        let (files, root) = coordinator("attribution");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let alpha = agent("alpha");
+        let beta = agent("beta");
+        read(&files, &alpha, &path).await;
+
+        files
+            .write_file(
+                &beta,
+                path.clone(),
+                "one\nCHANGED BY BETA\n".to_owned(),
+                WriteCondition::Any,
+            )
+            .await
+            .expect("beta writes");
+
+        let drifts = files.drifted(&alpha).await.expect("alpha checks");
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert_eq!(
+            drifts[0].writer.as_deref(),
+            Some("beta"),
+            "the other agent's write was not attributed: {drifts:?}"
+        );
+    }
+
+    /// The same write must be silent for the agent that made it. Anchor state
+    /// is per-actor, so this is the check that the two halves — per-actor views
+    /// and a shared writer map — do not report an agent to itself.
+    #[tokio::test]
+    async fn an_agent_is_not_told_about_its_own_write() {
+        let (files, root) = coordinator("self");
+        let file = root.join("mine.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let beta = agent("beta");
+        read(&files, &beta, &path).await;
+        files
+            .write_file(
+                &beta,
+                path.clone(),
+                "one\nCHANGED BY BETA\n".to_owned(),
+                WriteCondition::Any,
+            )
+            .await
+            .expect("beta writes");
+
+        let drifts = files.drifted(&beta).await.expect("beta checks");
+        assert!(
+            drifts.is_empty(),
+            "an agent was told about its own write: {drifts:?}"
+        );
+    }
+
+    /// A change from outside every agent — the user's editor, a formatter, a
+    /// checkout — is reported unattributed rather than blamed on whoever wrote
+    /// last. Guessing here would be worse than silence: it would send the model
+    /// coordinating with an agent that did nothing.
+    #[tokio::test]
+    async fn a_change_from_outside_any_agent_is_unattributed() {
+        let (files, root) = coordinator("outside");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let alpha = agent("alpha");
+        read(&files, &alpha, &path).await;
+        std::fs::write(&file, "one\nEDITED IN VIM\n").expect("outside write");
+
+        let drifts = files.drifted(&alpha).await.expect("alpha checks");
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert!(
+            drifts[0].writer.is_none(),
+            "an outside change was blamed on an agent: {drifts:?}"
+        );
+    }
+
+    /// An agent that wrote a file once must not be blamed for every later
+    /// change to it. Recording who wrote is not enough — the claim has to be
+    /// checked against what is actually there, or the user's own edit gets
+    /// attributed to whichever agent last touched the path, and the model goes
+    /// off coordinating with an agent that did nothing.
+    #[tokio::test]
+    async fn a_later_outside_edit_is_not_blamed_on_the_last_agent_writer() {
+        let (files, root) = coordinator("stale-attribution");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let alpha = agent("alpha");
+        let beta = agent("beta");
+        read(&files, &alpha, &path).await;
+
+        files
+            .write_file(
+                &beta,
+                path.clone(),
+                "one\nWRITTEN BY BETA\n".to_owned(),
+                WriteCondition::Any,
+            )
+            .await
+            .expect("beta writes");
+        // ...and then somebody outside every agent edits it again.
+        std::fs::write(&file, "one\nTHEN EDITED IN VIM\n").expect("outside write");
+
+        let drifts = files.drifted(&alpha).await.expect("alpha checks");
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert!(
+            drifts[0].writer.is_none(),
+            "a later outside edit was blamed on beta: {drifts:?}"
+        );
+    }
+
+    /// Each agent keeps its own view, so one reading a file must not make the
+    /// other's drift disappear — the shared writer map is shared, the views are
+    /// not.
+    #[tokio::test]
+    async fn one_agents_read_does_not_clear_anothers_drift() {
+        let (files, root) = coordinator("independent");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let alpha = agent("alpha");
+        let beta = agent("beta");
+        read(&files, &alpha, &path).await;
+
+        std::fs::write(&file, "one\nMOVED ON\n").expect("outside write");
+        // Beta reads the *new* content, so beta sees no drift...
+        read(&files, &beta, &path).await;
+        assert!(files.drifted(&beta).await.expect("beta").is_empty());
+
+        // ...but alpha still holds the old view and must still be told.
+        let drifts = files.drifted(&alpha).await.expect("alpha");
+        assert_eq!(
+            drifts.len(),
+            1,
+            "another agent's read swallowed alpha's drift: {drifts:?}"
+        );
+    }
+}

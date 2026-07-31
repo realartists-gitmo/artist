@@ -30,6 +30,16 @@ impl Rung {
     pub fn as_u8(self) -> u8 {
         self as u8
     }
+
+    /// How the rung is named in an error the model reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Programmatic => "programmatic",
+            Self::Engine => "engine",
+            Self::Accessibility => "accessibility",
+            Self::Pixels => "pixel",
+        }
+    }
 }
 
 /// A surface-local, stable identity for one element.
@@ -250,6 +260,14 @@ impl Node {
             hasher.update(flag.as_bytes());
             hasher.update(b",");
         }
+        // Actions are part of what the model is shown and part of what it can
+        // do: an element that stops offering `close` has changed in the only way
+        // that matters, and leaving it out meant no delta line said so.
+        hasher.update(b"\x1f");
+        for action in &self.actions {
+            hasher.update(action.as_bytes());
+            hasher.update(b",");
+        }
         *hasher.finalize().as_bytes()
     }
 }
@@ -294,6 +312,41 @@ impl Frame {
         let offset = ((y * self.width + x) * 4) as usize;
         let pixel = self.rgba.get(offset..offset + 4)?;
         Some((pixel[0], pixel[1], pixel[2], pixel[3]))
+    }
+
+    /// Decode a PNG into RGBA.
+    ///
+    /// Backends differ in what they can hand over — the compositor reads raw
+    /// pixels out of its own buffer, CDP returns an encoded screenshot — and
+    /// the ladder only works if a frame means the same thing at every rung.
+    /// Normalizing here costs one decode and is what lets the set-of-mark
+    /// overlay draw on any surface's picture without knowing where it came from.
+    pub fn from_png(bytes: &[u8]) -> Result<Self, String> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder
+            .read_info()
+            .map_err(|error| format!("read png: {error}"))?;
+        let size = reader
+            .output_buffer_size()
+            .ok_or_else(|| "png is too large to decode".to_owned())?;
+        let mut buffer = vec![0u8; size];
+        let info = reader
+            .next_frame(&mut buffer)
+            .map_err(|error| format!("decode png: {error}"))?;
+        buffer.truncate(info.buffer_size());
+
+        // Screenshots come back as RGB about as often as RGBA, and a viewer
+        // handed three-byte pixels as though they were four sees a sheared
+        // rainbow rather than a picture.
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => buffer,
+            png::ColorType::Rgb => buffer
+                .chunks_exact(3)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+                .collect(),
+            other => return Err(format!("unsupported png colour type {other:?}")),
+        };
+        Ok(Self::new(info.width, info.height, rgba))
     }
 
     /// Encode to PNG for the attachment store.

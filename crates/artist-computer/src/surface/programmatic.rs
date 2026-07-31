@@ -189,10 +189,23 @@ impl Surface for ProgrammaticSurface {
                 "a programmatic surface is driven by naming one of its actions".into(),
             ));
         };
-        let action = self.adapter.action(&node.name).ok_or_else(|| {
+        // `invoke` names the verb outright; everything else takes the node's own
+        // name, which for an adapter *is* the verb.
+        let wanted = match step {
+            Step::Invoke { action, .. } => action.as_str(),
+            _ => node.name.as_str(),
+        };
+        let action = self.adapter.action(wanted).ok_or_else(|| {
+            let declared: Vec<&str> = self
+                .adapter
+                .actions
+                .iter()
+                .map(|action| action.name.as_str())
+                .collect();
             StepError::Backend(format!(
-                "{:?} is not an action of the {} adapter",
-                node.name, self.adapter.name
+                "{wanted:?} is not an action of the {} adapter — it declares {}",
+                self.adapter.name,
+                declared.join(", ")
             ))
         })?;
 
@@ -279,6 +292,7 @@ cli = { argv = ["false"] }
                     label: Some("greet".into()),
                 },
                 text: "there".into(),
+                clear: true,
             }],
             settle: Settle::default(),
             expect: crate::program::Expect::Appears("greet".into()),

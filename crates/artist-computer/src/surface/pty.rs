@@ -28,6 +28,69 @@ use crate::surface::{Surface, SettleWatch};
 const QUIET_MS: u64 = 250;
 /// Poll granularity while waiting to settle.
 const POLL_MS: u64 = 25;
+/// How much primary-screen scrollback to keep.
+///
+/// A shell session is unbounded by nature — `cargo build` alone emits megabytes
+/// — and the observation only ever renders what is new, so holding the whole
+/// history costs memory to no purpose. Generous enough that nothing a model
+/// would actually re-read falls off.
+const TEXT_LIMIT: usize = 256 * 1024;
+
+/// Drop terminal escape sequences and control bytes, keeping the text.
+///
+/// The model reads this as prose. Raw escapes put `\x1b[0;32m` in the middle of
+/// a sentence, and a progress bar's carriage returns turn one line into
+/// thousands — both cost context and neither carries meaning the model can use.
+fn strip_control(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        match character {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters and intermediates, then a final byte in
+                // `@`..`~`. This is the form colour, cursor movement and screen
+                // clearing all take.
+                Some('[') => {
+                    for parameter in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&parameter) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: runs until BEL or ST. Window titles live here.
+                Some(']') => {
+                    while let Some(parameter) = chars.next() {
+                        if parameter == '\u{7}' {
+                            break;
+                        }
+                        if parameter == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // Any other two-character escape.
+                Some(_) | None => {}
+            },
+            // A carriage return without a newline redraws the line in place —
+            // progress bars, spinners. Keeping the text of every redraw would
+            // be thousands of near-identical lines, so only the last survives.
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    continue;
+                }
+                let keep = out.rfind('\n').map(|index| index + 1).unwrap_or(0);
+                out.truncate(keep);
+            }
+            '\n' | '\t' => out.push(character),
+            other if other.is_control() => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
 
 /// The screen state shared between the reader thread and the surface.
 pub struct Screen {
@@ -54,11 +117,38 @@ impl Screen {
 
     /// Feed terminal output in.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let was_alternate = self.parser.screen().alternate_screen();
         self.parser.process(bytes);
         self.revision += 1;
         self.last_change = Instant::now();
-        if !self.parser.screen().alternate_screen() {
-            self.text.push_str(&String::from_utf8_lossy(bytes));
+
+        // Keyed on the mode *before* processing: the escape that leaves the
+        // alternate screen is in the same chunk as the first line of shell
+        // output after it, and reading the mode afterwards attributes that whole
+        // chunk to the wrong screen.
+        if was_alternate && !self.parser.screen().alternate_screen() {
+            return;
+        }
+        if self.parser.screen().alternate_screen() {
+            return;
+        }
+
+        // Rendered, not raw. Appending the byte stream put `\x1b[0;32m` into the
+        // node the model reads — a coloured prompt became escape codes it had to
+        // parse itself, and a progress bar became kilobytes of carriage returns.
+        self.text.push_str(&strip_control(bytes));
+
+        // Bounded. This grew forever, so a long-running command was a memory
+        // leak that also made every observation slower. Trimming from the front
+        // is right for a scroll-back: the newest output is the interesting part.
+        if self.text.len() > TEXT_LIMIT {
+            let overflow = self.text.len() - TEXT_LIMIT;
+            // On a character boundary, or the drain panics on UTF-8.
+            let cut = (overflow..self.text.len())
+                .find(|index| self.text.is_char_boundary(*index))
+                .unwrap_or(self.text.len());
+            self.text.drain(..cut);
+            self.cursor = self.cursor.saturating_sub(cut);
         }
     }
 
@@ -67,19 +157,30 @@ impl Screen {
     }
 
     /// The nodes this screen currently presents.
-    fn nodes(&mut self) -> Vec<Node> {
+    ///
+    /// `from_start` re-reads the whole retained scrollback instead of only what
+    /// is new. The incremental read is what makes a shell cheap to watch, but it
+    /// is destructive — the second read returns nothing — so without a way back
+    /// to the beginning an elided observation could never be recovered, however
+    /// firmly the stub told the model to try.
+    fn nodes(&mut self, from_start: bool) -> Vec<Node> {
         if self.alternate() {
             return self.rows();
         }
-        // Primary screen: hand over what has arrived since the last look and
-        // advance. Rows are meaningless here — the same text is at a different
-        // row a moment later — so there is exactly one node and no row anchors.
-        let fresh = self.text[self.cursor.min(self.text.len())..].to_owned();
+        // Primary screen: rows are meaningless here — the same text is at a
+        // different row a moment later — so there is exactly one node and no row
+        // anchors.
+        let from = if from_start {
+            0
+        } else {
+            self.cursor.min(self.text.len())
+        };
+        let text = self.text[from..].to_owned();
         self.cursor = self.text.len();
-        if fresh.trim().is_empty() {
+        if text.trim().is_empty() {
             return Vec::new();
         }
-        vec![Node::new("pty:output", Role::Text, fresh.trim_end())]
+        vec![Node::new("pty:output", Role::Text, text.trim_end())]
     }
 
     fn rows(&self) -> Vec<Node> {
@@ -290,7 +391,11 @@ impl Surface for PtySurface {
     }
 
     async fn snapshot(&self) -> Result<Snapshot, StepError> {
-        Ok(Snapshot::new(self.screen.lock().unwrap().nodes()))
+        Ok(Snapshot::new(self.screen.lock().unwrap().nodes(false)))
+    }
+
+    async fn snapshot_full(&self) -> Result<Snapshot, StepError> {
+        Ok(Snapshot::new(self.screen.lock().unwrap().nodes(true)))
     }
 
     async fn watch(&self, settle: &Settle) -> Result<SettleWatch, StepError> {
@@ -338,7 +443,7 @@ impl Surface for PtySurface {
 
     async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
         match step {
-            Step::Key(key) => self.send(&key_bytes(key)?),
+            Step::Key(press) => self.send(&key_bytes(press.chord())?),
             Step::Type { text, .. } => self.send(text.as_bytes()),
             Step::Click(target) => Err(StepError::Unsupported {
                 anchor: target.anchor.clone(),
@@ -348,12 +453,24 @@ impl Surface for PtySurface {
             }),
             Step::Scroll { amount, .. } => {
                 let key = if *amount >= 0 { "PageDown" } else { "PageUp" };
-                let repeats = amount.unsigned_abs().max(1).min(20);
+                let repeats = amount.unsigned_abs().clamp(1, 20);
                 let bytes = key_bytes(key)?;
                 for _ in 0..repeats {
                     self.send(&bytes)?;
                 }
                 Ok(())
+            }
+            // A terminal has no browser history and no per-element verbs. These
+            // are routing mistakes rather than gaps, so they say what a terminal
+            // does understand instead of failing bare.
+            other @ (Step::Navigate { .. }
+            | Step::Back { .. }
+            | Step::Forward { .. }
+            | Step::Invoke { .. }) => {
+                Err(StepError::Backend(format!(
+                    "a terminal has no {:?} — drive it with key, type and scroll",
+                    other.action()
+                )))
             }
         }
     }
@@ -522,5 +639,64 @@ mod tests {
         };
         let outcome = surface.watch(&settle).await.unwrap().wait().await;
         assert!(matches!(outcome, SettleOutcome::TimedOut { .. }));
+    }
+
+    #[tokio::test]
+    async fn shell_output_reaches_the_model_as_text_not_escape_codes() {
+        let surface = PtySurface::detached("pty:1", 6, 40);
+        // A coloured prompt and a spinner, as any real shell emits.
+        surface.feed(b"\x1b[0;32muser@host\x1b[0m:~$ ls\r\n");
+        surface.feed(b"\x1b]0;window title\x07");
+        surface.feed(b"downloading  10%\rdownloading  60%\rdownloading 100%\r\n");
+
+        let snapshot = surface.snapshot().await.unwrap();
+        let text = snapshot
+            .nodes
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<String>();
+
+        assert!(text.contains("user@host:~$ ls"), "{text:?}");
+        assert!(!text.contains('\u{1b}'), "raw escapes reached the model: {text:?}");
+        assert!(!text.contains("window title"), "OSC payload leaked: {text:?}");
+        // Only the final state of an in-place redraw survives.
+        assert!(text.contains("downloading 100%"), "{text:?}");
+        assert!(!text.contains("downloading  10%"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn the_scrollback_is_bounded() {
+        let surface = PtySurface::detached("pty:1", 6, 40);
+        // Well past the cap, as `cargo build` output would be.
+        for _ in 0..600 {
+            surface.feed(&vec![b'x'; 1024]);
+            surface.feed(b"\n");
+        }
+        let held = surface.screen.lock().unwrap().text.len();
+        assert!(
+            held <= TEXT_LIMIT + 1024,
+            "the buffer grew without bound: {held} bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_observation_can_re_read_what_an_incremental_one_consumed() {
+        // The incremental read is destructive, so an elided observation could
+        // never be recovered — while the stub it left behind told the model to
+        // go and read it again.
+        let surface = PtySurface::detached("pty:1", 6, 40);
+        surface.feed(b"the answer is 42\n");
+
+        let first = surface.snapshot().await.unwrap();
+        assert!(first.nodes.iter().any(|node| node.name.contains("42")));
+
+        let again = surface.snapshot().await.unwrap();
+        assert!(again.nodes.is_empty(), "nothing new since the last look");
+
+        let full = surface.snapshot_full().await.unwrap();
+        assert!(
+            full.nodes.iter().any(|node| node.name.contains("42")),
+            "full=true must reach the retained scrollback"
+        );
     }
 }

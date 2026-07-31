@@ -19,6 +19,14 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// A handle for asking what changed under this session.
+    ///
+    /// Handed out rather than exposing `files`/`actor`, so callers get the one
+    /// question they need answered instead of the machinery behind it.
+    pub fn drift_watch(&self) -> crate::drift::DriftWatch {
+        crate::drift::DriftWatch::new(self.files.clone(), self.actor.clone())
+    }
+
     pub fn open(project_root: impl AsRef<Path>, state_dir: impl AsRef<Path>) -> Result<Self> {
         let root = std::fs::canonicalize(project_root).context("canonicalize project root")?;
         if !root.is_dir() {
@@ -26,6 +34,11 @@ impl Workspace {
         }
         let state = state_dir.as_ref();
         std::fs::create_dir_all(state)?;
+        // Keep the dep/call graph out of the user's repository. Upstream writes
+        // it to `<root>/.ast-bro/`, which would put a binary cache inside the
+        // tree the agent is editing; artist already has a per-project state
+        // directory for derived data, so point it there.
+        artist_ast::graph_cache::cache::set_cache_base(Some(state.join("astgraph")));
         let files = FileCoordinator::open(
             FileToolConfig {
                 workspace_root: Some(root.clone()),
@@ -109,6 +122,13 @@ impl Workspace {
         {
             index.handle_create_or_modify(path);
         }
+        // Drop the memoised dep/call graph for this root. `get_or_init` already
+        // re-validates against the working tree on every call, so this is not
+        // what makes the graph correct — it makes the next query skip a
+        // stat-walk it would otherwise perform only to reach the same
+        // conclusion, and it closes the window where a write lands inside the
+        // same mtime tick the cached records were stamped with.
+        artist_ast::graph_cache::shared::forget(self.root());
     }
 
     pub fn display(&self, path: &Path) -> String {

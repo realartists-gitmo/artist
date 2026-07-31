@@ -25,7 +25,7 @@ const PAGE: &str = r#"<!doctype html>
 fn chromium() -> Option<String> {
     ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]
         .into_iter()
-        .find_map(|name| which(name))
+        .find_map(which)
 }
 
 fn which(name: &str) -> Option<String> {
@@ -422,5 +422,196 @@ async fn a_mislabelled_anchor_never_reaches_the_browser() {
             .iter()
             .any(|node| node.name.contains("submitted")),
         "a mislabelled click must never reach the browser"
+    );
+}
+
+/// A tiny HTTP server that redirects `hops` times before answering.
+///
+/// Needed because a `file://` URL cannot 302, and the redirect path is exactly
+/// where the in-flight bookkeeping used to drift: Chromium re-announces a
+/// request for each hop, and the announcing hop never gets a completion.
+async fn redirect_server(hops: usize) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let handle = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            // One task per connection. Chromium preconnects — it opens sockets
+            // speculatively and sends nothing on them — so a server that reads
+            // each connection to completion before accepting the next one waits
+            // forever on a socket that will never speak, and never sees the real
+            // request at all.
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 2048];
+                let Ok(read) = socket.read(&mut buffer).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                let request = String::from_utf8_lossy(&buffer[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                let step: usize = path.trim_start_matches("/hop").parse().unwrap_or(0);
+
+                let response = if step < hops {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: /hop{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        step + 1
+                    )
+                } else {
+                    let body = "<!doctype html><html><body><h1>Arrived</h1></body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    (format!("http://127.0.0.1:{port}/hop0"), handle)
+}
+
+/// Whether this machine's Chromium can load an `http://` URL at all.
+///
+/// Some sandboxes give the browser a network stack that never completes a
+/// request — `file://` works, loopback HTTP hangs indefinitely with the request
+/// never even reaching the server. A test that cannot distinguish that from a
+/// real defect is worse than no test, so the redirect case checks first and says
+/// which it is.
+async fn can_load_http(surface: &CdpPage, url: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), surface.page().goto(url.to_owned()))
+        .await
+        .is_ok()
+}
+
+/// The in-flight set must drain to zero across a redirect chain.
+///
+/// With the old counter this was the failure that made every later `quiet`
+/// settle burn its full timeout: three unmatched increments left the page
+/// permanently above the idle threshold, for the rest of the session.
+///
+/// The bookkeeping itself is pinned hermetically in `cdp::inflight_tests`; this
+/// is the end-to-end confirmation that Chromium emits what those tests assume.
+#[tokio::test]
+async fn a_redirect_chain_leaves_no_requests_outstanding() {
+    let (url, server) = redirect_server(3).await;
+    let Some((_guard, _browser, surface)) = fixture_page().await else {
+        eprintln!("skipping: no chromium available");
+        server.abort();
+        return;
+    };
+    if !can_load_http(&surface, &url).await {
+        eprintln!("skipping: this chromium cannot load http:// URLs (file:// works)");
+        server.abort();
+        return;
+    }
+
+    let program = Program {
+        steps: vec![Step::Navigate { url: url.clone() }],
+        settle: Settle {
+            until: SettleKind::NetworkIdle,
+            timeout_ms: 15_000,
+        },
+        expect: artist_computer::program::Expect::Appears("Arrived".into()),
+    };
+    let mut book = AnchorBook::new();
+    let report = bounded(
+        "navigating through redirects",
+        run_program(&surface, &mut book, &program),
+    )
+    .await
+    .expect("program should run");
+    assert!(report.error.is_none(), "{:?}", report.error);
+
+    // Give any straggler completion a moment to arrive, then assert the set is
+    // genuinely empty rather than merely below the tolerance.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if surface.inflight() == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} requests still counted as in flight after a redirect chain",
+            surface.inflight()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // And the navigation actually landed.
+    let snapshot = surface.snapshot().await.expect("snapshot");
+    assert!(
+        snapshot.nodes.iter().any(|node| node.name.contains("Arrived")),
+        "the redirect chain never reached its destination"
+    );
+    server.abort();
+}
+
+/// `type` replaces a pre-filled field rather than appending to it.
+#[tokio::test]
+async fn typing_into_a_filled_field_replaces_its_contents() {
+    let Some((_guard, _browser, surface)) = fixture_page().await else {
+        eprintln!("skipping: no chromium available");
+        return;
+    };
+
+    // Pre-fill the input, as a page restoring a draft would.
+    surface
+        .page()
+        .evaluate("document.getElementById('email').value = 'old@example.com'")
+        .await
+        .expect("pre-fill");
+
+    let mut book = AnchorBook::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let anchor = loop {
+        let snapshot = surface.snapshot().await.expect("snapshot");
+        let observed = book.observe(&snapshot, true);
+        if let Some(entry) = observed
+            .entries
+            .iter()
+            .find(|entry| entry.node.name.contains("Email"))
+        {
+            break entry.anchor.clone();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no email field");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+
+    let program = Program {
+        steps: vec![Step::Type {
+            target: Target {
+                anchor,
+                label: Some("Email".into()),
+            },
+            text: "new@example.com".into(),
+            clear: true,
+        }],
+        settle: Settle {
+            until: SettleKind::Quiet,
+            timeout_ms: 2_000,
+        },
+        expect: artist_computer::program::Expect::Appears("Email".into()),
+    };
+    let report = bounded("typing", run_program(&surface, &mut book, &program))
+        .await
+        .expect("program should run");
+    assert!(report.error.is_none(), "{:?}", report.error);
+
+    let value = surface
+        .page()
+        .evaluate("document.getElementById('email').value")
+        .await
+        .expect("read back")
+        .into_value::<String>()
+        .expect("a string");
+    assert_eq!(
+        value, "new@example.com",
+        "typing appended instead of replacing"
     );
 }

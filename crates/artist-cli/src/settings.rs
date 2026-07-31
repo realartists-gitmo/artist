@@ -599,22 +599,14 @@ mod tests {
     #[test]
     fn a_screen_size_parses_and_a_typo_falls_back() {
         let global = from_str("[computer]\nscreen = \"1280x800\"\n");
-        let effective = EffectiveSettings::resolve(
-            &global,
-            &Settings::default(),
-            &Overrides::default(),
-            &[],
-        );
+        let effective =
+            EffectiveSettings::resolve(&global, &Settings::default(), &Overrides::default(), &[]);
         assert_eq!(effective.computer.screen, (1280, 800));
 
         // A typo in an optional display size must not stop the agent starting.
         let broken = from_str("[computer]\nscreen = \"enormous\"\n");
-        let effective = EffectiveSettings::resolve(
-            &broken,
-            &Settings::default(),
-            &Overrides::default(),
-            &[],
-        );
+        let effective =
+            EffectiveSettings::resolve(&broken, &Settings::default(), &Overrides::default(), &[]);
         assert_eq!(effective.computer.screen, (1920, 1080));
     }
 

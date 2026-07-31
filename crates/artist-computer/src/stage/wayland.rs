@@ -189,8 +189,17 @@ impl CompositorHandler for StageState {
             return &xwayland.compositor_state;
         }
         // A third party would be a smithay-side change rather than a client
-        // doing something odd, so this is genuinely unreachable in practice.
-        panic!("a wayland client arrived with unrecognized client data")
+        // doing something odd, so this should be unreachable — but the signature
+        // demands a reference and the compositor thread is the *whole* display.
+        // Panicking here has already cost X11 support once, silently: the thread
+        // died, every later command failed, and the failure surfaced as
+        // "XWayland is not available". A leaked default costs one allocation per
+        // strange client and keeps the display alive.
+        eprintln!(
+            "artist: a wayland client arrived with unrecognized client data; \
+             giving it fresh compositor state rather than taking the stage down"
+        );
+        Box::leak(Box::new(CompositorClientState::default()))
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
@@ -434,29 +443,50 @@ pub struct StageWayland {
 }
 
 impl Drop for StageWayland {
+    /// Tear the stage down — off the async runtime, if we are on one.
+    ///
+    /// Teardown genuinely blocks: reaping a killed browser and joining the
+    /// compositor thread both wait on another process or thread. That is fine
+    /// on an ordinary thread and not fine on a tokio worker, where it stalls
+    /// every other task on that worker. So the work is moved onto a blocking
+    /// thread when there is a runtime to move it to, and done inline when there
+    /// is not — a `Drop` that silently skipped the kill because no runtime was
+    /// handy would leak a compositor and a browser.
     fn drop(&mut self) {
         let _ = self.commands.send(StageCommand::Shutdown);
         // `unwrap_or_else(into_inner)` rather than `unwrap`: a panic elsewhere
         // while holding either lock would poison it and turn teardown into a
         // second panic, losing the cleanup entirely.
-        let mut children = self
-            .children
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for child in children.iter_mut() {
-            kill_process_group(child.id());
-            let _ = child.kill();
-            // Reap, or the child lingers as a zombie holding its profile dir.
-            let _ = child.wait();
-        }
-        drop(children);
-        if let Some(thread) = self
+        let children = std::mem::take(
+            &mut *self
+                .children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let thread = self
             .thread
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            let _ = thread.join();
+            .take();
+
+        let reap = move || {
+            let mut children = children;
+            for child in children.iter_mut() {
+                kill_process_group(child.id());
+                let _ = child.kill();
+                // Reap, or the child lingers as a zombie holding its profile dir.
+                let _ = child.wait();
+            }
+            if let Some(thread) = thread {
+                let _ = thread.join();
+            }
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(reap);
+            }
+            Err(_) => reap(),
         }
     }
 }
@@ -597,12 +627,26 @@ impl Stage for StageWayland {
         // been ready when the stage came up. An X11-only app launched before
         // then would otherwise silently inherit the *user's* DISPLAY — landing
         // its window on their screen, which is the one thing a stage prevents.
-        match self.x11_display().await {
-            Some(number) => {
+        //
+        // The two failures are told apart deliberately. `Err` means the
+        // compositor thread is gone; `Ok(None)` means it is alive and XWayland
+        // simply is not up. Collapsing them — as `.ok().flatten()` did — turned
+        // a dead compositor into "no X11" and launched the application against a
+        // socket nobody is listening on, so it hung or died with no explanation
+        // that pointed anywhere near the cause.
+        match self.ask(StageCommand::X11Display).await {
+            Ok(Some(number)) => {
                 process.env("DISPLAY", format!(":{number}"));
             }
-            None => {
+            Ok(None) => {
                 process.env_remove("DISPLAY");
+            }
+            Err(error) => {
+                return Err(StepError::Backend(format!(
+                    "the stage's compositor is not running, so {} cannot be launched into it: \
+                     {error}",
+                    command.program
+                )));
             }
         }
         let child = process
@@ -1264,9 +1308,15 @@ fn draw(
         .map_err(|error| format!("clear: {error}"))?;
     draw_render_elements(&mut frame, 1.0, &elements, &[full])
         .map_err(|error| format!("draw: {error}"))?;
+    // Wait on the fence rather than dropping it. `capture` reads this very
+    // buffer back with `copy_framebuffer`, and reading before the GPU has
+    // finished writing returns a half-drawn frame — a screenshot that is
+    // plausible, wrong, and reported as a success.
     frame
         .finish()
-        .map_err(|error| format!("finish: {error}"))?;
+        .map_err(|error| format!("finish: {error}"))?
+        .wait()
+        .map_err(|error| format!("wait for the frame to finish: {error}"))?;
     drop(framebuffer);
     Ok(())
 }

@@ -62,12 +62,17 @@ fn render_full(entries: &[Entry]) -> String {
             out.push('\n');
             continue;
         }
+        // A node with neither a name nor a value shows nothing and is dropped
+        // whether or not there is budget left. Counting it toward the overflow
+        // inflated "N more text nodes" with nodes that would never have been
+        // rendered, so the model was told to re-observe for content that does
+        // not exist.
+        if entry.node.name.trim().is_empty() && entry.node.value.is_none() {
+            continue;
+        }
         // Static text is the compressible part: it is usually most of a screen
         // and almost never what the next action targets.
         if text_shown < TEXT_BUDGET {
-            if entry.node.name.trim().is_empty() && entry.node.value.is_none() {
-                continue;
-            }
             out.push_str(&line(entry, None));
             out.push('\n');
             text_shown += 1;
@@ -196,7 +201,7 @@ fn truncate(value: &str, cap: usize) -> String {
 /// The stub a decayed observation leaves behind.
 pub fn elided(surface: &str, epoch: u64, image: Option<&str>) -> String {
     format!(
-        "{}\n[elided to save context — call computer with mode=\"observe\" on {surface} to refresh]",
+        "{}\n[elided to save context — call computer with mode=\"observe\", full=true on {surface} to see it again]",
         sentinel(surface, epoch, true, image)
     )
 }

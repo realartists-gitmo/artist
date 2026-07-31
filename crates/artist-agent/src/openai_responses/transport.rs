@@ -1311,9 +1311,15 @@ mod transport_tests {
         let calls = expanded_parallel_call(&wrapper("call_a")).unwrap();
 
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0]["name"], "read", "the functions. prefix is stripped");
+        assert_eq!(
+            calls[0]["name"], "read",
+            "the functions. prefix is stripped"
+        );
         assert_eq!(calls[1]["name"], "grep");
-        assert_eq!(calls[0]["call_id"], "call_a.0", "ids derive from the wrapper");
+        assert_eq!(
+            calls[0]["call_id"], "call_a.0",
+            "ids derive from the wrapper"
+        );
         assert_eq!(calls[1]["call_id"], "call_a.1");
         // `arguments` is a JSON string on the wire, not an object.
         assert_eq!(
@@ -1324,7 +1330,8 @@ mod transport_tests {
 
     #[test]
     fn an_ordinary_call_is_left_alone() {
-        let call = json!({"type":"function_call","id":"fc1","call_id":"c","name":"read","arguments":"{}"});
+        let call =
+            json!({"type":"function_call","id":"fc1","call_id":"c","name":"read","arguments":"{}"});
         assert!(expanded_parallel_call(&call).is_none());
         assert_eq!(expand_parallel_calls(vec![call.clone()]), vec![call]);
     }
@@ -1354,11 +1361,7 @@ mod transport_tests {
             })
             .collect();
 
-        let wire = normalized_terminal_wire(
-            &json!({"output": [wrapper("call_a")]}),
-            "",
-            &[],
-        );
+        let wire = normalized_terminal_wire(&json!({"output": [wrapper("call_a")]}), "", &[]);
         let canonical_ids: Vec<String> = wire["output"]
             .as_array()
             .unwrap()
@@ -1376,11 +1379,13 @@ mod transport_tests {
         let calls = expanded_parallel_call(&wrapper("call_a")).unwrap();
         let answers: Vec<Value> = calls
             .iter()
-            .map(|call| json!({
-                "type": "function_call_output",
-                "call_id": call["call_id"],
-                "output": "ok"
-            }))
+            .map(|call| {
+                json!({
+                    "type": "function_call_output",
+                    "call_id": call["call_id"],
+                    "output": "ok"
+                })
+            })
             .collect();
         let mut saved = calls.clone();
         saved.extend(answers);

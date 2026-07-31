@@ -17,6 +17,7 @@
 //! ```
 
 pub mod admission;
+pub mod candidates;
 pub mod chunk;
 pub mod embed;
 pub mod graph_store;

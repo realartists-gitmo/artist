@@ -45,14 +45,36 @@ ignoring it is genuinely correct here.",
 ///
 /// The patterns anchor on the verb rather than requiring a closed quote,
 /// because `on_tool_call_delta` matches mid-JSON and may only have seen
-/// `"label":"Delete acc` when it fires.
+/// `"label":"Delete acc` when it fires. Four classes, and each earns its place:
+///
+/// 1. **English destructive verbs**, unbounded in where they may appear. The
+///    earlier `{0,60}` prefix bound meant a long button name pushed its own verb
+///    out of range — a silent hole that widened with the label.
+/// 2. **The same verbs in other languages.** A stage runs whatever the user
+///    runs; "Supprimer" is not less irreversible for being French.
+/// 3. **Bare confirmations** — `Yes`, `OK`, `Continue`, `Proceed` — anchored to
+///    the *whole* label, because those words are only alarming when they are the
+///    entire button. This is the class that catches the second half of a
+///    two-step destructive flow, where the first click was innocuous and the
+///    dialog it opened is where the damage happens.
+/// 4. **Delete keys**, including modified forms.
+///
+/// What this still cannot see is a key press aimed at nothing named: that is why
+/// `Step::Key` takes an optional `label` naming what the model believes holds
+/// focus, so `{"key":{"chord":"Enter","label":"Delete account"}}` matches class
+/// 1 exactly as the click would. A bare `{"key":"Enter"}` on a focused
+/// destructive default button remains outside every pattern here — no regex over
+/// the arguments can recover a name the arguments do not contain — and the
+/// harness-side focus cross-check is what covers it.
 const COMPUTER_DESTRUCTIVE_ACTIONS: (&str, &str) = (
     r#"name: computer-destructive-actions
 description: Confirm with the user before an irreversible action in a GUI
 targets: [tool-args]
 patterns:
-  - '"label"\s*:\s*"[^"]{0,60}?(?i)\b(delete|remove|discard|erase|send|pay|purchase|buy|confirm|transfer|deactivate|deregister|unsubscribe|publish|revoke|reset|format|wipe|overwrite)\b'
-  - '"key"\s*:\s*"(?i)(ctrl\+|shift\+)*delete"'
+  - '"label"\s*:\s*"[^"]*?(?i)\b(delete|delet|remove|discard|erase|trash|bin|send|pay|purchase|buy|order|checkout|confirm|transfer|deactivate|deregister|unsubscribe|publish|revoke|reset|format|wipe|overwrite|shut\s*down|restart|log\s*out|sign\s*out)'
+  - '"label"\s*:\s*"[^"]*?(?i)(supprimer|effacer|l(ö|oe)schen|entfernen|eliminar|borrar|excluir|apagar|elimina|verwijderen|slett|ta\s*bort|poista|usu(ń|n)|udal|удалить|отправить|削除|送信|삭제|删除|刪除|发送|移除)'
+  - '"label"\s*:\s*"(?i)(yes|ok|okay|continue|proceed|accept|agree|apply|submit|confirm)\s*("|$)'
+  - '"key"\s*:\s*"(?i)(ctrl\+|shift\+|alt\+)*delete"'
 tools: [computer]
 fire: per-turn"#,
     "That step looks irreversible. Confirm with the user before doing anything \
@@ -366,6 +388,47 @@ mod tests {
         // The anchor alone carries no meaning and must not fire anything.
         assert!(!matches(r#"{"click":{"anchor":"kv7"}}"#));
         assert!(!matches(r#"{"click":{"anchor":"kv7","label":"Compose"}}"#));
+    }
+
+    #[test]
+    fn the_destructive_action_builtin_covers_what_it_claims_to() {
+        let set = crate::matcher::RuleSet::compile(vec![builtin(
+            "computer-destructive-actions",
+        )]);
+        let matches = |text: &str| {
+            !set.scan_all(crate::types::MatchTarget::ToolArgs, text, Some("computer"))
+                .is_empty()
+        };
+        let label = |name: &str| format!(r#"{{"click":{{"anchor":"kv7","label":"{name}"}}}}"#);
+
+        // A bare confirmation is the second half of every two-step destructive
+        // flow: the first click opens a dialog, and this is the one that does it.
+        for name in ["Yes", "OK", "Continue", "Proceed", "Confirm", "Apply"] {
+            assert!(matches(&label(name)), "{name} must be caught");
+        }
+        // Non-English. A stage runs whatever the user runs.
+        for name in ["Supprimer", "Löschen", "删除", "Eliminar", "Удалить"] {
+            assert!(matches(&label(name)), "{name} must be caught");
+        }
+        // The old `{0,60}` prefix bound let a long label push its own verb out
+        // of range, so the guardrail weakened as the button got wordier.
+        assert!(matches(&label(
+            "Are you absolutely sure you want to permanently delete this workspace"
+        )));
+        for name in ["Move to Trash", "Empty Bin", "Place order", "Submit order"] {
+            assert!(matches(&label(name)), "{name} must be caught");
+        }
+        // A key press that names what it will activate is caught exactly as the
+        // click would be — the whole reason `key` carries an optional label.
+        assert!(matches(
+            r#"{"key":{"chord":"Enter","label":"Delete account"}}"#
+        ));
+
+        // And the ordinary things stay quiet, or the rule is noise and gets
+        // ignored where it matters.
+        for name in ["Compose", "Reply", "Settings", "Back", "Search", "Yesterday"] {
+            assert!(!matches(&label(name)), "{name} must not fire");
+        }
     }
 
     #[test]

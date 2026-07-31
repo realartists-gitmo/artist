@@ -35,14 +35,19 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct StageBus {
     session_address: String,
     a11y_address: Option<String>,
-    children: Vec<std::process::Child>,
+    children: Vec<tokio::process::Child>,
 }
 
 impl Drop for StageBus {
+    /// Kill the daemons without ever blocking the thread that drops us.
+    ///
+    /// `start_kill` signals and returns; `kill_on_drop` hands the corpse to
+    /// tokio's reaper. The obvious version — `kill()` then `wait()` — blocks a
+    /// runtime worker on a process that has just been signalled, which is a
+    /// small stall in the good case and an unbounded one in the bad.
     fn drop(&mut self) {
         for child in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = child.start_kill();
         }
     }
 }
@@ -54,7 +59,7 @@ impl StageBus {
     /// rung, and reporting "no accessibility" is far better than refusing to
     /// start a display at all.
     pub async fn start(runtime_dir: &std::path::Path) -> Result<Self, StepError> {
-        let mut bus = Self::start_session_bus(runtime_dir)?;
+        let mut bus = Self::start_session_bus(runtime_dir).await?;
         if let Err(error) = bus.start_accessibility().await {
             // Deliberately not fatal, and deliberately not silent.
             eprintln!("artist: stage accessibility unavailable: {error}");
@@ -62,9 +67,15 @@ impl StageBus {
         Ok(bus)
     }
 
-    fn start_session_bus(runtime_dir: &std::path::Path) -> Result<Self, StepError> {
+    /// Start the private session bus and read the address it prints.
+    ///
+    /// The read is `tokio`'s and is bounded. A plain `read_line` here blocks a
+    /// runtime worker with no timeout, so a `dbus-daemon` that starts but never
+    /// prints — a stale socket it will not overwrite, a broken install — hung
+    /// the whole agent rather than reporting a failure it could recover from.
+    async fn start_session_bus(runtime_dir: &std::path::Path) -> Result<Self, StepError> {
         let socket = runtime_dir.join("bus");
-        let mut child = std::process::Command::new("dbus-daemon")
+        let mut child = tokio::process::Command::new("dbus-daemon")
             .args([
                 "--session",
                 "--print-address",
@@ -74,6 +85,7 @@ impl StageBus {
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
                 StepError::Backend(format!(
@@ -81,21 +93,36 @@ impl StageBus {
                 ))
             })?;
 
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| StepError::Backend("dbus-daemon gave no stdout".into()))?;
+
         let address = {
-            use std::io::{BufRead, BufReader};
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| StepError::Backend("dbus-daemon gave no stdout".into()))?;
+            use tokio::io::{AsyncBufReadExt, BufReader};
             let mut line = String::new();
-            BufReader::new(stdout)
-                .read_line(&mut line)
-                .map_err(|error| StepError::Backend(format!("read bus address: {error}")))?;
-            line.trim().to_owned()
+            match tokio::time::timeout(
+                READY_TIMEOUT,
+                BufReader::new(stdout).read_line(&mut line),
+            )
+            .await
+            {
+                Ok(Ok(_)) => line.trim().to_owned(),
+                Ok(Err(error)) => {
+                    let _ = child.start_kill();
+                    return Err(StepError::Backend(format!("read bus address: {error}")));
+                }
+                Err(_) => {
+                    let _ = child.start_kill();
+                    return Err(StepError::Backend(format!(
+                        "dbus-daemon did not print its address within {READY_TIMEOUT:?}"
+                    )));
+                }
+            }
         };
 
         if address.is_empty() {
-            let _ = child.kill();
+            let _ = child.start_kill();
             return Err(StepError::Backend(
                 "dbus-daemon printed no address".to_owned(),
             ));
@@ -115,11 +142,12 @@ impl StageBus {
             .ok_or_else(|| StepError::Backend("at-spi-bus-launcher not found".into()))?;
 
         self.children.push(
-            std::process::Command::new(launcher)
+            tokio::process::Command::new(launcher)
                 .arg("--launch-immediately")
                 .env("DBUS_SESSION_BUS_ADDRESS", &self.session_address)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .kill_on_drop(true)
                 .spawn()
                 .map_err(|error| StepError::Backend(format!("spawn {launcher}: {error}")))?,
         );
@@ -132,11 +160,12 @@ impl StageBus {
             .find(|path| std::path::Path::new(path).exists())
             .ok_or_else(|| StepError::Backend("at-spi2-registryd not found".into()))?;
         self.children.push(
-            std::process::Command::new(registryd)
+            tokio::process::Command::new(registryd)
                 .arg("--use-gnome-session=no")
                 .env("DBUS_SESSION_BUS_ADDRESS", &self.session_address)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .kill_on_drop(true)
                 .spawn()
                 .map_err(|error| StepError::Backend(format!("spawn {registryd}: {error}")))?,
         );
@@ -236,7 +265,7 @@ mod tests {
         }
         let user_bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok();
         let dir = tempfile::tempdir().unwrap();
-        let bus = StageBus::start_session_bus(dir.path()).unwrap();
+        let bus = StageBus::start_session_bus(dir.path()).await.unwrap();
 
         assert!(bus.session_address().starts_with("unix:"));
         if let Some(user_bus) = &user_bus {
@@ -260,8 +289,8 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let pid = {
-            let bus = StageBus::start_session_bus(dir.path()).unwrap();
-            bus.children[0].id()
+            let bus = StageBus::start_session_bus(dir.path()).await.unwrap();
+            bus.children[0].id().expect("the daemon is still running")
         };
         // Give the kill a moment to land before checking.
         tokio::time::sleep(Duration::from_millis(200)).await;

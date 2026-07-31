@@ -2,6 +2,23 @@ use hashline_tools::AnchoredLine;
 
 pub const OUTPUT_CAP: usize = 50 * 1024;
 
+/// How a modified line is rendered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffStyle {
+    /// Collapse a removal/addition pair onto the post-edit anchor as `~new`.
+    ///
+    /// Right for an edit the model just made: it supplied the new text, so
+    /// echoing what it replaced is noise.
+    Collapsed,
+    /// Keep both sides, `-old` then `+new`.
+    ///
+    /// Right for a change the model did *not* make. The removal row carries the
+    /// pre-edit anchor — which is the handle the model is still holding — so
+    /// this is what connects "the anchor you have" to "what happened to it".
+    /// Collapsing here would show only an anchor the model has never seen.
+    Explicit,
+}
+
 /// Render a unified diff with a mnemonic-anchor gutter instead of line numbers —
 /// the same anchors the model edits by, so a reviewer sees a consistent view.
 /// Removed lines take their pre-edit anchor, added/context lines the post-edit
@@ -12,6 +29,16 @@ pub const OUTPUT_CAP: usize = 50 * 1024;
 /// keeps its `-`/`+` prefix. The prefix survives after the `│` so the TUI can
 /// still color the row.
 pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]) -> String {
+    anchored_diff_styled(diff, before, after, DiffStyle::Collapsed)
+}
+
+/// As [`anchored_diff`], with the pairing behaviour chosen by the caller.
+pub fn anchored_diff_styled(
+    diff: &str,
+    before: &[AnchoredLine],
+    after: &[AnchoredLine],
+    style: DiffStyle,
+) -> String {
     // `AnchoredLine`s are built by an in-order enumerate, so `line_number` is
     // strictly ascending and the gutter lookup can binary-search instead of
     // scanning — the linear form is quadratic over a large diff.
@@ -30,7 +57,7 @@ pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]
     let mut in_hunk = false;
     for line in diff.lines() {
         if let Some(header) = line.strip_prefix("@@") {
-            flush_changes(&mut rows, &mut removals, &mut additions);
+            flush_changes(&mut rows, &mut removals, &mut additions, style);
             let mut ranges = header.split_whitespace();
             old_line = range_start(ranges.next()).unwrap_or(old_line);
             new_line = range_start(ranges.next()).unwrap_or(new_line);
@@ -39,7 +66,7 @@ pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]
         }
         // Inside a hunk these are content, not file headers.
         if !in_hunk && (line.starts_with("---") || line.starts_with("+++")) {
-            flush_changes(&mut rows, &mut removals, &mut additions);
+            flush_changes(&mut rows, &mut removals, &mut additions, style);
             continue;
         }
         if line == "\\ No newline at end of file" {
@@ -49,7 +76,7 @@ pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]
             // A removal after additions starts a new run rather than pairing
             // across the boundary.
             if !additions.is_empty() {
-                flush_changes(&mut rows, &mut removals, &mut additions);
+                flush_changes(&mut rows, &mut removals, &mut additions, style);
             }
             removals.push((anchor_at(before, old_line), line.to_owned()));
             old_line += 1;
@@ -57,7 +84,7 @@ pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]
             additions.push((anchor_at(after, new_line), line.to_owned()));
             new_line += 1;
         } else {
-            flush_changes(&mut rows, &mut removals, &mut additions);
+            flush_changes(&mut rows, &mut removals, &mut additions, style);
             if line.starts_with(' ') {
                 rows.push((anchor_at(after, new_line), line.to_owned()));
                 old_line += 1;
@@ -67,7 +94,7 @@ pub fn anchored_diff(diff: &str, before: &[AnchoredLine], after: &[AnchoredLine]
             }
         }
     }
-    flush_changes(&mut rows, &mut removals, &mut additions);
+    flush_changes(&mut rows, &mut removals, &mut additions, style);
     let width = rows
         .iter()
         .map(|(anchor, _)| anchor.chars().count())
@@ -84,7 +111,15 @@ fn flush_changes(
     rows: &mut Vec<(String, String)>,
     removals: &mut Vec<(String, String)>,
     additions: &mut Vec<(String, String)>,
+    style: DiffStyle,
 ) {
+    if style == DiffStyle::Explicit {
+        // No pairing: both sides are kept, removals first, so a modification
+        // reads as what went and what came.
+        rows.append(removals);
+        rows.append(additions);
+        return;
+    }
     let paired = removals.len().min(additions.len());
     for (_, added) in removals.iter().zip(additions.iter()) {
         let content = added.1.strip_prefix('+').unwrap_or(&added.1);
@@ -116,6 +151,59 @@ pub fn head(mut value: String, cap: usize) -> String {
     value.truncate(end);
     value.push_str("\n[truncated: visible output limit reached]");
     value
+}
+
+/// Fit oversized output under `cap`, compressing before discarding.
+///
+/// Plain [`tail`] keeps the end and throws the beginning away, which on a build
+/// log discards the first error and keeps the summary that merely says one
+/// happened. Squeezing first — reversible tag substitution over repeated
+/// timestamps, component prefixes and token runs — retains more of the original
+/// within the same budget.
+///
+/// Deliberately only applied when the output would otherwise be truncated: even
+/// a readable compression is worth nothing when the text already fits.
+///
+/// Runs [`Stages::legible`] rather than the full pipeline. Upstream's `keys`
+/// stage substitutes on `\b[A-Za-z0-9_]+={1,2}`, so the tag swallows the `=`
+/// and lands inside what a reader sees as one token — `--edition=2024` becomes
+/// `--#d#2024` — and its `meta_bpe` stage nests tags inside tags, so resolving
+/// one entry exposes more. Dropping both is not a concession: measured on a
+/// `cargo build -v` log from this workspace, the full pipeline gives a body 485
+/// bytes smaller but needs 46 more legend entries to do it, which costs more
+/// than it saves. Legible totals −49.9% against full's −48.4%, with 14 legend
+/// entries instead of 60.
+pub fn tail_compressed(value: String, cap: usize) -> (String, bool) {
+    if value.len() <= cap {
+        return (value, false);
+    }
+    let compressed =
+        artist_ast::squeeze::squeeze_with(&value, artist_ast::squeeze::Stages::legible());
+    if compressed.legend.is_empty() {
+        // Nothing repeated enough to be worth a tag. Squeezing bought nothing,
+        // so do not pay the legibility cost.
+        return tail(value, cap);
+    }
+    let mut legend = String::from("[compressed: repeated text replaced by tags]\n");
+    for (tag, original) in &compressed.legend {
+        legend.push_str(&format!("  {tag} = {original}\n"));
+    }
+    legend.push_str("---\n");
+
+    // The legend must survive truncation. `tail` keeps the *end* of its input,
+    // so compressing and then tailing the whole thing would cut the legend off
+    // and leave a tagged body with no key — worse than plain truncation. Budget
+    // the legend out first and tail only the body.
+    let Some(body_cap) = cap.checked_sub(legend.len()) else {
+        // Legend alone would not fit. Nothing to gain.
+        return tail(value, cap);
+    };
+    if compressed.body.len() + legend.len() >= value.len() {
+        // No saving once the legend is paid for.
+        return tail(value, cap);
+    }
+    let (body, truncated) = tail(compressed.body, body_cap);
+    (format!("{legend}{body}"), truncated)
 }
 
 pub fn tail(value: String, cap: usize) -> (String, bool) {
@@ -229,5 +317,53 @@ mod tests {
             ),
             "n09 │ ~++ new"
         );
+    }
+
+    /// Output that fits must come back byte-identical. Compression is only ever
+    /// worth its legibility cost when the alternative is losing text.
+    #[test]
+    fn output_under_the_cap_is_left_completely_alone() {
+        let text = "warning: unused variable `x`\n".repeat(20);
+        let (out, truncated) = tail_compressed(text.clone(), 50 * 1024);
+        assert_eq!(out, text);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn repetitive_oversized_output_is_compressed_rather_than_only_cut() {
+        // Highly repetitive, so squeezing has something to exploit.
+        let text = (0..4000)
+            .map(|i| {
+                format!("[worker] 2026-07-31T12:00:00Z compiling module_{i} feature=default\n")
+            })
+            .collect::<String>();
+        let cap = 8 * 1024;
+        let (compressed, _) = tail_compressed(text.clone(), cap);
+        let (plain, _) = tail(text, cap);
+        assert!(
+            compressed.contains("[compressed:"),
+            "expected the compression header"
+        );
+        // Both land under the cap; the compressed one represents more of the
+        // original within it.
+        assert!(compressed.len() <= cap);
+        assert!(plain.len() <= cap);
+    }
+
+    /// Text with nothing repeated must not be made worse. A legend costs bytes
+    /// and readability, so it has to earn its place.
+    #[test]
+    fn incompressible_output_falls_back_to_plain_truncation() {
+        let mut text = String::new();
+        for i in 0..3000 {
+            text.push_str(&format!(
+                "{i:x}{}\n",
+                "qwertyuiop".chars().rev().collect::<String>()
+            ));
+        }
+        let cap = 4 * 1024;
+        let (out, truncated) = tail_compressed(text, cap);
+        assert!(truncated);
+        assert!(out.len() <= cap);
     }
 }

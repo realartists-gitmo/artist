@@ -98,7 +98,9 @@ pub async fn replay(
         let mut steps = Vec::with_capacity(program.steps.len());
         for (step_index, step) in program.steps.iter().enumerate() {
             let resolved = match step.action.as_str() {
-                "key" => Step::Key(step.key.clone().unwrap_or_default()),
+                "key" => Step::Key(crate::program::KeyPress::Bare(
+                    step.key.clone().unwrap_or_default(),
+                )),
                 _ => {
                     let label = step.label.clone().ok_or_else(|| ReplayError::Drifted {
                         program: index,
@@ -120,6 +122,7 @@ pub async fn replay(
                         "type" => Step::Type {
                             target,
                             text: step.text.clone().unwrap_or_default(),
+                            clear: true,
                         },
                         _ => Step::Click(target),
                     }

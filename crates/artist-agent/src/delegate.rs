@@ -488,13 +488,25 @@ impl Delegate {
             if let Some(surfaces) = &child_computer
                 && role.permits("computer")
             {
+                // The delegate's own lineage recorder, so `artist computer log`
+                // attributes a subagent's actions to the subagent.
                 tools.push(crate::tool_prompt::dynamic(
-                    artist_computer::ComputerTool::new(surfaces.clone()),
+                    artist_computer::ComputerTool::with_recorder(
+                        surfaces.clone(),
+                        recorder.clone(),
+                        self.handles.attachments.clone(),
+                    ),
                 ));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
-            let guarded: Vec<rig_core::tool::PortableDynamicTool> =
-                tools.into_iter().map(crate::tool_prompt::guard).collect();
+            // A subagent needs drift reporting more than the parent does, not
+            // less: it runs concurrently with whoever spawned it, in the same
+            // worktree, so files moving underneath it is the normal case.
+            let drift = Some(child_tools.edit.0.drift_watch());
+            let guarded: Vec<rig_core::tool::PortableDynamicTool> = tools
+                .into_iter()
+                .map(|tool| crate::tool_prompt::guard(tool, drift.clone()))
+                .collect();
             guarded
         };
         let (base, _) = crate::prompt_config::base_prompt();

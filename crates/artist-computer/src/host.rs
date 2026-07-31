@@ -20,6 +20,11 @@ use crate::program::StepError;
 use crate::stage::bus::StageBus;
 use crate::surface::Surface;
 
+/// The stage screen size used when nothing configures one.
+///
+/// Matches `[computer] screen`'s default so the two cannot drift apart.
+pub const DEFAULT_SCREEN: (i32, i32) = (1920, 1080);
+
 /// How long to wait for a launched application to show a window.
 const WINDOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -92,6 +97,13 @@ pub struct Host {
     /// [`crate::tool::default_state_dir`] for why there is no `/tmp` fallback.
     state_dir: Option<PathBuf>,
     adapters: AdapterSet,
+    /// The stage's virtual screen size, from `[computer] screen`.
+    ///
+    /// Worth configuring rather than fixed: viewport size genuinely changes what
+    /// an application shows — a responsive page lays out differently and a list
+    /// renders a different number of rows — so a task that depends on seeing a
+    /// wide table needs a way to ask for one.
+    screen: (i32, i32),
     stage: tokio::sync::Mutex<Option<StageHandle>>,
     /// A chrome surface produced as a side effect of launching a browser.
     ///
@@ -114,12 +126,25 @@ struct StageHandle {
 
 impl Host {
     pub fn new(state_dir: Option<PathBuf>, adapters: AdapterSet) -> Self {
+        Self::sized(state_dir, adapters, DEFAULT_SCREEN)
+    }
+
+    pub fn sized(
+        state_dir: Option<PathBuf>,
+        adapters: AdapterSet,
+        screen: (i32, i32),
+    ) -> Self {
         Self {
             state_dir,
             adapters,
+            screen,
             stage: tokio::sync::Mutex::new(None),
             pending_chrome: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub fn screen(&self) -> (i32, i32) {
+        self.screen
     }
 
     /// Take any additional surface the last launch produced.
@@ -176,7 +201,8 @@ impl Host {
         // because a toolkit decides whether to run its a11y bridge at startup
         // and never revisits it.
         let bus = StageBus::start(&runtime_dir).await?;
-        let mut wayland = StageWayland::start(StageId(id.clone()), &runtime_dir)?;
+        let mut wayland =
+            StageWayland::start_sized(StageId(id.clone()), &runtime_dir, self.screen.0, self.screen.1)?;
         let mut env = crate::stage::StageEnv::default();
         bus.apply_to(&mut env);
         wayland.extend_env(&env);
@@ -207,11 +233,12 @@ impl Host {
         &self,
         program: &str,
         args: &[String],
+        cwd: Option<&std::path::Path>,
     ) -> Result<Arc<dyn Surface>, StepError> {
         use crate::stage::{AppCommand, Stage};
 
         self.ensure_stage().await?;
-        let (stage, runtime_dir) = {
+        let (stage, runtime_dir, a11y_address) = {
             let slot = self.stage.lock().await;
             let handle = slot
                 .as_ref()
@@ -219,6 +246,7 @@ impl Host {
             (
                 Arc::clone(&handle.wayland) as Arc<dyn Stage>,
                 handle.runtime_dir.clone(),
+                handle.bus.a11y_address().map(str::to_owned),
             )
         };
 
@@ -236,6 +264,11 @@ impl Host {
         let chromium = is_chromium(program);
         let profile = runtime_dir.join("chrome-profile");
         let mut command = AppCommand::new(program);
+        // `cwd` was accepted on the tool and dropped here, so a GUI launch
+        // silently ran wherever the harness happened to be — which for a file
+        // manager or an editor is the difference between opening the right
+        // directory and the wrong one.
+        command.cwd = cwd.map(std::path::Path::to_owned);
         if chromium {
             // Port 0, never fixed: a fixed port collides with the user's own
             // browser and with a second stage.
@@ -284,11 +317,34 @@ impl Host {
             ..Probe::default()
         };
         let attachment = select(&probe, &self.adapters);
+
+        // Rung 2. The application is on the stage's *private* a11y bus, which is
+        // what makes attribution exact: only what the agent launched is on it,
+        // so an accessible found by pid belongs unambiguously to this window
+        // rather than to whatever the user happens to have open.
+        if let Some(address) = &a11y_address {
+            match attach_accessible(address, app.pid).await {
+                Ok(surface) => return Ok(Arc::new(surface)),
+                Err(error) => {
+                    // Not fatal on its own — plenty of applications expose no
+                    // usable tree — but the reason belongs in the error below
+                    // rather than being swallowed.
+                    return Err(StepError::Backend(format!(
+                        "launched {program} (pid {}), and the probe chose rung {:?}, but no \
+                         structural surface could be attached: {error}. The window is on the \
+                         stage and can be captured; if this application has no accessibility \
+                         support, write a rung-0 adapter for it.",
+                        app.pid, attachment.rung
+                    )));
+                }
+            }
+        }
+
         Err(StepError::Backend(format!(
-            "launched {program} (pid {}), but no surface backend is wired for rung {:?} yet — \
-             the window is on the stage and can be captured, but not yet observed structurally",
-            app.pid,
-            attachment.rung
+            "launched {program} (pid {}), but this stage has no accessibility bus, so there is \
+             nothing to observe structurally. Install at-spi2-core, or write a rung-0 adapter \
+             for this application.",
+            app.pid
         )))
     }
 
@@ -297,6 +353,7 @@ impl Host {
         &self,
         _program: &str,
         _args: &[String],
+        _cwd: Option<&std::path::Path>,
     ) -> Result<Arc<dyn Surface>, StepError> {
         Err(StepError::Backend(
             "this build has no stage backend; only terminal surfaces are available".into(),
@@ -336,6 +393,121 @@ async fn wait_for_window(
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 }
+
+/// The AT-SPI registry's root, whose children are the applications on the bus.
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+const A11Y_ROOT: (&str, &str) = ("org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root");
+
+/// Attach a rung-2 surface to the application we just launched.
+///
+/// The match is on **pid**, resolved from each accessible's own bus connection
+/// via `GetConnectionUnixProcessID`. That is authoritative: an application's
+/// D-Bus name is owned by the process that registered it. Matching on the
+/// accessible's *name* instead would break the moment two windows share a
+/// title, which is the whole class of bug anchors exist to prevent — and the
+/// stage bus makes the pid route available where the user's bus would not.
+///
+/// Descendants count, because the process that registers the a11y bridge is
+/// often not the one we spawned: shell wrappers and re-execing toolkits are
+/// ordinary.
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+async fn attach_accessible(
+    address: &str,
+    pid: i32,
+) -> Result<crate::surface::atspi::AtspiSurface, StepError> {
+    use atspi_proxies::accessible::AccessibleProxy;
+
+    let connection = zbus::connection::Builder::address(address)
+        .map_err(|error| StepError::Backend(format!("a11y bus address: {error}")))?
+        .build()
+        .await
+        .map_err(|error| StepError::Backend(format!("connect to the a11y bus: {error}")))?;
+
+    let dbus = zbus::fdo::DBusProxy::new(&connection)
+        .await
+        .map_err(|error| StepError::Backend(format!("bus proxy: {error}")))?;
+
+    // A toolkit registers its bridge some time after the process starts, so
+    // this polls rather than looking once.
+    let deadline = tokio::time::Instant::now() + A11Y_TIMEOUT;
+    loop {
+        let root = AccessibleProxy::builder(&connection)
+            .destination(A11Y_ROOT.0)
+            .and_then(|builder| builder.path(A11Y_ROOT.1))
+            .map_err(|error: zbus::Error| StepError::Backend(format!("a11y registry: {error}")))?
+            .build()
+            .await
+            .map_err(|error: zbus::Error| StepError::Backend(format!("a11y registry: {error}")))?;
+
+        if let Ok(applications) = root.get_children().await {
+            for application in applications {
+                // An application with no unique bus name is not something we can
+                // attribute to a process, and attributing by anything weaker is
+                // the guess this whole design refuses to make.
+                let Some(unique) = application.name() else {
+                    continue;
+                };
+                let destination = unique.as_str().to_owned();
+                let Ok(owner) = dbus
+                    .get_connection_unix_process_id(unique.clone().into())
+                    .await
+                else {
+                    continue;
+                };
+                if !owned_by(Some(owner as i32), pid) {
+                    continue;
+                }
+                let surface = crate::surface::atspi::AtspiSurface::new(
+                    artist_tools::short_id("win"),
+                    connection.clone(),
+                    destination,
+                    application.path().as_str().to_owned(),
+                );
+                // A bridge that has registered but not yet built its tree is a
+                // one-node stub, and attaching to it hands the model an empty
+                // screen it cannot act on. Wait for something real.
+                if usable_tree(&surface).await {
+                    return Ok(surface);
+                }
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StepError::Backend(format!(
+                "no application on the stage's accessibility bus belongs to pid {pid} \
+                 (or its tree is still empty after {A11Y_TIMEOUT:?})"
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Whether a candidate tree has enough in it to be worth attaching to.
+///
+/// A bridge often registers before it has anything to expose. Attaching then
+/// gives the model a blank surface and no way to tell that from an application
+/// that genuinely has no controls.
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+async fn usable_tree(surface: &crate::surface::atspi::AtspiSurface) -> bool {
+    use crate::surface::Surface;
+
+    let Ok(snapshot) = surface.snapshot().await else {
+        return false;
+    };
+    snapshot.nodes.len() >= MIN_TREE_NODES
+        && snapshot
+            .nodes
+            .iter()
+            .any(|node| node.role.is_interactive() || !node.actions.is_empty())
+}
+
+/// How long to wait for a toolkit to put its accessibility tree on the bus.
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+const A11Y_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The smallest tree that counts as an attachment rather than a stub.
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+const MIN_TREE_NODES: usize = 8;
 
 /// Whether a window's process is the one we launched, or a descendant of it.
 ///

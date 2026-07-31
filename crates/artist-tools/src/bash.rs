@@ -563,7 +563,7 @@ impl BashTool {
             .unwrap_or("")
             .to_owned();
         *cursor = output.len();
-        Ok(output::tail(text, max.min(50 * 1024)).0)
+        Ok(output::tail_compressed(text, max.min(50 * 1024)).0)
     }
 }
 

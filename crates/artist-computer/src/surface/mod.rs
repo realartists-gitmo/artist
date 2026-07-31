@@ -48,6 +48,18 @@ pub trait Surface: Send + Sync {
     /// The complete current element set. Never a diff.
     async fn snapshot(&self) -> Result<Snapshot, StepError>;
 
+    /// The surface as it would be described to someone who has never seen it.
+    ///
+    /// Identical to [`Surface::snapshot`] for anything with a tree — a tree is
+    /// idempotent to read. It exists for the surfaces that are *streams*: a
+    /// shell's primary screen hands over what has arrived since the last look
+    /// and advances, so reading it twice returns nothing the second time. That
+    /// made an elided observation permanently unrecoverable, while the stub left
+    /// behind told the model to go and read it again.
+    async fn snapshot_full(&self) -> Result<Snapshot, StepError> {
+        self.snapshot().await
+    }
+
     /// Arm a change watcher. Called before the final step dispatches.
     async fn watch(&self, settle: &crate::program::Settle) -> Result<SettleWatch, StepError>;
 
@@ -216,6 +228,26 @@ fn check_expect(snapshot: &Snapshot, book: &AnchorBook, expect: &Expect) -> bool
 
 /// Resolve a step's anchor and verify the model's label still describes it.
 fn resolve_step(book: &AnchorBook, step: &Step) -> Result<Option<Node>, StepError> {
+    // A key press aims at whatever holds focus, so the thing to check is not an
+    // anchor but the focused node — which the surfaces now report. When the
+    // model has named what it expects to activate, that claim is checked exactly
+    // like a click's would be.
+    if let Step::Key(press) = step {
+        let Some(claimed) = press.label() else {
+            return Ok(None);
+        };
+        let Some(focused) = book.focused() else {
+            // No backend on this surface reports focus — a terminal, an adapter.
+            // Refusing the step would make the label unwritable there; the
+            // label's other job, giving the stream rules something to match, is
+            // done either way.
+            return Ok(None);
+        };
+        let focused = focused.clone();
+        check_label("focus", Some(claimed), &focused)?;
+        return Ok(Some(focused));
+    }
+
     let Some(Target { anchor, label }) = step.target() else {
         return Ok(None);
     };
@@ -229,7 +261,12 @@ fn report_for(step: &Step, resolved_name: Option<String>, outcome: String) -> St
     StepReport {
         action: step.action(),
         anchor: target.map(|target| target.anchor.clone()),
-        label: target.and_then(|target| target.label.clone()),
+        label: target
+            .and_then(|target| target.label.clone())
+            .or_else(|| match step {
+                Step::Key(press) => press.label().map(str::to_owned),
+                _ => None,
+            }),
         resolved_name,
         payload: step.payload().map(str::to_owned),
         outcome,
@@ -565,5 +602,86 @@ mod tests {
 
         assert_eq!(report.steps[0].label.as_deref(), Some("Save"));
         assert_eq!(report.steps[0].resolved_name.as_deref(), Some("Save…"));
+    }
+
+    #[tokio::test]
+    async fn a_key_that_names_its_target_is_checked_against_what_holds_focus() {
+        use crate::model::NodeState;
+        use crate::program::KeyPress;
+
+        let focused = Node::new("b1", Role::Button, "Cancel").with_state(NodeState {
+            focused: true,
+            ..NodeState::default()
+        });
+        let (surface, mut book, _) = seeded(vec![
+            Node::new("b0", Role::Button, "Delete account"),
+            focused,
+        ])
+        .await;
+
+        // The model believes Enter will press "Delete account". It will not —
+        // focus is on Cancel. Before `key` carried a label there was nothing to
+        // check and nothing for a guardrail to match on either.
+        let claimed = Step::Key(KeyPress::Aimed {
+            chord: "Enter".into(),
+            label: "Delete account".into(),
+        });
+        let report = run_program(&surface, &mut book, &program(vec![claimed], "gone"))
+            .await
+            .unwrap();
+
+        assert!(matches!(report.error, Some(StepError::LabelMismatch { .. })));
+        assert!(
+            !surface.calls().iter().any(|call| call == "apply:key"),
+            "the key must not be delivered: {:?}",
+            surface.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_naming_the_focused_element_goes_through() {
+        use crate::model::NodeState;
+        use crate::program::KeyPress;
+
+        let (surface, mut book, _) = seeded(vec![
+            Node::new("b0", Role::Button, "Delete account").with_state(NodeState {
+                focused: true,
+                ..NodeState::default()
+            }),
+        ])
+        .await;
+
+        let step = Step::Key(KeyPress::Aimed {
+            chord: "Enter".into(),
+            label: "Delete account".into(),
+        });
+        let report = run_program(&surface, &mut book, &program(vec![step], "Delete account"))
+            .await
+            .unwrap();
+
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.steps[0].outcome, "ok");
+        // And it reaches the audit trail, which is what `distill` replays from.
+        assert_eq!(report.steps[0].label.as_deref(), Some("Delete account"));
+        assert_eq!(report.steps[0].payload.as_deref(), Some("Enter"));
+    }
+
+    #[tokio::test]
+    async fn a_bare_key_still_works_where_nothing_reports_focus() {
+        use crate::program::KeyPress;
+
+        // A terminal or an adapter has no focus concept. Requiring a label there
+        // would make whole rungs unusable for no safety gain.
+        let (surface, mut book, _) = seeded(vec![Node::new("r0", Role::Row, "PID  COMMAND")]).await;
+        let report = run_program(
+            &surface,
+            &mut book,
+            &program(vec![Step::Key(KeyPress::Bare("Enter".into()))], "PID"),
+        )
+        .await
+        .unwrap();
+
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.steps[0].payload.as_deref(), Some("Enter"));
     }
 }

@@ -7,6 +7,20 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+# Pattern compilation for ast_query / ast_rewrite. Pinned to the version
+# artist-ast uses so the tree carries one copy.
+ast-grep-core = "0.42.1"
+# Everything except `search` and `cli`. Retrieval is artist-memory's job, so
+# the embedder, HTTP stack and model loader stay out of the tree; `ranking`
+# comes along for free with `impact`/`context` and costs no dependencies.
+artist-ast = { path = "../artist-ast", default-features = false, features = [
+    "surface",
+    "graphs",
+    "impact",
+    "context",
+    "run",
+    "squeeze",
+] }
 base64 = "0.23"
 dashmap = "6"
 dirs = "6"

@@ -158,12 +158,69 @@ impl AtspiSurface {
         }
     }
 
-    async fn proxy(&self, path: &str) -> Result<AccessibleProxy<'_>, StepError> {
-        accessible(&self.connection, &self.destination, path).await
-    }
-
     async fn walk(&self) -> Result<Vec<Node>, StepError> {
         walk_tree(&self.connection, &self.destination, &self.root_path).await
+    }
+
+    /// Run one of an accessible's declared actions.
+    ///
+    /// With `wanted = None` this takes the conventional activation verb, which
+    /// is what a `click` means. With a name it takes that verb, and says which
+    /// ones exist when there is no match — an element that declares three
+    /// actions should not fail with a bare "unsupported".
+    async fn do_action(
+        &self,
+        path: &str,
+        target: &crate::program::Target,
+        node: &Node,
+        wanted: Option<&str>,
+    ) -> Result<(), StepError> {
+        let action = action_proxy(&self.connection, &self.destination, path)
+            .await
+            .map_err(|error| StepError::Backend(format!("action proxy: {error}")))?;
+        let actions = action.get_actions().await.unwrap_or_default();
+        if actions.is_empty() {
+            return Err(StepError::Unsupported {
+                anchor: target.anchor.clone(),
+                role: node.role.label().to_owned(),
+                name: node.name.clone(),
+                action: if wanted.is_some() { "invoke" } else { "click" },
+            });
+        }
+
+        let index = match wanted {
+            Some(wanted) => {
+                let wanted = wanted.trim().to_ascii_lowercase();
+                actions
+                    .iter()
+                    .position(|declared| declared.name.to_ascii_lowercase() == wanted)
+                    .ok_or_else(|| {
+                        let declared: Vec<&str> =
+                            actions.iter().map(|action| action.name.as_str()).collect();
+                        StepError::Backend(format!(
+                            "{:?} has no action {wanted:?} — it declares {}",
+                            node.name,
+                            declared.join(", ")
+                        ))
+                    })?
+            }
+            // Prefer the conventional activation verb; otherwise the first.
+            None => actions
+                .iter()
+                .position(|declared| {
+                    matches!(
+                        declared.name.to_ascii_lowercase().as_str(),
+                        "click" | "activate" | "press" | "jump"
+                    )
+                })
+                .unwrap_or(0),
+        };
+
+        action
+            .do_action(index as i32)
+            .await
+            .map(|_| ())
+            .map_err(|error| StepError::Backend(format!("do_action: {error}")))
     }
 }
 
@@ -350,43 +407,21 @@ impl Surface for AtspiSurface {
             .ok_or_else(|| StepError::Backend("not an accessibility node".into()))?;
 
         match step {
-            Step::Click(target) => {
-                // Invoke the declared action rather than synthesizing a click.
-                // No coordinates, no focus juggling, and it works for elements
-                // that are scrolled out of view.
-                let action = action_proxy(&self.connection, &self.destination, path)
-                    .await
-                    .map_err(|error| StepError::Backend(format!("action proxy: {error}")))?;
-
-                let actions = action.get_actions().await.unwrap_or_default();
-                // Prefer the conventional activation verb; otherwise the first.
-                let index = actions
-                    .iter()
-                    .position(|declared| {
-                        matches!(
-                            declared.name.to_ascii_lowercase().as_str(),
-                            "click" | "activate" | "press" | "jump"
-                        )
-                    })
-                    .unwrap_or(0);
-                if actions.is_empty() {
-                    return Err(StepError::Unsupported {
-                        anchor: target.anchor.clone(),
-                        role: node.role.label().to_owned(),
-                        name: node.name.clone(),
-                        action: "click",
-                    });
-                }
-                action
-                    .do_action(index as i32)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| StepError::Backend(format!("do_action: {error}")))
+            // Invoke the declared action rather than synthesizing a click. No
+            // coordinates, no focus juggling, and it works for elements that are
+            // scrolled out of view.
+            //
+            // `click` takes the default verb; `invoke` names one. The second is
+            // what makes `Node::actions` more than decoration — a menu item's
+            // "open in new window" is unreachable any other way.
+            Step::Click(target) => self.do_action(path, target, node, None).await,
+            Step::Invoke { target, action } => {
+                self.do_action(path, target, node, Some(action)).await
             }
             // `EditableText` sets the whole field in one call, which is both
             // more reliable than typing and the right default: filling a
             // pre-populated field should replace it, not append to it.
-            Step::Type { target, text } => {
+            Step::Type { target, text, .. } => {
                 let editable = EditableTextProxy::builder(&self.connection)
                     .destination(self.destination.clone())
                     .and_then(|builder| builder.path(path.to_owned()))

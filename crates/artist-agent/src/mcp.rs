@@ -340,13 +340,11 @@ impl McpProxyTool {
         PortableDynamicTool::new(name, description, parameters, move |args| {
             let tool = self.clone();
             Box::pin(async move {
-                tool.call_inner(args)
-                    .await
-                    .map_err(|error| {
-                        rig_core::tool::ToolExecutionError::from_error(McpCallError(format!(
-                            "{error:#}"
-                        )))
-                    })
+                tool.call_inner(args).await.map_err(|error| {
+                    rig_core::tool::ToolExecutionError::from_error(McpCallError(format!(
+                        "{error:#}"
+                    )))
+                })
             })
         })
     }
@@ -426,9 +424,8 @@ impl McpProxyTool {
                 boundary = floor(&text, boundary.saturating_sub(overflow.max(64)));
             }
         }
-        let mut content = rig_core::OneOrMany::one(
-            rig_core::completion::message::ToolResultContent::text(text),
-        );
+        let mut content =
+            rig_core::OneOrMany::one(rig_core::completion::message::ToolResultContent::text(text));
         for image in images {
             content.push(image);
         }

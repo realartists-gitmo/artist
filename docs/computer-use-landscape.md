@@ -177,6 +177,12 @@ stakes.
 
 ## The ten highest-value things to steal, by value/cost
 
+> Superseded by [the steal list](computer-use-steal-list.md), which covers
+> everything found rather than the top ten, groups by what each item buys, states
+> the fit against our design commitments, and records what was rejected and why.
+> The ranking below is kept because it is the value/cost ordering the survey
+> itself produced.
+
 | # | Steal | From | Why |
 |---|---|---|---|
 | 1 | **`computer doctor`** — one structured readiness report with per-check blocker and recommended fix | computer-use-linux | Our doc names the silent-empty-tree trap; they productized the fix. Days of work, removes the worst debugging experience in the subsystem. |

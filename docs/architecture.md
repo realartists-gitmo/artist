@@ -43,7 +43,10 @@ artist/                          # Cargo workspace
 │   └── llm-provider/            # ChatGPT OAuth, SavedProvider, Secret
 └── docs/
     ├── architecture.md          # This file
-    └── computer-use.md          # The computer-use subsystem
+    ├── computer-use.md          # The computer-use subsystem
+    ├── computer-use-audit.md    # Adversarial review: defects, by severity
+    ├── computer-use-landscape.md # What every other harness does
+    └── computer-use-steal-list.md # What to take from them, and what not to
 ```
 
 | Crate | Responsibility |

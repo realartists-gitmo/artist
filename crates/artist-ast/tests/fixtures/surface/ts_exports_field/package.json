@@ -1,0 +1,14 @@
+{
+  "name": "ts_exports_field",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    },
+    "./feature/*": "./dist/feature/*.js"
+  }
+}

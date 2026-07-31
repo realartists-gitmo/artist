@@ -606,3 +606,64 @@ async fn the_stage_never_touches_the_users_session() {
     assert_eq!(std::env::var("WAYLAND_DISPLAY").ok(), user_wayland);
     assert_eq!(std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(), user_bus);
 }
+
+/// `capture(Some(window))` must return that window, not the whole screen.
+///
+/// The window key was being destructured into `_window` and thrown away, so
+/// every caller asking for one window silently got a full-screen frame with no
+/// indication anything had been ignored.
+#[tokio::test]
+async fn capturing_one_window_returns_that_window_not_the_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(stage) = stage_or_skip(dir.path()) else {
+        return;
+    };
+    let socket = stage.socket_name().to_owned();
+    let mut painted = paint_a_window(&socket, dir.path(), "one-window").expect("client connects");
+
+    // Wait for the toplevel to be mapped — which now means "has painted",
+    // rather than "the client asked for a toplevel".
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let key = loop {
+        let _ = painted.queue.roundtrip(&mut painted.state);
+        let windows = stage.windows().await.expect("windows");
+        if let Some(window) = windows.iter().find(|window| window.mapped) {
+            break window.key;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no window ever reported itself mapped: {windows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let whole = stage.capture(None).await.expect("full-screen capture");
+    let one = stage.capture(Some(key)).await.expect("per-window capture");
+
+    let geometry = stage
+        .windows()
+        .await
+        .expect("windows")
+        .into_iter()
+        .find(|window| window.key == key)
+        .expect("the window is still there")
+        .geometry;
+
+    // The capture is the window's own region. A stage toplevel is currently
+    // given the whole output — decorations are server-side and there is no tiling
+    // policy — so today that region happens to equal the screen, and this asserts
+    // the *relationship* rather than a smaller number. X11 dialogs and
+    // override-redirect windows arrive with their own geometry and are where the
+    // crop becomes visible.
+    assert_eq!(one.width, geometry.width, "capture must match the geometry");
+    assert_eq!(one.height, geometry.height);
+    assert_eq!(one.rgba.len(), (one.width * one.height * 4) as usize);
+    assert!(one.width <= whole.width && one.height <= whole.height);
+
+    // A key that names nothing must be an error, not a silent full screen.
+    let missing = artist_computer::stage::WindowKey(u64::MAX);
+    assert!(
+        stage.capture(Some(missing)).await.is_err(),
+        "capturing a window that does not exist must fail loudly"
+    );
+}

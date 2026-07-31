@@ -282,61 +282,69 @@ Externalizing keeps the log proportional to the number of *distinct* images.
 
 ## Status
 
-> **Corrected 2026-07-31 after two adversarial reviews.** Several items below
-> were previously listed as built and verified while being unreachable from any
-> production path — the code exists and has unit tests, but nothing calls it.
-> Those are now listed under *Implemented but not wired*. Known defects are in
-> [the audit](computer-use-audit.md); the critical ones are silent modifier-key
-> dropping, a world-traversable stage directory when `XDG_RUNTIME_DIR` is unset,
-> and decay destroying user steering messages. Read the audit before trusting any
-> safety claim in this document.
+> **Corrected 2026-07-31** after two adversarial reviews and the fixes that
+> followed. The audit's three CRITICALs and sixteen HIGHs are fixed, and the
+> paths previously listed as unwired are wired. Known remaining gaps are at the
+> bottom of this section; the audit's MEDIUM/LOW backlog is in
+> [the audit](computer-use-audit.md), and what is worth adding next is in
+> [the steal list](computer-use-steal-list.md).
 
 **Built and verified**
 
-- Anchors, deltas, render budgeting, program semantics, label cross-check
+- Anchors, deltas, render budgeting, program semantics, label cross-check.
+  Containment requires the shorter side to carry at least three characters, so a
+  one-glyph element no longer accepts any label; a name that normalization
+  empties (`…`) is still treated as a name.
+- Observation economy: deltas are budgeted like full renders, removals are
+  truncated, and a surface that turns over past 60% renders full with
+  `(surface replaced — full view)` rather than emitting two screens to describe
+  one.
 - PTY surface (rung 1): alternate-screen row anchors, primary-screen append,
-  quiet settle — verified driving a real curses program end to end
-- Stage: private D-Bus + a11y bring-up; headless GLES compositor verified with a
-  purpose-built `wayland-client` fixture (client connects, window appears with
-  real title/app_id/pid, keyboard and pointer reach the client, frame callbacks
-  fire, capture contains what the client painted, user's session untouched)
-- Damage noise-filter and quiet tracker
-- **CDP surface (rung 1)** — verified against real headless Chromium: the
-  accessibility tree becomes anchored nodes, a program clicks a real button and
-  the page changes, and a mislabelled anchor never reaches the browser
-- Destructive-action guardrail — aborts before any step runs. **Coverage is
-  narrower than it reads**: see audit H2 before relying on it.
-- Observation decay and image externalization
-- Tool UI
+  quiet settle — verified driving a real curses program end to end. Scrollback is
+  bounded and escape sequences are rendered out before the model sees them.
+- Stage: private D-Bus + a11y bring-up (async and timeout-bounded); headless GLES
+  compositor verified with a purpose-built `wayland-client` fixture — client
+  connects, window appears with real title/app_id/pid, keyboard and pointer reach
+  the client, frame callbacks fire *even when a render fails*, capture contains
+  what the client painted, per-window capture crops to that window, and the
+  user's session is provably untouched.
+- Damage noise-filter and quiet tracker.
+- **CDP surface (rungs 0/1)** — verified against real headless Chromium.
+  Navigation, history, per-element scrolling, clearing `type`, and an in-flight
+  *set* that survives redirect chains.
+- **AT-SPI surface (rung 2)** — breadth-first walk, element state read from the
+  state set, tree-digest settle, `EditableText` for typing, and named-action
+  `invoke`. Attached by pid on the stage's private bus.
+- **Rung-0 adapters** — discovered from the user's config root only, and reachable
+  from the shipped agent.
+- Destructive-action guardrail: four pattern classes (English verbs unbounded in
+  position, non-English verbs, whole-label confirmations, delete keys), plus an
+  optional focus label on `key` so a destructive Enter is visible to a rule and
+  cross-checked against the focused element.
+- Observation decay, image externalization, screenshots, and `computer.*` event
+  recording — so `artist computer log`, `frame` and `distill` have input.
+- Tool UI.
 
-**Implemented but NOT WIRED** — code and unit tests exist; no production path
-reaches them. Do not rely on any of these:
+**Known gaps** — real, and stated rather than implied:
 
-- **AT-SPI surface (rung 2)** — `AtspiSurface` is never constructed outside
-  tests; `Host::launch` returns `Err` for every non-Chromium GUI application
-- **Programmatic surface and adapters (rung 0)** — `SurfaceRegistry::for_project`
-  is the only caller of `AdapterSet::discover` and has no callers itself, so
-  `select()` can never return `Programmatic` in the shipped agent
-- **Set-of-mark overlay and screenshots (rung 3)** — `Surface::pixels()` has no
-  override and no caller; `tool.rs` passes `image: None` everywhere
-- **`computer.*` session events** — declared and consumed, never recorded, so
-  `artist computer log` and `distill` always report nothing found
-- **`artist computer distill | log`** — dead for the above reason; `distill` also
-  drops each step's `text`/`key`, so a distilled macro cannot replay
-- **`[computer] screen`** — resolved into config and never read
-
-- **XWayland**, so X11-only applications run on the stage's own display —
-  never the user's, asserted directly
-- **Browser chrome surface (rung 0)** — `Target.*` tab management alongside page
-  content, so a browser presents as two surfaces at two rungs
-- **Ladder wired into the tool** — `launch` with `gui: true` brings up the
-  isolated display, starts the application in it, probes, and attaches the right
-  surface. Verified end to end: one tool call launches a browser and returns an
-  observation the model can act on.
-- **Macro replay** — `artist computer distill` emits a script keyed on labels
-  rather than anchors, and `macros::replay` re-anchors it against a fresh
-  observation before running. A step whose label no longer resolves stops the
-  replay at that step instead of clicking whatever now occupies the position.
+- **Prompt injection is not addressed.** Rendered observations are
+  attacker-controlled text entering context unmarked, and the stage shares
+  `$HOME`. The guardrail inspects the model's output, not its input. See steal
+  list items 4 and 11.
+- **A bare `{"key":"Enter"}` on a focused destructive button is outside every
+  guardrail pattern**, because no regex over the arguments can recover a name the
+  arguments do not contain. The optional focus label covers the case where the
+  model knows what it is aiming at; nothing covers the case where it does not.
+- **Rung 3 is observation-only.** A surface with no tree reports "no actionable
+  surface". Games, canvases and broken accessibility support are out of reach
+  until a localizer exists (steal list item 15).
+- **`Surface::children` has no implementors**, so a `target=_blank` tab is
+  unreachable, and `GetFullAxTreeParams::default()` is main-frame only — an
+  iframe (a payment form, an embedded login) is not observable.
+- **No benchmark number.** The design argument is strong and the evidence is
+  absent.
+- **One compositor, one platform.** Linux/Wayland, our own stage. No macOS, no
+  Windows, no Android.
 
 ## Concurrency
 

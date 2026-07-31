@@ -33,6 +33,51 @@ pub struct Target {
     pub label: Option<String>,
 }
 
+/// A key press, optionally naming what the model believes holds focus.
+///
+/// The label exists because `key` was the guardrail's blind spot. Every other
+/// step carries a [`Target`], so a stream rule watching for `"label":"Delete
+/// account"` can see what is about to happen; `key` carried a bare chord, and
+/// `[click "More options", key "Enter"]` on a focused destructive default button
+/// went through a rule that stopped the plain click. A pattern cannot match text
+/// that is not in the arguments.
+///
+/// The plain string form is kept — `{"key":"Enter"}` — because most key presses
+/// aim at nothing in particular: typing into a field, dismissing a menu,
+/// scrolling. Demanding a label for those would be noise that teaches the model
+/// to write one that is not true.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum KeyPress {
+    Bare(String),
+    Aimed {
+        chord: String,
+        /// What the model believes this key will activate.
+        label: String,
+    },
+}
+
+impl KeyPress {
+    pub fn chord(&self) -> &str {
+        match self {
+            Self::Bare(chord) | Self::Aimed { chord, .. } => chord,
+        }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            Self::Bare(_) => None,
+            Self::Aimed { label, .. } => Some(label),
+        }
+    }
+}
+
+impl From<&str> for KeyPress {
+    fn from(chord: &str) -> Self {
+        Self::Bare(chord.to_owned())
+    }
+}
+
 /// One action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,10 +98,17 @@ pub enum Step {
         clear: bool,
     },
     /// A key or chord delivered to whatever holds focus.
-    Key(String),
+    Key(KeyPress),
+    /// Scroll a container, or the surface itself.
+    ///
+    /// The target is a full [`Target`] rather than a bare anchor because it is
+    /// resolved and label-checked like any other reference. A bare anchor was
+    /// accepted by the schema, never resolved, and silently scrolled the whole
+    /// document — so a virtualized inner list could not be scrolled at all and
+    /// the attempt reported `ok`.
     Scroll {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        anchor: Option<String>,
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
         /// Positive scrolls down.
         amount: i32,
     },
@@ -66,8 +118,13 @@ pub enum Step {
     /// a new profile, and up to 35 s of connect-and-map polling.
     Navigate { url: String },
     /// Browser history, one entry at a time.
-    Back,
-    Forward,
+    ///
+    /// Braced rather than unit variants so the wire form is `{"back":{}}` — the
+    /// same shape as every other step. A unit variant would serialize to the
+    /// bare string `"back"`, making one entry in a `steps` array look nothing
+    /// like its neighbours.
+    Back {},
+    Forward {},
     /// Run one of an element's declared actions by name.
     ///
     /// The escape hatch that makes `Node::actions` mean something. Elements
@@ -93,8 +150,8 @@ impl Step {
             Self::Key(_) => "key",
             Self::Scroll { .. } => "scroll",
             Self::Navigate { .. } => "navigate",
-            Self::Back => "back",
-            Self::Forward => "forward",
+            Self::Back { .. } => "back",
+            Self::Forward { .. } => "forward",
             Self::Invoke { .. } => "invoke",
         }
     }
@@ -106,8 +163,9 @@ impl Step {
             Self::Click(target) | Self::Type { target, .. } | Self::Invoke { target, .. } => {
                 Some(target)
             }
-            Self::Key(_) | Self::Scroll { .. } => None,
-            Self::Navigate { .. } | Self::Back | Self::Forward => None,
+            Self::Scroll { target, .. } => target.as_ref(),
+            Self::Key(_) => None,
+            Self::Navigate { .. } | Self::Back { .. } | Self::Forward { .. } => None,
         }
     }
 
@@ -116,10 +174,10 @@ impl Step {
     pub fn payload(&self) -> Option<&str> {
         match self {
             Self::Type { text, .. } => Some(text),
-            Self::Key(chord) => Some(chord),
+            Self::Key(press) => Some(press.chord()),
             Self::Navigate { url } => Some(url),
             Self::Invoke { action, .. } => Some(action),
-            Self::Click(_) | Self::Scroll { .. } | Self::Back | Self::Forward => None,
+            Self::Click(_) | Self::Scroll { .. } | Self::Back { .. } | Self::Forward { .. } => None,
         }
     }
 }
@@ -304,10 +362,10 @@ pub(crate) fn normalize(value: &str) -> String {
         .nfkc()
         .flat_map(|character| character.to_lowercase())
         .collect();
-    let stripped: String = folded
-        .chars()
-        .filter(|character| *character != '&' && *character != '_')
-        .collect();
+    // Access-key markers only. `&` never occurs in a real name, but `_` does —
+    // stripping it everywhere made `delete_all` and `deleteall` the same string,
+    // and identifiers are exactly where a one-character difference matters.
+    let stripped: String = folded.chars().filter(|character| *character != '&').collect();
     let trimmed = stripped
         .trim()
         .trim_end_matches('…')
@@ -454,6 +512,75 @@ mod tests {
             ),
         ] {
             assert_eq!(serde_json::from_value::<Expect>(json).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn a_key_step_takes_a_bare_chord_or_a_named_target() {
+        // Both forms, because most key presses aim at nothing in particular and
+        // demanding a label for those would teach the model to invent one.
+        let bare: Step = serde_json::from_value(serde_json::json!({"key": "Enter"})).unwrap();
+        assert_eq!(bare, Step::Key(KeyPress::Bare("Enter".into())));
+        assert_eq!(bare.payload(), Some("Enter"));
+
+        let aimed: Step = serde_json::from_value(
+            serde_json::json!({"key": {"chord": "Enter", "label": "Delete account"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            aimed,
+            Step::Key(KeyPress::Aimed {
+                chord: "Enter".into(),
+                label: "Delete account".into(),
+            })
+        );
+        // The label has to survive into the serialized arguments, or the stream
+        // rule that watches for it has nothing to match.
+        let json = serde_json::to_string(&aimed).unwrap();
+        assert!(json.contains("\"label\":\"Delete account\""), "{json}");
+    }
+
+    #[test]
+    fn typing_replaces_the_field_unless_told_otherwise() {
+        let step: Step = serde_json::from_value(
+            serde_json::json!({"type": {"anchor": "m2q", "label": "To", "text": "x"}}),
+        )
+        .unwrap();
+        assert!(
+            matches!(step, Step::Type { clear: true, .. }),
+            "a re-filled field became `oldnew` when this defaulted the other way"
+        );
+
+        let appending: Step = serde_json::from_value(serde_json::json!({
+            "type": {"anchor": "m2q", "label": "To", "text": "x", "clear": false}
+        }))
+        .unwrap();
+        assert!(matches!(appending, Step::Type { clear: false, .. }));
+    }
+
+    #[test]
+    fn the_navigation_and_invoke_steps_deserialize() {
+        for (json, expected) in [
+            (
+                serde_json::json!({"navigate": {"url": "https://example.com"}}),
+                Step::Navigate {
+                    url: "https://example.com".into(),
+                },
+            ),
+            (serde_json::json!({"back": {}}), Step::Back {}),
+            (serde_json::json!({"forward": {}}), Step::Forward {}),
+            (
+                serde_json::json!({"invoke": {"anchor": "kv7", "label": "Docs", "action": "close"}}),
+                Step::Invoke {
+                    target: Target {
+                        anchor: "kv7".into(),
+                        label: Some("Docs".into()),
+                    },
+                    action: "close".into(),
+                },
+            ),
+        ] {
+            assert_eq!(serde_json::from_value::<Step>(json).unwrap(), expected);
         }
     }
 

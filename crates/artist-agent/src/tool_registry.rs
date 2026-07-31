@@ -74,7 +74,11 @@ impl ToolRegistryHandle {
             .iter()
             .find(|tool| tool.name() == name)
             .cloned()?;
-        let cancel = self.generation.lock().expect("tool registry poisoned").clone();
+        let cancel = self
+            .generation
+            .lock()
+            .expect("tool registry poisoned")
+            .clone();
         Some(tokio::select! {
             result = tool.execute(arguments) => result.map(flatten),
             () = cancel.cancelled() => Err(ToolExecutionError::other(
@@ -157,7 +161,12 @@ mod tests {
     async fn an_unknown_tool_is_absent_rather_than_failing() {
         let registry = ToolRegistryHandle::new();
         registry.publish(vec![echo("read")]);
-        assert!(registry.execute("bash", serde_json::json!({})).await.is_none());
+        assert!(
+            registry
+                .execute("bash", serde_json::json!({}))
+                .await
+                .is_none()
+        );
     }
 
     /// Each attempt republishes. A canvas must see the current set, because
@@ -170,7 +179,12 @@ mod tests {
 
         registry.publish(vec![echo("read")]);
         assert_eq!(registry.names(), ["read"]);
-        assert!(registry.execute("write", serde_json::json!({})).await.is_none());
+        assert!(
+            registry
+                .execute("write", serde_json::json!({}))
+                .await
+                .is_none()
+        );
     }
 
     /// A call in flight when policy changes must not outlive the policy that
@@ -182,10 +196,12 @@ mod tests {
             "slow",
             "never finishes",
             serde_json::json!({"type": "object"}),
-            |_| Box::pin(async {
-                std::future::pending::<()>().await;
-                unreachable!()
-            }),
+            |_| {
+                Box::pin(async {
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                })
+            },
         )]);
 
         let running = {

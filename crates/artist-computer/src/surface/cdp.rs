@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use chromiumoxide::Browser;
 use chromiumoxide::cdp::browser_protocol::dom::BackendNodeId;
+use chromiumoxide::cdp::browser_protocol::network::RequestId;
 use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
 use futures::StreamExt;
 
@@ -88,7 +89,7 @@ pub async fn connect(user_data_dir: &std::path::Path) -> Result<Browser, StepErr
 /// redirect hop with no matching completion, so an incrementing counter drifts
 /// permanently upward — after a few redirects it never returns below the idle
 /// threshold and every `quiet` settle burns its full timeout.
-type InFlight = Arc<Mutex<HashSet<chromiumoxide::cdp::browser_protocol::network::RequestId>>>;
+type InFlight = Arc<Mutex<HashSet<RequestId>>>;
 
 /// Requests still allowed in flight for a page to count as idle.
 ///
@@ -203,18 +204,7 @@ async fn track_network(page: &chromiumoxide::Page, inflight: InFlight) -> Result
         async move {
             let mut started = started;
             while let Some(event) = started.next().await {
-                // Chromium re-announces a request for every redirect hop, and
-                // the hop that carries `redirectResponse` never gets its own
-                // completion. Counting it was an unmatched increment: after a
-                // login or OAuth flow the count sat permanently above the idle
-                // threshold and `quiet` could never be satisfied again.
-                //
-                // A set makes the whole class of drift impossible: the same
-                // request id re-inserted is still one request.
-                if event.redirect_response.is_some() {
-                    continue;
-                }
-                set.lock().unwrap().insert(event.request_id.clone());
+                note_started(&set, &event.request_id, event.redirect_response.is_some());
             }
         }
     });
@@ -223,7 +213,7 @@ async fn track_network(page: &chromiumoxide::Page, inflight: InFlight) -> Result
         async move {
             let mut finished = finished;
             while let Some(event) = finished.next().await {
-                set.lock().unwrap().remove(&event.request_id);
+                note_settled(&set, &event.request_id);
             }
         }
     });
@@ -232,7 +222,7 @@ async fn track_network(page: &chromiumoxide::Page, inflight: InFlight) -> Result
         async move {
             let mut failed = failed;
             while let Some(event) = failed.next().await {
-                set.lock().unwrap().remove(&event.request_id);
+                note_settled(&set, &event.request_id);
             }
         }
     });
@@ -241,17 +231,130 @@ async fn track_network(page: &chromiumoxide::Page, inflight: InFlight) -> Result
         async move {
             let mut navigated = navigated;
             while let Some(event) = navigated.next().await {
-                // A main-frame navigation discards the old document, so
-                // anything still outstanding for it will never complete and
-                // would otherwise keep the page "busy" for the rest of the
-                // session. Subframe navigations do not have that effect.
-                if event.frame.parent_id.is_none() {
-                    set.lock().unwrap().clear();
-                }
+                note_navigated(&set, event.frame.parent_id.is_none());
             }
         }
     });
     Ok(())
+}
+
+/// A request has been announced.
+///
+/// Chromium re-announces a request for every redirect hop, and the hop that
+/// carries `redirectResponse` never gets its own completion. Counting it was an
+/// unmatched increment: after a login or OAuth flow the count sat permanently
+/// above the idle threshold and `quiet` could never be satisfied again — every
+/// settle from then on burned its full timeout.
+///
+/// A set makes the whole class of drift impossible: the same request id
+/// re-inserted is still one request.
+fn note_started(inflight: &InFlight, id: &RequestId, is_redirect_hop: bool) {
+    if is_redirect_hop {
+        return;
+    }
+    inflight.lock().unwrap().insert(id.clone());
+}
+
+/// A request finished or failed. Both leave flight.
+fn note_settled(inflight: &InFlight, id: &RequestId) {
+    inflight.lock().unwrap().remove(id);
+}
+
+/// A frame navigated.
+///
+/// A main-frame navigation discards the old document, so anything still
+/// outstanding for it will never complete and would otherwise keep the page
+/// "busy" for the rest of the session. Subframe navigations do not have that
+/// effect and must not clear the set.
+fn note_navigated(inflight: &InFlight, is_main_frame: bool) {
+    if is_main_frame {
+        inflight.lock().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod inflight_tests {
+    use super::*;
+
+    fn book() -> InFlight {
+        Arc::new(Mutex::new(HashSet::new()))
+    }
+
+    fn id(value: &str) -> RequestId {
+        RequestId::new(value)
+    }
+
+    fn count(inflight: &InFlight) -> usize {
+        inflight.lock().unwrap().len()
+    }
+
+    #[test]
+    fn a_redirect_chain_leaves_nothing_outstanding() {
+        // What Chromium actually emits for `/a -> /b -> /c -> 200`: the same
+        // request id announced four times, the first three carrying a
+        // `redirectResponse`, and exactly one completion at the end.
+        let inflight = book();
+        note_started(&inflight, &id("req-1"), false);
+        for _ in 0..3 {
+            note_started(&inflight, &id("req-1"), true);
+        }
+        assert_eq!(count(&inflight), 1, "a redirect chain is one request");
+
+        note_settled(&inflight, &id("req-1"));
+        assert_eq!(
+            count(&inflight),
+            0,
+            "the counter used to sit at 4 here, permanently above the idle threshold"
+        );
+    }
+
+    #[test]
+    fn a_completion_for_a_request_we_never_saw_start_is_harmless() {
+        // Attaching mid-flight is normal: the page was already loading when the
+        // surface connected. A counter went negative here, or saturated at zero
+        // and then under-counted the next real request.
+        let inflight = book();
+        note_settled(&inflight, &id("before-we-attached"));
+        assert_eq!(count(&inflight), 0);
+
+        note_started(&inflight, &id("req-1"), false);
+        assert_eq!(count(&inflight), 1);
+    }
+
+    #[test]
+    fn a_failure_leaves_flight_exactly_like_a_completion() {
+        let inflight = book();
+        note_started(&inflight, &id("req-1"), false);
+        note_settled(&inflight, &id("req-1"));
+        assert_eq!(count(&inflight), 0, "a blocked request must not pin a page");
+    }
+
+    #[test]
+    fn a_main_frame_navigation_abandons_what_the_old_document_left_behind() {
+        let inflight = book();
+        note_started(&inflight, &id("long-poll"), false);
+        note_started(&inflight, &id("analytics"), false);
+        assert_eq!(count(&inflight), 2);
+
+        // A subframe navigating says nothing about the top-level document.
+        note_navigated(&inflight, false);
+        assert_eq!(count(&inflight), 2);
+
+        // The main frame navigating means those two will never complete.
+        note_navigated(&inflight, true);
+        assert_eq!(count(&inflight), 0);
+    }
+
+    #[test]
+    fn independent_requests_are_counted_independently() {
+        let inflight = book();
+        note_started(&inflight, &id("a"), false);
+        note_started(&inflight, &id("b"), false);
+        note_started(&inflight, &id("c"), false);
+        assert_eq!(count(&inflight), 3);
+        note_settled(&inflight, &id("b"));
+        assert_eq!(count(&inflight), 2);
+    }
 }
 
 /// A browser's own chrome: tabs and navigation, at rung 0.
@@ -336,6 +439,13 @@ impl Surface for CdpChrome {
     }
 
     async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+        // `navigate` names no element: it acts on whichever tab is current, and
+        // is the whole reason this rung exists. Requiring a tab anchor for it
+        // would mean an observation just to open a URL.
+        if let Step::Navigate { url } = step {
+            return self.navigate(url).await;
+        }
+
         let Some(node) = node else {
             return Err(StepError::Backend("this step needs a tab".into()));
         };
@@ -343,26 +453,14 @@ impl Surface for CdpChrome {
             .binding
             .as_str()
             .strip_prefix("cdp:target:")
-            .ok_or_else(|| StepError::Backend("not a browser tab".into()))?;
+            .ok_or_else(|| StepError::Backend("not a browser tab".into()))?
+            .to_owned();
 
         match step {
-            Step::Click(_) => {
-                use chromiumoxide::cdp::browser_protocol::target::ActivateTargetParams;
-
-                let pages = self
-                    .browser
-                    .pages()
-                    .await
-                    .map_err(|error| StepError::Backend(format!("list tabs: {error}")))?;
-                let page = pages
-                    .into_iter()
-                    .find(|page| page.target_id().inner() == target)
-                    .ok_or_else(|| StepError::Backend(format!("no tab {target}")))?;
-                page.execute(ActivateTargetParams::new(page.target_id().clone()))
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| StepError::Backend(format!("activate tab: {error}")))
-            }
+            Step::Click(_) => self.tab_action(&target, "activate").await,
+            // The verbs the tab nodes advertise. Before this they were rendered
+            // and could never be run.
+            Step::Invoke { action, .. } => self.tab_action(&target, action).await,
             other => Err(StepError::Unsupported {
                 anchor: other
                     .target()
@@ -372,6 +470,65 @@ impl Surface for CdpChrome {
                 name: node.name.clone(),
                 action: other.action(),
             }),
+        }
+    }
+}
+
+impl CdpChrome {
+    /// Open a URL in the current tab, or in a new one if there is none.
+    async fn navigate(&self, url: &str) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
+
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|error| StepError::Backend(format!("list tabs: {error}")))?;
+        match pages.into_iter().next() {
+            Some(page) => page
+                .execute(NavigateParams::new(url.to_owned()))
+                .await
+                .map(|_| ())
+                .map_err(|error| StepError::Backend(format!("navigate to {url}: {error}"))),
+            None => self
+                .browser
+                .new_page(url)
+                .await
+                .map(|_| ())
+                .map_err(|error| StepError::Backend(format!("open {url}: {error}"))),
+        }
+    }
+
+    async fn tab_action(&self, target: &str, action: &str) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::target::{
+            ActivateTargetParams, CloseTargetParams,
+        };
+
+        let pages = self
+            .browser
+            .pages()
+            .await
+            .map_err(|error| StepError::Backend(format!("list tabs: {error}")))?;
+        let page = pages
+            .into_iter()
+            .find(|page| page.target_id().inner() == target)
+            .ok_or_else(|| StepError::Backend(format!("no tab {target}")))?;
+        let id = page.target_id().clone();
+
+        match action.trim().to_ascii_lowercase().as_str() {
+            "activate" | "click" | "focus" => page
+                .execute(ActivateTargetParams::new(id))
+                .await
+                .map(|_| ())
+                .map_err(|error| StepError::Backend(format!("activate tab: {error}"))),
+            "close" => page
+                .execute(CloseTargetParams::new(id))
+                .await
+                .map(|_| ())
+                .map_err(|error| StepError::Backend(format!("close tab: {error}"))),
+            other => Err(StepError::Backend(format!(
+                "a tab has no action {other:?} — it declares activate and close"
+            ))),
         }
     }
 }
@@ -449,7 +606,7 @@ async fn ax_nodes(page: &chromiumoxide::Page) -> Result<Vec<Node>, StepError> {
         if let Some(value) = value {
             node = node.with_value(value);
         }
-        nodes.push(node.with_state(state_of(&ax)));
+        nodes.push(node.with_state(state_of(ax)));
     }
     Ok(nodes)
 }
@@ -520,6 +677,38 @@ impl Surface for CdpPage {
 
     async fn snapshot(&self) -> Result<Snapshot, StepError> {
         Ok(Snapshot::new(ax_nodes(&self.page).await?))
+    }
+
+    /// Rung 3, from the engine rather than the compositor.
+    ///
+    /// A page renders inside a window that may also contain browser chrome, so
+    /// capturing the window would hand the model a picture with a tab strip in
+    /// it. `Page.captureScreenshot` is the viewport alone, and it works for a
+    /// browser we merely attached to, with no stage involved at all.
+    async fn pixels(&self) -> Result<Option<crate::model::Frame>, StepError> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            CaptureScreenshotFormat, CaptureScreenshotParams,
+        };
+
+        let shot = self
+            .page
+            .execute(
+                CaptureScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Png)
+                    .build(),
+            )
+            .await
+            .map_err(|error| StepError::Backend(format!("capture screenshot: {error}")))?;
+
+        let png = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            &shot.data,
+        )
+        .map_err(|error| StepError::Backend(format!("decode screenshot: {error}")))?;
+
+        Ok(Some(
+            crate::model::Frame::from_png(&png).map_err(StepError::Backend)?,
+        ))
     }
 
     async fn watch(&self, settle: &Settle) -> Result<SettleWatch, StepError> {
@@ -610,20 +799,30 @@ impl Surface for CdpPage {
                     .map(|_| ())
                     .map_err(|error| StepError::Backend(format!("type: {error}")))
             }
-            Step::Key(key) => self.press_key(key).await,
-            Step::Scroll { amount, .. } => {
-                let expression = format!("window.scrollBy(0, {})", amount * 100);
-                self.page
-                    .execute(
-                        EvaluateParams::builder()
-                            .expression(expression)
-                            .build()
-                            .map_err(StepError::Backend)?,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| StepError::Backend(format!("scroll: {error}")))
-            }
+            Step::Key(press) => self.press_key(press.chord()).await,
+            // Scrolling the named container when there is one. A virtualized
+            // list, a chat log and a modal body all scroll independently of the
+            // document, so scrolling the window instead moved nothing and
+            // reported `ok`.
+            Step::Scroll { amount, .. } => match node {
+                None => {
+                    let expression = format!("window.scrollBy(0, {})", amount * 100);
+                    self.page
+                        .execute(
+                            EvaluateParams::builder()
+                                .expression(expression)
+                                .build()
+                                .map_err(StepError::Backend)?,
+                        )
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| StepError::Backend(format!("scroll: {error}")))
+                }
+                Some(_) => {
+                    let id = backend_id(node)?;
+                    self.scroll_backend_node(id, amount * 100).await
+                }
+            },
             Step::Navigate { url } => {
                 use chromiumoxide::cdp::browser_protocol::page::NavigateParams;
 
@@ -633,8 +832,8 @@ impl Surface for CdpPage {
                     .map(|_| ())
                     .map_err(|error| StepError::Backend(format!("navigate to {url}: {error}")))
             }
-            Step::Back => self.history(-1).await,
-            Step::Forward => self.history(1).await,
+            Step::Back { .. } => self.history(-1).await,
+            Step::Forward { .. } => self.history(1).await,
             // The page rung has no declared per-element verbs — every element
             // is reached the same way — so `invoke` here is a routing mistake
             // rather than a missing feature, and says so.
@@ -656,6 +855,162 @@ impl Surface for CdpPage {
 }
 
 impl CdpPage {
+    /// Empty a form control before typing into it.
+    ///
+    /// Set through the DOM rather than by sending `ctrl+a` then Delete: the
+    /// keyboard route needs a working modifier path, is at the mercy of the
+    /// page's own key handlers, and costs three extra round trips. Dispatching
+    /// `input` and `change` afterwards is what makes frameworks notice — React
+    /// in particular ignores a value assignment that fires no event.
+    async fn clear_backend_node(&self, backend_id: i64) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
+        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+
+        let resolved = self
+            .page
+            .execute(
+                ResolveNodeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend_id))
+                    .build(),
+            )
+            .await
+            .map_err(|error| StepError::Backend(format!("resolve element: {error}")))?;
+        let Some(object_id) = resolved.result.object.object_id.clone() else {
+            return Err(StepError::Backend(
+                "the element could not be resolved to clear it".into(),
+            ));
+        };
+
+        const CLEAR: &str = r#"function () {
+            if (this.isContentEditable) { this.textContent = ''; }
+            else if ('value' in this) { this.value = ''; }
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+        }"#;
+
+        self.page
+            .execute(
+                CallFunctionOnParams::builder()
+                    .function_declaration(CLEAR)
+                    .object_id(object_id)
+                    .build()
+                    .map_err(StepError::Backend)?,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| StepError::Backend(format!("clear element: {error}")))
+    }
+
+    /// Scroll one element by a pixel delta.
+    ///
+    /// Walks up to the nearest actually-scrollable ancestor first. The
+    /// accessibility tree names the thing a person would point at — a row, a
+    /// message — while the element with the overflow is usually a container a
+    /// few levels up that has no accessible name at all and so no anchor the
+    /// model could ever cite.
+    async fn scroll_backend_node(&self, backend_id: i64, delta: i32) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
+        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+
+        let resolved = self
+            .page
+            .execute(
+                ResolveNodeParams::builder()
+                    .backend_node_id(BackendNodeId::new(backend_id))
+                    .build(),
+            )
+            .await
+            .map_err(|error| StepError::Backend(format!("resolve element: {error}")))?;
+        let Some(object_id) = resolved.result.object.object_id.clone() else {
+            return Err(StepError::Backend(
+                "the element could not be resolved to scroll it".into(),
+            ));
+        };
+
+        const SCROLL: &str = r#"function (delta) {
+            let node = this;
+            while (node && node !== document.body) {
+                const style = getComputedStyle(node);
+                const scrollable = /auto|scroll|overlay/.test(style.overflowY)
+                    && node.scrollHeight > node.clientHeight;
+                if (scrollable) { break; }
+                node = node.parentElement;
+            }
+            const target = node && node !== document.body ? node : null;
+            if (target) {
+                const before = target.scrollTop;
+                target.scrollTop += delta;
+                return target.scrollTop !== before;
+            }
+            const before = window.scrollY;
+            window.scrollBy(0, delta);
+            return window.scrollY !== before;
+        }"#;
+
+        let outcome = self
+            .page
+            .execute(
+                CallFunctionOnParams::builder()
+                    .function_declaration(SCROLL)
+                    .object_id(object_id)
+                    .argument(
+                        chromiumoxide::cdp::js_protocol::runtime::CallArgument::builder()
+                            .value(serde_json::json!(delta))
+                            .build(),
+                    )
+                    .return_by_value(true)
+                    .build()
+                    .map_err(StepError::Backend)?,
+            )
+            .await
+            .map_err(|error| StepError::Backend(format!("scroll element: {error}")))?;
+
+        // Reporting `ok` for a scroll that moved nothing is how a model ends up
+        // paging forever through a list that was already at the bottom.
+        if outcome.result.result.value == Some(serde_json::Value::Bool(false)) {
+            return Err(StepError::Backend(
+                "nothing scrolled — the element and its ancestors are already at that end".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Step through session history.
+    ///
+    /// `Page.navigateToHistoryEntry` takes an absolute entry, so the current
+    /// index has to be read first — there is no relative form.
+    async fn history(&self, delta: i64) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::page::{
+            GetNavigationHistoryParams, NavigateToHistoryEntryParams,
+        };
+
+        let history = self
+            .page
+            .execute(GetNavigationHistoryParams::default())
+            .await
+            .map_err(|error| StepError::Backend(format!("read history: {error}")))?;
+        let wanted = history.current_index as i64 + delta;
+        let entry = usize::try_from(wanted)
+            .ok()
+            .and_then(|index| history.entries.get(index))
+            .ok_or_else(|| {
+                StepError::Backend(
+                    if delta < 0 {
+                        "there is nothing to go back to"
+                    } else {
+                        "there is nothing to go forward to"
+                    }
+                    .to_owned(),
+                )
+            })?;
+
+        self.page
+            .execute(NavigateToHistoryEntryParams::new(entry.id))
+            .await
+            .map(|_| ())
+            .map_err(|error| StepError::Backend(format!("navigate history: {error}")))
+    }
+
     async fn focus_backend_node(&self, backend_id: i64) -> Result<(), StepError> {
         use chromiumoxide::cdp::browser_protocol::dom::FocusParams;
 
@@ -683,7 +1038,7 @@ impl CdpPage {
             .page
             .execute(
                 ScrollIntoViewIfNeededParams::builder()
-                    .backend_node_id(node_id.clone())
+                    .backend_node_id(node_id)
                     .build(),
             )
             .await;

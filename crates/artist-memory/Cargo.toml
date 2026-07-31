@@ -10,7 +10,19 @@ rust-version.workspace = true
 # binary, so the default set is the languages this project actually works in;
 # anything without a grammar falls back to heuristic chunking rather than
 # becoming unindexable.
-default = ["lang-rust", "lang-markdown"]
+# Every grammar we have an adapter for. The old default was rust + markdown,
+# justified by non-grammar languages degrading gracefully to `heuristic_spans`.
+# That degradation is real but not free: a heuristic chunk starts and ends
+# mid-declaration, so its embedding carries no signature and no name, and a hit
+# hands back half a function. Artist ships into other people's codebases, where
+# "the languages this project works in" is not a useful default.
+default = [
+    "lang-rust",
+    "lang-markdown",
+    "lang-python",
+    "lang-go",
+    "lang-typescript",
+]
 lang-rust = ["dep:tree-sitter-rust"]
 lang-markdown = ["dep:tree-sitter-md"]
 lang-python = ["dep:tree-sitter-python"]
@@ -19,6 +31,13 @@ lang-typescript = ["dep:tree-sitter-typescript"]
 
 [dependencies]
 artist-logic = { path = "../artist-logic" }
+# `ranking` only: RRF fusion, file-coherence and exact-definition boosting,
+# path penalties, and the `CandidateSource` trait. Costs no extra dependencies
+# — it deliberately excludes the built-in index, embedder and model download,
+# because this crate *is* the index.
+artist-ast = { path = "../artist-ast", default-features = false, features = [
+    "ranking",
+] }
 num-bigint = "0.4"
 anyhow = "1"
 artist-session = { path = "../artist-session" }

@@ -1,7 +1,10 @@
 mod bash;
+mod code;
+mod drift;
 mod edit;
 mod find;
 mod grep;
+mod outline;
 mod output;
 mod read;
 mod short_id;
@@ -9,6 +12,11 @@ mod workspace;
 mod write;
 
 pub use bash::BashTool;
+pub use code::{
+    AstQueryTool, AstRewriteTool, CodeCallsTool, CodeCyclesTool, CodeDepsTool, CodeImpactTool,
+    CodeImplementsTool, CodeMapTool, CodeShowTool, CodeSurfaceTool, CodeTraceTool,
+};
+pub use drift::{DRIFT_BUDGET, DriftWatch, report as drift_report};
 pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;
@@ -44,6 +52,18 @@ pub struct ToolBundle {
     pub grep: GrepTool,
     pub edit: EditTool,
     pub write: WriteTool,
+    // Structural navigation, backed by artist-ast.
+    pub code_map: CodeMapTool,
+    pub code_show: CodeShowTool,
+    pub code_surface: CodeSurfaceTool,
+    pub code_implements: CodeImplementsTool,
+    pub code_deps: CodeDepsTool,
+    pub code_cycles: CodeCyclesTool,
+    pub code_calls: CodeCallsTool,
+    pub code_trace: CodeTraceTool,
+    pub code_impact: CodeImpactTool,
+    pub ast_query: AstQueryTool,
+    pub ast_rewrite: AstRewriteTool,
 }
 impl ToolBundle {
     pub fn new(workspace: Workspace) -> Self {
@@ -53,7 +73,18 @@ impl ToolBundle {
             find: FindTool(workspace.clone()),
             grep: GrepTool(workspace.clone()),
             edit: EditTool(workspace.clone()),
-            write: WriteTool(workspace),
+            write: WriteTool(workspace.clone()),
+            code_map: CodeMapTool(workspace.clone()),
+            code_show: CodeShowTool(workspace.clone()),
+            code_surface: CodeSurfaceTool(workspace.clone()),
+            code_implements: CodeImplementsTool(workspace.clone()),
+            code_deps: CodeDepsTool(workspace.clone()),
+            code_cycles: CodeCyclesTool(workspace.clone()),
+            code_calls: CodeCallsTool(workspace.clone()),
+            code_trace: CodeTraceTool(workspace.clone()),
+            code_impact: CodeImpactTool(workspace.clone()),
+            ast_query: AstQueryTool(workspace.clone()),
+            ast_rewrite: AstRewriteTool(workspace),
         }
     }
 

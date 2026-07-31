@@ -122,11 +122,12 @@ async fn drive(
             false,
             retries_used < retry_budget,
         );
-        let mut builder = AgentBuilder::new(model.clone())
-            .tool(tool.clone())
-            .tool(ComputerCountingTool {
-                calls: Arc::clone(&tool.calls),
-            });
+        let mut builder =
+            AgentBuilder::new(model.clone())
+                .tool(tool.clone())
+                .tool(ComputerCountingTool {
+                    calls: Arc::clone(&tool.calls),
+                });
         if let Some(steering) = steering {
             builder = builder.add_hook(SteeringHook(steering.clone()));
         }
@@ -330,7 +331,7 @@ async fn the_builtin_guardrail_stops_a_destructive_click_before_it_happens() {
                     "mode": "do",
                     "surface": "win:3",
                     "steps": [{"click": {"anchor": "kv7", "label": "Delete account"}}],
-                    "expect": {"anchor": "kx9", "label": "Account deleted"}
+                    "expect": {"appears": "Account deleted"}
                 }),
             ),
             MockStreamEvent::final_response_with_default_usage(),
@@ -363,7 +364,10 @@ async fn the_builtin_guardrail_stops_a_destructive_click_before_it_happens() {
         0,
         "no step of the program may run"
     );
-    assert_eq!(summary.text, "Asking first: this would delete the account.\n");
+    assert_eq!(
+        summary.text,
+        "Asking first: this would delete the account.\n"
+    );
 }
 
 /// The complement: an ordinary action must not trip the guardrail. A rule that
@@ -380,7 +384,7 @@ async fn the_builtin_guardrail_ignores_an_ordinary_click() {
                     "mode": "do",
                     "surface": "win:3",
                     "steps": [{"click": {"anchor": "kv7", "label": "Compose"}}],
-                    "expect": {"anchor": "kx9", "label": "New message"}
+                    "expect": {"appears": "New message"}
                 }),
             ),
             MockStreamEvent::final_response_with_default_usage(),

@@ -4,10 +4,13 @@
 //! in [`crate::anchors`], [`crate::render`] or a backend; this module only
 //! routes between them and owns the surface registry.
 //!
-//! The registry copies [`artist_tools::BashTool`]'s session model deliberately:
-//! a `DashMap` keyed by id, an in-flight guard against duplicate creation, and
-//! tombstone-once reaping in `list`. Two long-lived resource maps in one harness
-//! behaving differently would be a needless second thing to learn.
+//! The registry copies [`artist_tools::BashTool`]'s session model where the two
+//! genuinely share a problem — a `DashMap` keyed by id, `short_id` ids, and
+//! resources released on drop — and not where they do not. `BashTool` reaps
+//! exited shells because a shell exits on its own; a surface does not, so there
+//! is nothing to tombstone and `list` does no reaping. Claiming otherwise in a
+//! comment is worse than not having it: the next reader looks for the mechanism
+//! and finds nothing, and cannot tell whether it was removed or never written.
 
 use std::sync::Arc;
 
@@ -17,11 +20,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
+use artist_session::{ComputerActed, ComputerObserved, ComputerStep, Recorder};
+
 use crate::anchors::AnchorBook;
 use crate::model::SurfaceId;
-use crate::program::{Program, StepError};
+use crate::program::{Program, SettleOutcome, StepError};
 use crate::render;
-use crate::surface::{Surface, run_program};
+use crate::surface::{ProgramReport, Surface, run_program};
 
 /// A surface plus the anchor state that names its elements.
 ///
@@ -37,8 +42,14 @@ pub struct Attached {
 #[derive(Clone)]
 pub struct SurfaceRegistry {
     surfaces: Arc<DashMap<String, Arc<Attached>>>,
-    /// Guards against two concurrent opens racing to claim one id, exactly as
-    /// `BashTool` guards session creation.
+    /// Ids currently being claimed by an in-flight open.
+    ///
+    /// A surface takes real time to become driveable — a browser has to start
+    /// and bind a debugging port, a toolkit has to build its accessibility tree
+    /// — and until `attach` lands there is nothing in `surfaces` to collide
+    /// with. Two opens naming the same id would both proceed, and the second's
+    /// `attach` would silently replace the first's surface while the first
+    /// caller still holds its id.
     opening: Arc<DashSet<String>>,
     /// The graphical half. Shared so a stage opened on one turn is still there
     /// on the next.
@@ -71,30 +82,48 @@ impl SurfaceRegistry {
     /// cannot bring one up. That is better than either refusing outright or
     /// silently using a world-readable directory.
     pub fn new() -> Self {
-        Self::with_host_opt(default_state_dir(), Default::default())
+        Self::with_host_opt(
+            default_state_dir(),
+            Default::default(),
+            crate::host::DEFAULT_SCREEN,
+        )
     }
 
-    /// Build a registry rooted at a state directory, with adapters discovered
-    /// for a project.
-    pub fn for_project(state_dir: impl Into<std::path::PathBuf>, project: &std::path::Path) -> Self {
-        Self::with_host(state_dir, crate::ladder::adapters::AdapterSet::discover(project))
+    /// The registry the agent actually runs with.
+    ///
+    /// Discovers this project's rung-0 adapters and takes the configured screen
+    /// size. Both were previously reachable only through constructors nothing
+    /// called, which is why `select()` could never return `Programmatic` in the
+    /// shipped agent and `[computer] screen` resolved into a config field that
+    /// no code read.
+    pub fn for_project(project: &std::path::Path, screen: (i32, i32)) -> Self {
+        Self::with_host_opt(
+            default_state_dir(),
+            crate::ladder::adapters::AdapterSet::discover(project),
+            screen,
+        )
     }
 
     pub fn with_host(
         state_dir: impl Into<std::path::PathBuf>,
         adapters: crate::ladder::adapters::AdapterSet,
     ) -> Self {
-        Self::with_host_opt(Some(state_dir.into()), adapters)
+        Self::with_host_opt(
+            Some(state_dir.into()),
+            adapters,
+            crate::host::DEFAULT_SCREEN,
+        )
     }
 
     fn with_host_opt(
         state_dir: Option<std::path::PathBuf>,
         adapters: crate::ladder::adapters::AdapterSet,
+        screen: (i32, i32),
     ) -> Self {
         Self {
             surfaces: Arc::new(DashMap::new()),
             opening: Arc::new(DashSet::new()),
-            host: Arc::new(crate::host::Host::new(state_dir, adapters)),
+            host: Arc::new(crate::host::Host::sized(state_dir, adapters, screen)),
             input: Arc::new(Mutex::new(())),
         }
     }
@@ -123,7 +152,26 @@ impl SurfaceRegistry {
         Self::with_host_opt(
             self.host.state_dir().map(std::path::Path::to_owned),
             self.host.adapters().clone(),
+            self.host.screen(),
         )
+    }
+
+    /// Claim an id for a surface that is still being brought up.
+    ///
+    /// Returns `false` when another open already holds it, which the caller
+    /// must treat as "someone else is making this" rather than racing it.
+    pub fn claim(&self, id: &str) -> bool {
+        !self.surfaces.contains_key(id) && self.opening.insert(id.to_owned())
+    }
+
+    /// Release a claim that will never become a surface.
+    pub fn abandon(&self, id: &str) {
+        self.opening.remove(id);
+    }
+
+    /// Whether an id is spoken for, either open or opening.
+    pub fn is_claimed(&self, id: &str) -> bool {
+        self.surfaces.contains_key(id) || self.opening.contains(id)
     }
 
     pub fn attach(&self, surface: Arc<dyn Surface>) -> String {
@@ -171,11 +219,41 @@ impl SurfaceRegistry {
 #[derive(Clone)]
 pub struct ComputerTool {
     registry: SurfaceRegistry,
+    /// Where `computer.*` events go.
+    ///
+    /// The tool records its own events, exactly as `TodoTool` does. Without
+    /// this the events were declared, consumed by `artist computer log` and
+    /// `distill`, and never produced — so both commands always reported nothing
+    /// and macro distillation had no input at all.
+    ///
+    /// Deliberately operational: no `history.rs` arm reads these, so they cost
+    /// the model no context. The observation text the model sees is the tool
+    /// result; what is recorded here is the metadata that makes a run auditable
+    /// and replayable afterwards.
+    recorder: Recorder,
+    /// Where screenshots are kept.
+    ///
+    /// `None` for a session that records nothing: the model still gets the
+    /// picture inline, there is simply nothing to retrieve it from later.
+    attachments: Option<artist_session::AttachmentStore>,
 }
 
 impl ComputerTool {
+    /// A tool that records nothing — for tests, and for callers with no session.
     pub fn new(registry: SurfaceRegistry) -> Self {
-        Self { registry }
+        Self::with_recorder(registry, Recorder::noop(), None)
+    }
+
+    pub fn with_recorder(
+        registry: SurfaceRegistry,
+        recorder: Recorder,
+        attachments: Option<artist_session::AttachmentStore>,
+    ) -> Self {
+        Self {
+            registry,
+            recorder,
+            attachments,
+        }
     }
 
     pub fn registry(&self) -> &SurfaceRegistry {
@@ -223,6 +301,7 @@ Modes:
 - `launch` — start a program on a new surface and observe it. Terminal programs (`htop`, `vim notes.md`) run on a PTY; pass `gui: true` for a browser or desktop application, which runs on an isolated display of its own and never touches the user's screen or keyboard. For a plain command whose output you just want to read, `bash` is simpler.
 - `observe` — read a surface. The first look returns everything; later looks return only what CHANGED (`+` added, `~` changed, `-` gone). Pass `full: true` to re-read everything.
 - `do` — run a short program of steps against a surface.
+- `screenshot` — a picture of a surface, alongside the usual structured view. Use it only when the structured view cannot answer the question — a chart, a canvas, a rendering fault, "does this look right". It costs far more context than `observe` and you still cannot act on a coordinate.
 - `close` — release a surface.
 
 Naming things: every element is shown as `role "name" (anchor)`. Use the bare anchor token to refer to it. NEVER use screen coordinates — they are deliberately not shown, and there is no way to act on one.
@@ -237,6 +316,14 @@ Every step that names an anchor must also carry a `label`: your own copy of that
 If an anchor is rejected as stale, do not retry it and do not guess another — `observe` that surface again to get current anchors.
 
 Steps stop at the first failure, and a guardrail can abort the whole program before ANY step runs. So put an irreversible step (delete, send, pay, confirm) in its own single-step call, after the rest has already succeeded.
+
+The steps:
+- `{"click":{"anchor":…,"label":…}}` — activate an element.
+- `{"type":{"anchor":…,"label":…,"text":…}}` — REPLACES what is in the field. Pass `"clear":false` to append instead.
+- `{"key":"Enter"}` — send a key to whatever holds focus. When the key will activate something in particular, name it: `{"key":{"chord":"Enter","label":"Delete account"}}`. That claim is checked against the focused element, and it is what lets a guardrail see a destructive Enter coming.
+- `{"scroll":{"amount":3}}` — positive scrolls down.
+- `{"navigate":{"url":…}}`, `{"back":{}}`, `{"forward":{}}` — browser surfaces. Use these rather than launching a second browser.
+- `{"invoke":{"anchor":…,"label":…,"action":…}}` — run one of the verbs an element lists after its name, e.g. a tab's `close`.
 
 Example:
 {"mode":"do","surface":"pty:1",
@@ -261,7 +348,7 @@ Example:
         json!({
             "type": "object",
             "properties": {
-                "mode": {"enum": ["surfaces", "launch", "observe", "do", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
+                "mode": {"enum": ["surfaces", "launch", "observe", "do", "screenshot", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
                 "surface": {"type": "string", "description": "Surface id, from `surfaces`."},
                 "command": {"type": "string", "description": "For `launch`: the command to run, e.g. `htop`, `vim notes.md`, or `chromium https://example.com`."},
                 "cwd": {"type": "string", "description": "For `launch`: the working directory."},
@@ -279,19 +366,55 @@ Example:
                                 "properties": {
                                     "anchor": {"type": "string"},
                                     "label": {"type": "string"},
-                                    "text": {"type": "string"}
+                                    "text": {"type": "string"},
+                                    "clear": {"type": "boolean", "default": true, "description": "Replace the field's contents. Set false to append."}
                                 },
                                 "required": ["anchor", "text"],
                                 "additionalProperties": false
                             },
-                            "key": {"type": "string", "description": "A key or chord, e.g. `Enter`, `ctrl+c`, `Down`."},
+                            "key": {
+                                "description": "A key or chord, e.g. `Enter`, `ctrl+c`, `Down`. Give the object form to name what the key will activate.",
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "chord": {"type": "string"},
+                                            "label": {"type": "string", "description": "The focused element's name, checked before the key is sent."}
+                                        },
+                                        "required": ["chord", "label"],
+                                        "additionalProperties": false
+                                    }
+                                ]
+                            },
                             "scroll": {
                                 "type": "object",
+                                "description": "Omit the anchor to scroll the surface; name an element to scroll the container holding it.",
                                 "properties": {
                                     "anchor": {"type": "string"},
+                                    "label": {"type": "string"},
                                     "amount": {"type": "integer", "description": "Positive scrolls down."}
                                 },
                                 "required": ["amount"],
+                                "additionalProperties": false
+                            },
+                            "navigate": {
+                                "type": "object",
+                                "properties": {"url": {"type": "string"}},
+                                "required": ["url"],
+                                "additionalProperties": false
+                            },
+                            "back": {"type": "object", "additionalProperties": false},
+                            "forward": {"type": "object", "additionalProperties": false},
+                            "invoke": {
+                                "type": "object",
+                                "description": "Run one of the verbs an element lists after its name.",
+                                "properties": {
+                                    "anchor": {"type": "string"},
+                                    "label": {"type": "string"},
+                                    "action": {"type": "string"}
+                                },
+                                "required": ["anchor", "action"],
                                 "additionalProperties": false
                             }
                         },
@@ -341,10 +464,16 @@ Example:
                 // than sniffed, because guessing wrong means either an invisible
                 // window or a display brought up for `ls`.
                 let id = if args.gui {
-                    let mut parts = command.split_whitespace();
-                    let program = parts.next().unwrap_or(&command).to_owned();
-                    let rest: Vec<String> = parts.map(str::to_owned).collect();
-                    let surface = self.registry.host().launch(&program, &rest).await?;
+                    let mut words = split_command(&command);
+                    if words.is_empty() {
+                        return Err(StepError::Backend("`command` is empty".into()));
+                    }
+                    let program = words.remove(0);
+                    let surface = self
+                        .registry
+                        .host()
+                        .launch(&program, &words, args.cwd.as_deref().map(std::path::Path::new))
+                        .await?;
                     let id = self.registry.attach(surface);
                     // A browser yields two surfaces at two rungs; attach the
                     // chrome half too so tabs are addressable.
@@ -353,14 +482,25 @@ Example:
                     }
                     id
                 } else {
+                    // The id is claimed before the spawn, which can take
+                    // seconds: until `attach` lands there is nothing in the map
+                    // for a second open to collide with, so two would both
+                    // proceed and the later `attach` would silently replace the
+                    // earlier surface under a caller still holding its id.
                     let id = surface_id("term").as_str().to_owned();
+                    if !self.registry.claim(&id) {
+                        return Err(StepError::Backend(format!(
+                            "{id} is already being opened"
+                        )));
+                    }
                     let surface = crate::surface::pty::PtySurface::spawn(
                         id.clone(),
                         &command,
                         args.cwd.as_deref().map(std::path::Path::new),
                         40,
                         120,
-                    )?;
+                    )
+                    .inspect_err(|_| self.registry.abandon(&id))?;
                     self.registry.attach(Arc::new(surface))
                 };
                 let attached = self.attached(&id)?;
@@ -372,9 +512,10 @@ Example:
                 let snapshot = wait_for_first_paint(attached.surface.as_ref()).await?;
                 let mut book = attached.book.lock().await;
                 let observed = book.observe(&snapshot, true);
+                let rendered = render::observation(&id, &observed, None);
+                self.record_observation(&id, attached.surface.rung(), &observed, &rendered, None);
                 Ok(ToolOutput::text(format!(
-                    "launched {command:?} as {id}\n\n{}",
-                    render::observation(&id, &observed, None)
+                    "launched {command:?} as {id}\n\n{rendered}"
                 )))
             }
             "close" => {
@@ -389,10 +530,20 @@ Example:
             "observe" => {
                 let id = self.require_surface(&args)?;
                 let attached = self.attached(&id)?;
-                let snapshot = attached.surface.snapshot().await?;
+                // `full` is not only a rendering choice on a streaming surface:
+                // it is the difference between "what is new" and "everything
+                // still held", and the latter is the only way back after an
+                // observation has been elided.
+                let snapshot = if args.full {
+                    attached.surface.snapshot_full().await?
+                } else {
+                    attached.surface.snapshot().await?
+                };
                 let mut book = attached.book.lock().await;
                 let observed = book.observe(&snapshot, args.full);
-                Ok(ToolOutput::text(render::observation(&id, &observed, None)))
+                let rendered = render::observation(&id, &observed, None);
+                self.record_observation(&id, attached.surface.rung(), &observed, &rendered, None);
+                Ok(ToolOutput::text(rendered))
             }
             "do" => {
                 let id = self.require_surface(&args)?;
@@ -411,10 +562,55 @@ Example:
                 let _input = self.registry.input_lease().await;
                 let mut book = attached.book.lock().await;
                 let report = run_program(attached.surface.as_ref(), &mut book, &program).await?;
+                self.record_program(&id, &program, &report);
                 Ok(ToolOutput::text(render_report(&id, &report)))
             }
+            // Rung 3, and deliberately opt-in. A picture costs far more context
+            // than the structured view and cannot be acted on — there is no way
+            // to click a coordinate — so it is for the cases the tree genuinely
+            // cannot answer: a rendering fault, a canvas, a chart.
+            "screenshot" => {
+                let id = self.require_surface(&args)?;
+                let attached = self.attached(&id)?;
+                let Some(frame) = attached.surface.pixels().await? else {
+                    return Err(StepError::Backend(format!(
+                        "{id} has no picture to take — it is a {} surface, which has geometry \
+                         only where a display is involved. Use mode=\"observe\" to read it.",
+                        attached.surface.rung().label()
+                    )));
+                };
+                let png = frame.to_png().map_err(StepError::Backend)?;
+                let digest = self.store_image(&png)?;
+
+                // The structured view rides along, because a picture alone
+                // gives the model nothing it can name in a later step.
+                let snapshot = attached.surface.snapshot().await?;
+                let mut book = attached.book.lock().await;
+                let observed = book.observe(&snapshot, args.full);
+                let rendered = render::observation(&id, &observed, digest.as_deref());
+                self.record_observation(
+                    &id,
+                    attached.surface.rung(),
+                    &observed,
+                    &rendered,
+                    digest.clone(),
+                );
+
+                Ok(ToolOutput::content(rig_core::OneOrMany::many([
+                    rig_core::completion::message::ToolResultContent::text(format!(
+                        "{rendered}\n{}×{} picture of {id}",
+                        frame.width, frame.height
+                    )),
+                    rig_core::completion::message::ToolResultContent::image_base64(
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png),
+                        Some(rig_core::completion::message::ImageMediaType::PNG),
+                        None,
+                    ),
+                ])
+                .expect("two blocks")))
+            }
             other => Err(StepError::Backend(format!(
-                "unknown mode {other:?}; expected surfaces, observe, do, or close"
+                "unknown mode {other:?}; expected surfaces, launch, observe, do, screenshot or close"
             ))),
         }
     }
@@ -439,16 +635,174 @@ impl ComputerTool {
         })
     }
 
+    /// Keep a durable copy of a frame, and name it.
+    ///
+    /// The model gets the picture inline; this is the copy `artist computer
+    /// frame <sha>` can hand back afterwards, and the one the observation
+    /// sentinel names so an elided observation still says what was seen. A store
+    /// that fails is not worth failing the screenshot over — the model has the
+    /// image either way — so it degrades to an unnamed frame.
+    fn store_image(&self, png: &[u8]) -> Result<Option<String>, StepError> {
+        let Some(store) = &self.attachments else {
+            return Ok(None);
+        };
+        match store.put(png) {
+            Ok(digest) => Ok(Some(digest)),
+            Err(error) => {
+                eprintln!("artist: could not store a computer-use frame: {error}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Record one look at a surface.
+    ///
+    /// Metadata only, deliberately: the node text already reached the model as
+    /// the tool result, and duplicating it here would grow the log with every
+    /// look at an unchanged screen. `bytes` is what that result actually cost,
+    /// which is the number worth having when deciding whether decay is earning
+    /// its keep.
+    fn record_observation(
+        &self,
+        surface: &str,
+        rung: crate::model::Rung,
+        observed: &crate::anchors::Observation,
+        rendered: &str,
+        image: Option<String>,
+    ) {
+        self.recorder.record(ComputerObserved {
+            internal_call_id: artist_tools::short_id("obs"),
+            surface: surface.to_owned(),
+            epoch: observed.epoch,
+            rung: rung.as_u8(),
+            full: observed.full,
+            nodes: observed.entries.len() as u32,
+            bytes: rendered.len() as u64,
+            image,
+        });
+    }
+
+    /// Record one program, as executed.
+    ///
+    /// This is `distill`'s only input. Every field a replay needs has to survive
+    /// here — the payload especially, without which a `key` step replays as an
+    /// empty chord and a `type` step types nothing, both reporting success.
+    fn record_program(&self, surface: &str, program: &Program, report: &ProgramReport) {
+        self.recorder.record(ComputerActed {
+            internal_call_id: artist_tools::short_id("act"),
+            surface: surface.to_owned(),
+            epoch: report.observation.epoch,
+            steps: report
+                .steps
+                .iter()
+                .map(|step| ComputerStep {
+                    action: step.action.to_owned(),
+                    anchor: step.anchor.clone(),
+                    label: step.label.clone(),
+                    resolved_name: step.resolved_name.clone(),
+                    payload: step.payload.clone(),
+                    outcome: step.outcome.clone(),
+                })
+                .collect(),
+            settled_ms: report.settled.as_ref().and_then(|outcome| match outcome {
+                SettleOutcome::Settled { after_ms } | SettleOutcome::TimedOut { after_ms } => {
+                    Some(*after_ms)
+                }
+                SettleOutcome::Unsupported => None,
+            }),
+            expect: program.expect.label().map(str::to_owned),
+            expect_met: report.expect_met,
+            failed_step: report.failed_step,
+        });
+    }
+
+    /// The surface list, including what each one can be asked to do.
+    ///
+    /// `Caps` exists so the tool can refuse rather than pretend, and it was
+    /// never shown — so the model discovered that a terminal has no pointer by
+    /// clicking one and reading the error, at the cost of a round trip every
+    /// time. Saying it up front is strictly cheaper.
     fn render_surfaces(&self) -> String {
-        let rows = self.registry.list();
+        let mut rows: Vec<(String, String, u8, String)> = self
+            .registry
+            .surfaces
+            .iter()
+            .map(|entry| {
+                let surface = &entry.value().surface;
+                (
+                    entry.key().clone(),
+                    surface.title(),
+                    surface.rung().as_u8(),
+                    verbs(&surface.caps()),
+                )
+            })
+            .collect();
         if rows.is_empty() {
             return "no surfaces are open".to_owned();
         }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
         rows.into_iter()
-            .map(|(id, title, rung)| format!("{id}\trung {rung}\t{title}"))
+            .map(|(id, title, rung, verbs)| format!("{id}\trung {rung}\t{title}\t[{verbs}]"))
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// Split a command line into words, honouring quotes.
+///
+/// `split_whitespace` breaks the two things a GUI launch is most likely to
+/// carry: a URL with a query string is fine, but a path with a space in it or a
+/// quoted argument is silently torn into pieces and the application is started
+/// with arguments nobody wrote. Not a shell — no expansion, no globbing, no
+/// substitution — deliberately: this splits a command, it does not interpret one.
+fn split_command(command: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut any = false;
+
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, c @ ('\'' | '"')) => {
+                // An empty quoted argument is still an argument.
+                any = true;
+                quote = Some(c);
+            }
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() || any {
+                    words.push(std::mem::take(&mut current));
+                    any = false;
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() || any {
+        words.push(current);
+    }
+    words
+}
+
+/// The step verbs a surface actually accepts.
+fn verbs(caps: &crate::model::Caps) -> String {
+    let mut verbs = Vec::new();
+    for (supported, verb) in [
+        (caps.click, "click"),
+        (caps.type_text, "type"),
+        (caps.key, "key"),
+        (caps.scroll, "scroll"),
+        (caps.pixels, "screenshot"),
+    ] {
+        if supported {
+            verbs.push(verb);
+        }
+    }
+    if verbs.is_empty() {
+        return "observe only".to_owned();
+    }
+    verbs.join(" ")
 }
 
 /// Render a finished program for the model.
@@ -804,5 +1158,174 @@ mod tests {
             description.contains("irreversible"),
             "the model must be told to isolate destructive steps"
         );
+    }
+
+    /// A tool wired to a real recorder, so what it writes can be read back.
+    struct Recording {
+        tool: ComputerTool,
+        surface: String,
+        reader: artist_session::EventLogReader,
+        recorder: artist_session::Recorder,
+        _writer: artist_session::WriterTask,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Recording {
+        /// Every event written so far.
+        ///
+        /// The writer is a separate task, so a read that did not wait would race
+        /// it and pass or fail depending on scheduling.
+        async fn events(&self) -> Vec<artist_session::Envelope> {
+            self.recorder.flush().await;
+            self.reader.read_all().unwrap()
+        }
+    }
+
+    async fn recording_tool() -> Recording {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = artist_session::EventLogWriter::open(dir.path(), "test").unwrap();
+        let (recorder, task) = artist_session::spawn_writer(writer, None);
+        let (registry, surface) = registry_with_terminal();
+        Recording {
+            tool: ComputerTool::with_recorder(registry, recorder.clone(), None),
+            surface,
+            reader: artist_session::EventLogReader::new(dir.path()),
+            recorder,
+            _writer: task,
+            _dir: dir,
+        }
+    }
+
+    #[tokio::test]
+    async fn observing_records_an_event_the_inspector_can_read() {
+        // The events were declared and consumed and never produced, so
+        // `artist computer log` and `distill` always reported nothing at all.
+        let fixture = recording_tool().await;
+        let (tool, id) = (&fixture.tool, fixture.surface.clone());
+        call(tool, json!({"mode": "observe", "surface": id})).await;
+
+        let events = fixture.events().await;
+        let observed: Vec<_> = events
+            .iter()
+            .filter_map(|envelope| match envelope.event() {
+                artist_session::SessionEvent::ComputerObserved(observed) => Some(observed),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(observed.len(), 1, "one look, one record");
+        assert_eq!(observed[0].surface, id);
+        assert_eq!(observed[0].rung, 1, "a terminal is the engine rung");
+        assert!(observed[0].bytes > 0, "the cost of the result is the point");
+    }
+
+    #[tokio::test]
+    async fn a_program_records_every_step_with_its_payload() {
+        let fixture = recording_tool().await;
+        let (tool, id) = (&fixture.tool, fixture.surface.clone());
+        let observation = call(tool, json!({"mode": "observe", "surface": id})).await;
+        let anchor = observation
+            .lines()
+            .find(|line| line.contains("READY"))
+            .and_then(|line| line.rsplit('(').next())
+            .map(|tail| tail.trim_end_matches(')').to_owned())
+            .expect("an anchor for the READY row");
+
+        call(
+            tool,
+            json!({
+                "mode": "do",
+                "surface": id,
+                "steps": [{"key": "Enter"}, {"type": {"anchor": anchor, "label": "READY", "text": "hello"}}],
+                "settle": {"until": "none"},
+                "expect": {"appears": "READY"}
+            }),
+        )
+        .await;
+
+        let events = fixture.events().await;
+        let acted = events
+            .iter()
+            .find_map(|envelope| match envelope.event() {
+                artist_session::SessionEvent::ComputerActed(acted) => Some(acted),
+                _ => None,
+            })
+            .expect("the program must be recorded");
+
+        assert_eq!(acted.surface, id);
+        assert_eq!(acted.steps.len(), 2);
+        // Without the payload a distilled macro replays as a silent no-op: the
+        // key becomes an empty chord and the type step types nothing.
+        assert_eq!(acted.steps[0].action, "key");
+        assert_eq!(acted.steps[0].payload.as_deref(), Some("Enter"));
+        assert_eq!(acted.steps[1].action, "type");
+        assert_eq!(acted.steps[1].payload.as_deref(), Some("hello"));
+        assert_eq!(acted.expect.as_deref(), Some("READY"));
+        assert_eq!(acted.expect_met, Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_surface_with_no_picture_says_so_rather_than_failing_obscurely() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let args = serde_json::from_value(json!({"mode": "screenshot", "surface": id})).unwrap();
+        let error = tool.call(args).await.unwrap_err().to_string();
+
+        assert!(error.contains("no picture"), "{error}");
+        assert!(
+            error.contains("observe"),
+            "an error must name the thing to do instead: {error}"
+        );
+    }
+
+    #[test]
+    fn a_command_line_survives_quotes_and_spaces() {
+        // `split_whitespace` tore a quoted path into pieces and started the
+        // application with arguments nobody wrote.
+        assert_eq!(split_command("chromium"), ["chromium"]);
+        assert_eq!(
+            split_command("chromium https://example.com/a?b=c&d=e"),
+            ["chromium", "https://example.com/a?b=c&d=e"]
+        );
+        assert_eq!(
+            split_command(r#"gedit "/home/a/My Notes.txt""#),
+            ["gedit", "/home/a/My Notes.txt"]
+        );
+        assert_eq!(
+            split_command("code --folder-uri 'file:///tmp/my project'"),
+            ["code", "--folder-uri", "file:///tmp/my project"]
+        );
+        // An empty quoted argument is still an argument.
+        assert_eq!(split_command(r#"app "" x"#), ["app", "", "x"]);
+        assert!(split_command("   ").is_empty());
+    }
+
+    #[test]
+    fn the_surface_list_says_what_each_surface_can_do() {
+        // `Caps` exists so the tool can refuse rather than pretend, and was
+        // never rendered — so the model learned a terminal has no pointer by
+        // clicking one and reading the error, at a round trip every time.
+        let (registry, _) = registry_with_terminal();
+        let listing = ComputerTool::new(registry).render_surfaces();
+
+        assert!(listing.contains("key"), "{listing}");
+        assert!(listing.contains("type"), "{listing}");
+        assert!(
+            !listing.contains("click"),
+            "a terminal has no pointer and must not advertise one: {listing}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_being_opened_cannot_be_claimed_twice() {
+        let registry = SurfaceRegistry::new();
+        assert!(registry.claim("term:1"));
+        assert!(!registry.claim("term:1"), "the second open must lose");
+        assert!(registry.is_claimed("term:1"));
+
+        // A failed open releases its claim rather than burning the id.
+        registry.abandon("term:1");
+        assert!(!registry.is_claimed("term:1"));
+        assert!(registry.claim("term:1"));
     }
 }

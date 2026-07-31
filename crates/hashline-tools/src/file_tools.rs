@@ -122,6 +122,82 @@ struct FileView {
     lines: Vec<LineInfo>,
 }
 
+/// Enough about the last view handed to the model to tell, cheaply, whether
+/// disk still agrees with what it believes.
+///
+/// The hash is the authority; `mtime` and `len` exist only so the common answer
+/// — "nothing moved" — costs a stat rather than a read. That matters because
+/// this is checked after every tool call.
+#[derive(Debug, Clone)]
+struct ReadStamp {
+    hash: u64,
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+    /// Ordering only, so a drift report can spend its budget on whatever the
+    /// model touched most recently. A counter rather than a clock: this needs
+    /// to be monotonic, and wall time on a shared worktree is not.
+    touched: u64,
+}
+
+/// What became of a file since the model last looked at it.
+#[derive(Debug, Clone)]
+pub enum DriftKind {
+    /// Still there, different content. Carries the anchors either side, so the
+    /// report can say which handles died and what replaced them.
+    Modified {
+        before: Vec<AnchoredLine>,
+        after: Vec<AnchoredLine>,
+        before_text: String,
+        after_text: String,
+    },
+    /// Gone. Distinct from modified because "re-read it" is not the advice —
+    /// the model is holding anchors into a file that no longer exists.
+    Deleted,
+    /// There, but we could not look: permissions, a partial write, a directory
+    /// where a file used to be.
+    Unreadable(String),
+}
+
+/// One file whose content no longer matches what the model was shown.
+#[derive(Debug, Clone)]
+pub struct Drift {
+    pub path: String,
+    pub kind: DriftKind,
+    /// The `touched` counter from the stamp, for recency ordering.
+    pub touched: u64,
+    /// Which actor wrote it last, when that is known and is not us. A change
+    /// from another session is a coordination signal; one from nowhere in
+    /// particular is usually the user's editor.
+    pub writer: Option<String>,
+}
+
+/// A path to examine, and what it looked like when the model last saw it.
+///
+/// Handed out so the stat can happen without the manager's lock held — see
+/// `FileCoordinator::drifted`.
+#[derive(Debug, Clone)]
+pub struct DriftCandidate {
+    pub path: String,
+    pub touched: u64,
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl DriftCandidate {
+    /// Has this file moved since the model saw it, judged by stat alone?
+    ///
+    /// Deliberately errs towards "yes": a stat that fails, or a filesystem with
+    /// coarse mtime granularity, sends the path on to the hash check rather
+    /// than silently passing. False positives cost one read; false negatives
+    /// cost the model a wasted edit.
+    pub fn may_have_moved(&self) -> bool {
+        match std::fs::metadata(&self.path) {
+            Ok(meta) => meta.len() != self.len || meta.modified().ok() != self.mtime,
+            Err(_) => true,
+        }
+    }
+}
+
 impl FileView {
     fn from_text(text: &str, path: &Path) -> Self {
         let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
@@ -383,6 +459,13 @@ pub struct FileToolManager {
     /// Legacy visible hash-prefix bindings remain readable during migration.
     issued_prefixes: HashMap<String, HashMap<String, String>>,
     last_read_view: HashMap<String, FileView>,
+    /// Parallel to `last_read_view`: what disk looked like when that view was
+    /// taken. Separate rather than a field on `FileView` because views are
+    /// content-addressed and shared through `view_cache` — two paths with
+    /// identical content share a view but never a stamp.
+    read_stamps: HashMap<String, ReadStamp>,
+    /// Source of `ReadStamp::touched`. Bumped per view recorded.
+    touch_counter: u64,
     /// Set of pending stale-prefix confirmation keys.
     pending_confirmations: HashSet<PendingKey>,
     /// Content-addressed cache of parsed views, keyed by (is_rust, xxh3 of the
@@ -410,9 +493,132 @@ impl FileToolManager {
             config,
             issued_prefixes: HashMap::new(),
             last_read_view: HashMap::new(),
+            read_stamps: HashMap::new(),
+            touch_counter: 0,
             pending_confirmations: HashSet::new(),
             view_cache: HashMap::new(),
         }
+    }
+
+    /// Record what the model was just shown for `path`, and what disk looked
+    /// like at that moment.
+    ///
+    /// Called wherever `last_read_view` is written. Keeping the two together in
+    /// one method is the point: a view recorded without a stamp is a file the
+    /// drift check silently stops watching.
+    fn remember_view(&mut self, path: &str, view: FileView, text: &str) {
+        self.last_read_view.insert(path.to_owned(), view);
+        let meta = std::fs::metadata(path).ok();
+        self.touch_counter += 1;
+        self.read_stamps.insert(
+            path.to_owned(),
+            ReadStamp {
+                hash: compute_hash(text.as_bytes()),
+                mtime: meta.as_ref().and_then(|meta| meta.modified().ok()),
+                len: meta.as_ref().map(|meta| meta.len()).unwrap_or(0),
+                touched: self.touch_counter,
+            },
+        );
+    }
+
+    /// Every path the model has been shown, with enough to stat-check it.
+    ///
+    /// Phase one of the drift check. Returns immediately and does no I/O, so
+    /// the caller can release the manager lock before touching the filesystem.
+    pub fn drift_candidates(&self) -> Vec<DriftCandidate> {
+        self.read_stamps
+            .iter()
+            .map(|(path, stamp)| DriftCandidate {
+                path: path.clone(),
+                touched: stamp.touched,
+                mtime: stamp.mtime,
+                len: stamp.len,
+            })
+            .collect()
+    }
+
+    /// Phase three: confirm and describe drift for paths that failed the stat
+    /// prefilter.
+    ///
+    /// Reads and reconciles, so it needs the lock — but only ever runs for
+    /// files that actually moved, which is why holding it here is affordable.
+    /// A path that turns out to match after all returns nothing: mtime moving
+    /// without content changing is ordinary (a touch, a rewrite of identical
+    /// bytes, a checkout that restored what was there).
+    pub fn describe_drift(&mut self, candidates: &[DriftCandidate]) -> Vec<Drift> {
+        let mut drifts = Vec::new();
+        for candidate in candidates {
+            let Some(stamp) = self.read_stamps.get(&candidate.path).cloned() else {
+                continue;
+            };
+            let path = Path::new(&candidate.path);
+            let text = match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.read_stamps.remove(&candidate.path);
+                    drifts.push(Drift {
+                        path: candidate.path.clone(),
+                        kind: DriftKind::Deleted,
+                        touched: stamp.touched,
+                        writer: None,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    drifts.push(Drift {
+                        path: candidate.path.clone(),
+                        kind: DriftKind::Unreadable(error.to_string()),
+                        touched: stamp.touched,
+                        writer: None,
+                    });
+                    continue;
+                }
+            };
+
+            if compute_hash(text.as_bytes()) == stamp.hash {
+                // Same bytes after all. Restamp so the next check does not keep
+                // re-reading a file whose mtime merely moved.
+                let view = self.build_view(&text, path);
+                self.remember_view(&candidate.path, view, &text);
+                continue;
+            }
+
+            let before_view = self.last_read_view.get(&candidate.path).cloned();
+            let before_text = before_view
+                .as_ref()
+                .map(|view| {
+                    view.lines
+                        .iter()
+                        .map(|line| line.content.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            let before = before_view
+                .as_ref()
+                .map(|view| self.anchored_lines_for(&candidate.path, view))
+                .unwrap_or_default();
+
+            let after_view = self.build_view(&text, path);
+            // Reconciled before the anchors are rendered, so surviving lines
+            // keep the mnemonics the model already holds and only the changed
+            // region reads as new.
+            let after = self.reconcile_and_anchor(&candidate.path, &after_view);
+            self.remember_view(&candidate.path, after_view, &text);
+
+            drifts.push(Drift {
+                path: candidate.path.clone(),
+                kind: DriftKind::Modified {
+                    before,
+                    after,
+                    before_text,
+                    after_text: text,
+                },
+                touched: stamp.touched,
+                writer: None,
+            });
+        }
+        drifts
     }
 
     /// Build a `FileView`, reusing a cached parse for identical content (same
@@ -456,12 +662,16 @@ impl FileToolManager {
         self.issued_prefixes = issued_prefixes;
         self.pending_confirmations.clear();
         self.last_read_view.clear();
+        // Stamps track views. Keeping one without the other would leave the
+        // drift check comparing against a view it can no longer render.
+        self.read_stamps.clear();
     }
 
     pub fn forget_path(&mut self, path: &str) -> Result<()> {
         let normalized = normalize_path(path, &self.config)?;
         self.clear_all_for_path(&normalized);
         self.last_read_view.remove(&normalized);
+        self.read_stamps.remove(&normalized);
         Ok(())
     }
 
@@ -482,6 +692,55 @@ impl FileToolManager {
         visible
     }
 
+    /// The anchors the model is currently holding for `view`, without issuing
+    /// any new ones.
+    ///
+    /// Read-only on purpose. This renders the *pre-drift* side of a report, and
+    /// reconciling would rewrite the very bindings the report exists to explain
+    /// — a removed line's anchor has to still be the handle the model has, or
+    /// the report cannot tell it which handle just died.
+    fn anchored_lines_for(&self, path: &str, view: &FileView) -> Vec<AnchoredLine> {
+        let issued = self.issued_prefixes.get(path);
+        let by_hash: HashMap<&str, &str> = issued
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .map(|(handle, packed)| (binding_full(packed), handle.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        view.lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| AnchoredLine {
+                line_number: index + 1,
+                anchor: by_hash
+                    .get(line.full_hash.as_str())
+                    .map(|handle| (*handle).to_owned())
+                    .unwrap_or_default(),
+                text: line.content.clone(),
+            })
+            .collect()
+    }
+
+    /// Reconcile `view` into the anchor table and render its lines.
+    ///
+    /// `reclaim_dead` is true, matching a read: a file that changed underneath
+    /// the model is exactly when mnemonics freed by vanished lines should
+    /// become available again.
+    fn reconcile_and_anchor(&mut self, path: &str, view: &FileView) -> Vec<AnchoredLine> {
+        let anchors = self.reconcile_path_anchors(path, view, true);
+        view.lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| AnchoredLine {
+                line_number: index + 1,
+                anchor: anchors.get(index).cloned().unwrap_or_default(),
+                text: line.content.clone(),
+            })
+            .collect()
+    }
+
     pub async fn read_file(&mut self, request: ReadFileRequest) -> Result<ReadFileResult> {
         let norm = normalize_path(&request.path, &self.config)?;
         // Reread clears pending confirmations for this path but preserves
@@ -497,7 +756,7 @@ impl FileToolManager {
         let total_lines = lines.len();
 
         let view = self.build_view(&content, path);
-        self.last_read_view.insert(norm.clone(), view.clone());
+        self.remember_view(&norm, view.clone(), &content);
 
         // Clamped: an offset past the end is a request for nothing, not a
         // reason to slice out of range.
@@ -562,7 +821,7 @@ impl FileToolManager {
 
         let lines: Vec<&str> = request.content.lines().collect();
         let view = self.build_view(&request.content, path);
-        self.last_read_view.insert(norm.clone(), view.clone());
+        self.remember_view(&norm, view.clone(), &request.content);
 
         let visible_anchors = self.reconcile_path_anchors(&norm, &view, true);
         let mut rendered = String::new();
@@ -933,7 +1192,7 @@ impl FileToolManager {
         // handles available only to newly created lines.
         self.clear_pending_for_path(&norm);
         let final_view = self.build_view(&result, path);
-        self.last_read_view.insert(norm.clone(), final_view.clone());
+        self.remember_view(&norm, final_view.clone(), &result);
         let visible_anchors = self.reconcile_path_anchors(&norm, &final_view, true);
 
         let result_lines: Vec<&str> = result.lines().collect();
@@ -1183,6 +1442,192 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A manager rooted at a fresh temp directory, plus that directory.
+    fn manager_at(name: &str) -> (FileToolManager, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "artist-drift-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let config = FileToolConfig {
+            workspace_root: Some(root.clone()),
+            ..FileToolConfig::default()
+        };
+        (FileToolManager::with_config(config), root)
+    }
+
+    async fn read(manager: &mut FileToolManager, path: &str) {
+        manager
+            .read_file(ReadFileRequest {
+                path: path.to_owned(),
+                start_line: 1,
+                max_lines: None,
+            })
+            .await
+            .expect("read");
+    }
+
+    /// The whole point: something outside the harness changed a file the model
+    /// had read, and the model finds out without having to fail an edit first.
+    #[tokio::test]
+    async fn a_file_changed_outside_the_harness_reads_as_drift() {
+        let (mut manager, root) = manager_at("outside");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        // Stand in for `sed -i`, the user's editor, or another session.
+        std::fs::write(&file, "one\nCHANGED\n").expect("outside write");
+
+        let candidates: Vec<_> = manager
+            .drift_candidates()
+            .into_iter()
+            .filter(DriftCandidate::may_have_moved)
+            .collect();
+        let drifts = manager.describe_drift(&candidates);
+
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        match &drifts[0].kind {
+            DriftKind::Modified {
+                before_text,
+                after_text,
+                ..
+            } => {
+                assert!(before_text.contains("two"), "{before_text}");
+                assert!(after_text.contains("CHANGED"), "{after_text}");
+            }
+            other => panic!("expected a modification, got {other:?}"),
+        }
+    }
+
+    /// The common case, and the one that must cost nothing: nothing moved.
+    /// A check that reported drift for untouched files would tax every tool
+    /// call in the session.
+    #[tokio::test]
+    async fn an_untouched_file_is_not_drift() {
+        let (mut manager, root) = manager_at("untouched");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        let candidates: Vec<_> = manager
+            .drift_candidates()
+            .into_iter()
+            .filter(DriftCandidate::may_have_moved)
+            .collect();
+        assert!(manager.describe_drift(&candidates).is_empty());
+    }
+
+    /// The harness's own writes must not report as drift, or every edit would
+    /// be followed by a report of itself. Nothing classifies tools as native —
+    /// this holds because a write updates the view it is compared against.
+    #[tokio::test]
+    async fn our_own_write_does_not_report_as_drift() {
+        let (mut manager, root) = manager_at("ourwrite");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        manager
+            .write_file(WriteFileRequest {
+                path: path.clone(),
+                content: "one\ntwo\n".to_owned(),
+                overwrite: true,
+            })
+            .await
+            .expect("write");
+
+        let candidates: Vec<_> = manager
+            .drift_candidates()
+            .into_iter()
+            .filter(DriftCandidate::may_have_moved)
+            .collect();
+        assert!(
+            manager.describe_drift(&candidates).is_empty(),
+            "a write reported itself as drift"
+        );
+    }
+
+    /// mtime can move without content moving — a touch, a checkout restoring
+    /// identical bytes, a rewrite of the same text. The stat prefilter lets
+    /// those through on purpose; the hash is what decides.
+    #[tokio::test]
+    async fn an_identical_rewrite_is_not_drift() {
+        let (mut manager, root) = manager_at("identical");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        std::fs::write(&file, "one\ntwo\n").expect("rewrite");
+
+        let candidates = manager.drift_candidates();
+        assert!(
+            manager.describe_drift(&candidates).is_empty(),
+            "same bytes reported as a change"
+        );
+    }
+
+    /// A vanished file is not a modified one: "re-read it" is the wrong advice.
+    #[tokio::test]
+    async fn a_deleted_file_reads_as_deleted() {
+        let (mut manager, root) = manager_at("deleted");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        std::fs::remove_file(&file).expect("delete");
+
+        let candidates = manager.drift_candidates();
+        let drifts = manager.describe_drift(&candidates);
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert!(matches!(drifts[0].kind, DriftKind::Deleted));
+
+        // Reported once, then forgotten: a file that stays deleted must not
+        // re-report on every subsequent tool call for the rest of the session.
+        let candidates = manager.drift_candidates();
+        assert!(manager.describe_drift(&candidates).is_empty());
+    }
+
+    /// Anchors on surviving lines are the model's existing handles, so a drift
+    /// report only has to explain the part that moved.
+    #[tokio::test]
+    async fn surviving_lines_keep_the_anchors_the_model_holds() {
+        let (mut manager, root) = manager_at("survivors");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "keep\ngoing\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        read(&mut manager, &path).await;
+
+        let held = manager
+            .last_read_view
+            .get(&path)
+            .map(|view| manager.anchored_lines_for(&path, view))
+            .expect("a view");
+        let keep_anchor = held[0].anchor.clone();
+        assert!(!keep_anchor.is_empty());
+
+        std::fs::write(&file, "keep\nCHANGED\n").expect("outside write");
+        let candidates = manager.drift_candidates();
+        let drifts = manager.describe_drift(&candidates);
+
+        match &drifts[0].kind {
+            DriftKind::Modified { after, .. } => {
+                assert_eq!(
+                    after[0].anchor, keep_anchor,
+                    "an untouched line was reissued a new anchor"
+                );
+            }
+            other => panic!("expected a modification, got {other:?}"),
+        }
+    }
 
     #[test]
     fn normalize_insertion_reterminates_and_normalizes_crlf() {

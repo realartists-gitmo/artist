@@ -2,6 +2,7 @@
 
 pub mod canvas;
 mod capture;
+mod code_search;
 pub mod compaction;
 mod conversation;
 mod delegate;
@@ -693,6 +694,17 @@ where
             content.insert(0, UserContent::text(section));
         }
     }
+    // Files can move while nobody is looking: the user edits in their own
+    // editor between turns, another session in this worktree lands a change, a
+    // branch gets switched. The per-tool check cannot see any of that, because
+    // by definition no tool ran. Riding the user turn for the same reason
+    // skills and memory do — it is conditioned on what just happened, so
+    // folding it into the preamble would break the stable cache prefix.
+    if let Some(report) = tools.edit.0.drift_watch().report().await
+        && let Message::User { content } = &mut seed_prompt
+    {
+        content.insert(0, UserContent::text(report));
+    }
     // Observes the model's own output: schedules recall on a stated decision,
     // injects what has landed on the next completion call, and captures a fact
     // when a commit succeeds. Inert when memory is disabled.
@@ -788,6 +800,32 @@ where
             ("edit", tool_prompt::dynamic(tools.edit.clone())),
             ("write", tool_prompt::dynamic(tools.write.clone())),
             ("skill", tool_prompt::dynamic(resources.skill_tool())),
+            ("code_map", tool_prompt::dynamic(tools.code_map.clone())),
+            ("code_show", tool_prompt::dynamic(tools.code_show.clone())),
+            (
+                "code_surface",
+                tool_prompt::dynamic(tools.code_surface.clone()),
+            ),
+            (
+                "code_implements",
+                tool_prompt::dynamic(tools.code_implements.clone()),
+            ),
+            ("code_deps", tool_prompt::dynamic(tools.code_deps.clone())),
+            (
+                "code_cycles",
+                tool_prompt::dynamic(tools.code_cycles.clone()),
+            ),
+            ("code_calls", tool_prompt::dynamic(tools.code_calls.clone())),
+            ("code_trace", tool_prompt::dynamic(tools.code_trace.clone())),
+            (
+                "code_impact",
+                tool_prompt::dynamic(tools.code_impact.clone()),
+            ),
+            ("ast_query", tool_prompt::dynamic(tools.ast_query.clone())),
+            (
+                "ast_rewrite",
+                tool_prompt::dynamic(tools.ast_rewrite.clone()),
+            ),
         ] {
             if profile.permits(name) {
                 registered.push(tool);
@@ -803,6 +841,24 @@ where
         }
         if let Some(writer) = memory_writer.clone().filter(|_| profile.permits("memory")) {
             registered.push(tool_prompt::dynamic(memory::MemoryTool::new(writer)));
+        }
+        // Code retrieval rides on the memory index, so it is only offered when
+        // that index exists — a search tool with nothing to search would be a
+        // failure the model discovers by calling it.
+        if let Some(writer) = memory_writer.clone() {
+            let root = tools.project_root().to_path_buf();
+            if profile.permits("code_search") {
+                registered.push(tool_prompt::dynamic(code_search::CodeSearchTool::new(
+                    writer.handle().clone(),
+                    root.clone(),
+                )));
+            }
+            if profile.permits("code_related") {
+                registered.push(tool_prompt::dynamic(code_search::CodeRelatedTool::new(
+                    writer.handle().clone(),
+                    root,
+                )));
+            }
         }
         // Only offered when a surface registry exists. A computer tool with no
         // way to reach a display would be a mode the model discovers by
@@ -859,7 +915,14 @@ where
         // profile can trim a bloated server down to the handful it needs.
         registered.retain(|tool| profile.permits(tool.name()));
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
-        let registered: Vec<_> = registered.into_iter().map(tool_prompt::guard).collect();
+        // Every tool learns to report files that moved underneath the model,
+        // in the one place they all pass through — so this cannot be forgotten
+        // by a tool added later, and it covers changes the harness did not make.
+        let drift = Some(tools.edit.0.drift_watch());
+        let registered: Vec<_> = registered
+            .into_iter()
+            .map(|tool| tool_prompt::guard(tool, drift.clone()))
+            .collect();
         // Publish what the model actually got, so a canvas cannot reach a tool
         // the profile denied nor miss one it allowed.
         handles.tools.publish(registered.clone());
