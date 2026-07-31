@@ -260,6 +260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "artist-herdr"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "artist-rules"
 version = "0.1.0"
 dependencies = [

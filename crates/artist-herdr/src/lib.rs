@@ -1,0 +1,18 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HerdrState {
+    Idle,
+    Working,
+    Blocked,
+    Unknown,
+}
+
+impl HerdrState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Unknown => "unknown",
+        }
+    }
+}
