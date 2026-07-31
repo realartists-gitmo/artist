@@ -152,6 +152,22 @@ pub fn active_profile(events: &[Envelope]) -> Option<String> {
         .next_back()
 }
 
+/// How many handoffs this session has performed.
+///
+/// Used to derive a distinct provider-private lineage per hop: clearing the
+/// portable conversation does not clear provider-side state, so without this an
+/// incoming profile inherits the outgoing one's provider context.
+pub fn handoff_depth(events: &[Envelope]) -> usize {
+    let masks = resolve_masks(events, None);
+    events
+        .iter()
+        .filter(|envelope| {
+            envelope.lineage == crate::event::MAIN_LINEAGE && !masks.covers(envelope.seq)
+        })
+        .filter(|envelope| matches!(envelope.event(), SessionEvent::HandoffPerformed(_)))
+        .count()
+}
+
 pub fn visible_events(events: &[Envelope]) -> Vec<&Envelope> {
     let masks = resolve_masks(events, None);
     events
@@ -358,6 +374,29 @@ mod tests {
             }),
         )];
         assert_eq!(active_profile(&events), None);
+    }
+
+    #[test]
+    fn handoff_depth_counts_visible_hops_only() {
+        let events = vec![
+            handoff(0, "default", "planner"),
+            handoff(1, "planner", "worker"),
+        ];
+        assert_eq!(handoff_depth(&events), 2);
+        let rewound = vec![
+            handoff(0, "default", "planner"),
+            handoff(1, "planner", "worker"),
+            envelope(
+                2,
+                "main",
+                SessionEvent::HistoryRewind(crate::event::HistoryRewind {
+                    to_seq: 0,
+                    reason: "user".into(),
+                    by: "user".into(),
+                }),
+            ),
+        ];
+        assert_eq!(handoff_depth(&rewound), 1, "masked hops do not count");
     }
 
     #[test]

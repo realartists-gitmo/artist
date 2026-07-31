@@ -7,10 +7,9 @@
 //! the last error instead of the real one.
 
 use dashmap::DashMap;
-use rig_core::{
-    agent::StreamingError,
-    completion::{CompletionError, PromptError},
-};
+use rig_agent::agent::StreamingError;
+use rig_agent::prelude::PromptError;
+use rig_core::completion::CompletionError;
 use std::{
     sync::OnceLock,
     time::{Duration, Instant},
@@ -40,8 +39,6 @@ pub(crate) struct Unavailable(pub String);
 
 pub(crate) fn classify(error: &StreamingError) -> Failure {
     match error {
-        // A tool blew up inside our own loop; the provider is fine.
-        StreamingError::Tool(_) => Failure::Permanent,
         StreamingError::Completion(error) => classify_completion(error),
         StreamingError::Prompt(error) => match error.as_ref() {
             PromptError::CompletionError(error) => classify_completion(error),
@@ -61,21 +58,38 @@ fn classify_completion(error: &CompletionError) -> Failure {
         if status.is_success() {
             return Failure::Permanent;
         }
-        return if status.is_server_error()
-            || matches!(status.as_u16(), 401 | 402 | 403 | 408 | 409 | 425 | 429)
-        {
-            Failure::Unavailable
-        } else {
-            Failure::Permanent
-        };
+        return classify_status(status.as_u16());
     }
     match error {
-        // No status recovered: an HTTP-layer failure or a Rig-generated
-        // transport diagnostic. Both are availability problems.
-        CompletionError::HttpError(_) | CompletionError::ProviderError(_) => Failure::Unavailable,
+        // Not every transport routes through Rig's `from_http_response` funnel:
+        // the vendored Responses client formats the status into the message
+        // instead, so a 400 would otherwise read as an availability problem and
+        // burn the whole candidate list.
+        CompletionError::ProviderError(message) => match status_in(message) {
+            Some(status) => classify_status(status),
+            None => Failure::Unavailable,
+        },
+        // An HTTP-layer failure with no recoverable status is a transport
+        // problem, which is worth trying elsewhere.
+        CompletionError::HttpError(_) => Failure::Unavailable,
         // Serialization, URL, request-construction and response-parse failures
         // are ours and will recur everywhere.
         _ => Failure::Permanent,
+    }
+}
+
+/// Recover a status code a provider formatted into its error text.
+fn status_in(message: &str) -> Option<u16> {
+    let rest = message.split_once("HTTP ")?.1;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|code| (100..600).contains(code))
+}
+
+fn classify_status(code: u16) -> Failure {
+    if (500..600).contains(&code) || matches!(code, 401 | 402 | 403 | 408 | 409 | 425 | 429) {
+        Failure::Unavailable
+    } else {
+        Failure::Permanent
     }
 }
 
@@ -224,6 +238,27 @@ mod tests {
     #[test]
     fn a_success_status_carrying_an_error_envelope_is_not_a_failover() {
         assert_eq!(classify(&completion(StatusCode::OK)), Failure::Permanent);
+    }
+
+    /// The vendored Responses transport formats the status into the message
+    /// rather than routing through Rig's funnel. A 400 there is still a bad
+    /// request and must not burn the candidate list.
+    #[test]
+    fn a_status_formatted_into_the_message_is_still_classified() {
+        let bad = StreamingError::Completion(CompletionError::ProviderError(
+            "Responses HTTP 400 Bad Request: No tool output found for function call".into(),
+        ));
+        assert_eq!(classify(&bad), Failure::Permanent);
+
+        let overloaded = StreamingError::Completion(CompletionError::ProviderError(
+            "Responses HTTP 529: overloaded".into(),
+        ));
+        assert_eq!(classify(&overloaded), Failure::Unavailable);
+
+        let rate_limited = StreamingError::Completion(CompletionError::ProviderError(
+            "Responses HTTP 429: slow down".into(),
+        ));
+        assert_eq!(classify(&rate_limited), Failure::Unavailable);
     }
 
     #[test]

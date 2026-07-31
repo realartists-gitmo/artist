@@ -168,6 +168,9 @@ pub struct SessionHandles {
     /// Harness-owned todo lists, keyed by owner. Lives outside the model
     /// context so it survives compaction and handoff intact.
     pub todos: todo::TodoStore,
+    /// Handoffs already performed in this session, so a resumed session keeps
+    /// the provider-private lineage its current profile was running on.
+    pub handoff_depth: usize,
 }
 
 impl Default for SessionHandles {
@@ -186,6 +189,7 @@ impl Default for SessionHandles {
             attachments: None,
             providers: llm_provider::ProviderSet::default(),
             todos: todo::TodoStore::default(),
+            handoff_depth: 0,
         }
     }
 }
@@ -321,11 +325,13 @@ pub async fn stream_chat_as(
     let mut chain = vec![profile_name.to_owned()];
     let mut current = profile_name.to_owned();
     let mut seeded: Option<ChatInput> = None;
+    let mut depth = handles.handoff_depth;
     loop {
         let turn = seeded.as_ref().unwrap_or(input);
         let outcome = run_profile(
             provider,
             &current,
+            provider_lineage(&handles.conversation_id, depth),
             turn,
             tool_context,
             handles.clone(),
@@ -358,6 +364,7 @@ pub async fn stream_chat_as(
             from,
             to: handoff.to.clone(),
         })?;
+        depth += 1;
         seeded = Some(ChatInput {
             text: handoff.seed(
                 &current,
@@ -375,6 +382,7 @@ pub async fn stream_chat_as(
 async fn run_profile(
     provider: &SavedProvider,
     profile_name: &str,
+    lineage: String,
     input: &ChatInput,
     tool_context: ToolContext<'_>,
     handles: SessionHandles,
@@ -423,7 +431,17 @@ async fn run_profile(
             thinking: candidate.thinking.unwrap_or_default(),
             model,
         };
-        match attempt(&resolved, &run, input, tool_context, handles.clone(), on_event).await {
+        match attempt(
+            &resolved,
+            &run,
+            &lineage,
+            input,
+            tool_context,
+            handles.clone(),
+            on_event,
+        )
+        .await
+        {
             Ok(outcome) => {
                 breaker.record_success(&key);
                 return Ok(outcome);
@@ -457,9 +475,11 @@ async fn run_profile(
 ///
 /// Construction is centralized in `RigClient::build`, so a profile naming a
 /// different account routes through exactly the same path as the session's own.
+#[allow(clippy::too_many_arguments)]
 async fn attempt(
     resolved: &SavedProvider,
     run: &RootRun,
+    lineage: &str,
     input: &ChatInput,
     tool_context: ToolContext<'_>,
     handles: SessionHandles,
@@ -474,10 +494,7 @@ async fn attempt(
     match RigClient::build(resolved)? {
         RigClient::ArtistOpenAi(client) => {
             let client = client
-                .with_provider_context(
-                    handles.conversation_id.clone(),
-                    handles.provider_context.clone(),
-                )
+                .with_provider_context(lineage.to_owned(), handles.provider_context.clone())
                 .with_effective_context_window(handles.effective_context_window);
             run_with!(client)
         }
@@ -510,6 +527,20 @@ async fn attempt(
     }
 }
 
+
+/// The provider-private lineage for a hop.
+///
+/// Hop 0 keeps the bare conversation id so existing sessions are unaffected;
+/// later hops get their own namespace. The depth comes from the event log, so
+/// this is stable across a resume and a rewind past a boundary reuses the
+/// earlier hop's lineage.
+fn provider_lineage(conversation_id: &str, depth: usize) -> String {
+    if depth == 0 {
+        conversation_id.to_owned()
+    } else {
+        format!("{conversation_id}:handoff:{depth}")
+    }
+}
 
 /// The resolved profile context for a session-root run.
 struct RootRun {

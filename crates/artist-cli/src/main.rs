@@ -328,6 +328,7 @@ async fn execute_prompt(
             todos.restore(&resumed_events);
             todos
         },
+        handoff_depth: artist_session::handoff_depth(&resumed_events),
     };
     extension_control.set_steering(Some(steering));
     extensions

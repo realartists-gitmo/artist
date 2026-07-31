@@ -295,6 +295,8 @@ struct SubmitContext<'a> {
     profile: String,
     /// Harness-owned todo lists, shared across every turn of the session.
     todos: artist_agent::todo::TodoStore,
+    /// Handoffs performed so far, so each hop keeps its own provider lineage.
+    handoff_depth: usize,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -658,6 +660,7 @@ async fn run_loop(
         .unwrap_or_else(|| "default".to_owned());
     let todos = artist_agent::todo::TodoStore::default();
     todos.restore(&resumed_events);
+    let mut handoff_depth = artist_session::handoff_depth(&resumed_events);
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
     let custom_commands = crate::custom_commands::discover(context.project);
@@ -1106,6 +1109,7 @@ async fn run_loop(
                         ),
                         profile: current_profile.clone(),
                         todos: todos.clone(),
+                        handoff_depth,
                     },
                     &mut active,
                     &mut history,
@@ -1119,6 +1123,7 @@ async fn run_loop(
                 // later turn in this session runs as the target.
                 if let Some(profile) = result.handed_off_to {
                     current_profile = profile;
+                    handoff_depth += 1;
                 }
                 // AUTH-2: the turn 401'd, so the token is stale regardless of
                 // its recorded expiry. Force-refresh it now (non-blocking to the
@@ -2083,6 +2088,7 @@ async fn submit(
         attachments: Some(active.attachments.clone()),
         providers: context.providers.clone(),
         todos: context.todos.clone(),
+        handoff_depth: context.handoff_depth,
     };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat_as(

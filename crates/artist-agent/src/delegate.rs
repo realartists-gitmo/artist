@@ -451,7 +451,7 @@ impl Delegate {
                 // A child owns its own list and may read its parent's, but not
                 // write to it: concurrent siblings sharing one list would race
                 // with no obvious merge.
-                tools.push(Box::new(crate::todo::TodoTool::new(
+                tools.push(crate::tool_prompt::dynamic(crate::todo::TodoTool::new(
                     self.handles.todos.clone(),
                     recorder.clone(),
                     actor.clone(),

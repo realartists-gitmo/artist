@@ -11,7 +11,7 @@
 //! summarizer and no ability to reuse the prior summary chain.
 
 use crate::profiles::Profiles;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -124,7 +124,7 @@ pub(crate) struct HandoffArgs {
 #[error("handoff rejected: {0}")]
 pub(crate) struct HandoffError(String);
 
-impl Tool for HandoffTool {
+impl PortableTool for HandoffTool {
     const NAME: &'static str = "handoff";
     type Error = HandoffError;
     type Args = HandoffArgs;

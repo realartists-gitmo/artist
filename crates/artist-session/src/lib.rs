@@ -46,7 +46,7 @@ pub use memory::SessionMemory;
 pub use provider_context::{PROVIDER_CONTEXT_SCHEMA, ProviderContextHandle};
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{
-    ReplayItem, active_profile, markdown_fragment, render_markdown, replay_for_ui, rewind_targets,
+    ReplayItem, active_profile, handoff_depth, markdown_fragment, render_markdown, replay_for_ui, rewind_targets,
     user_prompts,
     visible_events,
 };

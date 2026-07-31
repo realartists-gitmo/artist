@@ -11,7 +11,7 @@
 
 use artist_session::{Recorder, TodoItem, TodoStatus, TodoUpdated};
 use dashmap::DashMap;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -101,7 +101,7 @@ pub(crate) struct TodoArgs {
 #[error("{0}")]
 pub(crate) struct TodoError(String);
 
-impl Tool for TodoTool {
+impl PortableTool for TodoTool {
     const NAME: &'static str = "todo";
     type Error = TodoError;
     type Args = TodoArgs;

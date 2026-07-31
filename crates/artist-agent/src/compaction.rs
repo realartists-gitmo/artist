@@ -5,6 +5,7 @@ use artist_session::{
     ProviderContextHandle,
     compaction::{CompactionPlan, format_file_operations},
 };
+use crate::rig_provider::RigClient;
 use llm_provider::SavedProvider;
 use rig_core::{
     OneOrMany,
@@ -153,14 +154,9 @@ async fn complete(provider: &SavedProvider, prompt: &str, max_tokens: u64) -> Re
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
-    let response = crate::rig_provider::health_check_prompt(
-        provider,
-        model,
-        SYSTEM_PROMPT,
-        prompt,
-        max_tokens,
-    )
-    .await?;
+    let response = RigClient::build(provider)?
+        .prompt(model, SYSTEM_PROMPT, prompt, max_tokens)
+        .await?;
     if response.trim().is_empty() {
         bail!("context compaction returned an empty summary");
     }
