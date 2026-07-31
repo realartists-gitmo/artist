@@ -535,6 +535,11 @@ pub fn tokens_css() -> String {
          \x20 --a-danger: {danger};\n\
          \x20 --a-ok: {ok};\n\
          \x20 --a-warn: {warn};\n\
+         \x20 --a-chart-1: {chart1};\n\
+         \x20 --a-chart-2: {chart2};\n\
+         \x20 --a-chart-3: {chart3};\n\
+         \x20 --a-chart-4: {chart4};\n\
+         \x20 --a-chart-5: {chart5};\n\
          \x20 --a-radius: 8px;\n\
          \x20 --a-sp: 4px;\n\
          \x20 --a-font: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif;\n\
@@ -548,6 +553,7 @@ pub fn tokens_css() -> String {
          \x20   --a-subtle: {dark_subtle};\n\
          \x20   --a-border: {dark_border};\n\
          \x20   --a-accent: {dark_accent};\n\
+         \x20   --a-accent-fg: {dark_accent_fg};\n\
          \x20   --a-danger: {dark_danger};\n\
          \x20   --a-ok: {dark_ok};\n\
          \x20   --a-warn: {dark_warn};\n\
@@ -561,6 +567,11 @@ pub fn tokens_css() -> String {
         danger = hex(red[7]),
         ok = hex(mint[7]),
         warn = hex(yellow[7]),
+        chart1 = hex(blue[6]),
+        chart2 = hex(mint[6]),
+        chart3 = hex(ramp(PINK)[6]),
+        chart4 = hex(yellow[6]),
+        chart5 = hex(ramp(BLUSH)[6]),
         // Dark mode reads off the opposite end: the pastels themselves become
         // the foregrounds they were designed to be in the terminal.
         dark_bg = hex(mix(neutral[10], 0x00_00_00, 0.55)),
@@ -569,6 +580,9 @@ pub fn tokens_css() -> String {
         dark_subtle = hex(mix(neutral[10], 0x00_00_00, 0.25)),
         dark_border = hex(neutral[9]),
         dark_accent = hex(blue[2]),
+        // The accent flips to a light pastel in dark mode, so what sits on top
+        // of it has to flip too — white on pastel is about 1.3:1.
+        dark_accent_fg = hex(neutral[10]),
         dark_danger = hex(red[3]),
         dark_ok = hex(mint[2]),
         dark_warn = hex(yellow[2]),
@@ -624,6 +638,25 @@ mod token_tests {
         let dark_bg = mix(neutral[10], 0x00_00_00, 0.55);
         let dark = contrast(neutral[1], dark_bg);
         assert!(dark >= 4.5, "dark-mode body text is {dark:.2}:1");
+    }
+
+    /// A filled button is a foreground on an accent, and the accent flips
+    /// between schemes. Leaving the text colour behind made "Apply" white on
+    /// pastel blue — invisible — in dark mode.
+    #[test]
+    fn text_on_a_filled_control_is_readable_in_both_schemes() {
+        let blue = ramp(BLUE);
+        let red = ramp(RED);
+        let neutral = ramp(WHITE);
+
+        for (name, accent) in [("accent", blue[7]), ("danger", red[7])] {
+            let ratio = contrast(0xFF_FF_FF, accent);
+            assert!(ratio >= 4.5, "light-mode {name} button text is {ratio:.2}:1");
+        }
+        for (name, accent) in [("accent", blue[2]), ("danger", red[3])] {
+            let ratio = contrast(neutral[10], accent);
+            assert!(ratio >= 4.5, "dark-mode {name} button text is {ratio:.2}:1");
+        }
     }
 
     #[test]

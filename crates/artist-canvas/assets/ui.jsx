@@ -189,7 +189,13 @@ export function Button({ variant = "default", size = "md", children, style, ...r
   const palette = {
     default: { background: "var(--a-subtle)", color: "var(--a-fg)", border: "1px solid var(--a-border)" },
     primary: { background: "var(--a-accent)", color: "var(--a-accent-fg)", border: "1px solid transparent" },
-    danger: { background: "var(--a-danger)", color: "#fff", border: "1px solid transparent" },
+    danger: {
+      background: "var(--a-danger)",
+      // Not a literal white: the danger colour is a dark red in light mode and
+      // a light pastel in dark mode, so the text on it has to flip as well.
+      color: "var(--a-accent-fg)",
+      border: "1px solid transparent",
+    },
     ghost: { background: "transparent", color: "var(--a-fg)", border: "1px solid transparent" },
   }[variant];
   const pad = size === "sm" ? `${sp(1)} ${sp(2)}` : `${sp(2)} ${sp(3)}`;
@@ -651,7 +657,16 @@ export function DataTable({ rows = [], columns, onRowClick, empty = "Nothing to 
  * uPlot is fast and tiny but its API is imperative, which is not how the model
  * writes React. This wrapper is the whole point: pass data, get a chart.
  */
-export function Plot({ data, series, height = 240, title, ...options }) {
+/** Series colours, taken from the palette so a chart matches everything else. */
+function stroke(index) {
+  // Read the tokens the server injects, not Tailwind's `--color-*`: those are
+  // produced by the browser JIT for use inside utilities and are not exposed
+  // on :root, so asking for them silently yields "" and every line goes grey.
+  const token = `--a-chart-${(index % 5) + 1}`;
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim() || "#888";
+}
+
+export function Plot({ data, series, height = 240, title, scales, ...rest }) {
   const host = useRef(null);
   const chart = useRef(null);
   const [width, setWidth] = useState(0);
@@ -668,17 +683,27 @@ export function Plot({ data, series, height = 240, title, ...options }) {
     import("uplot").then(({ default: uPlot }) => {
       if (cancelled || !host.current || !width) return;
       chart.current?.destroy();
-      const palette = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7"];
+      // uPlot's first series is the x axis, and so is the first entry the
+      // caller passes — prepending another one silently offsets everything and
+      // makes uPlot read a series that has no data behind it.
+      const declared = series ?? [
+        {},
+        ...data.slice(1).map((_, index) => ({ label: `series ${index + 1}` })),
+      ];
+      // Trim rather than crash: a mismatch is a mistake in the canvas, and an
+      // undersized chart reads better than a blank error boundary.
+      const resolved = declared.slice(0, data.length).map((entry, index) =>
+        index === 0 ? entry : { stroke: stroke(index - 1), width: 2, ...entry },
+      );
+
       chart.current = new uPlot(
         {
-          width, height, title,
-          series: [
-            {},
-            ...(series ?? data.slice(1).map((_, i) => ({ label: `series ${i + 1}` }))).map(
-              (s, i) => ({ stroke: palette[i % palette.length], width: 2, ...s }),
-            ),
-          ],
-          ...options,
+          width, height, title, series: resolved,
+          ...rest,
+          // uPlot reads x as a unix timestamp unless told otherwise, so a plain
+          // index axis renders as dates in 1969. Merged after `rest` so a
+          // caller that does want a time axis can still say so.
+          scales: { x: { time: false }, ...scales },
         },
         data,
         host.current,
@@ -689,7 +714,7 @@ export function Plot({ data, series, height = 240, title, ...options }) {
       chart.current?.destroy();
       chart.current = null;
     };
-  }, [data, series, width, height, title]);
+  }, [data, series, width, height, title, scales, rest]);
 
   return <div ref={host} style={{ width: "100%", minHeight: height }} />;
 }

@@ -255,8 +255,13 @@ export const artist = {
   call: async (tool, args = {}) => (await rpc("canvas.call", { tool, arguments: args })).output,
 
   state: {
-    get: (key) => (key === undefined ? { ...stateEntries } : stateEntries[key]),
-    all: () => ({ ...stateEntries }),
+    // Both of these are snapshots for useSyncExternalStore, so they must return
+    // the *same reference* until the data actually changes. Returning a fresh
+    // copy each call is an infinite render loop, not a defensive copy — the
+    // store replaces these wholesale on every write, so the reference is
+    // already safe to hand out.
+    get: (key) => (key === undefined ? stateEntries : stateEntries[key]),
+    all: () => stateEntries,
     rev: () => stateRev,
     async set(key, value) {
       const entries = typeof key === "object" && key !== null ? key : { [key]: value };
@@ -270,7 +275,8 @@ export const artist = {
   },
 
   ask: {
-    pending: () => pendingQuestions.slice(),
+    // Same contract as `state` above: a stable reference, replaced on change.
+    pending: () => pendingQuestions,
     answer: (questionId, selected, notes) =>
       rpc("canvas.ask.answer", {
         question_id: questionId,
