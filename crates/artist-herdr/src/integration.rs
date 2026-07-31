@@ -61,6 +61,10 @@ pub struct HerdrIntegration {
 }
 
 impl HerdrIntegration {
+    pub fn detect() -> Option<Self> {
+        HerdrContext::detect().map(Self::start)
+    }
+
     pub fn start(context: HerdrContext) -> Self {
         Self::start_with_runner(CommandRunner::new(context))
     }
@@ -88,6 +92,10 @@ impl HerdrIntegration {
             worker: Some(worker),
             fallback_release: true,
         }
+    }
+
+    pub fn handle(&self) -> HerdrHandle {
+        self.handle.clone()
     }
 
     pub async fn shutdown(mut self) {
