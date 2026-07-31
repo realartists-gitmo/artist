@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use llm_provider::ProviderKind;
 
-const MAX_OVERLOAD_RETRIES: u32 = 3;
+const MAX_OVERLOAD_RETRIES: u32 = 5;
 
 /// State for retrying a provider overload before the failed attempt has emitted
 /// anything observable. This is deliberately separate from stream-rule retries.
@@ -31,7 +31,7 @@ impl OverloadRetry {
         if self.retries >= MAX_OVERLOAD_RETRIES {
             return None;
         }
-        let floor_ms = 250u64 << self.retries;
+        let floor_ms = 500u64 << self.retries;
         let jitter = u64::from_le_bytes(
             uuid::Uuid::new_v4().as_bytes()[..8]
                 .try_into()
@@ -51,11 +51,12 @@ impl OverloadRetry {
 /// Rig does not currently expose the nested provider code as a stable typed
 /// value, so match the serialized response rather than generic error prose.
 pub(crate) fn is_overload(provider: ProviderKind, error: &impl std::fmt::Display) -> bool {
-    provider == ProviderKind::Chatgpt
-        && error
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("server_is_overloaded")
+    if provider != ProviderKind::Chatgpt {
+        return false;
+    }
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("server_is_overloaded")
+        || message.contains("our servers are currently overloaded")
 }
 
 fn prompt_cache_key(project: &Path, model: &str, lineage: &str) -> String {
@@ -94,7 +95,7 @@ mod tests {
         let original = retry.cache_key().to_owned();
         for attempt in 0..MAX_OVERLOAD_RETRIES {
             let delay = retry.schedule().unwrap();
-            let floor = 250u64 << attempt;
+            let floor = 500u64 << attempt;
             assert!(delay >= Duration::from_millis(floor));
             assert!(delay < Duration::from_millis(floor * 2));
             assert_ne!(retry.cache_key(), original);
@@ -111,6 +112,10 @@ mod tests {
         assert!(!is_overload(
             ProviderKind::Openai,
             &"response code: server_is_overloaded"
+        ));
+        assert!(is_overload(
+            ProviderKind::Chatgpt,
+            &"CompletionError: ProviderError: Our servers are currently overloaded. Please try again later."
         ));
         assert!(!is_overload(ProviderKind::Chatgpt, &"service unavailable"));
     }
