@@ -1,0 +1,37 @@
+[package]
+name = "artist-canvas"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Agent-authored, hot-reloading local React apps for Artist"
+
+[dependencies]
+# JSX/TSX -> JS in-process. The umbrella crate keeps the oxc sub-crates on one
+# version; they release in lockstep and mixing them is a build hazard.
+oxc = { version = "0.142", features = ["codegen", "semantic", "transformer"] }
+
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
+dashmap = "6"
+futures = "0.3"
+include_dir = "0.7"
+notify = { version = "8", default-features = false, features = [
+    "macos_fsevent",
+] }
+rand = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "net", "rt", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = "1.1"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
