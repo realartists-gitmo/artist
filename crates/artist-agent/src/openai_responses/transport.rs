@@ -456,7 +456,15 @@ impl CompletionModel for ArtistOpenAiModel {
                                             Err(error) => { yield Err(error); return; }
                                         };
                                         let mut saved = canonical_input.clone();
-                                        saved.extend(normalized_output.iter().map(|item| item.wire().clone()));
+                                        saved.extend(normalized_output.iter().map(|item| {
+                                            let mut wire = item.wire().clone();
+                                            if wire.get("id").and_then(Value::as_str)
+                                                == Some("msg_artist_streamed_message")
+                                            {
+                                                wire.as_object_mut().map(|object| object.remove("id"));
+                                            }
+                                            wire
+                                        }));
                                         let mut full_checkpoint = input_checkpoint.clone();
                                         match represented_output_from_wire(&normalized_wire) {
                                             Ok(represented) => full_checkpoint.extend(represented.iter().map(wire_fingerprint)),
@@ -531,8 +539,11 @@ fn normalized_terminal_wire(wire: &Value, text: &str, streamed_items: &[Value]) 
         if !tools.is_empty() {
             output.extend(tools);
         } else if !text.is_empty() {
+            // Rig's terminal response conversion requires an id. This sentinel
+            // uses the valid shape only for local conversion and is stripped
+            // before the item is persisted/replayed to OpenAI.
             output.push(json!({
-                "type": "message", "id": "artist_streamed_message", "role": "assistant", "status": "completed",
+                "type": "message", "id": "msg_artist_streamed_message", "role": "assistant", "status": "completed",
                 "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}]
             }));
         }

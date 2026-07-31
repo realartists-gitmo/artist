@@ -804,7 +804,12 @@ pub(crate) fn request_params(
     // Request a provider-generated trace for the live UI even when the model's
     // default effort is in use. Rig's memory policy is independent: streaming
     // this summary does not make the CLI responsible for model context.
-    params["reasoning"] = match reasoning_effort {
+    params["reasoning"] = match reasoning_effort.filter(|effort| {
+        matches!(
+            *effort,
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        )
+    }) {
         Some(effort) => json!({ "effort": effort, "summary": "auto", "context": "all_turns" }),
         None => json!({ "summary": "auto", "context": "all_turns" }),
     };

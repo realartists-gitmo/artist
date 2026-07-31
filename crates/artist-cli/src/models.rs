@@ -220,7 +220,21 @@ async fn fetch(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
         .json::<ModelsResponse>()
         .await
         .context("invalid ChatGPT models response")?
-        .models)
+        .models
+        .into_iter()
+        .map(with_supported_reasoning)
+        .collect())
+}
+
+fn with_supported_reasoning(mut model: SelectableModel) -> SelectableModel {
+    // `ultra` is a Codex CLI presentation alias, not a Responses API effort.
+    model
+        .supported_reasoning_levels
+        .retain(|level| level.effort != "ultra");
+    if model.default_reasoning_level.as_deref() == Some("ultra") {
+        model.default_reasoning_level = None;
+    }
+    model
 }
 
 #[cfg(test)]
@@ -263,12 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_forward_compatible_reasoning_efforts() {
-        let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"future","display_name":"Future","visibility":"list","default_reasoning_level":"ultra","supported_reasoning_levels":[{"effort":"ultra","description":"Deep"}]}]}"#).unwrap();
-        assert_eq!(
-            response.models[0].supported_reasoning_levels[0].effort,
-            "ultra"
-        );
+    fn removes_codex_cli_ultra_reasoning_alias() {
+        let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"future","display_name":"Future","visibility":"list","default_reasoning_level":"ultra","supported_reasoning_levels":[{"effort":"high","description":"Deep"},{"effort":"ultra","description":"Codex alias"}]}]}"#).unwrap();
+        let model = with_supported_reasoning(response.models.into_iter().next().unwrap());
+        assert_eq!(model.default_reasoning_level, None);
+        assert_eq!(model.supported_reasoning_levels.len(), 1);
+        assert_eq!(model.supported_reasoning_levels[0].effort, "high");
     }
 
     #[test]
