@@ -55,6 +55,26 @@ pub(crate) struct ChatInput {
 }
 
 impl ChatInput {
+    /// Replace the whole buffer with literal text.
+    ///
+    /// Atoms index into `text`, so neither may be set without the other: a
+    /// stale range outlives the string it points into and surfaces later as an
+    /// out-of-bounds slice in `expand`. Literal replacement text contains no
+    /// atoms by construction, so they are dropped.
+    fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.atoms.clear();
+        self.cursor = self.text.len();
+    }
+
+    /// Restore a previously submitted buffer together with the atoms that
+    /// index into it.
+    fn restore(&mut self, display: String, atoms: InputAtoms) {
+        self.text = display;
+        self.atoms = atoms;
+        self.cursor = self.text.len();
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind != KeyEventKind::Press {
             return true;
@@ -1255,9 +1275,7 @@ async fn run_loop(
                 if let Some(prompt) =
                     prompt_history.navigate(key.code == KeyCode::Up, &input.text, &input.atoms)
                 {
-                    input.text = prompt.display;
-                    input.atoms = prompt.atoms;
-                    input.cursor = input.text.len();
+                    input.restore(prompt.display, prompt.atoms);
                 }
             }
             // First ctrl+c on a non-empty prompt clears it; make that legible
@@ -1531,9 +1549,7 @@ async fn handle_rewind(
         );
     }
     insert_status(terminal, &marker)?;
-    input.text = display;
-    input.cursor = input.text.len();
-    input.atoms.clear();
+    input.set_text(display);
     Ok(Vec::new())
 }
 
@@ -2197,8 +2213,7 @@ async fn submit(
                             && !steering_input.text.trim().is_empty() =>
                         {
                             if !slash_suggestions.is_empty() {
-                                steering_input.text = slash_suggestions[suggestion_index].name.into();
-                                steering_input.cursor = steering_input.text.len();
+                                steering_input.set_text(slash_suggestions[suggestion_index].name);
                             }
                             let display = steering_input.text.clone();
                             let history_atoms = steering_input.atoms.clone();
@@ -2249,8 +2264,7 @@ async fn submit(
                             && key.code == KeyCode::Tab
                             && !slash_suggestions.is_empty() =>
                         {
-                            steering_input.text = slash_suggestions[suggestion_index].name.into();
-                            steering_input.cursor = steering_input.text.len();
+                            steering_input.set_text(slash_suggestions[suggestion_index].name);
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
@@ -2260,9 +2274,7 @@ async fn submit(
                                 &steering_input.text,
                                 &steering_input.atoms,
                             ) {
-                                steering_input.text = value.display;
-                                steering_input.atoms = value.atoms;
-                                steering_input.cursor = steering_input.text.len();
+                                steering_input.restore(value.display, value.atoms);
                             }
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
@@ -3308,30 +3320,19 @@ fn apply_selected_suggestion(
     skills: &[&artist_agent::AvailableSkill],
 ) -> bool {
     if let Some(command) = slash.get(index) {
-        input.text = command.name.to_owned() + " ";
-        input.atoms.clear();
-        input.cursor = input.text.len();
+        input.set_text(command.name.to_owned() + " ");
     } else if let Some(command) = custom.get(index.saturating_sub(slash.len())) {
-        input.text = command.name.clone() + " ";
-        input.atoms.clear();
-        input.cursor = input.text.len();
+        input.set_text(command.name.clone() + " ");
     } else if let Some(command) = extension.get(index.saturating_sub(slash.len() + custom.len())) {
-        input.text = command.name.clone() + " ";
-        input.atoms.clear();
-        input.cursor = input.text.len();
+        input.set_text(command.name.clone() + " ");
     } else if let Some(completion) = provider.get(index) {
-        input.text = completion.value.clone() + " ";
-        input.atoms.clear();
-        input.cursor = input.text.len();
+        input.set_text(completion.value.clone() + " ");
     } else if let Some(completion) = mcp.get(index) {
-        input.text = completion.clone();
         // A fully-specified command can be sent as-is; a partial one keeps a
         // trailing space so the user (or Enter) can still add an argument.
-        if completion != "/mcp status" && completion.split_whitespace().count() != 3 {
-            input.text.push(' ');
-        }
-        input.atoms.clear();
-        input.cursor = input.text.len();
+        let trailing =
+            completion != "/mcp status" && completion.split_whitespace().count() != 3;
+        input.set_text(format!("{completion}{}", if trailing { " " } else { "" }));
     } else if let (Some(range), Some(skill)) = (skill_range.clone(), skills.get(index)) {
         input.replace_range(range, &format!("${}", skill.name));
     } else {
@@ -3406,6 +3407,41 @@ mod tests {
     use super::*;
     use llm_provider::{Auth, ProviderId, SavedProvider, Secret};
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// Atoms index into the buffer, so replacing the buffer must drop them.
+    /// A slash-completion or steering suggestion replaces a long buffer holding
+    /// a paste atom with a short command name; a surviving atom range then
+    /// points past the new string and `expand` slices out of bounds.
+    #[test]
+    fn replacing_the_buffer_drops_atoms_that_indexed_the_old_text() {
+        let mut input = ChatInput::default();
+        input.paste("a pasted blob long enough to become its own atom", false);
+        assert!(!input.atoms.is_empty());
+        let long = input.text.len();
+
+        input.set_text("/handoff");
+        assert!(input.text.len() < long, "the new buffer is shorter");
+        assert!(input.atoms.is_empty(), "stale atoms must not survive");
+        assert_eq!(input.cursor, input.text.len());
+
+        assert_eq!(input.take_expanded().text, "/handoff");
+    }
+
+    /// History recall is the one case where atoms legitimately accompany the
+    /// text, so they must survive together.
+    #[test]
+    fn restoring_a_previous_buffer_keeps_its_atoms() {
+        let mut source = ChatInput::default();
+        source.paste("recalled paste body", false);
+        let display = source.text.clone();
+        let atoms = source.atoms.clone();
+
+        let mut input = ChatInput::default();
+        input.restore(display.clone(), atoms);
+        assert_eq!(input.text, display);
+        assert_eq!(input.cursor, display.len());
+        assert_eq!(input.take_expanded().text, "recalled paste body");
+    }
 
     #[test]
     fn onboarding_notice_is_actionable_and_tui_only() {
