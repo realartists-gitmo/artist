@@ -83,6 +83,50 @@ impl Registry {
     }
 }
 
+/// Scaffold a new canvas from a template.
+///
+/// Refuses to overwrite: a canvas is durable, and `create` on an existing slug
+/// is far more likely to be the model forgetting it already made one than a
+/// deliberate reset.
+pub fn scaffold(
+    project: &Path,
+    slug: &str,
+    title: &str,
+    template: &crate::templates::Template,
+) -> Result<Canvas, ScaffoldError> {
+    let root = project.join(CANVAS_DIR).join(slug);
+    if root.join(MANIFEST_FILE).exists() {
+        return Err(ScaffoldError::Exists {
+            slug: slug.to_owned(),
+        });
+    }
+    std::fs::create_dir_all(&root)?;
+
+    let manifest = crate::templates::manifest_for(title, template);
+    std::fs::write(root.join(MANIFEST_FILE), manifest.render())?;
+    for (relative, contents) in template.files {
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(target, contents)?;
+    }
+
+    Ok(Canvas {
+        slug: slug.to_owned(),
+        root,
+        manifest,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScaffoldError {
+    #[error("a canvas named `{slug}` already exists — edit it, or pick another name")]
+    Exists { slug: String },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 /// Reduce a title to a directory-safe slug.
 ///
 /// The result becomes a path segment and a URL segment, so it is restricted to
@@ -159,6 +203,37 @@ mod tests {
         assert_eq!(registry.canvases[0].slug, "good");
         assert_eq!(registry.diagnostics.len(), 1);
         assert_eq!(registry.diagnostics[0].slug, "bad");
+    }
+
+    #[test]
+    fn scaffolding_produces_a_canvas_that_discovery_finds() {
+        let project = temp();
+        let template = crate::templates::find("dashboard").expect("template");
+
+        let created = scaffold(&project, "perf", "Perf", template).expect("scaffold");
+        assert_eq!(created.manifest.title, "Perf");
+        assert!(created.entry_path().exists(), "entry was not written");
+
+        let found = Registry::discover(&project);
+        assert_eq!(found.canvases.len(), 1);
+        assert_eq!(found.get("perf").expect("found").manifest.title, "Perf");
+    }
+
+    /// A canvas is durable. Recreating one is almost always the model having
+    /// forgotten it already exists, not a deliberate reset.
+    #[test]
+    fn scaffolding_refuses_to_overwrite_an_existing_canvas() {
+        let project = temp();
+        let template = crate::templates::find("blank").expect("template");
+        scaffold(&project, "perf", "First", template).expect("first");
+
+        let error = scaffold(&project, "perf", "Second", template).expect_err("refused");
+        assert!(matches!(error, ScaffoldError::Exists { .. }));
+        // The original survives untouched.
+        assert_eq!(
+            Registry::discover(&project).get("perf").expect("still there").manifest.title,
+            "First"
+        );
     }
 
     #[test]

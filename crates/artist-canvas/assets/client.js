@@ -1,56 +1,35 @@
 // The Artist canvas runtime.
 //
-// Two jobs, both of which exist so the model is not writing UI blind:
-//   1. reload the page when the model edits a file
-//   2. ship every error the page produces back to the harness, so the failure
-//      shows up in `canvas status` instead of only in a devtools console the
-//      model cannot see.
+// Everything a page can do to the harness goes through here, and everything the
+// harness pushes arrives here. Two responsibilities beyond the bridge itself:
+// reload when the model edits a file, and ship every error the page produces
+// back to `canvas status` — a canvas the model cannot debug is a canvas the
+// model cannot write.
 
 const boot = globalThis.__ARTIST__ ?? {};
-const endpoint = (path) => `${path}?k=${encodeURIComponent(boot.key ?? "")}&slug=${encodeURIComponent(boot.slug ?? "")}`;
+const query = `k=${encodeURIComponent(boot.key ?? "")}&slug=${encodeURIComponent(boot.slug ?? "")}`;
 
-/** Fire-and-forget: reporting must never itself throw into user code. */
-function post(method, params) {
-  try {
-    return fetch(endpoint("/_artist/rpc"), {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-artist-key": boot.key ?? "" },
-      body: JSON.stringify({ method, params }),
-    }).catch(() => {});
-  } catch {
-    return Promise.resolve();
+/** Call the harness. Returns the parsed body; throws only on a refusal. */
+async function rpc(method, params = {}) {
+  const response = await fetch(`/_artist/rpc?${query}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-artist-key": boot.key ?? "" },
+    body: JSON.stringify({ method, params }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error ?? `${method} failed (${response.status})`);
   }
+  return body;
 }
 
+/** Reporting must never throw into user code, so it is fire-and-forget. */
 function report(level, message, detail) {
-  post("canvas.report", { level, message, detail: detail ?? null });
-}
-
-// ---------------------------------------------------------------- diagnostics
-
-addEventListener("error", (event) => {
-  report("error", String(event.message ?? event.error ?? "error"), {
-    source: event.filename ?? null,
-    line: event.lineno ?? null,
-    column: event.colno ?? null,
-    stack: event.error && event.error.stack ? String(event.error.stack) : null,
-  });
-});
-
-addEventListener("unhandledrejection", (event) => {
-  const reason = event.reason;
-  report("error", `unhandled rejection: ${reason && reason.message ? reason.message : String(reason)}`, {
-    stack: reason && reason.stack ? String(reason.stack) : null,
-  });
-});
-
-// Mirror rather than replace: the user still gets a working console.
-for (const level of ["error", "warn"]) {
-  const original = console[level].bind(console);
-  console[level] = (...args) => {
-    original(...args);
-    report(level, args.map(stringify).join(" "));
-  };
+  try {
+    rpc("canvas.report", { level, message, detail: detail ?? null }).catch(() => {});
+  } catch {
+    /* ignore */
+  }
 }
 
 function stringify(value) {
@@ -63,35 +42,97 @@ function stringify(value) {
   }
 }
 
+// ---------------------------------------------------------------- diagnostics
+
+addEventListener("error", (event) => {
+  report("error", String(event.message ?? event.error ?? "error"), {
+    source: event.filename ?? null,
+    line: event.lineno ?? null,
+    column: event.colno ?? null,
+    stack: event.error?.stack ? String(event.error.stack) : null,
+  });
+});
+
+addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  report("error", `unhandled rejection: ${reason?.message ?? String(reason)}`, {
+    stack: reason?.stack ? String(reason.stack) : null,
+  });
+});
+
+// Mirror rather than replace: the user still gets a working console.
+for (const level of ["error", "warn"]) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    original(...args);
+    report(level, args.map(stringify).join(" "));
+  };
+}
+
+// --------------------------------------------------------------- subscriptions
+
+/** Minimal fan-out. Returns an unsubscribe function, as hooks expect. */
+function channel() {
+  const listeners = new Set();
+  return {
+    emit: (value) => listeners.forEach((fn) => {
+      try {
+        fn(value);
+      } catch (error) {
+        report("error", `canvas subscriber threw: ${error?.message ?? error}`);
+      }
+    }),
+    subscribe(fn) {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+  };
+}
+
+const stateChannel = channel();
+const askChannel = channel();
+const agentChannel = channel();
+
+// Local mirror of shared state. Revision-guarded: an update older than what we
+// already applied is a straggler from a slow connection, not news.
+let stateRev = 0;
+let stateEntries = {};
+
+function applyState(payload) {
+  if (payload.rev < stateRev) return;
+  stateRev = payload.rev;
+  stateEntries = payload.entries ?? {};
+  stateChannel.emit(stateEntries);
+}
+
+let pendingQuestions = [];
+
 // ---------------------------------------------------------------- hot reload
 
 let events;
 let backoff = 250;
 
 function connect() {
-  events = new EventSource(endpoint("/_artist/events"));
+  events = new EventSource(`/_artist/events?${query}`);
 
   events.addEventListener("open", () => {
     backoff = 250;
-  });
-
-  events.addEventListener("reload", () => {
-    location.reload();
-  });
-
-  // A compile error means the module the browser is about to ask for does not
-  // exist yet. Surface it on the page rather than reloading into a blank frame.
-  events.addEventListener("build-error", (event) => {
-    showOverlay(JSON.parse(event.data));
-  });
-
-  events.addEventListener("build-ok", () => {
     hideOverlay();
   });
 
+  events.addEventListener("reload", () => location.reload());
+  events.addEventListener("update", (event) => applyUpdate(JSON.parse(event.data)));
+  events.addEventListener("state", (event) => applyState(JSON.parse(event.data)));
+  events.addEventListener("ask", (event) => {
+    pendingQuestions = JSON.parse(event.data).questions ?? [];
+    askChannel.emit(pendingQuestions);
+  });
+  events.addEventListener("agent", (event) => agentChannel.emit(JSON.parse(event.data).event));
+  events.addEventListener("build-error", (event) => showOverlay(JSON.parse(event.data)));
+
   events.addEventListener("error", () => {
     // The harness exited or is restarting. Retry with a ceiling so a closed
-    // session does not leave a tab spinning on the CPU forever.
+    // session does not leave a tab spinning forever.
     events.close();
     backoff = Math.min(backoff * 2, 5000);
     setTimeout(connect, backoff);
@@ -99,6 +140,82 @@ function connect() {
 }
 
 connect();
+
+// Seed from the server so a page that loads after a write is not blank.
+rpc("canvas.state.get").then(applyState).catch(() => {});
+rpc("canvas.ask.pending")
+  .then((body) => {
+    pendingQuestions = body.questions ?? [];
+    askChannel.emit(pendingQuestions);
+  })
+  .catch(() => {});
+
+// ----------------------------------------------------------- fast refresh
+
+// Bump per edit so the browser fetches the new module rather than its cached
+// copy. A module URL is its identity, so this is also what makes the re-import
+// a genuinely new evaluation.
+let generation = 0;
+
+/**
+ * Swap one edited module without reloading the page.
+ *
+ * React Refresh keys components by a stable id, so re-evaluating the module
+ * re-registers the same families with new implementations and every mounted
+ * instance is updated in place — state, scroll and focus survive.
+ *
+ * Falls back to a full reload whenever that cannot be guaranteed: a module the
+ * page never imported, an import that throws, or a runtime that reports the
+ * update was not handled.
+ */
+async function applyUpdate({ path }) {
+  const runtime = globalThis.__ARTIST_REFRESH__;
+  if (!runtime || !path) {
+    location.reload();
+    return;
+  }
+  try {
+    generation += 1;
+    // Resolve against the page, not against this module: the runtime is served
+    // from /@artist/, so a relative specifier here would look for the canvas's
+    // modules alongside the runtime and 404.
+    const target = new URL(path, location.href);
+    target.searchParams.set("t", String(generation));
+    const updated = await import(target.href);
+
+    // Only a module whose exports are all components can be swapped in place.
+    // Anything else — a module exporting a constant, a store, a helper — has
+    // live references held by its importers that Refresh cannot rewrite, so
+    // the honest move is to rebuild the page.
+    if (!isRefreshBoundary(runtime, updated)) {
+      location.reload();
+      return;
+    }
+
+    // Let the newly registered families settle before asking React to swap.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runtime.performReactRefresh();
+    hideOverlay();
+  } catch (error) {
+    // A compile error arrives as a throwing module; showing it beats a reload
+    // loop against a file that does not parse.
+    report("error", `hot update failed for ${path}: ${error?.message ?? error}`);
+    showOverlay({ path, message: String(error?.message ?? error) });
+  }
+}
+
+/** Are every one of this module's exports React components? */
+function isRefreshBoundary(runtime, module) {
+  const names = Object.keys(module ?? {}).filter((name) => name !== "__esModule");
+  if (!names.length) return false;
+  return names.every((name) => {
+    try {
+      return runtime.isLikelyComponentType(module[name]);
+    } catch {
+      return false;
+    }
+  });
+}
 
 // ------------------------------------------------------------------- overlay
 
@@ -126,7 +243,56 @@ function hideOverlay() {
 
 // ---------------------------------------------------------------------- api
 
-globalThis.artist = {
+export const artist = {
+  /**
+   * Put text into the conversation.
+   * mode: "auto" steers a running turn and prompts an idle one — which is
+   * almost always what a button wants.
+   */
+  send: (text, { mode = "auto" } = {}) => rpc("canvas.send", { text, mode }),
+
+  /** Invoke a tool this canvas declared in [permissions] allow. */
+  call: async (tool, args = {}) => (await rpc("canvas.call", { tool, arguments: args })).output,
+
+  state: {
+    get: (key) => (key === undefined ? { ...stateEntries } : stateEntries[key]),
+    all: () => ({ ...stateEntries }),
+    rev: () => stateRev,
+    async set(key, value) {
+      const entries = typeof key === "object" && key !== null ? key : { [key]: value };
+      // Apply locally first so the UI does not wait a round trip; the echo
+      // from the server carries the authoritative revision.
+      stateEntries = { ...stateEntries, ...entries };
+      stateChannel.emit(stateEntries);
+      return rpc("canvas.state.set", { entries });
+    },
+    subscribe: stateChannel.subscribe,
+  },
+
+  ask: {
+    pending: () => pendingQuestions.slice(),
+    answer: (questionId, selected, notes) =>
+      rpc("canvas.ask.answer", {
+        question_id: questionId,
+        selected: Array.isArray(selected) ? selected : [selected],
+        notes: notes ?? null,
+      }),
+    subscribe: askChannel.subscribe,
+  },
+
+  events: { subscribe: agentChannel.subscribe },
+
+  context: () => rpc("canvas.context"),
+
+  /**
+   * Syntax-highlight code with the harness's own highlighter.
+   * Resolves to `{language, lines: [[{text, color, bold, italic}]]}`.
+   */
+  highlight: (source, language = "txt", dark = matchMedia("(prefers-color-scheme: dark)").matches) =>
+    rpc("canvas.highlight", { source, language, dark }),
+
   /** Surface a message in the TUI and in `canvas status`. */
   log: (...args) => report("log", args.map(stringify).join(" ")),
 };
+
+globalThis.artist = artist;

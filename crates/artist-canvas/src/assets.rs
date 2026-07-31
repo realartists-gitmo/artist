@@ -16,6 +16,66 @@ static VENDOR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/vendor");
 /// The canvas runtime: hot reload, error reporting, and the `artist` global.
 pub const CLIENT: &str = include_str!("../assets/client.js");
 
+/// The component kit. Vendored so a canvas is assembled from parts rather than
+/// re-deriving a button, a table, and a dark mode every single time.
+///
+/// Written in JSX like any canvas and compiled through the same transformer,
+/// so the source stays readable instead of being hand-rolled `createElement`.
+pub const UI: &str = include_str!("../assets/ui.jsx");
+
+/// React bindings over the runtime — the idiomatic way to reach the bridge.
+pub const HOOKS: &str = include_str!("../assets/hooks.js");
+
+/// Fast Refresh bootstrap, loaded ahead of every canvas module.
+pub const REFRESH: &str = include_str!("../assets/refresh.js");
+
+/// Wrap a compiled module so its Fast Refresh registrations are scoped to it.
+///
+/// The transform emits bare `$RefreshReg$` / `$RefreshSig$` calls; without this
+/// namespacing, two modules that both export a `App` would collide in the
+/// runtime's family registry and swap each other's components.
+pub fn scope_refresh(module_id: &str, code: &str) -> String {
+    let id = json_string(module_id);
+    format!(
+        "import \"/@artist/refresh.js\";\n\
+         const __artistPrevReg = window.$RefreshReg$;\n\
+         const __artistPrevSig = window.$RefreshSig$;\n\
+         window.$RefreshReg$ = (type, id) => window.__ARTIST_REFRESH__.register(type, {id} + \" \" + id);\n\
+         window.$RefreshSig$ = window.__ARTIST_REFRESH__.createSignatureFunctionForTransform;\n\
+         {code}\n\
+         window.$RefreshReg$ = __artistPrevReg;\n\
+         window.$RefreshSig$ = __artistPrevSig;\n"
+    )
+}
+
+/// Compile a first-party module once and reuse it. These never change at
+/// runtime, so paying the transform per request would be pure waste.
+pub fn compiled(name: &str, source: &str) -> &'static str {
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+    };
+
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("asset cache poisoned");
+    if let Some(existing) = cache.get(name) {
+        return existing;
+    }
+    let code = crate::transform::transform(
+        std::path::Path::new(name),
+        source,
+        crate::transform::Options::default(),
+    )
+    .map(|output| output.code)
+    // A first-party asset that will not compile is a build error we want to
+    // see in the browser rather than a silent blank page.
+    .unwrap_or_else(|error| format!("throw new Error({});\n", json_string(&error.to_string())));
+    let leaked: &'static str = Box::leak(code.into_boxed_str());
+    cache.insert(name.to_owned(), leaked);
+    leaked
+}
+
 /// Bare specifiers the vendored set satisfies, mapped to their served paths.
 ///
 /// `react-dom/client`, `react/jsx-runtime` and friends are subpaths rather than
@@ -29,6 +89,14 @@ const BARE: &[(&str, &str)] = &[
     ("react-refresh/runtime", "react-refresh-runtime.js"),
     ("uplot", "uplot.js"),
     ("@tanstack/react-table", "tanstack-react-table.js"),
+];
+
+/// Our own modules, served from `/@artist/` rather than `/@vendor/`.
+const OURS: &[(&str, &str)] = &[
+    ("@artist/canvas", "/@artist/client.js"),
+    ("@artist/ui", "/@artist/ui.js"),
+    ("@artist/react", "/@artist/react.js"),
+    ("@artist/refresh", "/@artist/refresh.js"),
 ];
 
 /// Fetch a vendored asset by file name.
@@ -55,11 +123,16 @@ fn import_map(manifest: &Manifest) -> String {
     let mut imports: BTreeMap<&str, String> = BARE
         .iter()
         .map(|(specifier, file)| (*specifier, format!("/@vendor/{file}")))
+        .chain(OURS.iter().map(|(specifier, path)| (*specifier, (*path).to_owned())))
         .collect();
-    // A canvas may name extra packages; those are absolute URLs and need the
-    // network, which is why they are opt-in per canvas rather than ambient.
-    for (specifier, url) in &manifest.deps {
-        imports.insert(specifier.as_str(), url.clone());
+    // Declared packages are proxied rather than linked directly: the canvas
+    // then works offline after the first load, and the browser never talks to
+    // a third-party host.
+    for specifier in manifest.deps.keys() {
+        imports.insert(
+            specifier.as_str(),
+            format!("/@dep/{}", urlencode(specifier)),
+        );
     }
     let entries = imports
         .iter()
@@ -99,6 +172,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
     <script>
       window.__ARTIST__ = {{ slug: {slug_json}, key: {key_json} }};
     </script>{tailwind}
+    <script type="module" src="/@artist/refresh.js"></script>
     <script type="module" src="/@artist/client.js"></script>
   </head>
   <body>
@@ -114,6 +188,19 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
         tailwind = tailwind,
         entry = escape_html(&format!("./{}", manifest.entry.trim_start_matches("./"))),
     )
+}
+
+/// Percent-encode a specifier for use as one path segment.
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
 
 fn escape_html(value: &str) -> String {
@@ -147,6 +234,41 @@ mod tests {
 
     /// The vendored bundles import `react` by bare specifier, so a missing or
     /// misspelled map entry breaks every canvas at once.
+    /// A JSX typo in the kit breaks every canvas at once, and the failure would
+    /// otherwise only surface in a browser.
+    #[test]
+    fn the_first_party_modules_compile() {
+        for (name, source) in [("ui.jsx", UI), ("hooks.js", HOOKS)] {
+            let compiled = compiled(name, source);
+            assert!(
+                !compiled.starts_with("throw new Error"),
+                "{name} failed to compile: {compiled}"
+            );
+            assert!(compiled.len() > 500, "{name} compiled suspiciously small");
+        }
+        // client.js is plain JS served verbatim, so it only has to parse.
+        assert!(CLIENT.contains("globalThis.artist"));
+    }
+
+    /// Every specifier the kit imports has to be in the map, or the browser
+    /// fails to resolve it at load time with no useful message.
+    #[test]
+    fn the_kit_only_imports_what_the_map_resolves() {
+        let map = import_map(&Manifest::default());
+        for source in [UI, HOOKS] {
+            for line in source.lines().filter(|line| line.starts_with("import ")) {
+                let Some(start) = line.rfind(" from \"") else {
+                    continue;
+                };
+                let specifier = line[start + 7..].trim_end_matches("\";");
+                assert!(
+                    map.contains(&format!("\"{specifier}\"")),
+                    "{specifier} is imported but not in the import map"
+                );
+            }
+        }
+    }
+
     #[test]
     fn react_resolves_for_the_bundles_that_import_it() {
         let map = import_map(&Manifest::default());
@@ -154,15 +276,31 @@ mod tests {
         assert!(map.contains("\"react/jsx-runtime\""), "{map}");
     }
 
+    /// Declared deps resolve through our proxy, not straight at the CDN: that
+    /// is what makes them cache locally and keeps the page off third-party
+    /// hosts. Pointing the import map at the raw URL would quietly undo both.
     #[test]
-    fn declared_deps_override_and_extend_the_vendored_map() {
+    fn declared_deps_are_proxied_not_linked_directly() {
         let manifest = Manifest {
             deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three".to_owned())]),
             ..Manifest::default()
         };
         let map = import_map(&manifest);
-        assert!(map.contains("\"three\": \"https://esm.sh/three\""), "{map}");
+        assert!(map.contains("\"three\": \"/@dep/three\""), "{map}");
+        assert!(!map.contains("esm.sh"), "the CDN URL leaked into the page: {map}");
         assert!(map.contains("\"react\""), "{map}");
+    }
+
+    /// A specifier becomes one path segment, so a scoped package must not
+    /// split into two.
+    #[test]
+    fn scoped_specifiers_stay_a_single_path_segment() {
+        let manifest = Manifest {
+            deps: BTreeMap::from([("@scope/pkg".to_owned(), "https://esm.sh/x".to_owned())]),
+            ..Manifest::default()
+        };
+        assert!(import_map(&manifest).contains("/@dep/%40scope%2Fpkg"));
+        assert_eq!(urlencode("@scope/pkg"), "%40scope%2Fpkg");
     }
 
     #[test]

@@ -10,11 +10,20 @@
 //! dependency set is compiled into the binary.
 
 pub mod assets;
+pub mod bridge;
+pub mod deps;
+pub mod docs;
+pub mod highlight;
 pub mod manifest;
 pub mod registry;
 pub mod server;
+pub mod state;
+pub mod templates;
 pub mod transform;
 
+pub use bridge::{CanvasHost, Denied, SendMode};
 pub use manifest::Manifest;
+pub use state::{Snapshot, StateStore};
+pub use templates::{TEMPLATES, Template};
 pub use registry::{Canvas, Registry, slugify};
 pub use transform::{Diagnostic, TransformError, Transformed, transform};

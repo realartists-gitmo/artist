@@ -13,12 +13,14 @@
 //! exists to prevent.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+use dashmap::DashMap;
 
 use axum::{
     Router,
@@ -37,7 +39,9 @@ use tokio::sync::broadcast;
 
 use crate::{
     assets,
+    bridge::CanvasHost,
     registry::Registry,
+    state::StateStore,
     transform::{self, Options},
 };
 
@@ -55,9 +59,58 @@ pub struct Report {
     pub detail: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug)]
+/// Pushed to every open page.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 enum Signal {
-    Reload { slug: String },
+    Reload {
+        slug: String,
+    },
+    /// One module changed. The page re-imports just that module and lets React
+    /// Refresh swap the components, so scroll position, focus and state all
+    /// survive an edit — the difference between a preview and a workbench.
+    Update {
+        slug: String,
+        /// Canvas-relative, matching the URL the page originally imported.
+        path: String,
+    },
+    /// Shared state changed. Carries only what moved, plus the revision, so a
+    /// page can ignore an update older than what it already applied.
+    State {
+        slug: String,
+        rev: u64,
+        entries: serde_json::Value,
+    },
+    /// The set of open questions changed.
+    Ask {
+        questions: Vec<artist_session::ask::Question>,
+    },
+    /// An agent event, forwarded verbatim.
+    Agent {
+        event: serde_json::Value,
+    },
+}
+
+impl Signal {
+    /// Which canvas should see this, or `None` for everyone.
+    fn addressed_to(&self) -> Option<&str> {
+        match self {
+            Signal::Reload { slug }
+            | Signal::Update { slug, .. }
+            | Signal::State { slug, .. } => Some(slug),
+            Signal::Ask { .. } | Signal::Agent { .. } => None,
+        }
+    }
+
+    fn event_name(&self) -> &'static str {
+        match self {
+            Signal::Reload { .. } => "reload",
+            Signal::Update { .. } => "update",
+            Signal::State { .. } => "state",
+            Signal::Ask { .. } => "ask",
+            Signal::Agent { .. } => "agent",
+        }
+    }
 }
 
 struct Inner {
@@ -66,6 +119,10 @@ struct Inner {
     addr: SocketAddr,
     signals: broadcast::Sender<Signal>,
     reports: Mutex<VecDeque<Report>>,
+    /// One store per canvas, opened lazily and kept for the process lifetime so
+    /// two tabs of the same canvas share one revision counter.
+    states: DashMap<String, Arc<StateStore>>,
+    host: Arc<dyn CanvasHost>,
 }
 
 /// A running canvas server.
@@ -76,11 +133,19 @@ pub struct Server {
 }
 
 impl Server {
-    /// Bind and start serving. Returns once the port is known, so a caller can
-    /// hand out a URL immediately without racing the accept loop.
+    /// Bind and start serving, detached from any agent.
     pub async fn start(project: PathBuf) -> anyhow::Result<Self> {
+        Server::start_with_host(project, Arc::new(crate::bridge::DetachedHost)).await
+    }
+
+    /// Bind and start serving against a live session. Returns once the port is
+    /// known, so a caller can hand out a URL without racing the accept loop.
+    pub async fn start_with_host(
+        project: PathBuf,
+        host: Arc<dyn CanvasHost>,
+    ) -> anyhow::Result<Self> {
         let key = session_key(&mut rand::rng());
-        let (signals, _) = broadcast::channel(64);
+        let (signals, _) = broadcast::channel(256);
         // Bind first: the origin check compares against our own port, so the
         // address has to be known before anything can serve a request.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -91,13 +156,19 @@ impl Server {
             addr,
             signals,
             reports: Mutex::new(VecDeque::new()),
+            states: DashMap::new(),
+            host,
         });
 
         let router = Router::new()
             .route("/c/{key}/{slug}/", get(serve_shell))
             .route("/c/{key}/{slug}/{*path}", get(serve_module))
             .route("/@artist/client.js", get(serve_client))
+            .route("/@artist/ui.js", get(serve_ui))
+            .route("/@artist/react.js", get(serve_hooks))
+            .route("/@artist/refresh.js", get(serve_refresh))
             .route("/@vendor/{*path}", get(serve_vendor))
+            .route("/@dep/{specifier}", get(serve_dep))
             .route("/_artist/events", get(serve_events))
             .route("/_artist/rpc", post(serve_rpc))
             .with_state(Arc::clone(&inner));
@@ -115,9 +186,42 @@ impl Server {
         self.addr
     }
 
+    /// The project whose canvases this server hosts.
+    pub fn project(&self) -> &Path {
+        &self.inner.project
+    }
+
     /// The URL to hand the user for one canvas.
     pub fn url(&self, slug: &str) -> String {
         format!("http://{}/c/{}/{}/", self.addr, self.inner.key, slug)
+    }
+
+    /// The shared state store for one canvas.
+    pub fn state(&self, slug: &str) -> Arc<StateStore> {
+        self.inner.state_for(slug)
+    }
+
+    /// Write shared state from the harness side and push it to open pages.
+    ///
+    /// This is how the model feeds a canvas: it writes rows, the page rerenders.
+    pub fn publish_state(&self, slug: &str, values: BTreeMap<String, serde_json::Value>) -> u64 {
+        let snapshot = self.inner.state_for(slug).merge(values);
+        let _ = self.inner.signals.send(Signal::State {
+            slug: slug.to_owned(),
+            rev: snapshot.rev,
+            entries: serde_json::to_value(snapshot.plain()).unwrap_or_default(),
+        });
+        snapshot.rev
+    }
+
+    /// Tell open pages the pending-question set changed.
+    pub fn publish_questions(&self, questions: Vec<artist_session::ask::Question>) {
+        let _ = self.inner.signals.send(Signal::Ask { questions });
+    }
+
+    /// Forward an agent event to any page subscribed to the stream.
+    pub fn publish_agent_event(&self, event: serde_json::Value) {
+        let _ = self.inner.signals.send(Signal::Agent { event });
     }
 
     /// Everything the page has reported since the last drain.
@@ -142,6 +246,7 @@ impl Server {
         let root = self.inner.project.join(crate::registry::CANVAS_DIR);
         let signals = self.inner.signals.clone();
         let base = root.clone();
+        let project = self.inner.project.clone();
         std::thread::spawn(move || {
             let (tx, rx) = std::sync::mpsc::channel();
             let mut watcher = match notify::recommended_watcher(tx) {
@@ -162,14 +267,26 @@ impl Server {
                 while let Ok(next) = rx.recv_timeout(Duration::from_millis(60)) {
                     paths.extend(collect_paths(next));
                 }
-                let mut slugs: Vec<String> = paths
+                let entries = Registry::discover(&project);
+                let mut changed: Vec<(String, Option<String>)> = paths
                     .iter()
-                    .filter_map(|path| slug_of(&base, path))
+                    .filter_map(|path| {
+                        let slug = slug_of(&base, path)?;
+                        let entry = entries.get(&slug).map(|c| c.manifest.entry.clone());
+                        let module = module_path(&base, &slug, path, entry.as_deref());
+                        Some((slug, module))
+                    })
                     .collect();
-                slugs.sort();
-                slugs.dedup();
-                for slug in slugs {
-                    let _ = signals.send(Signal::Reload { slug });
+                changed.sort();
+                changed.dedup();
+                for (slug, module) in changed {
+                    // A module can be swapped in place. Anything else — the
+                    // manifest, a stylesheet, an asset — changes the page
+                    // itself, so the page has to be rebuilt.
+                    let _ = match module {
+                        Some(path) => signals.send(Signal::Update { slug, path }),
+                        None => signals.send(Signal::Reload { slug }),
+                    };
                 }
             }
         });
@@ -194,6 +311,24 @@ fn collect_paths(event: Result<notify::Event, notify::Error>) -> Vec<PathBuf> {
         EventKind::Modify(_) => event.paths,
         EventKind::Access(_) | EventKind::Any | EventKind::Other => Vec::new(),
     }
+}
+
+/// The canvas-relative module path for a change, or `None` if it is not a
+/// module the page could re-import.
+fn module_path(base: &Path, slug: &str, path: &Path, entry: Option<&str>) -> Option<String> {
+    let relative = path.strip_prefix(base.join(slug)).ok()?;
+    let extension = relative.extension()?.to_str()?;
+    if !matches!(extension, "js" | "jsx" | "ts" | "tsx" | "mjs") {
+        return None;
+    }
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    // The entry mounts the React root, so re-importing it would call
+    // createRoot a second time and throw the live tree away — the state a hot
+    // swap exists to preserve. Rebuild the page instead.
+    if entry.is_some_and(|entry| entry.trim_start_matches("./") == relative) {
+        return None;
+    }
+    Some(relative)
 }
 
 /// Which canvas does a changed path belong to?
@@ -264,10 +399,13 @@ async fn serve_module(
         &source,
         Options {
             development: true,
-            ..Options::default()
+            refresh: true,
         },
     ) {
-        Ok(output) => raw("text/javascript; charset=utf-8", output.code.into_bytes()),
+        Ok(output) => raw(
+            "text/javascript; charset=utf-8",
+            assets::scope_refresh(&label.display().to_string(), &output.code).into_bytes(),
+        ),
         Err(error) => {
             let first = error.diagnostics.first();
             let detail = serde_json::json!({
@@ -301,6 +439,49 @@ async fn serve_client() -> Response {
     raw("text/javascript; charset=utf-8", assets::CLIENT.as_bytes().to_vec())
 }
 
+async fn serve_ui() -> Response {
+    raw(
+        "text/javascript; charset=utf-8",
+        assets::compiled("ui.jsx", assets::UI).as_bytes().to_vec(),
+    )
+}
+
+async fn serve_refresh() -> Response {
+    raw(
+        "text/javascript; charset=utf-8",
+        assets::compiled("refresh.js", assets::REFRESH).as_bytes().to_vec(),
+    )
+}
+
+async fn serve_hooks() -> Response {
+    raw(
+        "text/javascript; charset=utf-8",
+        assets::compiled("hooks.js", assets::HOOKS).as_bytes().to_vec(),
+    )
+}
+
+/// Serve a package a canvas declared under `[deps]`.
+///
+/// The URL comes from the manifest on disk, never from the request, so this
+/// cannot be driven into fetching an arbitrary host.
+async fn serve_dep(State(inner): Shared, UrlPath(specifier): UrlPath<String>) -> Response {
+    let declared = Registry::discover(&inner.project)
+        .canvases
+        .iter()
+        .find_map(|canvas| canvas.manifest.deps.get(&specifier).cloned());
+    let Some(url) = declared else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("`{specifier}` is not declared under [deps] in any canvas"),
+        )
+            .into_response();
+    };
+    match crate::deps::fetch(&url).await {
+        Ok(bytes) => raw("text/javascript; charset=utf-8", bytes),
+        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
+    }
+}
+
 async fn serve_vendor(UrlPath(path): UrlPath<String>) -> Response {
     match assets::vendored(&path) {
         Some(bytes) => raw(assets::content_type(&path), bytes.to_vec()),
@@ -325,14 +506,16 @@ async fn serve_events(State(inner): Shared, Query(session): Query<Session>) -> R
         .filter_map(move |signal| {
             let slug = slug.clone();
             async move {
-                match signal {
-                    Ok(Signal::Reload { slug: changed }) if changed == slug => {
-                        Some(Ok::<_, std::convert::Infallible>(
-                            Event::default().event("reload").data("{}"),
-                        ))
-                    }
-                    _ => None,
+                let signal = signal.ok()?;
+                // A signal addressed to another canvas is not this page's
+                // business; an unaddressed one goes to everybody.
+                if signal.addressed_to().is_some_and(|target| target != slug) {
+                    return None;
                 }
+                let data = serde_json::to_string(&signal).ok()?;
+                Some(Ok::<_, std::convert::Infallible>(
+                    Event::default().event(signal.event_name()).data(data),
+                ))
             }
         });
     Sse::new(stream)
@@ -365,31 +548,156 @@ async fn serve_rpc(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
+    let slug = session.slug;
+    let params = request.params;
+
     match request.method.as_str() {
         "canvas.report" => {
-            let level = request.params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
-            let message = request
-                .params
+            let level = params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
+            let message = params
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             inner.push_report(Report {
-                slug: session.slug,
+                slug,
                 level: level.to_owned(),
                 message: message.to_owned(),
-                detail: request.params.get("detail").cloned().filter(|v| !v.is_null()),
+                detail: params.get("detail").cloned().filter(|v| !v.is_null()),
             });
-            axum::Json(serde_json::json!({"ok": true})).into_response()
+            ok(serde_json::json!({"ok": true}))
         }
-        other => (
-            StatusCode::BAD_REQUEST,
-            format!("unknown canvas method: {other}"),
-        )
-            .into_response(),
+
+        "canvas.state.get" => {
+            let snapshot = inner.state_for(&slug).snapshot();
+            ok(serde_json::json!({"rev": snapshot.rev, "entries": snapshot.plain()}))
+        }
+
+        "canvas.state.set" => {
+            let Some(values) = params.get("entries").and_then(|v| v.as_object()) else {
+                return bad("state.set needs an `entries` object");
+            };
+            let merged: BTreeMap<String, serde_json::Value> = values
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            let snapshot = inner.state_for(&slug).merge(merged);
+            // Echo to every open tab, including the one that wrote: it needs
+            // the revision to know its optimistic update was accepted.
+            let _ = inner.signals.send(Signal::State {
+                slug,
+                rev: snapshot.rev,
+                entries: serde_json::to_value(snapshot.plain()).unwrap_or_default(),
+            });
+            ok(serde_json::json!({"rev": snapshot.rev}))
+        }
+
+        "canvas.send" => {
+            let Some(text) = params.get("text").and_then(|v| v.as_str()) else {
+                return bad("send needs `text`");
+            };
+            let mode = params
+                .get("mode")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            inner.host.send(text.to_owned(), mode).await;
+            ok(serde_json::json!({"ok": true}))
+        }
+
+        "canvas.call" => {
+            let Some(tool) = params.get("tool").and_then(|v| v.as_str()) else {
+                return bad("call needs `tool`");
+            };
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            // The declaration travels with the request rather than being
+            // trusted from the page: it is read from canvas.toml on disk.
+            let allowed = Registry::discover(&inner.project)
+                .get(&slug)
+                .map(|canvas| canvas.manifest.permissions.allow.clone())
+                .unwrap_or_default();
+            match inner.host.call_tool(tool.to_owned(), arguments, allowed).await {
+                Ok(output) => ok(serde_json::json!({"ok": true, "output": output})),
+                Err(denied) => (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "ok": false,
+                        "error": denied.to_string(),
+                        "denied": denied,
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+
+        "canvas.ask.pending" => ok(serde_json::json!({
+            "questions": inner.host.pending_questions()
+        })),
+
+        "canvas.ask.answer" => {
+            let Ok(answer) = serde_json::from_value::<artist_session::ask::Answer>(params.clone())
+            else {
+                return bad("answer needs `question_id` and `selected`");
+            };
+            let accepted = inner
+                .host
+                .answer_question(answer, &format!("canvas:{slug}"));
+            // Whether or not this surface won the race, the set changed.
+            let _ = inner.signals.send(Signal::Ask {
+                questions: inner.host.pending_questions(),
+            });
+            ok(serde_json::json!({"accepted": accepted}))
+        }
+
+        "canvas.context" => ok(inner.host.context()),
+
+        "canvas.highlight" => {
+            let source = params.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            let language = params
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("txt");
+            let dark = params.get("dark").and_then(|v| v.as_bool()).unwrap_or(true);
+            ok(serde_json::to_value(crate::highlight::highlight(source, language, dark))
+                .unwrap_or_default())
+        }
+
+        other => bad(&format!("unknown canvas method: {other}")),
     }
 }
 
+fn ok(body: serde_json::Value) -> Response {
+    axum::Json(body).into_response()
+}
+
+fn bad(message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({"ok": false, "error": message})),
+    )
+        .into_response()
+}
+
 impl Inner {
+    /// The state store for one canvas, opened on first use and then shared, so
+    /// two tabs of the same canvas agree on the revision counter.
+    fn state_for(&self, slug: &str) -> Arc<StateStore> {
+        if let Some(existing) = self.states.get(slug) {
+            return Arc::clone(existing.value());
+        }
+        let root = self
+            .project
+            .join(crate::registry::CANVAS_DIR)
+            .join(slug);
+        let store = Arc::new(StateStore::open(&root));
+        self.states
+            .entry(slug.to_owned())
+            .or_insert(store)
+            .value()
+            .clone()
+    }
+
     fn push_report(&self, report: Report) {
         let mut reports = self.reports.lock().expect("report lock poisoned");
         if reports.len() >= REPORT_CAPACITY {
@@ -514,6 +822,62 @@ mod tests {
         assert_eq!(of(EventKind::Remove(RemoveKind::File)), [path]);
     }
 
+    /// A module can be swapped in place; anything else changes the page itself
+    /// and has to be rebuilt. Getting this backwards either loses state on
+    /// every edit, or silently serves a stale page after a manifest change.
+    #[test]
+    fn only_modules_are_hot_swapped() {
+        let base = Path::new("/p/.artist/canvas");
+
+        let entry = Some("main.jsx");
+
+        assert_eq!(
+            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/parts/Chart.tsx"), entry),
+            Some("parts/Chart.tsx".to_owned())
+        );
+
+        // The entry mounts the React root. Re-importing it would call
+        // createRoot again and discard the very state a hot swap protects, so
+        // it is deliberately a full reload.
+        assert_eq!(
+            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/main.jsx"), entry),
+            None
+        );
+        assert_eq!(
+            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/main.jsx"), Some("./main.jsx")),
+            None
+        );
+
+        for whole_page in ["canvas.toml", "styles.css", "logo.svg", "state.json"] {
+            let path = Path::new("/p/.artist/canvas/demo").join(whole_page);
+            assert_eq!(
+                module_path(base, "demo", &path, entry),
+                None,
+                "{whole_page} should force a reload"
+            );
+        }
+        // A file with no extension is not a module either.
+        assert_eq!(
+            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/README"), entry),
+            None
+        );
+    }
+
+    /// Two modules both exporting `App` must not overwrite each other in the
+    /// refresh runtime's family registry.
+    #[test]
+    fn refresh_registrations_are_namespaced_per_module() {
+        let first = crate::assets::scope_refresh("main.jsx", "const a = 1;");
+        let second = crate::assets::scope_refresh("parts/Chart.jsx", "const a = 1;");
+
+        assert!(first.contains("\"main.jsx\""), "{first}");
+        assert!(second.contains("\"parts/Chart.jsx\""), "{second}");
+        // The previous pair is saved and restored, so modules do not leak their
+        // registrar into whatever evaluates next.
+        assert!(first.contains("__artistPrevReg"));
+        assert!(first.trim_end().ends_with("window.$RefreshSig$ = __artistPrevSig;"));
+    }
+
     #[test]
     fn a_changed_file_maps_back_to_its_canvas() {
         let base = Path::new("/p/.artist/canvas");
@@ -537,6 +901,8 @@ mod tests {
             addr: "127.0.0.1:54321".parse().expect("loopback addr"),
             signals: broadcast::channel(1).0,
             reports: Mutex::new(VecDeque::new()),
+            states: DashMap::new(),
+            host: Arc::new(crate::bridge::DetachedHost),
         };
 
         assert!(origin_is_ours(&headers, &inner), "same-origin sends no Origin");
