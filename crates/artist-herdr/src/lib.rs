@@ -1,8 +1,10 @@
 mod command;
 mod context;
+mod reporter;
 mod state;
 
 pub use context::{AGENT, HerdrContext, LIFECYCLE_SOURCE};
+pub use reporter::{HerdrHandle, HerdrIntegration};
 pub use state::{Activity, TurnActivity};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
