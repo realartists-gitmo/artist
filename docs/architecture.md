@@ -245,10 +245,16 @@ triggers it manually. The planner walks backward to retain approximately
 early prefix when one oversized turn must be split. Summarization uses labelled
 conversation serialization, truncates tool results to 2,000 characters, updates
 the previous structured checkpoint on repeated compactions, and carries
-cumulative read/modified file lists. A successful compaction appends
-`conversation.compacted` audit metadata and a hidden reset snapshot containing
-the summary plus the recent suffix. The append-only transcript remains intact;
-only model context is replaced. Summary failures leave memory untouched.
+cumulative read/modified file lists. For OpenAI Responses and ChatGPT, compaction uses the standalone
+`/responses/compact` endpoint with `store: false`; encrypted reasoning and the
+opaque canonical compaction item remain in the provider sidecar, while Rig
+memory is reset so superseded history is not resent. Explicit 400/404/422
+capability failures fall back to the local summarizer; auth, network, and server
+failures leave both memory and sidecar untouched. `/compact` custom instructions
+always select the local summarizer. Other providers remain local. A successful
+compaction appends non-opaque `conversation.compacted` audit metadata and a
+hidden reset snapshot. The append-only transcript remains intact; only model
+context is replaced.
 
 Defaults are enabled with 16,384 reserve tokens and 20,000 recent tokens. They
 can be overridden globally or per project in `settings.toml`:
@@ -356,18 +362,16 @@ other and with `providers.toml`'s `disabled_tools`, so a project can tighten
 access but never silently loosen it.
 
 A provider record's `model` and `reasoning_effort` are its durable defaults;
-`artist model` and `/model` edit the active default provider. Thus switching
-with `/provider set ID` or `/accounts ID` restores compatible provider-local
-choices. Project/global `settings.toml` values remain layered runtime overrides
-when present; they do not rewrite another provider's stored model.
+`artist model` and `/model` edit the active default provider. Project/global
+`settings.toml` values remain layered runtime overrides when present.
 
 ## Auth, providers, MCP
 
-Provider CRUD is interactive through `artist provider add|edit|remove|list|set|test`
-and TUI `/provider` equivalents; `/providers` and `/accounts` are list aliases.
-ChatGPT uses Authorization Code + PKCE and an eligible ChatGPT subscription.
-Copilot supports API key, GitHub token, and cached device-OAuth modes. Other
-clients enforce their protocol-specific API-key/bearer/no-auth requirements.
+Login is performed during first-run setup or with the TUI `/login` command.
+ChatGPT uses Authorization Code + PKCE and an eligible ChatGPT subscription;
+API-key OpenAI Responses is configured as an OpenAI login. Copilot supports API
+key, GitHub token, and cached device-OAuth modes. Other clients enforce their
+protocol-specific API-key/bearer/no-auth requirements.
 Pre-v4 credentials migrate to v4's tagged union without discarding secrets;
 Unix config/token permissions are tightened to `0700` directories and `0600`
 files. Full operational and security details are in the provider guide.

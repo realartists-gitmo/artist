@@ -29,7 +29,7 @@ mod theme;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, LoginKind, ProviderAction, RulesCommand, SessionsCommand};
+use args::{Cli, Command, RulesCommand, SessionsCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
@@ -79,36 +79,6 @@ async fn run() -> Result<()> {
         .await;
     }
     match cli.command {
-        Some(Command::Provider(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
-            match (args.login, args.action) {
-                (Some(LoginKind::Chatgpt), None) => {
-                    login::chatgpt(&mut store).await?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Add)) => {
-                    provider_commands::add(&mut store)?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Edit { id })) => {
-                    provider_commands::edit(&mut store, id.as_deref())?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Remove { id })) => {
-                    provider_commands::remove(&mut store, id.as_deref())?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::List)) => list(&store),
-                (None, Some(ProviderAction::Set)) => {
-                    set_default(&mut store)?;
-                    store.save(&path)?;
-                }
-                (None, Some(ProviderAction::Test)) => {
-                    test_selected(&mut store, &path).await?;
-                    store.save(&path)?;
-                }
-                _ => bail!("choose --login chatgpt or a provider subcommand"),
-            }
-        }
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
             let selected = default_index(&store)?;
             if refresh_if_needed(&mut store.providers[selected]).await? {
@@ -136,7 +106,9 @@ async fn run() -> Result<()> {
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
         None => {
-            let selected = default_index(&store)?;
+            let selected = (!store.providers.is_empty())
+                .then(|| default_index(&store))
+                .transpose()?;
             let project = std::env::current_dir().context("find current project directory")?;
             // Layered settings (global ~/.config/artist + project .artist) resolve the
             // model/reasoning overrides and the effective tool denylist.
@@ -149,12 +121,17 @@ async fn run() -> Result<()> {
             // Catch a missing effective model before the TUI takes over. Legacy
             // settings scalars supply ChatGPT only; other providers must have a
             // provider-local selection.
-            if effective
-                .apply_to(store.providers[selected].clone())
-                .model
-                .is_none()
+            if let Some(selected) = selected
+                && effective
+                    .apply_to(store.providers[selected].clone())
+                    .model
+                    .is_none()
             {
-                bail!("no model selected — run `artist model` to choose one first");
+                // Legacy/incomplete provider records should recover through the
+                // interactive model setup instead of referring to the removed
+                // standalone model command.
+                models::select(&mut store.providers[selected]).await?;
+                store.save(&path)?;
             }
             // Resolve an interactive resume before entering inline TUI mode so the
             // selector cannot be painted underneath the splash and input viewport.
@@ -164,11 +141,16 @@ async fn run() -> Result<()> {
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let show_splash = resumed.is_none() && cli.prompt.is_none();
             let extension_control = extension_control::ExtensionControl::default();
-            let mut refreshed_provider = store.providers[selected].clone();
+            let mut refreshed_provider = selected.map(|index| store.providers[index].clone());
             let (mcp, extensions, refreshed) = tokio::join!(
                 artist_agent::mcp::McpManager::load(config_root),
                 extension_manager(config_root, &store, extension_control.clone()),
-                refresh_if_needed(&mut refreshed_provider)
+                async {
+                    match refreshed_provider.as_mut() {
+                        Some(provider) => refresh_if_needed(provider).await,
+                        None => Ok(false),
+                    }
+                }
             );
             let mcp = mcp?;
             let extensions = extensions?;
@@ -176,9 +158,11 @@ async fn run() -> Result<()> {
                 show_splash,
                 cli.prompt.is_some(),
                 &extensions.extension_ids(),
+                selected.is_none(),
             )?;
             if refreshed? {
-                store.providers[selected] = refreshed_provider;
+                let selected = selected.expect("a refreshed provider is selected");
+                store.providers[selected] = refreshed_provider.expect("refreshed provider exists");
                 store.save(&path)?;
             }
             let tools = tool_bundle(config_root, &project)?;
@@ -314,6 +298,16 @@ async fn execute_prompt(
     rules.restore_from_log(&resumed_events);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
+    let effective_context_window =
+        models::catalog(&session_provider)
+            .await
+            .ok()
+            .and_then(|catalog| {
+                catalog
+                    .iter()
+                    .find(|model| Some(&model.slug) == session_provider.model.as_ref())
+                    .and_then(|model| model.effective_context_window())
+            });
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
         rules,
@@ -321,6 +315,9 @@ async fn execute_prompt(
         recorder: active.recorder.clone(),
         memory: Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
+        provider_context: active.provider_context.clone(),
+        effective_context_window,
+        fast_mode: false,
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
         providers: llm_provider::ProviderSet::new(store.providers.clone()),

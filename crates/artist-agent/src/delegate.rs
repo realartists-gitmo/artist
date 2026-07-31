@@ -13,12 +13,13 @@ use artist_session::{
 use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
+use rig_agent::client::AgentClientExt;
+use rig_agent::{agent::MultiTurnStreamItem, prelude::PromptError, streaming::StreamingChat};
 use rig_core::{
-    agent::MultiTurnStreamItem,
     client::CompletionClient,
     completion::{Message, message::ToolResultContent},
-    streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
-    tool::{Tool, ToolDyn},
+    streaming::{StreamedAssistantContent, StreamedUserContent},
+    tool::{PortableDynamicTool, PortableTool},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -128,7 +129,7 @@ pub(crate) enum DelegateError {
     Unavailable(String),
 }
 
-impl Tool for Delegate {
+impl PortableTool for Delegate {
     const NAME: &'static str = "subagent";
     type Error = DelegateError;
     type Args = DelegateArgs;
@@ -333,6 +334,12 @@ impl Delegate {
     /// monomorphizes `run_agent_with` separately, which is why this stays a
     /// match over provider kinds rather than a unified client type.
     #[allow(clippy::too_many_arguments)]
+    /// Build the client for the resolved account and hand it to the run.
+    ///
+    /// Construction is centralized in `RigClient::build`, so a candidate that
+    /// names a different account — or a different provider entirely — routes
+    /// through exactly the same path the session root uses.
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch(
         &self,
         provider: &SavedProvider,
@@ -343,62 +350,52 @@ impl Delegate {
         fork: bool,
         run: &DelegateRun,
     ) -> Result<String, DelegateError> {
-        use llm_provider::{OpenAiApi, ProviderKind};
+        use crate::rig_provider::RigClient;
+        let client = RigClient::build(provider)
+            .map_err(|error| DelegateError::Failed(error.to_string()))?;
         macro_rules! run_with {
-            ($build:ident) => {
+            ($client:expr) => {
                 self.run_agent_with(
-                    crate::rig_provider::$build(provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    profile,
-                    provider,
-                    thinking,
-                    fork,
-                    model,
-                    run,
+                    $client, prompt, profile, provider, thinking, fork, model, run,
                 )
                 .await
             };
         }
-        match provider.provider {
-            ProviderKind::Anthropic => run_with!(build_anthropic),
-            ProviderKind::Azure => run_with!(build_azure),
-            ProviderKind::Chatgpt => run_with!(build_chatgpt),
-            ProviderKind::Cohere => run_with!(build_cohere),
-            ProviderKind::Copilot => run_with!(build_copilot),
-            ProviderKind::Deepseek => run_with!(build_deepseek),
-            ProviderKind::Gemini => run_with!(build_gemini),
-            ProviderKind::Groq => run_with!(build_groq),
-            ProviderKind::Huggingface => run_with!(build_huggingface),
-            ProviderKind::Hyperbolic => run_with!(build_hyperbolic),
-            ProviderKind::Llamafile => run_with!(build_llamafile),
-            ProviderKind::Mira => run_with!(build_mira),
-            ProviderKind::Mistral => run_with!(build_mistral),
-            ProviderKind::Ollama => run_with!(build_ollama),
-            ProviderKind::Openrouter => run_with!(build_openrouter),
-            ProviderKind::Perplexity => run_with!(build_perplexity),
-            ProviderKind::Together => run_with!(build_together),
-            ProviderKind::Xai => run_with!(build_xai),
-            ProviderKind::Minimax => match provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => run_with!(build_minimax),
-                OpenAiApi::ChatCompletions => run_with!(build_minimax_anthropic),
-            },
-            ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => run_with!(build_moonshot),
-                OpenAiApi::ChatCompletions => run_with!(build_moonshot_anthropic),
-            },
-            ProviderKind::Openai => match provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => run_with!(build_openai_responses),
-                OpenAiApi::ChatCompletions => run_with!(build_openai_chat),
-            },
-            ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => run_with!(build_xiaomimimo),
-                OpenAiApi::ChatCompletions => run_with!(build_xiaomimimo_anthropic),
-            },
-            ProviderKind::Zai => match provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => run_with!(build_zai),
-                OpenAiApi::ChatCompletions => run_with!(build_zai_anthropic),
-            },
+        match client {
+            RigClient::ArtistOpenAi(client) => {
+                // Delegates have isolated provider-private lineage even when
+                // their portable conversation is seeded from the parent.
+                let lineage = format!("{}:delegate:{}", self.handles.conversation_id, run.actor);
+                let client =
+                    client.with_provider_context(lineage, self.handles.provider_context.clone());
+                run_with!(client)
+            }
+            RigClient::Copilot(client) => run_with!(client),
+            RigClient::OpenAiChat(client) => run_with!(client),
+            RigClient::Anthropic(client) => run_with!(client),
+            RigClient::Cohere(client) => run_with!(client),
+            RigClient::Gemini(client) => run_with!(client),
+            RigClient::DeepSeek(client) => run_with!(client),
+            RigClient::Groq(client) => run_with!(client),
+            RigClient::HuggingFace(client) => run_with!(client),
+            RigClient::Hyperbolic(client) => run_with!(client),
+            RigClient::Mira(client) => run_with!(client),
+            RigClient::Mistral(client) => run_with!(client),
+            RigClient::OpenRouter(client) => run_with!(client),
+            RigClient::Perplexity(client) => run_with!(client),
+            RigClient::Together(client) => run_with!(client),
+            RigClient::XAi(client) => run_with!(client),
+            RigClient::Azure(client) => run_with!(client),
+            RigClient::Llamafile(client) => run_with!(client),
+            RigClient::Ollama(client) => run_with!(client),
+            RigClient::Minimax(client) => run_with!(client),
+            RigClient::MinimaxAnthropic(client) => run_with!(client),
+            RigClient::Moonshot(client) => run_with!(client),
+            RigClient::MoonshotAnthropic(client) => run_with!(client),
+            RigClient::XiaomiMiMo(client) => run_with!(client),
+            RigClient::XiaomiMiMoAnthropic(client) => run_with!(client),
+            RigClient::ZAi(client) => run_with!(client),
+            RigClient::ZAiAnthropic(client) => run_with!(client),
         }
     }
 
@@ -437,18 +434,18 @@ impl Delegate {
             background: run.background,
         });
         let registered_tools = || {
-            let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+            let mut tools: Vec<PortableDynamicTool> = Vec::new();
             if role.permits("read") {
-                tools.push(Box::new(child_tools.read.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.read.clone()));
             }
             if role.permits("find") {
-                tools.push(Box::new(child_tools.find.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.find.clone()));
             }
             if role.permits("grep") {
-                tools.push(Box::new(child_tools.grep.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.grep.clone()));
             }
             if role.permits("skill") {
-                tools.push(Box::new(self.resources.skill_tool()));
+                tools.push(crate::tool_prompt::dynamic(self.resources.skill_tool()));
             }
             if role.permits("todo") {
                 // A child owns its own list and may read its parent's, but not
@@ -462,13 +459,13 @@ impl Delegate {
                 )));
             }
             if role.permits("bash") {
-                tools.push(Box::new(child_tools.bash.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.bash.clone()));
             }
             if role.permits("edit") {
-                tools.push(Box::new(child_tools.edit.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.edit.clone()));
             }
             if role.permits("write") {
-                tools.push(Box::new(child_tools.write.clone()));
+                tools.push(crate::tool_prompt::dynamic(child_tools.write.clone()));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
             tools
@@ -498,7 +495,11 @@ impl Delegate {
         // from the main agent and any sibling delegates.
         let retry_budget = self.handles.rules.retry_budget();
         let mut retries_used = 0u32;
-        let cache_key = crate::prompt_cache_key(self.tools.project_root(), model);
+        let mut overload_retry = crate::provider_retry::OverloadRetry::new(
+            self.tools.project_root(),
+            model,
+            &format!("delegate:{actor}"),
+        );
         let (output, conversation) = loop {
             let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
             let run_recorder = recorder.with_run(&run_id);
@@ -509,18 +510,43 @@ impl Delegate {
                 retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
-            // The profile's own thinking configuration wins over the resolved
-            // account's default effort (main b9d9193). Translation is
-            // per-provider: mode and level are separate fields on Anthropic and
-            // a single `reasoning` block on the ChatGPT backend.
-            if let Some(params) =
-                crate::thinking::request_params(provider.provider, &cache_key, thinking)
-            {
+            // Upstream owns the ChatGPT/OpenAI request shape (fast mode,
+            // context window, Responses-only policy); the profile supplies the
+            // effort. Anthropic spells reasoning differently and upstream
+            // returns nothing for it, so our translation covers that case.
+            let effort = thinking
+                .level
+                .map(|level| level.as_str().to_owned())
+                .or_else(|| provider.reasoning_effort.clone());
+            if let Some(params) = crate::request_params(
+                provider.provider,
+                provider.api,
+                overload_retry.cache_key(),
+                effort.as_deref(),
+                delegate_context_window(
+                    model,
+                    provider.model.as_deref(),
+                    self.handles.effective_context_window,
+                ),
+                self.handles.fast_mode,
+            )
+            .or_else(|| {
+                crate::thinking::request_params(
+                    provider.provider,
+                    overload_retry.cache_key(),
+                    thinking,
+                )
+            }) {
                 builder = builder.additional_params(params);
             }
             let tool_meta = ToolMeta::default();
             let agent = builder
-                .tools(registered_tools())
+                .dynamic_tools(
+                    registered_tools()
+                        .into_iter()
+                        .map(rig_agent::tool::DynamicTool::from)
+                        .collect(),
+                )
                 .add_hook(CaptureHook::new(tool_meta.clone()))
                 .add_hook(TtsrHook(Arc::clone(&ttsr)))
                 .default_max_turns(usize::MAX)
@@ -543,6 +569,7 @@ impl Delegate {
             let mut last_turn_had_text_delta = false;
             let mut final_messages = None;
             let mut retry = false;
+            let mut attempt_observed = false;
             loop {
                 let item = tokio::select! {
                     biased;
@@ -579,6 +606,9 @@ impl Delegate {
                     run_recorder.record(RunFinished::Completed);
                     break;
                 };
+                if item.is_ok() {
+                    attempt_observed = true;
+                }
                 match item {
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                         last_turn_had_text_delta = !turn_text.is_empty();
@@ -649,7 +679,7 @@ impl Delegate {
                             arguments: tool_call.function.arguments,
                         },
                     ),
-                    Ok(MultiTurnStreamItem::ToolExecutionStart {
+                    Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                         tool_call,
                         internal_call_id,
                     }) => self.emit_child(
@@ -673,6 +703,7 @@ impl Delegate {
                                     images += 1;
                                     None
                                 }
+                                ToolResultContent::Json { value } => Some(value.to_string()),
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -691,11 +722,9 @@ impl Delegate {
                     Ok(_) => {}
                     Err(error) => {
                         if let Some(firing) = ttsr.take_pending()
-                            && let rig_core::agent::StreamingError::Prompt(boxed) = &error
-                            && let rig_core::completion::PromptError::PromptCancelled {
-                                chat_history,
-                                ..
-                            } = boxed.as_ref()
+                            && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
+                            && let PromptError::PromptCancelled { chat_history, .. } =
+                                boxed.as_ref()
                         {
                             seed_history = chat_history.clone();
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
@@ -715,6 +744,23 @@ impl Delegate {
                         run_recorder.record(RunFinished::Error {
                             error: error.to_string(),
                         });
+                        if !attempt_observed
+                            && crate::provider_retry::is_overload(self.provider.provider, &error)
+                            && let Some(delay) = overload_retry.schedule()
+                        {
+                            drop(stream);
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {
+                                    retry = true;
+                                    break;
+                                }
+                                _ = self.handles.cancel.cancelled() => {
+                                    recorder.record(DelegateFinished { outcome: "cancelled".into() });
+                                    self.finish_child(&actor, "cancelled");
+                                    return Err(DelegateError::Failed("cancelled".into()));
+                                }
+                            }
+                        }
                         recorder.record(DelegateFinished {
                             outcome: "error".into(),
                         });
@@ -769,6 +815,16 @@ pub(crate) fn child_conversation_messages(
     }
 }
 
+fn delegate_context_window(
+    delegate_model: &str,
+    main_model: Option<&str>,
+    main_window: Option<u64>,
+) -> Option<u64> {
+    (main_model == Some(delegate_model))
+        .then_some(main_window)
+        .flatten()
+}
+
 fn required<T>(value: Option<T>, name: &str) -> Result<T, DelegateError> {
     value.ok_or_else(|| DelegateError::Failed(format!("{name} is required")))
 }
@@ -785,7 +841,20 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::DelegateRun;
+    use super::{DelegateRun, delegate_context_window};
+
+    #[test]
+    fn model_override_does_not_inherit_main_context_window() {
+        assert_eq!(
+            delegate_context_window("main", Some("main"), Some(100_000)),
+            Some(100_000)
+        );
+        assert_eq!(
+            delegate_context_window("small", Some("main"), Some(100_000)),
+            None
+        );
+        assert_eq!(delegate_context_window("small", None, Some(100_000)), None);
+    }
 
     #[test]
     fn background_run_reuses_reserved_task_id() {

@@ -1,7 +1,7 @@
 use crate::{ToolError, Workspace, output};
 use dashmap::{DashMap, DashSet};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -165,7 +165,7 @@ impl BashArgs {
         }
     }
 }
-impl Tool for BashTool {
+impl PortableTool for BashTool {
     const NAME: &'static str = "bash";
     type Error = ToolError;
     type Args = BashArgs;

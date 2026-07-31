@@ -1,7 +1,7 @@
 use crate::{ToolError, Workspace, output};
 use fff_search::{GrepMode, GrepSearchOptions, QueryParser};
 use globset::Glob;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -20,7 +20,7 @@ pub struct GrepArgs {
     context: Option<usize>,
     limit: Option<usize>,
 }
-impl Tool for GrepTool {
+impl PortableTool for GrepTool {
     const NAME: &'static str = "grep";
     type Error = ToolError;
     type Args = GrepArgs;

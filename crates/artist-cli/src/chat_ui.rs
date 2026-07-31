@@ -45,6 +45,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+const NO_PROVIDER_NOTICE: &str = "No provider configured — run /login to connect one.";
+
 #[derive(Default)]
 pub(crate) struct ChatInput {
     text: String,
@@ -217,6 +219,7 @@ struct StatusRuntime {
     context_capacity: Option<u64>,
     /// Sum of all completion totals this session (billed volume).
     session_tokens: u64,
+    fast_mode: bool,
     extension_values: Vec<(String, String)>,
 }
 
@@ -251,20 +254,23 @@ fn provider_with_session_selection(
 
 fn footer_view(
     config: &StatusBarConfig,
-    provider: &SavedProvider,
+    provider: Option<&SavedProvider>,
     project: &Path,
     runtime: &StatusRuntime,
 ) -> status_bar::StatusView {
-    status_bar::view(status_bar::segments(
-        config,
-        project,
-        provider,
-        runtime.git_branch.as_deref(),
-        runtime.used_tokens,
-        runtime.context_capacity,
-        runtime.session_tokens,
-        &runtime.extension_values,
-    ))
+    provider.map_or_else(status_bar::StatusView::default, |provider| {
+        status_bar::view(status_bar::segments_with_fast_mode(
+            config,
+            project,
+            provider,
+            runtime.git_branch.as_deref(),
+            runtime.used_tokens,
+            runtime.context_capacity,
+            runtime.session_tokens,
+            runtime.fast_mode,
+            &runtime.extension_values,
+        ))
+    })
 }
 
 struct SubmitContext<'a> {
@@ -344,6 +350,7 @@ struct PendingDelivery {
 struct StreamingControls<'a> {
     input: &'a ChatInput,
     steering: &'a SteeringQueue,
+    suggestions: &'a [String],
     subagents: &'a SubagentStatuses,
     animation_frame: usize,
     reasoning: &'a str,
@@ -377,7 +384,7 @@ impl StreamingViewport {
 
 struct ChatContext<'a> {
     store: &'a mut ProviderStore,
-    provider_index: usize,
+    provider_index: Option<usize>,
     store_path: &'a Path,
     sessions: &'a SessionStore,
     project: &'a Path,
@@ -416,6 +423,7 @@ pub fn start_terminal(
     show_splash: bool,
     thinking: bool,
     extension_ids: &[String],
+    needs_login: bool,
 ) -> Result<ratatui::DefaultTerminal> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("interactive chat requires a terminal; use -p for non-interactive prompts");
@@ -443,8 +451,17 @@ pub fn start_terminal(
     // than reserving it inside — so it simply scrolls away as the chat grows and
     // never forces a viewport resize.
     if show_splash && !thinking {
-        terminal.insert_before(crate::startup_splash::HEIGHT + 1, |buffer| {
+        let notice_rows = u16::from(needs_login);
+        terminal.insert_before(crate::startup_splash::HEIGHT + 1 + notice_rows, |buffer| {
             crate::startup_splash::render_buffer(buffer, extension_ids);
+            if needs_login {
+                buffer.set_string(
+                    2,
+                    crate::startup_splash::HEIGHT,
+                    NO_PROVIDER_NOTICE,
+                    Style::default().fg(crate::theme::PASTEL_YELLOW),
+                );
+            }
         })?;
     }
     terminal.show_cursor()?;
@@ -470,7 +487,7 @@ impl Drop for TerminalModeGuard {
 pub async fn run(
     mut terminal: ratatui::DefaultTerminal,
     store: &mut ProviderStore,
-    provider_index: usize,
+    provider_index: Option<usize>,
     store_path: &Path,
     resources: ChatResources<'_>,
     resumed: Option<(ActiveSession, Vec<Envelope>)>,
@@ -491,6 +508,7 @@ pub async fn run(
         used_tokens: None,
         context_capacity,
         session_tokens: 0,
+        fast_mode: false,
         extension_values: extensions.status_items(),
     };
     status.refresh(&store.status_bar, project);
@@ -659,15 +677,17 @@ async fn run_loop(
     let mut suggestion_input = String::new();
     // The provider the session actually runs with: the selected account plus
     // any settings model/reasoning override, applied to a throwaway clone so
-    // the override is never persisted. Rebuilt when the account changes
-    // (`/accounts`) or before a turn (to carry a freshly-refreshed token).
-    let mut session_provider = context
-        .settings
-        .apply_to(context.store.providers[context.provider_index].clone());
+    // the override is never persisted. Rebuilt before a turn to carry a
+    // freshly-refreshed token.
+    let mut session_provider = context.provider_index.map(|index| {
+        context
+            .settings
+            .apply_to(context.store.providers[index].clone())
+    });
     if resumed_session {
         let footer = footer_view(
             &context.store.status_bar,
-            &session_provider,
+            session_provider.as_ref(),
             context.project,
             &status,
         );
@@ -689,8 +709,10 @@ async fn run_loop(
     }
     loop {
         context.extensions.update_context(|extension_context| {
-            extension_context.model = session_provider.model.clone();
-            extension_context.reasoning = session_provider.reasoning_effort.clone();
+            extension_context.model = session_provider.as_ref().and_then(|p| p.model.clone());
+            extension_context.reasoning = session_provider
+                .as_ref()
+                .and_then(|p| p.reasoning_effort.clone());
         });
         status.extension_values = context.extensions.status_items();
         // Prompt execution can change any external status (notably the checked-out
@@ -703,7 +725,7 @@ async fn run_loop(
         let extension_suggestions = extension_command_completions(&input.text, &extension_commands);
         let custom_suggestions = crate::custom_commands::completions(&custom_commands, &input.text);
         let mcp_suggestions = slash_commands::mcp_completions(&input.text, &mcp_servers);
-        let provider_suggestions = slash_commands::provider_completions(&input.text);
+        let provider_suggestions: Vec<slash_commands::ArgumentCompletion> = Vec::new();
         let (skill_range, skill_suggestions) = skill_completions(&input, &skills);
         if suggestion_input != input.text {
             suggestion_index = 0;
@@ -727,11 +749,6 @@ async fn run_loop(
                         .map(|command| format!("{}  {}", command.name, command.description)),
                 )
                 .collect()
-        } else if !provider_suggestions.is_empty() {
-            provider_suggestions
-                .iter()
-                .map(|completion| format!("{}  {}", completion.value, completion.description))
-                .collect()
         } else if !mcp_suggestions.is_empty() {
             mcp_suggestions.clone()
         } else {
@@ -751,7 +768,7 @@ async fn run_loop(
         };
         let footer = footer_view(
             &context.store.status_bar,
-            &session_provider,
+            session_provider.as_ref(),
             context.project,
             &status,
         );
@@ -840,6 +857,10 @@ async fn run_loop(
                         continue;
                     }
                     Ok(slash_commands::ParsedCommand::Compact { instructions }) => {
+                        let Some(provider) = session_provider.as_ref() else {
+                            command_panel = vec![NO_PROVIDER_NOTICE.into()];
+                            continue;
+                        };
                         let Some(active_session) = active.as_ref() else {
                             command_panel = vec!["Nothing to compact in a fresh session.".into()];
                             continue;
@@ -857,7 +878,7 @@ async fn run_loop(
                         )?;
                         match crate::compaction::compact(
                             active_session,
-                            &session_provider,
+                            provider,
                             context.settings.compaction,
                             instructions,
                             "manual",
@@ -886,6 +907,28 @@ async fn run_loop(
                             Err(error) => vec![format!("Compaction failed: {error:#}")],
                         }
                     }
+                    Ok(slash_commands::ParsedCommand::Fast) => {
+                        if session_provider.as_ref().is_some_and(|provider| {
+                            matches!(
+                                provider.provider,
+                                llm_provider::ProviderKind::Openai
+                                    | llm_provider::ProviderKind::Chatgpt
+                            )
+                        }) {
+                            status.fast_mode = !status.fast_mode;
+                            vec![format!(
+                                "Fast mode {}.",
+                                if status.fast_mode {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            )]
+                        } else {
+                            status.fast_mode = false;
+                            vec!["Fast mode is not supported by the active provider.".into()]
+                        }
+                    }
                     Ok(slash_commands::ParsedCommand::Rules(action)) => handle_rules(
                         context.rules_engine,
                         context.rules_handle,
@@ -906,8 +949,31 @@ async fn run_loop(
                         context.rules_handle.restore_from_log(&[]);
                         status.used_tokens = None;
                         status.session_tokens = 0;
+                        status.fast_mode = false;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
+                    Ok(slash_commands::ParsedCommand::Login) => match handle_login(
+                        &mut terminal,
+                        context.store,
+                        context.store_path,
+                        viewport_height,
+                        &footer,
+                    )
+                    .await
+                    {
+                        Ok((lines, Some(index))) => {
+                            context.provider_index = Some(index);
+                            status.fast_mode = false;
+                            session_provider = Some(
+                                context
+                                    .settings
+                                    .apply_to(context.store.providers[index].clone()),
+                            );
+                            lines
+                        }
+                        Ok((lines, None)) => lines,
+                        Err(error) => vec![format!("Login failed: {error:#}")],
+                    },
                     Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
                         context.sessions,
                         context.project,
@@ -918,71 +984,16 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Provider { action }) => handle_provider(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        &mut context.provider_index,
-                        action,
-                        viewport_height,
-                        context.settings,
-                    )
-                    .await
-                    .map(|(lines, changed)| {
-                        if changed {
-                            session_provider = context
-                                .settings
-                                .apply_to(context.store.providers[context.provider_index].clone());
-                            // Capacity is provider/model-specific and is resolved from
-                            // that provider's catalog before the next submission.
-                            status.context_capacity = None;
-                            status.used_tokens = None;
-                            status.refresh(&context.store.status_bar, context.project);
-                        }
-                        lines
-                    })
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Accounts { id }) => handle_accounts(
-                        context.store,
-                        context.store_path,
-                        context.provider_index,
-                        id,
-                    )
-                    .map(|(panel, switch)| {
-                        if let Some(new_index) = switch {
-                            context.provider_index = new_index;
-                            status.context_capacity = None;
-                            status.used_tokens = None;
-                            status.refresh(&context.store.status_bar, context.project);
-                            session_provider = context
-                                .settings
-                                .apply_to(context.store.providers[context.provider_index].clone());
-                        }
-                        panel
-                    })
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
-                    Ok(slash_commands::ParsedCommand::Login) => handle_login(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        viewport_height,
-                    )
-                    .await
-                    .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(command) => {
-                        let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
-                        let active_provider_edited = match command {
-                            slash_commands::ParsedCommand::Provider {
-                                action: slash_commands::ProviderAction::Edit { id },
-                            } => id.is_none_or(|id| {
-                                context.store.providers[context.provider_index].id.as_str() == id
-                            }),
-                            _ => false,
+                        let Some(provider_index) = context.provider_index else {
+                            command_panel = vec![NO_PROVIDER_NOTICE.into()];
+                            continue;
                         };
+                        let tools_changed = matches!(command, slash_commands::ParsedCommand::Tools);
                         let command_input = ChatInput::default();
                         match command_ui::run(
                             context.store,
-                            context.provider_index,
+                            provider_index,
                             context.store_path,
                             command,
                             &skills,
@@ -1018,7 +1029,7 @@ async fn run_loop(
                                     )?
                                     .denied_tools;
                                 }
-                                if output.model_changed || active_provider_edited {
+                                if output.model_changed {
                                     if output.model_changed {
                                         status.context_capacity = output.context_capacity;
                                         status.used_tokens = None;
@@ -1028,11 +1039,11 @@ async fn run_loop(
                                     // newly persisted choice directly rather than reapplying
                                     // those defaults over it.
                                     session_provider = if output.model_changed {
-                                        context.store.providers[context.provider_index].clone()
+                                        Some(context.store.providers[provider_index].clone())
                                     } else {
-                                        context.settings.apply_to(
-                                            context.store.providers[context.provider_index].clone(),
-                                        )
+                                        Some(context.settings.apply_to(
+                                            context.store.providers[provider_index].clone(),
+                                        ))
                                     };
                                 }
                                 output.lines
@@ -1054,13 +1065,15 @@ async fn run_loop(
                     false,
                     None,
                 )?;
+                let Some(provider_index) = context.provider_index else {
+                    command_panel = vec![NO_PROVIDER_NOTICE.into()];
+                    continue;
+                };
                 prompt_history.push(prompt.display.clone(), prompt.history_atoms.clone());
                 // Refresh the access token at the turn boundary so a session
                 // that outlives the token lifetime keeps working instead of
                 // failing with an unrecoverable 401 (AUTH-1).
-                if crate::refresh_if_needed(&mut context.store.providers[context.provider_index])
-                    .await?
-                {
+                if crate::refresh_if_needed(&mut context.store.providers[provider_index]).await? {
                     context
                         .store
                         .save(context.store_path)
@@ -1068,14 +1081,14 @@ async fn run_loop(
                 }
                 // Carry refreshed account credentials into the request without
                 // clobbering a model/reasoning choice made via `/model`.
-                session_provider = provider_with_session_selection(
-                    context.store.providers[context.provider_index].clone(),
-                    &session_provider,
-                );
+                session_provider = Some(provider_with_session_selection(
+                    context.store.providers[provider_index].clone(),
+                    session_provider.as_ref().expect("provider initialized"),
+                ));
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
-                        provider: &session_provider,
+                        provider: session_provider.as_ref().expect("provider initialized"),
                         sessions: context.sessions,
                         project: context.project,
                         status_config: &context.store.status_bar,
@@ -1111,9 +1124,7 @@ async fn run_loop(
                 // its recorded expiry. Force-refresh it now (non-blocking to the
                 // rest of the loop's state) so the user's resend succeeds.
                 if result.auth_expired {
-                    match crate::force_refresh(&mut context.store.providers[context.provider_index])
-                        .await
-                    {
+                    match crate::force_refresh(&mut context.store.providers[provider_index]).await {
                         Ok(()) => match context.store.save(context.store_path) {
                             Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
                             Err(error) => insert_status(
@@ -1499,6 +1510,8 @@ async fn handle_rewind(
         });
         current.recorder.flush().await;
         let events = current.events()?;
+        current.memory.reload_from_events(&events)?;
+        current.provider_context.restore_from_events(&events).await;
         *history = artist_session::build_history(
             &events,
             &current.attachments,
@@ -1710,44 +1723,106 @@ fn handle_accounts(
     }
 }
 
-/// `/login`: run the ChatGPT OAuth flow for an additional account. The inline
-/// viewport and its input modes are suspended for the flow (which prints and
-/// opens a browser like standalone `artist login`), then restored.
+/// `/login`: select an authentication method and provider for an additional
+/// account. The inline viewport and its input modes are suspended for the flow,
+/// then restored.
 async fn handle_login(
     terminal: &mut ratatui::DefaultTerminal,
     store: &mut ProviderStore,
     store_path: &Path,
-    viewport_height: u16,
-) -> Result<Vec<String>> {
-    finish_inline(terminal)?;
-    let _ = execute!(
-        std::io::stdout(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
-    ratatui::restore();
+    mut viewport_height: u16,
+    footer: &status_bar::StatusView,
+) -> Result<(Vec<String>, Option<usize>)> {
+    let input = ChatInput::default();
+    let mut draw = |panel: &[String]| {
+        resize_and_draw(
+            terminal,
+            &input,
+            panel,
+            footer,
+            &mut viewport_height,
+            3,
+            false,
+            None,
+        )
+    };
+    let selected = crate::login::select(&mut draw)?;
+    let previous = store.clone();
     let before = store.providers.len();
-    let outcome = crate::login::add_provider(store).await;
-    if outcome.is_ok() {
-        let _ = store.save(store_path);
-    }
-    // Re-enter the inline viewport and re-arm the enhanced-key / paste modes
-    // the chat loop relies on.
-    *terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(viewport_height),
-    });
-    let _ = execute!(
-        std::io::stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        EnableBracketedPaste
-    );
-    terminal.show_cursor()?;
+    let attempted: Result<Option<usize>> = if let Some(provider) = selected {
+        // Only credential entry / browser OAuth leaves inline mode.
+        finish_inline(terminal)?;
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste
+        );
+        ratatui::restore();
+        let credential_result = crate::login::execute(provider, store).await;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(viewport_height),
+        });
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            EnableBracketedPaste
+        );
+        terminal.show_cursor()?;
+        async {
+            credential_result?;
+            let index = (store.providers.len() > before).then_some(store.providers.len() - 1);
+            if let Some(index) = index
+                && store.providers[index].model.is_none()
+            {
+                let mut draw = |panel: &[String]| {
+                    resize_and_draw(
+                        terminal,
+                        &input,
+                        panel,
+                        footer,
+                        &mut viewport_height,
+                        3,
+                        false,
+                        None,
+                    )
+                };
+                command_ui::select_model(&mut store.providers[index], &mut draw).await?;
+            }
+            Ok(index)
+        }
+        .await
+    } else {
+        Err(anyhow::anyhow!("login cancelled"))
+    };
+    let outcome = finish_login_transaction(store, previous, store_path, attempted);
     match outcome {
-        Ok(()) if store.providers.len() > before => Ok(vec![
-            "Logged in and saved. Switch to it with /accounts.".to_owned(),
-        ]),
-        Ok(()) => Ok(vec!["Login completed.".to_owned()]),
-        Err(error) => Ok(vec![format!("Login failed: {error:#}")]),
+        Ok(Some(index)) => Ok((
+            vec!["Logged in and selected for this session.".to_owned()],
+            Some(index),
+        )),
+        Ok(None) => Ok((vec!["Login completed.".to_owned()], None)),
+        Err(error) => Ok((vec![format!("Login failed: {error:#}")], None)),
+    }
+}
+
+fn finish_login_transaction(
+    store: &mut ProviderStore,
+    previous: ProviderStore,
+    store_path: &Path,
+    attempted: Result<Option<usize>>,
+) -> Result<Option<usize>> {
+    match attempted {
+        Ok(index) => {
+            if let Err(error) = store.save(store_path) {
+                *store = previous;
+                return Err(error);
+            }
+            Ok(index)
+        }
+        Err(error) => {
+            *store = previous;
+            Err(error)
+        }
     }
 }
 
@@ -1937,7 +2012,7 @@ async fn submit(
     let empty_input = ChatInput::default();
     let mut footer = footer_view(
         context.status_config,
-        context.provider,
+        Some(context.provider),
         context.project,
         status,
     );
@@ -1973,6 +2048,8 @@ async fn submit(
     let mut delivered_steering: Vec<String> = Vec::new();
     let mut pending_delivered = Vec::new();
     let mut steering_input = ChatInput::default();
+    let mut deferred_commands = Vec::new();
+    let mut suggestion_index = 0usize;
     let mut cancelled = false;
     let mut animation_frame = 0;
     let cancel = CancellationToken::new();
@@ -1999,6 +2076,9 @@ async fn submit(
         recorder: active.recorder.clone(),
         memory: std::sync::Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
+        provider_context: active.provider_context.clone(),
+        effective_context_window: status.context_capacity,
+        fast_mode: status.fast_mode,
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
         providers: context.providers.clone(),
@@ -2033,6 +2113,7 @@ async fn submit(
         StreamingControls {
             input: &steering_input,
             steering: &steering,
+            suggestions: &[],
             subagents: &subagents,
             animation_frame,
             reasoning: &reasoning,
@@ -2041,6 +2122,24 @@ async fn submit(
         &mut stream_viewport,
     )?;
     while !task.is_finished() || !rx.is_empty() {
+        let slash_suggestions = slash_commands::completions(&steering_input.text);
+        suggestion_index = suggestion_index.min(slash_suggestions.len().saturating_sub(1));
+        let suggestions = slash_suggestions
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                format!(
+                    "{}{}  {}",
+                    if index == suggestion_index {
+                        "› "
+                    } else {
+                        ""
+                    },
+                    command.name,
+                    command.description
+                )
+            })
+            .collect::<Vec<_>>();
         tokio::select! {
             // The context-size fetch resolves concurrently; update the readout
             // when it lands. Disabled once done via the `if` guard.
@@ -2054,7 +2153,7 @@ async fn submit(
                 });
                 footer = footer_view(
                     context.status_config,
-                    context.provider,
+                    Some(context.provider),
                     context.project,
                     status,
                 );
@@ -2091,6 +2190,10 @@ async fn submit(
                             && !key.modifiers.contains(KeyModifiers::SHIFT)
                             && !steering_input.text.trim().is_empty() =>
                         {
+                            if !slash_suggestions.is_empty() {
+                                steering_input.text = slash_suggestions[suggestion_index].name.into();
+                                steering_input.cursor = steering_input.text.len();
+                            }
                             let display = steering_input.text.clone();
                             let history_atoms = steering_input.atoms.clone();
                             let expanded = steering_input.take_expanded();
@@ -2100,27 +2203,48 @@ async fn submit(
                                 images: expanded.images,
                                 history_atoms,
                             };
-                            let applied = if let Some(index) = steering.selected() {
-                                let mutation = steering_handle
-                                    .edit_pending(index, prompt.content.clone());
-                                collect_messages(
-                                    mutation.delivered,
-                                    &mut steering,
-                                    &mut pending_delivered,
-                                );
-                                mutation.applied
+                            if prompt.content.trim_start().starts_with('/') {
+                                deferred_commands.push(prompt);
                             } else {
-                                steering_handle.enqueue(prompt.content.clone());
-                                true
-                            };
-                            if applied {
-                                steering.submit(
-                                    display,
-                                    prompt.content,
-                                    prompt.images,
-                                    prompt.history_atoms,
-                                );
+                                let applied = if let Some(index) = steering.selected() {
+                                    let mutation = steering_handle
+                                        .edit_pending(index, prompt.content.clone());
+                                    collect_messages(
+                                        mutation.delivered,
+                                        &mut steering,
+                                        &mut pending_delivered,
+                                    );
+                                    mutation.applied
+                                } else {
+                                    steering_handle.enqueue(prompt.content.clone());
+                                    true
+                                };
+                                if applied {
+                                    steering.submit(
+                                        display,
+                                        prompt.content,
+                                        prompt.images,
+                                        prompt.history_atoms,
+                                    );
+                                }
                             }
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                            && !slash_suggestions.is_empty() =>
+                        {
+                            suggestion_index = if key.code == KeyCode::Up {
+                                suggestion_index.checked_sub(1).unwrap_or(slash_suggestions.len() - 1)
+                            } else {
+                                (suggestion_index + 1) % slash_suggestions.len()
+                            };
+                        }
+                        Event::Key(key) if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Tab
+                            && !slash_suggestions.is_empty() =>
+                        {
+                            steering_input.text = slash_suggestions[suggestion_index].name.into();
+                            steering_input.cursor = steering_input.text.len();
                         }
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && matches!(key.code, KeyCode::Up | KeyCode::Down) =>
@@ -2165,6 +2289,9 @@ async fn submit(
                     artist_agent::PromptEvent::TextDelta(delta) => {
                         phase = "responding";
                         if !reasoning.is_empty() {
+                            if transcript_gap {
+                                insert_blank(terminal)?;
+                            }
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                             transcript_gap = false;
@@ -2197,6 +2324,9 @@ async fn submit(
                             response_since_tool = false;
                         }
                         if !reasoning.is_empty() {
+                            if transcript_gap {
+                                insert_blank(terminal)?;
+                            }
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                             transcript_gap = false;
@@ -2303,7 +2433,7 @@ async fn submit(
                         }
                         footer = footer_view(
                             context.status_config,
-                            context.provider,
+                            Some(context.provider),
                             context.project,
                             status,
                         );
@@ -2363,6 +2493,7 @@ async fn submit(
             StreamingControls {
                 input: &steering_input,
                 steering: &steering,
+                suggestions: &suggestions,
                 subagents: &subagents,
                 animation_frame,
                 reasoning: &reasoning,
@@ -2395,6 +2526,9 @@ async fn submit(
         delivered_steering.push(message.content);
     }
     if !reasoning.is_empty() {
+        if transcript_gap {
+            insert_blank(terminal)?;
+        }
         insert_reasoning(terminal, &reasoning)?;
     }
     if !visible.is_empty() {
@@ -2460,15 +2594,14 @@ async fn submit(
     Ok(SubmitResult {
         handed_off_to,
         viewport_height: stream_viewport.height,
-        queued: steering
-            .take()
+        queued: deferred_commands
             .into_iter()
-            .map(|entry| SubmittedPrompt {
+            .chain(steering.take().into_iter().map(|entry| SubmittedPrompt {
                 display: entry.display,
                 content: entry.content,
                 images: entry.images,
                 history_atoms: entry.atoms,
-            })
+            }))
             .collect(),
         delivered,
         leftover_input: steering_input,
@@ -2902,6 +3035,11 @@ fn draw_streaming(
     let width = terminal_size.width.max(1);
     let footer_height = footer.height(width);
     let queued_height = controls.steering.displays().count() as u16;
+    let suggestions_height = if controls.suggestions.is_empty() {
+        0
+    } else {
+        controls.suggestions.len() as u16 + 2
+    };
     let input_height = controls
         .input
         .visual_lines(width.saturating_sub(2).max(1))
@@ -2915,6 +3053,7 @@ fn draw_streaming(
     const TIMER_GAP_HEIGHT: u16 = 1;
     let base_fixed_height = input_height
         .saturating_add(queued_height)
+        .saturating_add(suggestions_height)
         .saturating_add(transcript_gap_height)
         .saturating_add(TIMER_GAP_HEIGHT)
         .saturating_add(1)
@@ -2938,7 +3077,7 @@ fn draw_streaming(
     let desired = streaming_viewport_height(
         input_height,
         subagent_height,
-        queued_height,
+        queued_height.saturating_add(suggestions_height),
         reasoning_height,
         footer_height,
         transcript_gap_height > 0,
@@ -3023,15 +3162,33 @@ fn draw_streaming(
             Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
             status_area,
         );
-        let input_area = Rect::new(
+        let suggestions_area = Rect::new(
             area.x,
             status_area.bottom(),
+            area.width,
+            suggestions_height.min(area.height.saturating_sub(footer_height)),
+        );
+        if suggestions_height > 0 {
+            let text = controls
+                .suggestions
+                .iter()
+                .map(|option| Line::styled(option.clone(), panel_option_style(option)))
+                .collect::<Vec<_>>();
+            frame.render_widget(
+                Paragraph::new(text)
+                    .block(Block::bordered().border_style(Style::default().fg(Color::DarkGray))),
+                suggestions_area,
+            );
+        }
+        let input_area = Rect::new(
+            area.x,
+            suggestions_area.bottom(),
             area.width,
             area.height.saturating_sub(
                 transcript_gap_height
                     + subagent_height
                     + queued_height
-                    + reasoning_height
+                    + suggestions_height
                     + TIMER_GAP_HEIGHT
                     + 1
                     + footer_height,
@@ -3244,6 +3401,28 @@ mod tests {
     use llm_provider::{Auth, ProviderId, SavedProvider, Secret};
     use ratatui::{Terminal, backend::TestBackend};
 
+    #[test]
+    fn onboarding_notice_is_actionable_and_tui_only() {
+        assert!(NO_PROVIDER_NOTICE.contains("/login"));
+        assert!(!NO_PROVIDER_NOTICE.contains("artist provider"));
+    }
+
+    #[test]
+    fn empty_provider_footer_is_safe() {
+        let runtime = StatusRuntime {
+            git_branch: None,
+            used_tokens: None,
+            context_capacity: None,
+            session_tokens: 0,
+            fast_mode: false,
+            extension_values: Vec::new(),
+        };
+        assert_eq!(
+            footer_view(&StatusBarConfig::default(), None, Path::new("."), &runtime).height(80),
+            0
+        );
+    }
+
     fn test_account(id: &str) -> SavedProvider {
         SavedProvider::chatgpt(
             ProviderId::new(id).unwrap(),
@@ -3313,6 +3492,47 @@ mod tests {
         assert_eq!(store.default_provider.as_ref().unwrap().as_str(), "two");
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.default_provider.unwrap().as_str(), "two");
+    }
+
+    #[test]
+    fn login_selection_cancel_restores_exact_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut store = ProviderStore::default();
+        store.add(test_account("existing"));
+        let before = toml::to_string(&store).unwrap();
+        let previous = store.clone();
+        store.add(test_account("partial"));
+        store.default_provider = Some(store.providers[1].id.clone());
+
+        let result = finish_login_transaction(
+            &mut store,
+            previous,
+            &path,
+            Err(anyhow::anyhow!("selection cancelled")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(toml::to_string(&store).unwrap(), before);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn successful_login_selection_is_saved_once_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.toml");
+        let mut store = ProviderStore::default();
+        let previous = store.clone();
+        store.add(test_account("selected"));
+        store.providers[0].model = Some("chosen-model".to_owned());
+
+        let index = finish_login_transaction(&mut store, previous, &path, Ok(Some(0))).unwrap();
+
+        assert_eq!(index, Some(0));
+        let loaded = ProviderStore::load(&path).unwrap();
+        assert_eq!(loaded.providers.len(), 1);
+        assert_eq!(loaded.providers[0].id.as_str(), "selected");
+        assert!(loaded.providers[0].model.is_some());
     }
 
     #[test]

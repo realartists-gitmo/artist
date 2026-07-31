@@ -1,5 +1,5 @@
 use super::*;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde_json::json;
 
 fn write(path: &Path, content: &str) {

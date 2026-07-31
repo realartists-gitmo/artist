@@ -1,8 +1,7 @@
 use crate::store::ProviderStore;
-use crate::{prompt, provider_commands};
 use anyhow::{Context, Result, bail};
 use llm_provider::{
-    ChatGptOAuth, PROVIDERS, ProviderId, ProviderKind, ProviderMetadata, SavedProvider,
+    ChatGptOAuth, Credentials, OpenAiApi, ProviderId, ProviderKind, SavedProvider, Secret,
 };
 use std::time::Duration;
 use tokio::{
@@ -11,21 +10,123 @@ use tokio::{
 };
 use url::Url;
 
-pub async fn add_provider(store: &mut ProviderStore) -> Result<()> {
-    let api_providers: Vec<&ProviderMetadata> = PROVIDERS
-        .iter()
-        .filter(|p| p.kind != ProviderKind::Chatgpt)
-        .collect();
-    let choices: Vec<String> = std::iter::once("ChatGPT".to_owned())
-        .chain(api_providers.iter().map(|p| p.display_name.to_owned()))
-        .collect();
-    let selection = prompt::select_paged("Provider", &choices, 0, 7)?;
-    if selection == 0 {
-        chatgpt(store).await?;
-    } else {
-        let kind = api_providers[selection - 1].kind;
-        provider_commands::add_kind(store, Some(kind.slug()))?;
+/// Authentication categories and providers are deliberately separate so new
+/// providers can be registered without leaking provider names into `/login`'s
+/// first picker.
+#[derive(Clone, Copy)]
+enum AuthKind {
+    Subscription,
+    ApiKey,
+}
+
+impl AuthKind {
+    const ALL: [Self; 2] = [Self::Subscription, Self::ApiKey];
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Subscription => "Subscription",
+            Self::ApiKey => "API key",
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum LoginProvider {
+    OpenAiCodex,
+    OpenAi,
+}
+
+impl LoginProvider {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::OpenAiCodex => "OpenAI Codex",
+            Self::OpenAi => "OpenAI",
+        }
+    }
+}
+
+fn providers(kind: AuthKind) -> &'static [LoginProvider] {
+    match kind {
+        AuthKind::Subscription => &[LoginProvider::OpenAiCodex],
+        AuthKind::ApiKey => &[LoginProvider::OpenAi],
+    }
+}
+
+/// Select a registry entry using the shared inline command picker. Credential
+/// execution is deliberately separate because it may need to suspend the TUI.
+pub(crate) fn select(
+    draw: &mut impl FnMut(&[String]) -> Result<()>,
+) -> Result<Option<LoginProvider>> {
+    let categories = AuthKind::ALL.map(|kind| kind.label().to_owned());
+    let Some(kind) = crate::command_ui::pick("Authentication method", &categories, 0, draw)? else {
+        return Ok(None);
+    };
+    let available = providers(AuthKind::ALL[kind]);
+    let choices = available
+        .iter()
+        .map(|provider| provider.label().to_owned())
+        .collect::<Vec<_>>();
+    Ok(crate::command_ui::pick("Provider", &choices, 0, draw)?.map(|index| available[index]))
+}
+
+/// Execute credentials for an already-selected registry entry.
+pub(crate) async fn execute(provider: LoginProvider, store: &mut ProviderStore) -> Result<()> {
+    match provider {
+        LoginProvider::OpenAiCodex => chatgpt(store).await,
+        LoginProvider::OpenAi => api_key(store).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn login_registry_has_generic_categories_and_nested_provider_labels() {
+        assert_eq!(
+            AuthKind::ALL.map(AuthKind::label),
+            ["Subscription", "API key"]
+        );
+        assert_eq!(
+            providers(AuthKind::Subscription)
+                .iter()
+                .map(|p| p.label())
+                .collect::<Vec<_>>(),
+            ["OpenAI Codex"]
+        );
+        assert_eq!(
+            providers(AuthKind::ApiKey)
+                .iter()
+                .map(|p| p.label())
+                .collect::<Vec<_>>(),
+            ["OpenAI"]
+        );
+    }
+}
+
+async fn api_key(store: &mut ProviderStore) -> Result<()> {
+    let key = dialoguer::Password::new()
+        .with_prompt("OpenAI API key")
+        .interact()?;
+    if key.trim().is_empty() {
+        bail!("API key cannot be empty");
+    }
+    let provider = SavedProvider {
+        id: ProviderId::new(unique_id(store, "openai"))?,
+        name: "OpenAI".into(),
+        provider: ProviderKind::Openai,
+        base_url: Url::parse("https://api.openai.com/v1/")?,
+        api: Some(OpenAiApi::Responses),
+        api_version: None,
+        model: None,
+        reasoning_effort: None,
+        credentials: Credentials::ApiKey {
+            api_key: Secret::new(key),
+        },
+    };
+    crate::models::catalog(&provider)
+        .await
+        .context("OpenAI API key validation failed")?;
+    store.add(provider);
+    println!("Validated and saved OpenAI API key.");
     Ok(())
 }
 

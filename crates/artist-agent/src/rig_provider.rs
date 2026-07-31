@@ -1,15 +1,13 @@
-//! Centralized construction of Rig completion clients.
+//! Centralized construction and typed dispatch for Rig completion clients.
 
 use anyhow::{Context, Result, bail};
 use llm_provider::{Credentials, OpenAiApi, ProviderKind, SavedProvider};
-use rig_core::{
-    client::CompletionClient,
-    completion::Prompt,
-    providers::{
-        anthropic, azure, chatgpt, cohere, copilot, deepseek, gemini, groq, huggingface,
-        hyperbolic, llamafile, minimax, mira, mistral, moonshot, ollama, openai, openrouter,
-        perplexity, together, xai, xiaomimimo, zai,
-    },
+use rig_agent::client::AgentClientExt;
+use rig_agent::prelude::Prompt;
+use rig_core::providers::{
+    anthropic, azure, cohere, copilot, deepseek, gemini, groq, huggingface, hyperbolic, llamafile,
+    minimax, mira, mistral, moonshot, ollama, openai, openrouter, perplexity, together, xai,
+    xiaomimimo, zai,
 };
 
 fn secure_token_dir(path: &std::path::Path) -> Result<()> {
@@ -30,505 +28,283 @@ fn secure_token_dir(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Individual client builders
-// ---------------------------------------------------------------------------
-
-pub(crate) fn build_chatgpt(provider: &SavedProvider) -> Result<chatgpt::Client> {
-    let auth = provider.chatgpt_auth()?;
-    chatgpt::Client::builder()
-        .api_key(chatgpt::ChatGPTAuth::AccessToken {
-            access_token: auth.access_token.expose().to_owned(),
-            account_id: Some(auth.account_id.clone()),
-        })
-        .base_url(provider.base_url.as_str())
-        .originator("artist")
-        .user_agent(concat!("artist/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .context("build ChatGPT client")
+pub(crate) enum RigClient {
+    ArtistOpenAi(crate::openai_responses::ArtistOpenAiClient),
+    Copilot(copilot::Client),
+    OpenAiChat(openai::CompletionsClient),
+    Anthropic(anthropic::Client),
+    Cohere(cohere::Client),
+    Gemini(gemini::Client),
+    DeepSeek(deepseek::Client),
+    Groq(groq::Client),
+    HuggingFace(huggingface::Client),
+    Hyperbolic(hyperbolic::Client),
+    Mira(mira::Client),
+    Mistral(mistral::Client),
+    OpenRouter(openrouter::Client),
+    Perplexity(perplexity::Client),
+    Together(together::Client),
+    XAi(xai::Client),
+    Azure(azure::Client),
+    Llamafile(llamafile::Client),
+    Ollama(ollama::Client),
+    Minimax(minimax::Client),
+    MinimaxAnthropic(minimax::AnthropicClient),
+    Moonshot(moonshot::Client),
+    MoonshotAnthropic(moonshot::AnthropicClient),
+    XiaomiMiMo(xiaomimimo::Client),
+    XiaomiMiMoAnthropic(xiaomimimo::AnthropicClient),
+    ZAi(zai::Client),
+    ZAiAnthropic(zai::AnthropicClient),
 }
 
-fn build_copilot_inner(
-    provider: &SavedProvider,
-    allow_device_flow: bool,
-) -> Result<copilot::Client> {
-    let builder = copilot::Client::builder();
-    let builder = match &provider.credentials {
-        Credentials::ApiKey { api_key } => builder.api_key(api_key.expose()),
-        Credentials::BearerToken { token } => builder.api_key(
-            copilot::CopilotAuth::GitHubAccessToken(token.expose().to_owned()),
-        ),
-        Credentials::CopilotOauth { token_dir } => {
-            secure_token_dir(token_dir)?;
-            builder
-                .api_key(copilot::CopilotAuth::OAuth)
-                .token_dir(token_dir)
-        }
-        _ => bail!("Copilot API key, GitHub token, or OAuth token directory required"),
+impl RigClient {
+    pub(crate) fn build(provider: &SavedProvider) -> Result<Self> {
+        Self::build_with_device_flow(provider, false)
     }
-    .base_url(provider.base_url.as_str())
-    .allow_device_flow(allow_device_flow);
-    builder.build().context("build GitHub Copilot client")
-}
 
-pub(crate) fn build_copilot(provider: &SavedProvider) -> Result<copilot::Client> {
-    build_copilot_inner(provider, false)
-}
-
-pub(crate) fn build_copilot_with_device_flow(provider: &SavedProvider) -> Result<copilot::Client> {
-    build_copilot_inner(provider, true)
-}
-
-pub(crate) fn build_azure(provider: &SavedProvider) -> Result<azure::Client> {
-    let auth = match &provider.credentials {
-        Credentials::ApiKey { api_key } => azure::AzureOpenAIAuth::ApiKey(api_key.expose().into()),
-        Credentials::BearerToken { token } => azure::AzureOpenAIAuth::Token(token.expose().into()),
-        _ => bail!("Azure API key or bearer token required"),
-    };
-    azure::Client::builder()
-        .api_key(auth)
-        .azure_endpoint(provider.base_url.to_string())
-        .api_version(provider.api_version.as_deref().unwrap_or("2024-10-21"))
-        .build()
-        .context("build Azure OpenAI client")
-}
-
-pub(crate) fn build_llamafile(provider: &SavedProvider) -> Result<llamafile::Client> {
-    llamafile::Client::from_url(provider.base_url.as_str()).context("build Llamafile client")
-}
-
-pub(crate) fn build_ollama(provider: &SavedProvider) -> Result<ollama::Client> {
-    let key = match &provider.credentials {
-        Credentials::None => "",
-        Credentials::ApiKey { api_key } => api_key.expose(),
-        _ => bail!("Ollama requires no credentials or an API key"),
-    };
-    ollama::Client::builder()
-        .api_key(key)
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Ollama client")
-}
-
-pub(crate) fn build_openai_responses(provider: &SavedProvider) -> Result<openai::Client> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("OpenAI API-key credentials required")
-    };
-    openai::Client::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build OpenAI Responses client")
-}
-
-pub(crate) fn build_openai_chat(provider: &SavedProvider) -> Result<openai::CompletionsClient> {
-    build_openai_responses(provider).map(|client| client.completions_api())
-}
-
-// ---------------------------------------------------------------------------
-// Simple API-key providers
-// ---------------------------------------------------------------------------
-
-macro_rules! build_api_key_client {
-    ($name:ident, $module:ident, $display:literal) => {
-        pub(crate) fn $name(provider: &SavedProvider) -> Result<$module::Client> {
-            let Credentials::ApiKey { api_key } = &provider.credentials else {
-                bail!("{} API-key credentials required", $display)
-            };
-            $module::Client::builder()
-                .api_key(api_key.expose())
+    pub(crate) fn build_with_device_flow(
+        provider: &SavedProvider,
+        allow_device_flow: bool,
+    ) -> Result<Self> {
+        match provider.provider {
+            ProviderKind::Chatgpt => {
+                let auth = provider.chatgpt_auth()?;
+                Ok(Self::ArtistOpenAi(
+                    crate::openai_responses::ArtistOpenAiClient::chatgpt(
+                        provider.base_url.as_str(),
+                        auth.access_token.expose(),
+                        auth.account_id.clone(),
+                    ),
+                ))
+            }
+            ProviderKind::Copilot => {
+                let builder = copilot::Client::builder();
+                let builder = match &provider.credentials {
+                    Credentials::ApiKey { api_key } => builder.api_key(api_key.expose()),
+                    Credentials::BearerToken { token } => builder.api_key(
+                        copilot::CopilotAuth::GitHubAccessToken(token.expose().to_owned()),
+                    ),
+                    Credentials::CopilotOauth { token_dir } => {
+                        secure_token_dir(token_dir)?;
+                        builder
+                            .api_key(copilot::CopilotAuth::OAuth)
+                            .token_dir(token_dir)
+                    }
+                    _ => bail!("Copilot API key, GitHub token, or OAuth token directory required"),
+                }
                 .base_url(provider.base_url.as_str())
-                .build()
-                .with_context(|| format!("build {} client", $display))
-        }
-    };
-}
-
-build_api_key_client!(build_anthropic, anthropic, "Anthropic");
-build_api_key_client!(build_cohere, cohere, "Cohere");
-build_api_key_client!(build_gemini, gemini, "Google Gemini");
-build_api_key_client!(build_deepseek, deepseek, "DeepSeek");
-build_api_key_client!(build_groq, groq, "Groq");
-build_api_key_client!(build_huggingface, huggingface, "Hugging Face");
-build_api_key_client!(build_hyperbolic, hyperbolic, "Hyperbolic");
-build_api_key_client!(build_mira, mira, "Mira");
-build_api_key_client!(build_mistral, mistral, "Mistral");
-build_api_key_client!(build_openrouter, openrouter, "OpenRouter");
-build_api_key_client!(build_perplexity, perplexity, "Perplexity");
-build_api_key_client!(build_together, together, "Together AI");
-build_api_key_client!(build_xai, xai, "xAI");
-
-// ---------------------------------------------------------------------------
-// Dual-mode providers (OpenAI-compatible + Anthropic-compatible)
-// ---------------------------------------------------------------------------
-
-pub(crate) fn build_minimax(provider: &SavedProvider) -> Result<minimax::Client> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("MiniMax API-key credentials required")
-    };
-    minimax::Client::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build MiniMax client")
-}
-
-pub(crate) fn build_minimax_anthropic(
-    provider: &SavedProvider,
-) -> Result<minimax::AnthropicClient> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("MiniMax API-key credentials required")
-    };
-    minimax::AnthropicClient::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build MiniMax Anthropic-compatible client")
-}
-
-pub(crate) fn build_moonshot(provider: &SavedProvider) -> Result<moonshot::Client> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Moonshot API-key credentials required")
-    };
-    moonshot::Client::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Moonshot client")
-}
-
-pub(crate) fn build_moonshot_anthropic(
-    provider: &SavedProvider,
-) -> Result<moonshot::AnthropicClient> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Moonshot API-key credentials required")
-    };
-    moonshot::AnthropicClient::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Moonshot Anthropic-compatible client")
-}
-
-pub(crate) fn build_xiaomimimo(provider: &SavedProvider) -> Result<xiaomimimo::Client> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Xiaomi MiMo API-key credentials required")
-    };
-    xiaomimimo::Client::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Xiaomi MiMo client")
-}
-
-pub(crate) fn build_xiaomimimo_anthropic(
-    provider: &SavedProvider,
-) -> Result<xiaomimimo::AnthropicClient> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Xiaomi MiMo API-key credentials required")
-    };
-    let base_url = provider
-        .base_url
-        .join("/anthropic/v1/")
-        .context("build Xiaomi MiMo Anthropic base URL")?;
-    xiaomimimo::AnthropicClient::builder()
-        .api_key(api_key.expose())
-        .base_url(base_url.as_str())
-        .build()
-        .context("build Xiaomi MiMo Anthropic-compatible client")
-}
-
-pub(crate) fn build_zai(provider: &SavedProvider) -> Result<zai::Client> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Z.ai API-key credentials required")
-    };
-    zai::Client::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Z.ai client")
-}
-
-pub(crate) fn build_zai_anthropic(provider: &SavedProvider) -> Result<zai::AnthropicClient> {
-    let Credentials::ApiKey { api_key } = &provider.credentials else {
-        bail!("Z.ai API-key credentials required")
-    };
-    zai::AnthropicClient::builder()
-        .api_key(api_key.expose())
-        .base_url(provider.base_url.as_str())
-        .build()
-        .context("build Z.ai Anthropic-compatible client")
-}
-
-// ---------------------------------------------------------------------------
-// Generic prompt helper
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn prompt_with<C: CompletionClient>(
-    client: C,
-    model: &str,
-    preamble: &str,
-    prompt: &str,
-    max_tokens: u64,
-) -> Result<String>
-where
-    C::CompletionModel: 'static,
-{
-    Ok(client
-        .agent(model)
-        .preamble(preamble)
-        .max_tokens(max_tokens)
-        .build()
-        .prompt(prompt)
-        .await?)
-}
-
-// ---------------------------------------------------------------------------
-// Dispatch: health-check prompt (no device flow)
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn health_check_prompt(
-    provider: &SavedProvider,
-    model: &str,
-    preamble: &str,
-    prompt: &str,
-    max_tokens: u64,
-) -> Result<String> {
-    match provider.provider {
-        ProviderKind::Chatgpt => {
-            prompt_with(
-                build_chatgpt(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Copilot => {
-            prompt_with(
-                build_copilot(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Azure => {
-            prompt_with(build_azure(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Llamafile => {
-            prompt_with(
-                build_llamafile(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Ollama => {
-            prompt_with(build_ollama(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Openai => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                prompt_with(
-                    build_openai_responses(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+                .allow_device_flow(allow_device_flow);
+                Ok(Self::Copilot(
+                    builder.build().context("build GitHub Copilot client")?,
+                ))
             }
-            OpenAiApi::ChatCompletions => {
-                prompt_with(
-                    build_openai_chat(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+            ProviderKind::Azure => {
+                let auth = match &provider.credentials {
+                    Credentials::ApiKey { api_key } => {
+                        azure::AzureOpenAIAuth::ApiKey(api_key.expose().into())
+                    }
+                    Credentials::BearerToken { token } => {
+                        azure::AzureOpenAIAuth::Token(token.expose().into())
+                    }
+                    _ => bail!("Azure API key or bearer token required"),
+                };
+                Ok(Self::Azure(
+                    azure::Client::builder()
+                        .api_key(auth)
+                        .azure_endpoint(provider.base_url.to_string())
+                        .api_version(provider.api_version.as_deref().unwrap_or("2024-10-21"))
+                        .build()
+                        .context("build Azure OpenAI client")?,
+                ))
             }
-        },
-        ProviderKind::Anthropic => {
-            prompt_with(
-                build_anthropic(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Cohere => {
-            prompt_with(build_cohere(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Gemini => {
-            prompt_with(build_gemini(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Deepseek => {
-            prompt_with(
-                build_deepseek(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Groq => {
-            prompt_with(build_groq(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Huggingface => {
-            prompt_with(
-                build_huggingface(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Hyperbolic => {
-            prompt_with(
-                build_hyperbolic(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Mira => {
-            prompt_with(build_mira(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Mistral => {
-            prompt_with(
-                build_mistral(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Openrouter => {
-            prompt_with(
-                build_openrouter(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Perplexity => {
-            prompt_with(
-                build_perplexity(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Together => {
-            prompt_with(
-                build_together(provider)?,
-                model,
-                preamble,
-                prompt,
-                max_tokens,
-            )
-            .await
-        }
-        ProviderKind::Xai => {
-            prompt_with(build_xai(provider)?, model, preamble, prompt, max_tokens).await
-        }
-        ProviderKind::Minimax => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                prompt_with(
-                    build_minimax(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+            ProviderKind::Llamafile => Ok(Self::Llamafile(
+                llamafile::Client::from_url(provider.base_url.as_str())
+                    .context("build Llamafile client")?,
+            )),
+            ProviderKind::Ollama => {
+                let key = match &provider.credentials {
+                    Credentials::None => "",
+                    Credentials::ApiKey { api_key } => api_key.expose(),
+                    _ => bail!("Ollama requires no credentials or an API key"),
+                };
+                Ok(Self::Ollama(
+                    ollama::Client::builder()
+                        .api_key(key)
+                        .base_url(provider.base_url.as_str())
+                        .build()
+                        .context("build Ollama client")?,
+                ))
             }
-            OpenAiApi::ChatCompletions => {
-                prompt_with(
-                    build_minimax_anthropic(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+            ProviderKind::Openai => {
+                let Credentials::ApiKey { api_key } = &provider.credentials else {
+                    bail!("OpenAI API-key credentials required")
+                };
+                if provider.api.unwrap_or_default() == OpenAiApi::Responses {
+                    return Ok(Self::ArtistOpenAi(
+                        crate::openai_responses::ArtistOpenAiClient::api_key(
+                            provider.base_url.as_str(),
+                            api_key.expose(),
+                        ),
+                    ));
+                }
+                let client = openai::Client::builder()
+                    .api_key(api_key.expose())
+                    .base_url(provider.base_url.as_str())
+                    .build()
+                    .context("build OpenAI client")?;
+                Ok(Self::OpenAiChat(client.completions_api()))
             }
-        },
-        ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                prompt_with(
-                    build_moonshot(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+            kind @ (ProviderKind::Minimax
+            | ProviderKind::Moonshot
+            | ProviderKind::Xiaomimimo
+            | ProviderKind::Zai) => {
+                let Credentials::ApiKey { api_key } = &provider.credentials else {
+                    bail!(
+                        "{} API-key credentials required",
+                        llm_provider::metadata(kind).display_name
+                    )
+                };
+                let anthropic = provider.api == Some(OpenAiApi::ChatCompletions);
+                let anthropic_base_url = (kind == ProviderKind::Xiaomimimo)
+                    .then(|| provider.base_url.join("/anthropic/v1/"))
+                    .transpose()?;
+                macro_rules! dual {
+                    ($module:ident, $normal:ident, $anthropic:ident) => {{
+                        if anthropic {
+                            Self::$anthropic(
+                                $module::AnthropicClient::builder()
+                                    .api_key(api_key.expose())
+                                    .base_url(
+                                        anthropic_base_url
+                                            .as_ref()
+                                            .unwrap_or(&provider.base_url)
+                                            .as_str(),
+                                    )
+                                    .build()
+                                    .context("build Anthropic-compatible client")?,
+                            )
+                        } else {
+                            Self::$normal(
+                                $module::Client::builder()
+                                    .api_key(api_key.expose())
+                                    .base_url(provider.base_url.as_str())
+                                    .build()
+                                    .context("build OpenAI-compatible client")?,
+                            )
+                        }
+                    }};
+                }
+                Ok(match kind {
+                    ProviderKind::Minimax => dual!(minimax, Minimax, MinimaxAnthropic),
+                    ProviderKind::Moonshot => dual!(moonshot, Moonshot, MoonshotAnthropic),
+                    ProviderKind::Xiaomimimo => dual!(xiaomimimo, XiaomiMiMo, XiaomiMiMoAnthropic),
+                    ProviderKind::Zai => dual!(zai, ZAi, ZAiAnthropic),
+                    _ => unreachable!(),
+                })
             }
-            OpenAiApi::ChatCompletions => {
-                prompt_with(
-                    build_moonshot_anthropic(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
+            kind @ (ProviderKind::Anthropic
+            | ProviderKind::Cohere
+            | ProviderKind::Gemini
+            | ProviderKind::Deepseek
+            | ProviderKind::Groq
+            | ProviderKind::Huggingface
+            | ProviderKind::Hyperbolic
+            | ProviderKind::Mira
+            | ProviderKind::Mistral
+            | ProviderKind::Openrouter
+            | ProviderKind::Perplexity
+            | ProviderKind::Together
+            | ProviderKind::Xai) => {
+                let Credentials::ApiKey { api_key } = &provider.credentials else {
+                    bail!(
+                        "{} API-key credentials required",
+                        llm_provider::metadata(kind).display_name
+                    )
+                };
+                macro_rules! build {
+                    ($module:ident, $variant:ident) => {
+                        Self::$variant(
+                            $module::Client::builder()
+                                .api_key(api_key.expose())
+                                .base_url(provider.base_url.as_str())
+                                .build()
+                                .with_context(|| {
+                                    format!(
+                                        "build {} client",
+                                        llm_provider::metadata(kind).display_name
+                                    )
+                                })?,
+                        )
+                    };
+                }
+                Ok(match kind {
+                    ProviderKind::Anthropic => build!(anthropic, Anthropic),
+                    ProviderKind::Cohere => build!(cohere, Cohere),
+                    ProviderKind::Gemini => build!(gemini, Gemini),
+                    ProviderKind::Deepseek => build!(deepseek, DeepSeek),
+                    ProviderKind::Groq => build!(groq, Groq),
+                    ProviderKind::Huggingface => build!(huggingface, HuggingFace),
+                    ProviderKind::Hyperbolic => build!(hyperbolic, Hyperbolic),
+                    ProviderKind::Mira => build!(mira, Mira),
+                    ProviderKind::Mistral => build!(mistral, Mistral),
+                    ProviderKind::Openrouter => build!(openrouter, OpenRouter),
+                    ProviderKind::Perplexity => build!(perplexity, Perplexity),
+                    ProviderKind::Together => build!(together, Together),
+                    ProviderKind::Xai => build!(xai, XAi),
+                    _ => unreachable!(),
+                })
             }
-        },
-        ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                prompt_with(
-                    build_xiaomimimo(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                prompt_with(
-                    build_xiaomimimo_anthropic(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
-            }
-        },
-        ProviderKind::Zai => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                prompt_with(build_zai(provider)?, model, preamble, prompt, max_tokens).await
-            }
-            OpenAiApi::ChatCompletions => {
-                prompt_with(
-                    build_zai_anthropic(provider)?,
-                    model,
-                    preamble,
-                    prompt,
-                    max_tokens,
-                )
-                .await
-            }
-        },
+        }
+    }
+
+    pub(crate) async fn prompt(
+        self,
+        model: &str,
+        preamble: &str,
+        prompt: &str,
+        max_tokens: u64,
+    ) -> Result<String> {
+        macro_rules! run {
+            ($client:expr) => {{
+                $client
+                    .agent(model)
+                    .preamble(preamble)
+                    .max_tokens(max_tokens)
+                    .build()
+                    .prompt(prompt)
+                    .await?
+            }};
+        }
+        Ok(match self {
+            Self::ArtistOpenAi(client) => run!(client),
+            Self::Copilot(client) => run!(client),
+            Self::OpenAiChat(client) => run!(client),
+            Self::Anthropic(client) => run!(client),
+            Self::Cohere(client) => run!(client),
+            Self::Gemini(client) => run!(client),
+            Self::DeepSeek(client) => run!(client),
+            Self::Groq(client) => run!(client),
+            Self::HuggingFace(client) => run!(client),
+            Self::Hyperbolic(client) => run!(client),
+            Self::Mira(client) => run!(client),
+            Self::Mistral(client) => run!(client),
+            Self::OpenRouter(client) => run!(client),
+            Self::Perplexity(client) => run!(client),
+            Self::Together(client) => run!(client),
+            Self::XAi(client) => run!(client),
+            Self::Azure(client) => run!(client),
+            Self::Llamafile(client) => run!(client),
+            Self::Ollama(client) => run!(client),
+            Self::Minimax(client) => run!(client),
+            Self::MinimaxAnthropic(client) => run!(client),
+            Self::Moonshot(client) => run!(client),
+            Self::MoonshotAnthropic(client) => run!(client),
+            Self::XiaomiMiMo(client) => run!(client),
+            Self::XiaomiMiMoAnthropic(client) => run!(client),
+            Self::ZAi(client) => run!(client),
+            Self::ZAiAnthropic(client) => run!(client),
+        })
     }
 }
 
@@ -573,27 +349,10 @@ mod tests {
                     api_key: Secret::new("test-key"),
                 },
             };
-            let result: Result<()> = match kind {
-                ProviderKind::Anthropic => build_anthropic(&provider).map(|_| ()),
-                ProviderKind::Cohere => build_cohere(&provider).map(|_| ()),
-                ProviderKind::Gemini => build_gemini(&provider).map(|_| ()),
-                ProviderKind::Deepseek => build_deepseek(&provider).map(|_| ()),
-                ProviderKind::Groq => build_groq(&provider).map(|_| ()),
-                ProviderKind::Huggingface => build_huggingface(&provider).map(|_| ()),
-                ProviderKind::Hyperbolic => build_hyperbolic(&provider).map(|_| ()),
-                ProviderKind::Mira => build_mira(&provider).map(|_| ()),
-                ProviderKind::Mistral => build_mistral(&provider).map(|_| ()),
-                ProviderKind::Openrouter => build_openrouter(&provider).map(|_| ()),
-                ProviderKind::Perplexity => build_perplexity(&provider).map(|_| ()),
-                ProviderKind::Together => build_together(&provider).map(|_| ()),
-                ProviderKind::Xai => build_xai(&provider).map(|_| ()),
-                ProviderKind::Minimax => build_minimax(&provider).map(|_| ()),
-                ProviderKind::Moonshot => build_moonshot(&provider).map(|_| ()),
-                ProviderKind::Xiaomimimo => build_xiaomimimo(&provider).map(|_| ()),
-                ProviderKind::Zai => build_zai(&provider).map(|_| ()),
-                _ => unreachable!(),
-            };
-            assert!(result.is_ok(), "failed to build {kind:?}");
+            assert!(
+                RigClient::build(&provider).is_ok(),
+                "failed to build {kind:?}"
+            );
         }
     }
 
@@ -625,11 +384,11 @@ mod tests {
                 token_dir: temp.path().join("tokens"),
             },
         ];
-        for cred in &credentials {
-            assert!(
-                build_copilot(&test_provider(ProviderKind::Copilot, cred.clone())).is_ok(),
-                "failed with {cred:?}"
-            );
+        for credentials in credentials {
+            assert!(matches!(
+                RigClient::build(&test_provider(ProviderKind::Copilot, credentials)),
+                Ok(RigClient::Copilot(_))
+            ));
         }
         #[cfg(unix)]
         {
@@ -657,11 +416,15 @@ mod tests {
             },
         );
         azure.api_version = Some("2024-10-21".into());
-        assert!(build_azure(&azure).is_ok());
-        assert!(
-            build_llamafile(&test_provider(ProviderKind::Llamafile, Credentials::None)).is_ok()
-        );
-        assert!(build_ollama(&test_provider(ProviderKind::Ollama, Credentials::None)).is_ok());
+        assert!(matches!(RigClient::build(&azure), Ok(RigClient::Azure(_))));
+        assert!(matches!(
+            RigClient::build(&test_provider(ProviderKind::Llamafile, Credentials::None)),
+            Ok(RigClient::Llamafile(_))
+        ));
+        assert!(matches!(
+            RigClient::build(&test_provider(ProviderKind::Ollama, Credentials::None)),
+            Ok(RigClient::Ollama(_))
+        ));
         for kind in [
             ProviderKind::Minimax,
             ProviderKind::Moonshot,
@@ -670,14 +433,10 @@ mod tests {
         ] {
             let mut provider = test_provider(kind, key());
             provider.api = Some(OpenAiApi::ChatCompletions);
-            let result = match kind {
-                ProviderKind::Minimax => build_minimax_anthropic(&provider).map(|_| ()),
-                ProviderKind::Moonshot => build_moonshot_anthropic(&provider).map(|_| ()),
-                ProviderKind::Xiaomimimo => build_xiaomimimo_anthropic(&provider).map(|_| ()),
-                ProviderKind::Zai => build_zai_anthropic(&provider).map(|_| ()),
-                _ => unreachable!(),
-            };
-            assert!(result.is_ok(), "failed Anthropic variant {kind:?}");
+            assert!(
+                RigClient::build(&provider).is_ok(),
+                "failed Anthropic variant {kind:?}"
+            );
         }
     }
 }

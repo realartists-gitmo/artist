@@ -356,14 +356,15 @@ Exhaustion does not silently degrade and does not trigger a handoff.
 
 ## Implementation notes
 
-Generic dispatch is preserved throughout. `stream_chat_with` and
-`run_agent_with` are already generic over `C: CompletionClient`, and the
-per-provider match that selects a `build_*()` function is the intended shape —
-it needs a different input, not removal. For fallback, the match moves inside
-the per-candidate attempt so each candidate constructs its own concrete client.
-Reintroducing a unified client type is not required by anything in this design.
+Client construction is centralized in `rig_provider::RigClient::build`, which
+takes any `SavedProvider`. That is all cross-provider routing needs: the
+candidate loop resolves an account and hands it to the same builder the session
+root uses, so a delegated or handed-off profile can run on a different account —
+and a different provider — from the parent that spawned it. `stream_chat_with`
+and `run_agent_with` stay generic over the concrete client type, so each arm
+monomorphizes separately.
 
-The seam for 3 and 4 already exists: `stream_chat_with` re-enters its retry loop
+The seam for fallback and handoff already exists: `stream_chat_with` re-enters its retry loop
 and rebuilds the client, preamble, tool set, and agent from the current seed on
 every attempt, because stream rules needed that. Three triggers, one mechanism:
 
@@ -384,6 +385,7 @@ every attempt, because stream rules needed that. Three triggers, one mechanism:
 | Handoff tool and payload | `artist-agent/src/handoff.rs` |
 | Todo store and tool | `artist-agent/src/todo.rs` |
 | Session root, candidate loop, handoff loop | `artist-agent/src/lib.rs` |
+| Client construction for a resolved account | `artist-agent/src/rig_provider.rs` (`RigClient`) |
 | Subagent dispatch and candidate loop | `artist-agent/src/delegate.rs` |
 | `handoff.performed`, `todo.updated`, `active_profile` | `artist-session/src/{event,replay}.rs` |
 

@@ -19,24 +19,12 @@ Artist requires a completion model.
 
 ## Configure providers
 
-Use the interactive commands rather than editing secrets by hand:
-
-```text
-artist provider add          # prompts for kind, id, URL, protocol, and auth
-artist provider edit [ID]
-artist provider remove [ID]
-artist provider list
-artist provider set          # interactively choose the default
-artist provider test         # interactively choose and make a small request
-artist provider --login chatgpt
-artist model                 # model/reasoning for the default provider
-```
-
-Inside the TUI, the equivalents are `/provider add [KIND]`, `/provider edit
-[ID]`, `/provider remove [ID]`, `/provider list`, `/provider set [ID]`, and
-`/provider test [ID]`. `/providers` aliases `/provider list`; `/accounts`
-also lists providers, while `/accounts ID` switches the active/default one.
-Omitted arguments open an interactive picker. `/login` starts ChatGPT login.
+Use first-run setup to configure credentials and the default provider. Inside
+the TUI, `/login` starts or refreshes ChatGPT subscription login, while
+`/model` selects the model and reasoning effort. The standalone CLI equivalent
+for model selection is `artist model`. ChatGPT subscription login uses PKCE;
+OpenAI API-key mode is a separate login choice. Provider/account CRUD commands
+from older releases are no longer part of the public CLI.
 
 Provider records live in `$ARTIST_CONFIG_DIR/providers.toml` (normally
 `~/.config/artist/providers.toml`). The v4 shape is:

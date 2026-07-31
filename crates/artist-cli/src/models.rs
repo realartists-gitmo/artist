@@ -12,6 +12,16 @@ struct ModelsResponse {
     models: Vec<SelectableModel>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub(crate) struct SelectableModel {
     pub slug: String,
@@ -186,11 +196,45 @@ async fn fetch(provider: &SavedProvider) -> Result<Vec<SelectableModel>> {
         .await?
         .error_for_status()
         .context("ChatGPT model discovery failed")?;
+    if provider.provider == ProviderKind::Openai {
+        return Ok(response
+            .json::<OpenAiModelsResponse>()
+            .await
+            .context("invalid OpenAI models response")?
+            .data
+            .into_iter()
+            .map(|model| SelectableModel {
+                display_name: model.id.clone(),
+                slug: model.id,
+                description: None,
+                priority: 0,
+                visibility: "list".into(),
+                default_reasoning_level: None,
+                supported_reasoning_levels: Vec::new(),
+                context_window: None,
+                effective_context_window_percent: 100,
+            })
+            .collect());
+    }
     Ok(response
         .json::<ModelsResponse>()
         .await
         .context("invalid ChatGPT models response")?
-        .models)
+        .models
+        .into_iter()
+        .map(with_supported_reasoning)
+        .collect())
+}
+
+fn with_supported_reasoning(mut model: SelectableModel) -> SelectableModel {
+    // `ultra` is a Codex CLI presentation alias, not a Responses API effort.
+    model
+        .supported_reasoning_levels
+        .retain(|level| level.effort != "ultra");
+    if model.default_reasoning_level.as_deref() == Some("ultra") {
+        model.default_reasoning_level = None;
+    }
+    model
 }
 
 #[cfg(test)]
@@ -225,12 +269,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_forward_compatible_reasoning_efforts() {
-        let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"future","display_name":"Future","visibility":"list","default_reasoning_level":"ultra","supported_reasoning_levels":[{"effort":"ultra","description":"Deep"}]}]}"#).unwrap();
-        assert_eq!(
-            response.models[0].supported_reasoning_levels[0].effort,
-            "ultra"
-        );
+    fn parses_openai_model_catalog_shape() {
+        let response: OpenAiModelsResponse =
+            serde_json::from_str(r#"{"object":"list","data":[{"id":"gpt-5","object":"model"}]}"#)
+                .unwrap();
+        assert_eq!(response.data[0].id, "gpt-5");
+    }
+
+    #[test]
+    fn removes_codex_cli_ultra_reasoning_alias() {
+        let response: ModelsResponse = serde_json::from_str(r#"{"models":[{"slug":"future","display_name":"Future","visibility":"list","default_reasoning_level":"ultra","supported_reasoning_levels":[{"effort":"high","description":"Deep"},{"effort":"ultra","description":"Codex alias"}]}]}"#).unwrap();
+        let model = with_supported_reasoning(response.models.into_iter().next().unwrap());
+        assert_eq!(model.default_reasoning_level, None);
+        assert_eq!(model.supported_reasoning_levels.len(), 1);
+        assert_eq!(model.supported_reasoning_levels[0].effort, "high");
     }
 
     #[test]

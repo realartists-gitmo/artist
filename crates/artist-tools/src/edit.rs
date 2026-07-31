@@ -1,6 +1,6 @@
 use crate::{ToolError, Workspace, output};
 use hashline_tools::{EditOperation, EditRequest};
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::TextDiff;
@@ -18,7 +18,7 @@ pub struct Replacement {
     end: Option<String>,
     content: String,
 }
-impl Tool for EditTool {
+impl PortableTool for EditTool {
     const NAME: &'static str = "edit";
     type Error = ToolError;
     type Args = EditArgs;

@@ -1,6 +1,6 @@
 use crate::{ToolError, Workspace, output};
 use hashline_tools::WriteCondition;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::TextDiff;
@@ -12,7 +12,7 @@ pub struct WriteArgs {
     path: String,
     content: String,
 }
-impl Tool for WriteTool {
+impl PortableTool for WriteTool {
     const NAME: &'static str = "write";
     type Error = ToolError;
     type Args = WriteArgs;

@@ -1,6 +1,6 @@
 use crate::{ToolError, Workspace};
 use hashline_tools::ReadFileRequest;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ pub struct ReadArgs {
     offset: Option<usize>,
     limit: Option<usize>,
 }
-impl Tool for ReadTool {
+impl PortableTool for ReadTool {
     const NAME: &'static str = "read";
     type Error = ToolError;
     type Args = ReadArgs;

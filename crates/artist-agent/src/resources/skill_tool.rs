@@ -3,7 +3,7 @@ use super::{
     skill_io::{cap, message, read_bounded, resources},
     skills,
 };
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Component, Path};
@@ -25,7 +25,7 @@ pub enum SkillError {
     Message(String),
 }
 
-impl Tool for SkillTool {
+impl PortableTool for SkillTool {
     const NAME: &'static str = "skill";
     type Error = SkillError;
     type Args = SkillArgs;

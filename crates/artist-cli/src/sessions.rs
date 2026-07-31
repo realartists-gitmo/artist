@@ -66,6 +66,7 @@ pub struct ActiveSession {
     pub recorder: Recorder,
     pub memory: artist_session::SessionMemory,
     pub attachments: AttachmentStore,
+    pub provider_context: artist_session::ProviderContextHandle,
     task: WriterTask,
 }
 
@@ -76,9 +77,13 @@ impl ActiveSession {
         let Self {
             recorder,
             memory,
+            provider_context,
             task,
             ..
         } = self;
+        // Every recorder clone must be gone before the writer can observe its
+        // channel closing. The provider sidecar owns one too.
+        drop(provider_context);
         drop(recorder);
         drop(memory);
         task.close().await
@@ -422,7 +427,10 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
     let dir = session.dir().to_owned();
     let writer = EventLogWriter::open(&dir, &session.id)?;
     let attachments = AttachmentStore::new(dir.join("attachments"));
+    let existing_events = EventLogReader::new(&dir).read_all()?;
     let (recorder, task) = spawn_writer(writer, Some(session.transcript.clone()));
+    let provider_context =
+        artist_session::ProviderContextHandle::from_events(&existing_events, recorder.clone());
     let memory = artist_session::SessionMemory::new(
         session.id.clone(),
         &dir,
@@ -434,6 +442,7 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
         recorder,
         memory,
         attachments,
+        provider_context,
         task,
     })
 }
@@ -503,7 +512,9 @@ mod tests {
         active.recorder.record(user_turn("first prompt"));
         active.recorder.flush().await;
         let transcript = active.session.transcript.clone();
-        active.close().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(2), active.close())
+            .await
+            .context("session close timed out while sidecar held recorder")??;
 
         // transcript projection was appended incrementally
         let markdown = fs::read_to_string(&transcript)?;

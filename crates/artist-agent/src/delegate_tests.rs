@@ -1,8 +1,8 @@
 use artist_session::ToolOutcomeRecord;
 use futures::StreamExt;
-use rig_core::agent::{AgentBuilder, MultiTurnStreamItem};
+use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
+use rig_agent::streaming::StreamingChat;
 use rig_core::completion::Message;
-use rig_core::streaming::StreamingChat;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use crate::{PromptEvent, delegate::child_conversation_messages};

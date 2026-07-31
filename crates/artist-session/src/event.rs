@@ -62,6 +62,7 @@ pub enum SessionEvent {
     RuleRetroFindings(RuleRetroFindings),
     HandoffPerformed(HandoffPerformed),
     TodoUpdated(TodoUpdated),
+    ProviderContext(ProviderContext),
     /// Forward-compat: a kind this binary does not understand.
     Unknown {
         kind: String,
@@ -140,7 +141,22 @@ event_kinds!(
     (RuleRetroFindings, RuleRetroFindings, "rule.retro_findings"),
     (HandoffPerformed, HandoffPerformed, "handoff.performed"),
     (TodoUpdated, TodoUpdated, "todo.updated"),
+    (ProviderContext, ProviderContext, "provider.context.v1"),
 );
+
+/// A durable, provider-private context snapshot. Values are deliberately
+/// opaque: projections must never interpret or render them.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ProviderContext {
+    pub conversation_id: String,
+    pub provider: String,
+    pub schema: u32,
+    pub items: Vec<serde_json::Value>,
+    /// Stable fingerprints of the framework history incorporated into `items`.
+    /// Absent on schema-v1 snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_fingerprints: Vec<String>,
+}
 
 /// One content block inside a message. Structurally mirrors rig's content
 /// types but with explicit tags so the on-disk format survives rig upgrades.

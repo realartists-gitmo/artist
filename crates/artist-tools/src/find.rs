@@ -1,7 +1,7 @@
 use crate::{ToolError, Workspace, output};
 use fff_search::{FuzzySearchOptions, PaginationArgs, QueryParser};
 use globset::Glob;
-use rig_core::tool::Tool;
+use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -15,7 +15,7 @@ pub struct FindArgs {
     glob: Option<String>,
     limit: Option<usize>,
 }
-impl Tool for FindTool {
+impl PortableTool for FindTool {
     const NAME: &'static str = "find";
     type Error = ToolError;
     type Args = FindArgs;

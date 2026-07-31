@@ -90,6 +90,31 @@ pub(crate) fn segments(
     session_tokens: u64,
     extension_values: &[(String, String)],
 ) -> Vec<StatusSegment> {
+    segments_with_fast_mode(
+        config,
+        project,
+        provider,
+        git_branch,
+        used_tokens,
+        context_capacity,
+        session_tokens,
+        false,
+        extension_values,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn segments_with_fast_mode(
+    config: &StatusBarConfig,
+    project: &Path,
+    provider: &SavedProvider,
+    git_branch: Option<&str>,
+    used_tokens: Option<u64>,
+    context_capacity: Option<u64>,
+    session_tokens: u64,
+    fast_mode: bool,
+    extension_values: &[(String, String)],
+) -> Vec<StatusSegment> {
     let mut segments = config
         .items
         .iter()
@@ -109,7 +134,12 @@ pub(crate) fn segments(
                 ),
                 StatusItem::GitBranch => (format!("{} {}", icons::BRANCH, git_branch?), None),
                 StatusItem::Model => (
-                    format!("{} {}", icons::MODEL, provider.model.as_deref()?),
+                    format!(
+                        "{} {}{}",
+                        icons::MODEL,
+                        provider.model.as_deref()?,
+                        if fast_mode { " " } else { "" }
+                    ),
                     None,
                 ),
                 StatusItem::Reasoning => (

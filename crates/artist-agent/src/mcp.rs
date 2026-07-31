@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use rig_core::tool::Tool;
+use rig_core::tool::PortableDynamicTool;
 use rmcp::{RoleClient, ServiceExt, model::Tool as McpDefinition, service::RunningService};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -126,7 +126,7 @@ impl McpManager {
         self.tools()
             .await
             .into_iter()
-            .map(|tool| tool.name())
+            .map(|tool| tool.name().to_owned())
             .collect()
     }
     pub async fn start(&self, name: &str) -> Result<()> {
@@ -245,7 +245,7 @@ impl McpManager {
         }
         out
     }
-    pub async fn tools(&self) -> Vec<McpProxyTool> {
+    pub async fn tools(&self) -> Vec<PortableDynamicTool> {
         let mut out = Vec::new();
         for server_name in self.names().await {
             let Some(server) = self.0.servers.read().await.get(&server_name).cloned() else {
@@ -259,11 +259,14 @@ impl McpManager {
                 continue;
             }
             for tool in &state.tools {
-                out.push(McpProxyTool {
-                    manager: self.clone(),
-                    server: server_name.clone(),
-                    tool: tool.clone(),
-                });
+                out.push(
+                    McpProxyTool {
+                        manager: self.clone(),
+                        server: server_name.clone(),
+                        tool: tool.clone(),
+                    }
+                    .into_dynamic(),
+                );
             }
         }
         out
@@ -325,31 +328,30 @@ pub struct McpProxyTool {
     server: String,
     tool: CachedTool,
 }
-impl Tool for McpProxyTool {
-    const NAME: &'static str = "mcp";
-    type Error = McpCallError;
-    type Args = serde_json::Value;
-    type Output = String;
-    fn name(&self) -> String {
-        format!(
+impl McpProxyTool {
+    fn into_dynamic(self) -> PortableDynamicTool {
+        let name = format!(
             "mcp__{}__{}",
             sanitize(&self.server),
             sanitize(&self.tool.name)
-        )
+        );
+        let description = self.tool.description.clone();
+        let parameters = self.tool.parameters.clone();
+        PortableDynamicTool::new(name, description, parameters, move |args| {
+            let tool = self.clone();
+            Box::pin(async move {
+                tool.call_inner(args)
+                    .await
+                    .map(rig_core::tool::ToolOutput::text)
+                    .map_err(|error| {
+                        rig_core::tool::ToolExecutionError::from_error(McpCallError(format!(
+                            "{error:#}"
+                        )))
+                    })
+            })
+        })
     }
-    fn description(&self) -> String {
-        self.tool.description.clone()
-    }
-    fn parameters(&self) -> serde_json::Value {
-        self.tool.parameters.clone()
-    }
-    async fn call(&self, args: Self::Args) -> std::result::Result<String, McpCallError> {
-        self.call_inner(args)
-            .await
-            .map_err(|error| McpCallError(format!("{error:#}")))
-    }
-}
-impl McpProxyTool {
+
     async fn call_inner(&self, args: serde_json::Value) -> Result<String> {
         self.manager.start(&self.server).await?;
         let server = self

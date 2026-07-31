@@ -69,6 +69,19 @@ impl SessionMemory {
         Ok((messages, native))
     }
 
+    /// Rebuild the shared in-memory projection from the currently visible events.
+    /// All clones observe the replacement immediately.
+    pub fn reload_from_events(&self, events: &[crate::Envelope]) -> Result<(), MemoryError> {
+        let native = crate::history::has_native_conversation(events, None);
+        let messages = build_history(events, &self.attachments, &HistoryOptions::default())
+            .map_err(memory_error)?;
+        *self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((messages, native));
+        Ok(())
+    }
+
     fn cache(&self, messages: Vec<Message>) -> Result<(), MemoryError> {
         // Match the JSONL round trip used by a freshly loaded session so cached
         // and restored histories have identical Rig parameter defaults.

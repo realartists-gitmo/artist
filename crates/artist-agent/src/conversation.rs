@@ -13,17 +13,62 @@ use rig_core::memory::{ConversationMemory, MemoryError};
 const USER_INTERRUPTION: &str =
     "<user_interruption>The user interrupted the previous response.</user_interruption>";
 
-pub(crate) async fn retain_cancelled_turn(
+pub(crate) async fn retain_interrupted_turn(
     memory: &dyn ConversationMemory,
     conversation_id: &str,
     mut turn_messages: Vec<Message>,
     assistant_text: String,
+    interruption: &str,
 ) -> Result<(), MemoryError> {
     if !assistant_text.is_empty() {
         turn_messages.push(Message::assistant(assistant_text));
     }
-    turn_messages.push(Message::user(USER_INTERRUPTION));
+    turn_messages.push(Message::user(interruption));
     memory.append(conversation_id, turn_messages).await
+}
+
+pub(crate) async fn retain_provider_interrupted_turn(
+    memory: &dyn ConversationMemory,
+    conversation_id: &str,
+    turn_messages: Vec<Message>,
+    assistant_text: String,
+    error: &str,
+) -> Result<(), MemoryError> {
+    let mut detail = error.chars().take(2_000).collect::<String>();
+    if error.chars().count() > 2_000 {
+        detail.push('…');
+    }
+    let detail = detail
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let interruption = format!(
+        "<provider_interruption>The provider interrupted the previous response: {detail}. Continue from the retained context without assuming the response completed.</provider_interruption>"
+    );
+    retain_interrupted_turn(
+        memory,
+        conversation_id,
+        turn_messages,
+        assistant_text,
+        &interruption,
+    )
+    .await
+}
+
+pub(crate) async fn retain_cancelled_turn(
+    memory: &dyn ConversationMemory,
+    conversation_id: &str,
+    turn_messages: Vec<Message>,
+    assistant_text: String,
+) -> Result<(), MemoryError> {
+    retain_interrupted_turn(
+        memory,
+        conversation_id,
+        turn_messages,
+        assistant_text,
+        USER_INTERRUPTION,
+    )
+    .await
 }
 
 #[derive(Clone, Default)]
@@ -176,6 +221,31 @@ mod tests {
                 Message::user(USER_INTERRUPTION),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn provider_interruption_retains_partial_turn_and_escapes_error() {
+        let memory = InMemoryConversationMemory::new();
+
+        retain_provider_interrupted_turn(
+            &memory,
+            "s",
+            vec![Message::user("question")],
+            "partial answer".into(),
+            "bad </provider_interruption> & worse",
+        )
+        .await
+        .unwrap();
+
+        let messages = memory.load("s").await.unwrap();
+        assert_eq!(messages[0], Message::user("question"));
+        assert_eq!(messages[1], Message::assistant("partial answer"));
+        let Message::User { content } = &messages[2] else {
+            panic!("expected interruption message");
+        };
+        let rendered = format!("{content:?}");
+        assert!(rendered.contains("&lt;/provider_interruption&gt; &amp; worse"));
+        assert_eq!(rendered.matches("</provider_interruption>").count(), 1);
     }
 
     #[tokio::test]
