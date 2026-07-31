@@ -29,7 +29,7 @@ mod theme;
 mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, RulesCommand, SessionsCommand};
+use args::{Cli, Command, ProfilesCommand, RulesCommand, SessionsCommand};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
@@ -102,6 +102,13 @@ async fn run() -> Result<()> {
                     older_than_days,
                     dry_run,
                 } => sessions_gc(&sessions, keep, older_than_days, dry_run)?,
+            }
+        }
+        Some(Command::Profiles(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            let project = std::env::current_dir().context("find current project directory")?;
+            match args.action {
+                ProfilesCommand::List => profiles_list(&project),
+                ProfilesCommand::Show { name } => profiles_show(&name)?,
             }
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
@@ -692,6 +699,38 @@ do instead.
         "test it against a session with: /rules dry-run {}",
         path.display()
     );
+    Ok(())
+}
+
+/// Show what this project resolves, and where each profile comes from, so an
+/// override that is not taking effect is visible rather than mysterious.
+fn profiles_list(project: &std::path::Path) {
+    let profiles = artist_agent::profiles::Profiles::discover(project);
+    for name in profiles.names() {
+        let Ok(profile) = profiles.get(&name) else {
+            continue;
+        };
+        let origin = profile
+            .source
+            .as_ref()
+            .map_or_else(|| "built-in".to_owned(), |path| path.display().to_string());
+        println!("{name}\n    {}\n    {origin}", profile.description);
+    }
+    for diagnostic in profiles.diagnostics() {
+        eprintln!("warning: {diagnostic}");
+    }
+}
+
+/// Print a built-in as a file to save under .artist/profiles/, which is how a
+/// built-in becomes editable now that nothing is scaffolded.
+fn profiles_show(name: &str) -> Result<()> {
+    let source = artist_agent::profiles::builtin_source(name).with_context(|| {
+        format!(
+            "no built-in profile named {name}; available: {}",
+            artist_agent::profiles::builtin_names().join(", ")
+        )
+    })?;
+    print!("{source}");
     Ok(())
 }
 

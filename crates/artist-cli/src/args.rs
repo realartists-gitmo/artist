@@ -24,6 +24,25 @@ pub enum Command {
     Rules(RulesArgs),
     /// Inspect and maintain stored sessions.
     Sessions(SessionsArgs),
+    /// Inspect agent profiles.
+    Profiles(ProfilesArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProfilesArgs {
+    #[command(subcommand)]
+    pub action: ProfilesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfilesCommand {
+    /// List the profiles available in this project and where each comes from.
+    List,
+    /// Print a built-in profile, ready to save as an override.
+    ///
+    /// Nothing is written to your config until you do it: redirect this into
+    /// .artist/profiles/<name>.md and edit from there.
+    Show { name: String },
 }
 
 #[derive(Debug, Args)]

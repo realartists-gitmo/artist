@@ -453,6 +453,38 @@ fn project_semaphore(project: &Path, permits: usize) -> Arc<Semaphore> {
         .clone()
 }
 
+/// The profiles that ship in the binary.
+pub fn builtin_names() -> &'static [&'static str] {
+    &BUILTIN_NAMES
+}
+
+/// Render a built-in as the file that would override it.
+///
+/// Nothing is scaffolded to disk, so this is how a built-in becomes editable:
+/// write it into `.artist/profiles/<name>.md` and change what you want. Returns
+/// `None` for a name that is not built in.
+pub fn builtin_source(name: &str) -> Option<String> {
+    if !BUILTIN_NAMES.contains(&name) {
+        return None;
+    }
+    let (allow, deny) = builtin_tools(name);
+    let mut tools = String::new();
+    if allow.is_some() || !deny.is_empty() {
+        tools.push_str("tools:\n");
+        if let Some(allow) = allow {
+            tools.push_str(&format!("  allow: [{}]\n", allow.join(", ")));
+        }
+        if !deny.is_empty() {
+            tools.push_str(&format!("  deny: [{}]\n", deny.join(", ")));
+        }
+    }
+    Some(format!(
+        "---\ndescription: {}\n{tools}---\n\n{}",
+        crate::prompt_config::profile_description(name),
+        crate::prompt_config::profile_prompt(name)
+    ))
+}
+
 pub(crate) const BUILTIN_NAMES: [&str; 5] =
     ["default", "worker", "explorer", "planner", "reviewer"];
 
