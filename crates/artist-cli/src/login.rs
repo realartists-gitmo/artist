@@ -30,7 +30,7 @@ impl AuthKind {
 }
 
 #[derive(Clone, Copy)]
-enum LoginProvider {
+pub(crate) enum LoginProvider {
     OpenAiCodex,
     OpenAi,
 }
@@ -51,17 +51,25 @@ fn providers(kind: AuthKind) -> &'static [LoginProvider] {
     }
 }
 
-/// Interactive provider login. API keys are read without echo and validated
-/// before they are ever written to the provider store.
-pub async fn login(store: &mut ProviderStore) -> Result<()> {
+/// Select a registry entry using the shared inline command picker. Credential
+/// execution is deliberately separate because it may need to suspend the TUI.
+pub(crate) fn select(
+    draw: &mut impl FnMut(&[String]) -> Result<()>,
+) -> Result<Option<LoginProvider>> {
     let categories = AuthKind::ALL.map(|kind| kind.label().to_owned());
-    let kind = AuthKind::ALL[crate::prompt::select("Authentication method", &categories, 0)?];
-    let available = providers(kind);
+    let Some(kind) = crate::command_ui::pick("Authentication method", &categories, 0, draw)? else {
+        return Ok(None);
+    };
+    let available = providers(AuthKind::ALL[kind]);
     let choices = available
         .iter()
         .map(|provider| provider.label().to_owned())
         .collect::<Vec<_>>();
-    let provider = available[crate::prompt::select("Provider", &choices, 0)?];
+    Ok(crate::command_ui::pick("Provider", &choices, 0, draw)?.map(|index| available[index]))
+}
+
+/// Execute credentials for an already-selected registry entry.
+pub(crate) async fn execute(provider: LoginProvider, store: &mut ProviderStore) -> Result<()> {
     match provider {
         LoginProvider::OpenAiCodex => chatgpt(store).await,
         LoginProvider::OpenAi => api_key(store).await,

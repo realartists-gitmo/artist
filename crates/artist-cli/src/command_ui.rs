@@ -241,6 +241,47 @@ pub async fn run(
     }
 }
 
+/// Select and apply a model and reasoning level without persisting. This is
+/// shared by `/model` and the transactional `/login` flow.
+pub(crate) async fn select_model(
+    provider: &mut llm_provider::SavedProvider,
+    draw: &mut impl FnMut(&[String]) -> Result<()>,
+) -> Result<()> {
+    draw(&["Loading models…".to_owned()])?;
+    let catalog = models::catalog(provider).await?;
+    let current_model = provider
+        .model
+        .as_ref()
+        .and_then(|slug| catalog.iter().position(|model| &model.slug == slug))
+        .unwrap_or(0);
+    let model_index =
+        pick_model(&catalog, current_model, draw)?.context("model selection cancelled")?;
+    let selected = &catalog[model_index];
+    let reasoning = if selected.supported_reasoning_levels.is_empty() {
+        None
+    } else {
+        let preferred = provider
+            .reasoning_effort
+            .as_ref()
+            .or(selected.default_reasoning_level.as_ref());
+        let current = preferred
+            .and_then(|effort| {
+                selected
+                    .supported_reasoning_levels
+                    .iter()
+                    .position(|v| &v.effort == effort)
+            })
+            .unwrap_or(0);
+        Some(
+            selected.supported_reasoning_levels[pick_reasoning(selected, current, draw)?
+                .context("reasoning selection cancelled")?]
+            .effort
+            .clone(),
+        )
+    };
+    models::apply_selection(provider, &catalog, &selected.slug, reasoning.as_deref())
+}
+
 fn pick_tools(
     names: &[String],
     disabled: &[String],
@@ -361,7 +402,7 @@ fn pick_status_bar(
     }
 }
 
-fn pick_model(
+pub(crate) fn pick_model(
     models: &[SelectableModel],
     current: usize,
     draw: &mut impl FnMut(&[String]) -> Result<()>,
@@ -379,7 +420,7 @@ fn pick_model(
     pick("Select model", &labels, current, draw)
 }
 
-fn pick_reasoning(
+pub(crate) fn pick_reasoning(
     model: &SelectableModel,
     current: usize,
     draw: &mut impl FnMut(&[String]) -> Result<()>,
@@ -392,7 +433,7 @@ fn pick_reasoning(
     pick("Select reasoning", &labels, current, draw)
 }
 
-fn pick(
+pub(crate) fn pick(
     title: &str,
     labels: &[String],
     current: usize,
@@ -400,21 +441,7 @@ fn pick(
 ) -> Result<Option<usize>> {
     let mut selected = current.min(labels.len().saturating_sub(1));
     loop {
-        let mut panel = vec![title.to_owned()];
-        let start = selected
-            .saturating_sub(3)
-            .min(labels.len().saturating_sub(7));
-        panel.extend(
-            labels
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(7)
-                .map(|(index, label)| {
-                    format!("{} {label}", if index == selected { "›" } else { " " })
-                }),
-        );
-        draw(&panel)?;
+        draw(&pick_panel(title, labels, selected))?;
         if let Event::Key(key) = event::read()? {
             match key.code {
                 KeyCode::Up => selected = selected.saturating_sub(1),
@@ -424,5 +451,35 @@ fn pick(
                 _ => {}
             }
         }
+    }
+}
+
+fn pick_panel(title: &str, labels: &[String], selected: usize) -> Vec<String> {
+    let mut panel = vec![title.to_owned()];
+    let start = selected
+        .saturating_sub(3)
+        .min(labels.len().saturating_sub(7));
+    panel.extend(
+        labels
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(7)
+            .map(|(index, label)| format!("{} {label}", if index == selected { "›" } else { " " })),
+    );
+    panel
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::pick_panel;
+
+    #[test]
+    fn picker_panel_marks_selection_and_limits_visible_rows() {
+        let labels = (0..12).map(|n| format!("item {n}")).collect::<Vec<_>>();
+        let panel = pick_panel("Choose", &labels, 8);
+        assert_eq!(panel.len(), 8);
+        assert_eq!(panel[0], "Choose");
+        assert!(panel.iter().any(|line| line == "› item 8"));
     }
 }

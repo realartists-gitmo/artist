@@ -890,6 +890,7 @@ async fn run_loop(
                         context.store,
                         context.store_path,
                         viewport_height,
+                        &footer,
                     )
                     .await
                     {
@@ -1643,43 +1644,71 @@ async fn handle_login(
     terminal: &mut ratatui::DefaultTerminal,
     store: &mut ProviderStore,
     store_path: &Path,
-    viewport_height: u16,
+    mut viewport_height: u16,
+    footer: &status_bar::StatusView,
 ) -> Result<(Vec<String>, Option<usize>)> {
-    finish_inline(terminal)?;
-    let _ = execute!(
-        std::io::stdout(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
-    ratatui::restore();
-    // Treat login, required model selection, and persistence as one transaction.
-    // In particular, cancellation from either prompt must not leave a provider
-    // in memory that was never made usable (or change the previous default).
+    let input = ChatInput::default();
+    let mut draw = |panel: &[String]| {
+        resize_and_draw(
+            terminal,
+            &input,
+            panel,
+            footer,
+            &mut viewport_height,
+            3,
+            false,
+            None,
+        )
+    };
+    let selected = crate::login::select(&mut draw)?;
     let previous = store.clone();
     let before = store.providers.len();
-    let attempted: Result<Option<usize>> = async {
-        crate::login::login(store).await?;
-        let index = (store.providers.len() > before).then_some(store.providers.len() - 1);
-        if let Some(index) = index
-            && store.providers[index].model.is_none()
-        {
-            models::select(&mut store.providers[index]).await?;
+    let attempted: Result<Option<usize>> = if let Some(provider) = selected {
+        // Only credential entry / browser OAuth leaves inline mode.
+        finish_inline(terminal)?;
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableBracketedPaste
+        );
+        ratatui::restore();
+        let credential_result = crate::login::execute(provider, store).await;
+        *terminal = ratatui::init_with_options(TerminalOptions {
+            viewport: Viewport::Inline(viewport_height),
+        });
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            EnableBracketedPaste
+        );
+        terminal.show_cursor()?;
+        async {
+            credential_result?;
+            let index = (store.providers.len() > before).then_some(store.providers.len() - 1);
+            if let Some(index) = index
+                && store.providers[index].model.is_none()
+            {
+                let mut draw = |panel: &[String]| {
+                    resize_and_draw(
+                        terminal,
+                        &input,
+                        panel,
+                        footer,
+                        &mut viewport_height,
+                        3,
+                        false,
+                        None,
+                    )
+                };
+                command_ui::select_model(&mut store.providers[index], &mut draw).await?;
+            }
+            Ok(index)
         }
-        Ok(index)
-    }
-    .await;
+        .await
+    } else {
+        Err(anyhow::anyhow!("login cancelled"))
+    };
     let outcome = finish_login_transaction(store, previous, store_path, attempted);
-    // Re-enter the inline viewport and re-arm the enhanced-key / paste modes
-    // the chat loop relies on.
-    *terminal = ratatui::init_with_options(TerminalOptions {
-        viewport: Viewport::Inline(viewport_height),
-    });
-    let _ = execute!(
-        std::io::stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        EnableBracketedPaste
-    );
-    terminal.show_cursor()?;
     match outcome {
         Ok(Some(index)) => Ok((
             vec!["Logged in and selected for this session.".to_owned()],
