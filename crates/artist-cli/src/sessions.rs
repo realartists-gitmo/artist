@@ -128,7 +128,7 @@ impl SessionStore {
         let label = label.map(|value| value.chars().take(80).collect::<String>());
         let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let now = duration.as_millis() as u64;
-        let id = format!("{:x}-{:x}", duration.as_nanos(), std::process::id());
+        let id = new_session_id();
         let dir = self.root.join(project_key(&project)).join(&id);
         fs::create_dir_all(&dir)?;
         let session = Session {
@@ -225,7 +225,7 @@ impl SessionStore {
         let (parent, events) = self.peek(parent_id)?;
         let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let now = duration.as_millis() as u64;
-        let id = format!("{:x}-{:x}", duration.as_nanos(), std::process::id());
+        let id = new_session_id();
         let dir = self.root.join(project_key(&parent.project)).join(&id);
         fs::create_dir_all(&dir)?;
         {
@@ -454,6 +454,10 @@ fn parse_legacy(transcript: &Path) -> Result<Vec<Turn>> {
         })
         .map(|json| serde_json::from_str(json).context("parse legacy transcript turn"))
         .collect()
+}
+
+fn new_session_id() -> String {
+    format!("s-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn sanitize(value: &str) -> String {
