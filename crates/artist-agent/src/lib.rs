@@ -814,9 +814,8 @@ where
                     } else {
                         committed
                     };
-                    cancelled_delta = cancelled_delta
-                        [durable_history_len.min(cancelled_delta.len())..]
-                        .to_vec();
+                    cancelled_delta =
+                        conversation::delta_after(&cancelled_delta, durable_history_len);
                     conversation::retain_cancelled_turn(
                         handles.memory.as_ref(),
                         &handles.conversation_id,
@@ -843,7 +842,7 @@ where
                     committed
                 };
                 interrupted_delta =
-                    interrupted_delta[durable_history_len.min(interrupted_delta.len())..].to_vec();
+                    conversation::delta_after(&interrupted_delta, durable_history_len);
                 conversation::retain_provider_interrupted_turn(
                     handles.memory.as_ref(),
                     &handles.conversation_id,
@@ -1057,9 +1056,8 @@ where
                             _ = handles.cancel.cancelled() => {
                                 let mut cancelled_delta = seed_history.clone();
                                 cancelled_delta.push(seed_prompt.clone());
-                                cancelled_delta = cancelled_delta
-                                    [durable_history_len.min(cancelled_delta.len())..]
-                                    .to_vec();
+                                cancelled_delta =
+                                    conversation::delta_after(&cancelled_delta, durable_history_len);
                                 conversation::retain_cancelled_turn(
                                     handles.memory.as_ref(),
                                     &handles.conversation_id,
@@ -1083,9 +1081,8 @@ where
                     } else {
                         committed
                     };
-                    interrupted_delta = interrupted_delta
-                        [durable_history_len.min(interrupted_delta.len())..]
-                        .to_vec();
+                    interrupted_delta =
+                        conversation::delta_after(&interrupted_delta, durable_history_len);
                     conversation::retain_provider_interrupted_turn(
                         handles.memory.as_ref(),
                         &handles.conversation_id,

@@ -130,6 +130,17 @@ impl AttemptMemory {
     }
 }
 
+/// The messages appended after a durable prefix.
+///
+/// The prefix length is stored apart from the history it indexes, so it can
+/// outrun a history that has since become shorter — which is exactly what a
+/// cancelled or provider-interrupted turn produces. Clamping lives here so that
+/// no call site has to remember to: the same rule spelled out at five separate
+/// sites is the shape that has already produced two panics in this codebase.
+pub(crate) fn delta_after(history: &[Message], durable_len: usize) -> Vec<Message> {
+    history[durable_len.min(history.len())..].to_vec()
+}
+
 fn without_display_summaries(messages: Vec<Message>) -> Vec<Message> {
     messages
         .into_iter()
@@ -172,7 +183,7 @@ impl ConversationMemory for AttemptMemory {
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         Box::pin(async move {
             self.check_id(conversation_id)?;
-            let mut delta = self.history[self.durable_len.min(self.history.len())..].to_vec();
+            let mut delta = delta_after(&self.history, self.durable_len);
             delta.extend(messages);
             let result = self
                 .durable
