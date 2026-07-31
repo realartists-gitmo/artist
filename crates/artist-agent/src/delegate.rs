@@ -63,6 +63,14 @@ impl Drop for SubagentActivityGuard {
     }
 }
 
+fn start_background_activity(
+    lifecycle: crate::LifecycleEmitter,
+    id: String,
+) -> SubagentActivityGuard {
+    lifecycle.emit(LifecycleEvent::SubagentStarted(id.clone()));
+    SubagentActivityGuard { lifecycle, id }
+}
+
 impl DelegateRun {
     fn new(task_id: Option<String>) -> Self {
         let background = task_id.is_some();
@@ -204,14 +212,10 @@ impl PortableTool for Delegate {
                 Ok(self
                     .jobs
                     .start(prompt, role, move |task_id| {
-                        delegate
-                            .handles
-                            .lifecycle
-                            .emit(LifecycleEvent::SubagentStarted(task_id.clone()));
-                        let activity = SubagentActivityGuard {
-                            lifecycle: delegate.handles.lifecycle.clone(),
-                            id: task_id.clone(),
-                        };
+                        let activity = start_background_activity(
+                            delegate.handles.lifecycle.clone(),
+                            task_id.clone(),
+                        );
                         async move {
                             let _activity = activity;
                             delegate
@@ -801,7 +805,9 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::{DelegateRun, delegate_context_window};
+    use super::{DelegateRun, delegate_context_window, start_background_activity};
+    use crate::{LifecycleEmitter, LifecycleEvent};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn model_override_does_not_inherit_main_context_window() {
@@ -830,5 +836,22 @@ mod identity_tests {
 
         assert!(run.actor.starts_with("a-"));
         assert!(!run.background);
+    }
+
+    #[test]
+    fn background_activity_spans_future_polling_and_drop() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let lifecycle = LifecycleEmitter::new(move |event| captured.lock().unwrap().push(event));
+        let guard = start_background_activity(lifecycle, "a-task".into());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![LifecycleEvent::SubagentStarted("a-task".into())]
+        );
+        drop(guard);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&LifecycleEvent::SubagentFinished("a-task".into()))
+        );
     }
 }
