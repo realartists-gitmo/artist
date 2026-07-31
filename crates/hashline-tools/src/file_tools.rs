@@ -499,7 +499,9 @@ impl FileToolManager {
         let view = self.build_view(&content, path);
         self.last_read_view.insert(norm.clone(), view.clone());
 
-        let start = request.start_line.saturating_sub(1);
+        // Clamped: an offset past the end is a request for nothing, not a
+        // reason to slice out of range.
+        let start = request.start_line.saturating_sub(1).min(lines.len());
         let end = match request.max_lines {
             Some(max) => (start + max).min(lines.len()),
             None => lines.len(),

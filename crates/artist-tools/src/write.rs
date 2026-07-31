@@ -22,7 +22,21 @@ impl PortableTool for WriteTool {
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false})
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Project-relative or absolute path. Created if missing; replaced in full if it already exists."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The complete new contents of the file. This is the whole file, not a fragment appended or spliced into the existing one."
+                }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        })
     }
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
         let target = self.0.resolve_new(&args.path)?;

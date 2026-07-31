@@ -467,7 +467,9 @@ impl Delegate {
                 tools.push(crate::tool_prompt::dynamic(child_tools.write.clone()));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
-            tools
+            let guarded: Vec<rig_core::tool::PortableDynamicTool> =
+                tools.into_iter().map(crate::tool_prompt::guard).collect();
+            guarded
         };
         let (base, _) = crate::prompt_config::base_prompt();
         let policy = format!(

@@ -550,6 +550,10 @@ fn provider_lineage(conversation_id: &str, depth: usize) -> String {
     }
 }
 
+/// How many times one turn may be regenerated after the model calls a tool
+/// that does not exist.
+const UNKNOWN_TOOL_RETRIES: u32 = 2;
+
 /// The resolved profile context for a session-root run.
 struct RootRun {
     profiles: profiles::Profiles,
@@ -613,6 +617,7 @@ where
     // from concurrent delegate runs (each has its own counter).
     let retry_budget = handles.rules.retry_budget();
     let mut retries_used = 0u32;
+    let mut unknown_tool_retries = 0u32;
     // Keep cache affinity within a conversation rather than pinning every main
     // agent and delegate in the project to the same provider route.
     let mut overload_retry = provider_retry::OverloadRetry::new(
@@ -717,6 +722,7 @@ where
         // profile can trim a bloated server down to the handful it needs.
         registered.retain(|tool| profile.permits(tool.name()));
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
+        let registered: Vec<_> = registered.into_iter().map(tool_prompt::guard).collect();
         // Every profile is composed on the shared prompt: the body says what is
         // different about this profile, not what is true of every agent.
         let (base, base_diagnostics) = prompt_config::base_prompt();
@@ -1005,6 +1011,36 @@ where
                         run_recorder.record(RunFinished::Cancelled);
                         seed_prompt = reminder_message(&firing);
                         retries_used += 1;
+                        continue 'retry;
+                    }
+                    // The model named a tool that does not exist: a
+                    // hallucination, or the `multi_tool_use.parallel` wrapper
+                    // OpenAI injects beside our tools. Rig treats it as a
+                    // protocol violation and ends the turn, which throws away a
+                    // working session over one bad call. Naming the real tools
+                    // and regenerating recovers it.
+                    //
+                    // Budgeted separately from stream-rule retries, and low: a
+                    // model that keeps inventing the same name would otherwise
+                    // loop, and after two corrections it is not going to learn.
+                    if let rig_agent::agent::StreamingError::Prompt(boxed) = &error
+                        && let PromptError::UnknownToolCall {
+                            tool_name,
+                            allowed_tools,
+                            chat_history,
+                            ..
+                        } = boxed.as_ref()
+                        && unknown_tool_retries < UNKNOWN_TOOL_RETRIES
+                    {
+                        seed_history = *chat_history.clone();
+                        run_recorder.record(RunFinished::Cancelled);
+                        seed_prompt = rig_core::completion::Message::user(format!(
+                            "<system-reminder>\nThere is no tool named `{tool_name}`. \
+                             The tools available this turn are: {}. Call one of those, \
+                             or answer without a tool.\n</system-reminder>",
+                            allowed_tools.join(", ")
+                        ));
+                        unknown_tool_retries += 1;
                         continue 'retry;
                     }
                     let error_text = error.to_string();

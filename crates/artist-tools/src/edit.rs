@@ -31,7 +31,10 @@ impl PortableTool for EditTool {
         json!({
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
+                "path": {
+                    "type": "string",
+                    "description": "Project-relative or absolute path to the file being edited. Anchors must come from a read of this same file."
+                },
                 "replacements": {
                     "type": "array",
                     "items": {
