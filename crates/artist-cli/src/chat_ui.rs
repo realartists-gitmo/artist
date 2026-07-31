@@ -282,6 +282,7 @@ struct SubmitContext<'a> {
     mcp: &'a artist_agent::mcp::McpManager,
     extensions: &'a std::sync::Arc<artist_extensions::Manager>,
     extension_control: &'a crate::extension_control::ExtensionControl,
+    herdr: &'a crate::herdr::Lifecycle,
     disabled_tools: &'a [String],
     compaction: crate::settings::CompactionConfig,
     show_splash: bool,
@@ -670,6 +671,13 @@ async fn run_loop(
             .settings
             .apply_to(context.store.providers[index].clone())
     });
+    if let Some(active) = &active {
+        context.herdr.report_session(&active.session.id);
+    }
+    context.herdr.claim_idle();
+    context
+        .herdr
+        .set_auth_blocked(context.provider_index.is_none());
     if resumed_session {
         let footer = footer_view(
             &context.store.status_bar,
@@ -1058,6 +1066,7 @@ async fn run_loop(
                         mcp: context.mcp,
                         extensions: context.extensions,
                         extension_control: context.extension_control,
+                        herdr: context.herdr,
                         disabled_tools: &denied_tools,
                         compaction: context.settings.compaction,
                         show_splash,
@@ -1886,6 +1895,8 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
+    context.herdr.report_session(&active.session.id);
+    let turn_lifecycle = context.herdr.start_turn();
     // Rules hot-reload between turns; the run holds the snapshot.
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
@@ -2021,7 +2032,7 @@ async fn submit(
         provider_context: active.provider_context.clone(),
         effective_context_window: status.context_capacity,
         fast_mode: status.fast_mode,
-        lifecycle: artist_agent::LifecycleEmitter::default(),
+        lifecycle: turn_lifecycle.emitter(),
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {
@@ -2422,6 +2433,7 @@ async fn submit(
         Some(task.await.context("join Artist agent"))
     };
     let unfinished_subagents = subagents.finish_turn(cancelled);
+    turn_lifecycle.finish(cancelled);
     lifecycle_extensions
         .update_context(|value| value.agent_state = serde_json::json!({"state":"idle"}));
     let _ = lifecycle_extensions.publish(artist_extensions::Event {
