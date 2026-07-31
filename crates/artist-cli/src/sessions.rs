@@ -158,14 +158,17 @@ impl SessionStore {
         Ok(active)
     }
 
+    pub fn find(&self, id: &str) -> Result<Session> {
+        self.list()?
+            .into_iter()
+            .find(|session| session.id == id)
+            .with_context(|| format!("session '{id}' not found"))
+    }
+
     /// Opens a session for writing, migrating legacy markdown-only sessions
     /// to the event log first. Returns the events for resume projections.
     pub fn open(&self, id: &str) -> Result<(ActiveSession, Vec<Envelope>)> {
-        let session = self
-            .list()?
-            .into_iter()
-            .find(|s| s.id == id)
-            .context("session not found")?;
+        let session = self.find(id)?;
         let session = if session.has_event_log() {
             session
         } else {
@@ -180,11 +183,7 @@ impl SessionStore {
     /// commands). Legacy sessions are parsed via the migration path but not
     /// converted.
     pub fn peek(&self, id: &str) -> Result<(Session, Vec<Envelope>)> {
-        let session = self
-            .list()?
-            .into_iter()
-            .find(|s| s.id == id)
-            .context("session not found")?;
+        let session = self.find(id)?;
         if session.has_event_log() {
             let events = EventLogReader::new(session.dir()).read_all()?;
             return Ok((session, events));

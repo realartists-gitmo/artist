@@ -60,6 +60,9 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
+    if cli.command.is_none() {
+        enter_resume_project(&SessionStore::new(config_root), cli.resume.as_deref())?;
+    }
 
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
@@ -213,6 +216,25 @@ fn enter_positional_project(cli: &mut Cli) -> Result<()> {
     Ok(())
 }
 
+fn enter_resume_project(sessions: &SessionStore, resume: Option<&str>) -> Result<()> {
+    let Some(id) = resume.filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    let session = sessions.find(id)?;
+    if !session.project.is_dir() {
+        bail!(
+            "session '{id}' project no longer exists: {}",
+            session.project.display()
+        );
+    }
+    std::env::set_current_dir(&session.project).with_context(|| {
+        format!(
+            "restore project directory for session '{id}': {}",
+            session.project.display()
+        )
+    })
+}
+
 fn load_resumed(
     sessions: &SessionStore,
     project: &std::path::Path,
@@ -221,18 +243,12 @@ fn load_resumed(
     let Some(requested) = resume else {
         return Ok(None);
     };
+    if !requested.is_empty() {
+        return sessions.open(requested).map(Some);
+    }
     let mut available = sessions.list_project(project)?;
     available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-    // An unknown id shouldn't abort the launch — a typo or stale id falls back
-    // to the interactive picker instead of killing the process.
-    let requested_missing =
-        !requested.is_empty() && !available.iter().any(|session| session.id == requested);
-    if requested_missing {
-        eprintln!(
-            "session '{requested}' was not found in this project — pick one to resume instead"
-        );
-    }
-    let id = if requested.is_empty() || requested_missing {
+    let id = {
         if available.is_empty() {
             bail!("no sessions found for {}", project.display());
         }
@@ -258,8 +274,6 @@ fn load_resumed(
         available[prompt::select_paged("Session to resume", &items, 0, 10)?]
             .id
             .clone()
-    } else {
-        requested.to_owned()
     };
     Ok(Some(sessions.open(&id)?))
 }
