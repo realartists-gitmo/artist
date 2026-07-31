@@ -187,3 +187,90 @@ impl TurnActivity {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (Activity, Arc<Mutex<Vec<HerdrState>>>) {
+        let emitted = Arc::new(Mutex::new(Vec::new()));
+        let capture = emitted.clone();
+        let activity = Activity::new(move |state| capture.lock().unwrap().push(state));
+        (activity, emitted)
+    }
+
+    fn states(emitted: &Arc<Mutex<Vec<HerdrState>>>) -> Vec<HerdrState> {
+        emitted.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn aggregates_turn_tools_and_background_subagents() {
+        let (activity, emitted) = fixture();
+        activity.claim_idle();
+        let turn = activity.start_turn();
+        turn.tool_started("tool");
+        turn.subagent_started("child");
+        turn.tool_finished("tool");
+        turn.finish();
+        assert_eq!(
+            states(&emitted),
+            vec![HerdrState::Idle, HerdrState::Working]
+        );
+
+        turn.subagent_finished("child");
+        assert_eq!(
+            states(&emitted),
+            vec![HerdrState::Idle, HerdrState::Working, HerdrState::Idle]
+        );
+    }
+
+    #[test]
+    fn blockers_take_precedence_and_resolve_to_working() {
+        let (activity, emitted) = fixture();
+        let turn = activity.start_turn();
+        activity.set_blocked("approval", true);
+        activity.set_blocked("question", true);
+        activity.set_blocked("approval", false);
+        assert_eq!(
+            states(&emitted),
+            vec![HerdrState::Working, HerdrState::Blocked]
+        );
+        activity.set_blocked("question", false);
+        turn.finish();
+        assert_eq!(
+            states(&emitted),
+            vec![
+                HerdrState::Working,
+                HerdrState::Blocked,
+                HerdrState::Working,
+                HerdrState::Idle,
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellation_clears_children_and_rejects_late_starts() {
+        let (activity, emitted) = fixture();
+        let turn = activity.start_turn();
+        turn.tool_started("tool");
+        turn.subagent_started("child");
+        turn.cancel();
+        turn.tool_started("late-tool");
+        turn.subagent_started("late-child");
+        turn.tool_finished("tool");
+        turn.subagent_finished("child");
+        assert_eq!(
+            states(&emitted),
+            vec![HerdrState::Working, HerdrState::Idle]
+        );
+    }
+
+    #[test]
+    fn identical_states_are_deduplicated() {
+        let (activity, emitted) = fixture();
+        activity.claim_idle();
+        activity.claim_idle();
+        activity.set_blocked("auth", false);
+        assert_eq!(states(&emitted), vec![HerdrState::Idle]);
+    }
+}
