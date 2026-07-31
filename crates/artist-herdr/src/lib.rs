@@ -1,5 +1,7 @@
+mod context;
 mod state;
 
+pub use context::{AGENT, HerdrContext, LIFECYCLE_SOURCE};
 pub use state::{Activity, TurnActivity};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
