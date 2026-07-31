@@ -1,11 +1,11 @@
 //! Provider-backed generation for Pi-style structured context checkpoints.
 
+use crate::rig_provider::RigClient;
 use anyhow::{Context, Result, bail};
 use artist_session::{
     ProviderContextHandle,
     compaction::{CompactionPlan, format_file_operations},
 };
-use crate::rig_provider::RigClient;
 use llm_provider::SavedProvider;
 use rig_core::{
     OneOrMany,

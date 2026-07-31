@@ -136,18 +136,17 @@ impl PortableTool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run a focused subagent for work that benefits from a separate agent. Set background=true to continue other work, then use status/read/wait/cancel with taskId. Set fork=true to include the main chat context. Collect or cancel every background subagent before you finish."
-            .into()
+        "Run a focused subagent.".into()
     }
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{
-            "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run"},
-            "prompt":{"type":"string"},
-            "agent":{"type":"string","enum":self.profiles.names(),"description":"Configured subagent role"},
+            "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run","description":"Operation to perform."},
+            "prompt":{"type":"string","description":"Task for the subagent."},
+            "agent":{"type":"string","enum":self.profiles.names(),"description":"Configured subagent role."},
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
             "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
-            "taskId":{"type":"string"},
-            "waitMs":{"type":"integer","minimum":1,"maximum":30000}
+            "taskId":{"type":"string","description":"Task identifier returned when a subagent is started; required for status, read, wait, and cancel."},
+            "waitMs":{"type":"integer","minimum":1,"maximum":30000,"description":"Maximum time to wait for a background task state change."}
         },"additionalProperties":false})
     }
 
@@ -351,8 +350,8 @@ impl Delegate {
         run: &DelegateRun,
     ) -> Result<String, DelegateError> {
         use crate::rig_provider::RigClient;
-        let client = RigClient::build(provider)
-            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        let client =
+            RigClient::build(provider).map_err(|error| DelegateError::Failed(error.to_string()))?;
         macro_rules! run_with {
             ($client:expr) => {
                 self.run_agent_with(

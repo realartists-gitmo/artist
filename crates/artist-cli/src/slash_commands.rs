@@ -78,7 +78,7 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/resume [id]",
     },
     SlashCommand {
-                name: "/help",
+        name: "/help",
         description: "Show available commands",
         usage: "/help",
     },

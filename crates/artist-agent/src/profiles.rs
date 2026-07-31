@@ -217,7 +217,10 @@ impl Profiles {
         let mut max_concurrent = None;
 
         let project_root = project.join(".artist");
-        for root in global.into_iter().chain(std::iter::once(project_root.as_path())) {
+        for root in global
+            .into_iter()
+            .chain(std::iter::once(project_root.as_path()))
+        {
             if let Some(value) = load_settings(root, &mut diagnostics) {
                 max_concurrent = Some(value.max(1));
             }
@@ -370,7 +373,11 @@ fn parse(path: &Path) -> Result<Raw, String> {
 
 /// Whole-field merge along the `extends` chain: a field present in the child
 /// replaces the parent's entirely, a field absent is inherited.
-fn resolve(name: &str, raw: &BTreeMap<String, Raw>, seen: &mut BTreeSet<String>) -> Result<Profile, String> {
+fn resolve(
+    name: &str,
+    raw: &BTreeMap<String, Raw>,
+    seen: &mut BTreeSet<String>,
+) -> Result<Profile, String> {
     if !seen.insert(name.to_owned()) {
         return Err(format!("profile {name} has a circular `extends` chain"));
     }
@@ -602,7 +609,11 @@ mod tests {
         let profiles = Profiles::discover_from(dir.path(), None);
         let child = profiles.get("child").unwrap();
         let thinking = child.candidates[0].thinking.unwrap();
-        assert_eq!(thinking.mode, ThinkingMode::On, "mode must not be inherited");
+        assert_eq!(
+            thinking.mode,
+            ThinkingMode::On,
+            "mode must not be inherited"
+        );
         assert_eq!(thinking.level, Some(ThinkingLevel::High));
         // The child declared its own routing, so it does not inherit the model.
         assert_eq!(child.candidates[0].model, None);
@@ -696,7 +707,12 @@ mod tests {
         assert!(catalog_contains(&profiles, "both `candidates`"));
     }
 
-    fn account(id: &str, name: &str, kind: llm_provider::ProviderKind, model: &str) -> llm_provider::SavedProvider {
+    fn account(
+        id: &str,
+        name: &str,
+        kind: llm_provider::ProviderKind,
+        model: &str,
+    ) -> llm_provider::SavedProvider {
         let mut provider = llm_provider::SavedProvider::chatgpt(
             llm_provider::ProviderId::new(id).unwrap(),
             name,
@@ -719,7 +735,12 @@ mod tests {
     /// account and only substituted the model string.
     #[test]
     fn a_candidate_resolves_to_an_account_other_than_the_parent() {
-        let parent = account("chatgpt", "ChatGPT", llm_provider::ProviderKind::Chatgpt, "gpt-5");
+        let parent = account(
+            "chatgpt",
+            "ChatGPT",
+            llm_provider::ProviderKind::Chatgpt,
+            "gpt-5",
+        );
         let set = llm_provider::ProviderSet::new(vec![
             parent.clone(),
             account(
@@ -746,7 +767,12 @@ mod tests {
 
     #[test]
     fn an_unnamed_provider_inherits_the_parent_account() {
-        let parent = account("chatgpt", "ChatGPT", llm_provider::ProviderKind::Chatgpt, "gpt-5");
+        let parent = account(
+            "chatgpt",
+            "ChatGPT",
+            llm_provider::ProviderKind::Chatgpt,
+            "gpt-5",
+        );
         let set = llm_provider::ProviderSet::new(vec![parent.clone()]);
         let candidate = Candidate {
             provider: None,
@@ -764,7 +790,12 @@ mod tests {
 
     #[test]
     fn an_unknown_provider_reference_is_an_error_not_a_silent_fallback() {
-        let parent = account("chatgpt", "ChatGPT", llm_provider::ProviderKind::Chatgpt, "gpt-5");
+        let parent = account(
+            "chatgpt",
+            "ChatGPT",
+            llm_provider::ProviderKind::Chatgpt,
+            "gpt-5",
+        );
         let set = llm_provider::ProviderSet::new(vec![parent.clone()]);
         let candidate = Candidate {
             provider: Some("not-configured".into()),

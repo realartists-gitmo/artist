@@ -153,7 +153,6 @@ impl Breaker {
     pub fn record_success(&self, key: &CandidateKey) {
         self.health.remove(key);
     }
-
 }
 
 /// Why a candidate was not attempted, for the exhaustion report.

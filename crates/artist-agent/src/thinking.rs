@@ -53,7 +53,8 @@ pub(crate) fn request_params(
                     // current Anthropic models; pairing it with `xhigh`/`max`
                     // is rejected outright. Drop the level rather than send a
                     // request we know the provider will refuse.
-                    if let Some(level) = thinking.level.filter(|level| *level <= ThinkingLevel::High)
+                    if let Some(level) =
+                        thinking.level.filter(|level| *level <= ThinkingLevel::High)
                     {
                         params["output_config"] = json!({ "effort": level.as_str() });
                     }
@@ -78,9 +79,12 @@ mod tests {
 
     #[test]
     fn chatgpt_always_carries_the_cache_key_and_a_summary() {
-        let params =
-            request_params(ProviderKind::Chatgpt, "artist-1", thinking(ThinkingMode::On, None))
-                .unwrap();
+        let params = request_params(
+            ProviderKind::Chatgpt,
+            "artist-1",
+            thinking(ThinkingMode::On, None),
+        )
+        .unwrap();
         assert_eq!(params["prompt_cache_key"], "artist-1");
         assert_eq!(params["reasoning"]["summary"], "auto");
         assert!(params["reasoning"]["effort"].is_null());

@@ -343,8 +343,8 @@ async fn execute_prompt(
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
     let outcome = {
         // A resumed session runs as whatever profile it last handed off to.
-        let session_profile = artist_session::active_profile(&resumed_events)
-            .unwrap_or_else(|| "default".to_owned());
+        let session_profile =
+            artist_session::active_profile(&resumed_events).unwrap_or_else(|| "default".to_owned());
         let chat = artist_agent::stream_chat_as(
             &session_provider,
             &session_profile,

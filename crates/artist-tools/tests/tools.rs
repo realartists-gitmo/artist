@@ -27,6 +27,19 @@ where
         .replace("\\n", "\n")
 }
 
+#[test]
+fn edit_schema_uses_nullable_end_for_strict_tools() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let tools = ToolBundle::new(workspace);
+    let schema = tools.edit.parameters();
+    let replacement = &schema["properties"]["replacements"]["items"];
+    assert_eq!(replacement["required"], json!(["start", "end", "content"]));
+    assert_eq!(
+        replacement["properties"]["end"]["anyOf"],
+        json!([{"type":"string"}, {"type":"null"}])
+    );
+}
+
 #[tokio::test]
 async fn reads_then_edits_with_mnemonic_anchor() {
     let (_root, _state, workspace) = workspace(&[("src/lib.rs", "fn alpha() {}\nfn beta() {}\n")]);

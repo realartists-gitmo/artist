@@ -24,12 +24,46 @@ impl PortableTool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace lines in a project-relative or absolute file using ANCHORs from the latest read. Never use line numbers as anchors. If an anchor is stale or unknown, read the file again before retrying."
+        "Atomically replace line ranges in a project-relative or absolute file. Use anchors from a recent read of the same file. Re-read before retrying if an anchor is stale or unknown."
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"replacements":{"type":"array","items":{"type":"object","properties":{"start":{"type":"string"},"end":{"type":"string"},"content":{"type":"string"}},"required":["start","content"],"additionalProperties":false},"minItems":1}},"required":["path","replacements"],"additionalProperties":false})
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "replacements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {
+                                "type": "string",
+                                "description": "Bare mnemonic anchor token from read output. For `time: beta`, pass `time`, not `time: beta`; never use a line number."
+                            },
+                            "end": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "null"}
+                                ],
+                                "description": "Ending mnemonic anchor, or null to replace only the start line."
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Replacement text for the selected line range."
+                            }
+                        },
+                        "required": ["start", "end", "content"],
+                        "additionalProperties": false
+                    },
+                    "minItems": 1
+                }
+            },
+            "required": ["path", "replacements"],
+            "additionalProperties": false
+        })
     }
+
     async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
         let target = self.0.resolve_existing(&args.path)?;
         if args.replacements.is_empty() {

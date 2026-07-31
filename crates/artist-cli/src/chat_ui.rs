@@ -676,8 +676,8 @@ async fn run_loop(
     // A resumed session runs as whatever profile it last handed off to. The
     // event log is the source of truth, so a rewind past a handoff boundary
     // restores the earlier profile for free.
-    let mut current_profile = artist_session::active_profile(&resumed_events)
-        .unwrap_or_else(|| "default".to_owned());
+    let mut current_profile =
+        artist_session::active_profile(&resumed_events).unwrap_or_else(|| "default".to_owned());
     let todos = artist_agent::todo::TodoStore::default();
     todos.restore(&resumed_events);
     let mut handoff_depth = artist_session::handoff_depth(&resumed_events);
@@ -857,8 +857,7 @@ async fn run_loop(
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
                     Ok(slash_commands::ParsedCommand::Handoff { profile }) => {
-                        let profiles =
-                            artist_agent::profiles::Profiles::discover(context.project);
+                        let profiles = artist_agent::profiles::Profiles::discover(context.project);
                         if profiles.get(profile).is_err() {
                             command_panel = vec![format!(
                                 "Unknown profile {profile}. Available: {}",
@@ -1124,9 +1123,7 @@ async fn run_loop(
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
-                        providers: llm_provider::ProviderSet::new(
-                            context.store.providers.clone(),
-                        ),
+                        providers: llm_provider::ProviderSet::new(context.store.providers.clone()),
                         profile: current_profile.clone(),
                         todos: todos.clone(),
                         handoff_depth,
@@ -3330,8 +3327,7 @@ fn apply_selected_suggestion(
     } else if let Some(completion) = mcp.get(index) {
         // A fully-specified command can be sent as-is; a partial one keeps a
         // trailing space so the user (or Enter) can still add an argument.
-        let trailing =
-            completion != "/mcp status" && completion.split_whitespace().count() != 3;
+        let trailing = completion != "/mcp status" && completion.split_whitespace().count() != 3;
         input.set_text(format!("{completion}{}", if trailing { " " } else { "" }));
     } else if let (Some(range), Some(skill)) = (skill_range.clone(), skills.get(index)) {
         input.replace_range(range, &format!("${}", skill.name));

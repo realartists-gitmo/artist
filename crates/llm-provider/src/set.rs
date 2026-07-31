@@ -108,7 +108,10 @@ mod tests {
     /// with it — otherwise renaming an account could silently reroute traffic.
     #[test]
     fn ids_take_precedence_over_names() {
-        let set = ProviderSet::new(vec![provider("work", "personal"), provider("personal", "X")]);
+        let set = ProviderSet::new(vec![
+            provider("work", "personal"),
+            provider("personal", "X"),
+        ]);
         assert_eq!(set.resolve("personal").unwrap().id.as_str(), "personal");
     }
 

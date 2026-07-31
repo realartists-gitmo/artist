@@ -510,6 +510,73 @@ fn represented_assistant_input(
         .map_err(|error| CompletionError::ResponseError(error.to_string()))
 }
 
+/// The wrapper OpenAI's serving layer injects beside the caller's tools.
+///
+/// When parallel tool calling is enabled — the default, and we never send
+/// `parallel_tool_calls: false` — OpenAI adds a `multi_tool_use` namespace
+/// alongside the `functions` namespace holding our tools, so the model can emit
+/// a batch as a single call whose arguments name the real tools. Nothing
+/// registers that wrapper on our side, so a call to it would be a call to an
+/// unknown tool.
+const PARALLEL_TOOL: &str = "multi_tool_use.parallel";
+
+/// Expand an injected parallel wrapper into the calls it names.
+///
+/// Returns `None` for anything that is not the wrapper, so ordinary calls pass
+/// through untouched. Derived ids are a pure function of the wrapper's own ids,
+/// so the live stream and the persisted canonical items agree on them without
+/// coordinating — which is what keeps every result paired with a call the
+/// provider can see.
+fn expanded_parallel_call(item: &Value) -> Option<Vec<Value>> {
+    if item.get("type").and_then(Value::as_str) != Some("function_call")
+        || item.get("name").and_then(Value::as_str) != Some(PARALLEL_TOOL)
+    {
+        return None;
+    }
+    let arguments: Value = item
+        .get("arguments")
+        .and_then(Value::as_str)
+        .and_then(|raw| serde_json::from_str(raw).ok())?;
+    let uses = arguments.get("tool_uses")?.as_array()?;
+    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+    let call_id = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .unwrap_or(id)
+        .to_owned();
+    Some(
+        uses.iter()
+            .enumerate()
+            .map(|(index, use_)| {
+                // Tools live in the `functions` namespace, so the wrapper
+                // refers to them across namespaces; our registry uses the bare
+                // name.
+                let name = use_
+                    .get("recipient_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let name = name.strip_prefix("functions.").unwrap_or(name);
+                let parameters = use_.get("parameters").cloned().unwrap_or_else(|| json!({}));
+                json!({
+                    "type": "function_call",
+                    "id": format!("{id}.{index}"),
+                    "call_id": format!("{call_id}.{index}"),
+                    "name": name,
+                    "arguments": parameters.to_string(),
+                    "status": "completed",
+                })
+            })
+            .collect(),
+    )
+}
+
+fn expand_parallel_calls(items: Vec<Value>) -> Vec<Value> {
+    items
+        .into_iter()
+        .flat_map(|item| expanded_parallel_call(&item).unwrap_or_else(|| vec![item]))
+        .collect()
+}
+
 fn normalized_terminal_wire(wire: &Value, text: &str, streamed_items: &[Value]) -> Value {
     let mut normalized = wire.clone();
     let has_terminal_choice = wire
@@ -523,11 +590,10 @@ fn normalized_terminal_wire(wire: &Value, text: &str, streamed_items: &[Value]) 
                 )
             })
         });
-    if has_terminal_choice {
-        return normalized;
-    }
-
-    let output = normalized.get_mut("output").and_then(Value::as_array_mut);
+    let output = normalized
+        .get_mut("output")
+        .and_then(Value::as_array_mut)
+        .filter(|_| !has_terminal_choice);
     if let Some(output) = output {
         // Prefer completed tool items. Otherwise synthesize the assistant message
         // represented by text events; opaque reasoning stays only in raw output.
@@ -547,6 +613,12 @@ fn normalized_terminal_wire(wire: &Value, text: &str, streamed_items: &[Value]) 
                 "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}]
             }));
         }
+    }
+    // The wrapper must not reach the sidecar: the calls we dispatch are the
+    // expanded ones, so the persisted record has to name them too or their
+    // results pair with nothing.
+    if let Some(output) = normalized.get_mut("output").and_then(Value::as_array_mut) {
+        *output = expand_parallel_calls(std::mem::take(output));
     }
     normalized
 }
@@ -741,34 +813,38 @@ fn parse_event(data: &str) -> Result<Vec<RawStreamingChoice<StreamResponse>>, Co
             if let Some(item) = v.get("item") {
                 match item.get("type").and_then(Value::as_str) {
                     Some("function_call") => {
-                        let id = item
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .or_else(|| item.get("call_id").and_then(Value::as_str))
-                            .unwrap_or("")
-                            .to_owned();
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or(&id)
-                            .to_owned();
-                        let args = serde_json::from_str(
-                            item.get("arguments")
+                        for call in
+                            expanded_parallel_call(item).unwrap_or_else(|| vec![item.clone()])
+                        {
+                            let id = call
+                                .get("id")
                                 .and_then(Value::as_str)
-                                .unwrap_or("{}"),
-                        )?;
-                        out.push(RawStreamingChoice::ToolCall(
-                            RawStreamingToolCall::new(
-                                id,
-                                item.get("name")
+                                .or_else(|| call.get("call_id").and_then(Value::as_str))
+                                .unwrap_or("")
+                                .to_owned();
+                            let call_id = call
+                                .get("call_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&id)
+                                .to_owned();
+                            let args = serde_json::from_str(
+                                call.get("arguments")
                                     .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .into(),
-                                args,
-                            )
-                            .with_internal_call_id(call_id.clone())
-                            .with_call_id(call_id),
-                        ));
+                                    .unwrap_or("{}"),
+                            )?;
+                            out.push(RawStreamingChoice::ToolCall(
+                                RawStreamingToolCall::new(
+                                    id,
+                                    call.get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .into(),
+                                    args,
+                                )
+                                .with_internal_call_id(call_id.clone())
+                                .with_call_id(call_id),
+                            ));
+                        }
                     }
                     Some("reasoning") => {
                         let id = item.get("id").and_then(Value::as_str).map(str::to_owned);
@@ -1113,7 +1189,8 @@ mod transport_tests {
 
     #[test]
     fn an_already_answered_call_is_left_alone() {
-        let call = json!({"type":"function_call","id":"fc1","call_id":"c","name":"edit","arguments":"{}"});
+        let call =
+            json!({"type":"function_call","id":"fc1","call_id":"c","name":"edit","arguments":"{}"});
         let output = json!({"type":"function_call_output","call_id":"c","output":"ok"});
         let merged = reconcile_inputs(vec![call.clone(), output.clone()], &[], Vec::new(), &[]);
         assert_eq!(merged, vec![call, output]);
@@ -1122,21 +1199,121 @@ mod transport_tests {
     /// Parallel tool calls answered out of order still count as answered.
     #[test]
     fn each_call_is_matched_by_call_id_not_position() {
-        let first = json!({"type":"function_call","id":"fc1","call_id":"a","name":"read","arguments":"{}"});
-        let second = json!({"type":"function_call","id":"fc2","call_id":"b","name":"read","arguments":"{}"});
+        let first =
+            json!({"type":"function_call","id":"fc1","call_id":"a","name":"read","arguments":"{}"});
+        let second =
+            json!({"type":"function_call","id":"fc2","call_id":"b","name":"read","arguments":"{}"});
         let answer_b = json!({"type":"function_call_output","call_id":"b","output":"ok"});
-        let merged = reconcile_inputs(
-            vec![first, second, answer_b],
-            &[],
-            Vec::new(),
-            &[],
-        );
+        let merged = reconcile_inputs(vec![first, second, answer_b], &[], Vec::new(), &[]);
 
         let outputs: Vec<&str> = merged
             .iter()
             .filter(|item| item["type"] == "function_call_output")
             .map(|item| item["call_id"].as_str().unwrap())
             .collect();
-        assert_eq!(outputs, ["a", "b"], "only the unanswered call gains an output");
+        assert_eq!(
+            outputs,
+            ["a", "b"],
+            "only the unanswered call gains an output"
+        );
+    }
+
+    fn wrapper(call_id: &str) -> Value {
+        json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": call_id,
+            "name": "multi_tool_use.parallel",
+            "arguments": json!({"tool_uses": [
+                {"recipient_name": "functions.read", "parameters": {"path": "a.rs"}},
+                {"recipient_name": "functions.grep", "parameters": {"query": "Foo"}}
+            ]}).to_string()
+        })
+    }
+
+    /// OpenAI injects `multi_tool_use.parallel` beside our tools, so the model
+    /// can batch calls into one we have no tool registered for. Expanding it
+    /// names the real tools instead.
+    #[test]
+    fn an_injected_parallel_wrapper_expands_into_the_calls_it_names() {
+        let calls = expanded_parallel_call(&wrapper("call_a")).unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["name"], "read", "the functions. prefix is stripped");
+        assert_eq!(calls[1]["name"], "grep");
+        assert_eq!(calls[0]["call_id"], "call_a.0", "ids derive from the wrapper");
+        assert_eq!(calls[1]["call_id"], "call_a.1");
+        // `arguments` is a JSON string on the wire, not an object.
+        assert_eq!(
+            serde_json::from_str::<Value>(calls[0]["arguments"].as_str().unwrap()).unwrap(),
+            json!({"path": "a.rs"})
+        );
+    }
+
+    #[test]
+    fn an_ordinary_call_is_left_alone() {
+        let call = json!({"type":"function_call","id":"fc1","call_id":"c","name":"read","arguments":"{}"});
+        assert!(expanded_parallel_call(&call).is_none());
+        assert_eq!(expand_parallel_calls(vec![call.clone()]), vec![call]);
+    }
+
+    /// A wrapper we cannot parse stays intact rather than vanishing: an
+    /// unknown-tool error is recoverable, a silently dropped call is not.
+    #[test]
+    fn a_malformed_wrapper_is_not_dropped() {
+        let broken = json!({
+            "type": "function_call", "id": "fc_1", "call_id": "c",
+            "name": "multi_tool_use.parallel", "arguments": "{\"nope\":1}"
+        });
+        assert!(expanded_parallel_call(&broken).is_none());
+    }
+
+    /// The dispatched calls and the persisted canonical items must agree, or
+    /// each result pairs with a call the provider never saw.
+    #[test]
+    fn the_stream_and_the_canonical_items_derive_the_same_ids() {
+        let event = json!({"type": "response.output_item.done", "item": wrapper("call_a")});
+        let streamed = parse_event(&event.to_string()).unwrap();
+        let stream_ids: Vec<String> = streamed
+            .iter()
+            .filter_map(|choice| match choice {
+                RawStreamingChoice::ToolCall(call) => call.call_id.clone(),
+                _ => None,
+            })
+            .collect();
+
+        let wire = normalized_terminal_wire(
+            &json!({"output": [wrapper("call_a")]}),
+            "",
+            &[],
+        );
+        let canonical_ids: Vec<String> = wire["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["call_id"].as_str().unwrap().to_owned())
+            .collect();
+
+        assert_eq!(stream_ids, ["call_a.0", "call_a.1"]);
+        assert_eq!(stream_ids, canonical_ids);
+    }
+
+    /// With both sides expanded, the results pair up and nothing is synthesized.
+    #[test]
+    fn expanded_calls_need_no_orphan_repair_once_answered() {
+        let calls = expanded_parallel_call(&wrapper("call_a")).unwrap();
+        let answers: Vec<Value> = calls
+            .iter()
+            .map(|call| json!({
+                "type": "function_call_output",
+                "call_id": call["call_id"],
+                "output": "ok"
+            }))
+            .collect();
+        let mut saved = calls.clone();
+        saved.extend(answers);
+
+        let merged = reconcile_inputs(saved.clone(), &[], Vec::new(), &[]);
+        assert_eq!(merged, saved, "every expanded call is already answered");
     }
 }

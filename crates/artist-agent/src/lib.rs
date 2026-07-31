@@ -10,8 +10,8 @@ mod delegate_tests;
 mod fallback;
 pub mod handoff;
 pub mod mcp;
-pub mod profiles;
 pub mod openai_responses;
+pub mod profiles;
 mod prompt_config;
 mod provider_retry;
 mod resources;
@@ -488,7 +488,16 @@ async fn attempt(
     use rig_provider::RigClient;
     macro_rules! run_with {
         ($client:expr) => {
-            stream_chat_with($client, resolved, run, input, tool_context, handles, on_event).await
+            stream_chat_with(
+                $client,
+                resolved,
+                run,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
         };
     }
     match RigClient::build(resolved)? {
@@ -526,7 +535,6 @@ async fn attempt(
         RigClient::ZAiAnthropic(client) => run_with!(client),
     }
 }
-
 
 /// The provider-private lineage for a hop.
 ///

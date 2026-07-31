@@ -32,13 +32,7 @@ impl Handoff {
     /// The original user request is carried verbatim rather than summarized —
     /// it is ground truth, it is small, and summarizing the user's own words is
     /// the highest-regret loss in the whole exchange.
-    pub fn seed(
-        &self,
-        from: &str,
-        user_request: &str,
-        chain: &[String],
-        todos: &str,
-    ) -> String {
+    pub fn seed(&self, from: &str, user_request: &str, chain: &[String], todos: &str) -> String {
         let mut seed = format!(
             "<handoff from=\"{from}\">\n<summary>\n{}\n</summary>",
             self.summary.trim()
@@ -277,7 +271,10 @@ mod tests {
         assert!(seed.contains("use serde_yaml"));
         assert!(seed.contains("which crate owns the registry?"));
         assert!(seed.contains("planner -> worker"), "{seed}");
-        assert!(seed.contains("port the loader"), "todos cross verbatim: {seed}");
+        assert!(
+            seed.contains("port the loader"),
+            "todos cross verbatim: {seed}"
+        );
     }
 
     /// A single-hop chain is not worth the tokens; it says nothing the `from`
