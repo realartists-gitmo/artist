@@ -312,6 +312,7 @@ async fn execute_prompt(
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
         effective_context_window,
+        fast_mode: false,
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));

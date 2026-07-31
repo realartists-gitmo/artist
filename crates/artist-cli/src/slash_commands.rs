@@ -13,6 +13,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/login",
     },
     SlashCommand {
+        name: "/fast",
+        description: "Toggle fast mode for supported providers",
+        usage: "/fast",
+    },
+    SlashCommand {
         name: "/model",
         description: "Select a model and reasoning effort",
         usage: "/model [model] [reasoning]",
@@ -91,6 +96,7 @@ pub(crate) enum ParsedCommand<'a> {
         action: &'a str,
         server: Option<&'a str>,
     },
+    Fast,
     Model {
         model: Option<&'a str>,
         reasoning: Option<&'a str>,
@@ -204,6 +210,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
         ("/help", _) => Err(ParseError::InvalidUsage {
             command,
             usage: "/help",
+        }),
+        ("/fast", []) => Ok(ParsedCommand::Fast),
+        ("/fast", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/fast",
         }),
         ("/model", []) => Ok(ParsedCommand::Model {
             model: None,
@@ -325,6 +336,7 @@ mod tests {
             COMMANDS.iter().map(|c| c.name).collect::<Vec<_>>(),
             [
                 "/login",
+                "/fast",
                 "/model",
                 "/statusbar",
                 "/skills",

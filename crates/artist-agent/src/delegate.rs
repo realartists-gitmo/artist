@@ -481,6 +481,7 @@ impl Delegate {
                     self.provider.model.as_deref(),
                     self.handles.effective_context_window,
                 ),
+                self.handles.fast_mode,
             ) {
                 builder = builder.additional_params(params);
             }

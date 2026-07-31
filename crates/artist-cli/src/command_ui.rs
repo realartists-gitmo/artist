@@ -46,6 +46,11 @@ pub async fn run(
             context_capacity: None,
             model_changed: false,
         }),
+        ParsedCommand::Fast => Ok(CommandOutput {
+            lines: vec!["/fast is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Rules(_) => Ok(CommandOutput {
             lines: vec!["/rules is only available inside a chat session".to_owned()],
             context_capacity: None,

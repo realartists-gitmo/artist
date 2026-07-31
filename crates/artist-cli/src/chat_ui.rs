@@ -219,6 +219,7 @@ struct StatusRuntime {
     context_capacity: Option<u64>,
     /// Sum of all completion totals this session (billed volume).
     session_tokens: u64,
+    fast_mode: bool,
     extension_values: Vec<(String, String)>,
 }
 
@@ -258,7 +259,7 @@ fn footer_view(
     runtime: &StatusRuntime,
 ) -> status_bar::StatusView {
     provider.map_or_else(status_bar::StatusView::default, |provider| {
-        status_bar::view(status_bar::segments(
+        status_bar::view(status_bar::segments_with_fast_mode(
             config,
             project,
             provider,
@@ -266,6 +267,7 @@ fn footer_view(
             runtime.used_tokens,
             runtime.context_capacity,
             runtime.session_tokens,
+            runtime.fast_mode,
             &runtime.extension_values,
         ))
     })
@@ -496,6 +498,7 @@ pub async fn run(
         used_tokens: None,
         context_capacity,
         session_tokens: 0,
+        fast_mode: false,
         extension_values: extensions.status_items(),
     };
     status.refresh(&store.status_bar, project);
@@ -863,6 +866,24 @@ async fn run_loop(
                             Err(error) => vec![format!("Compaction failed: {error:#}")],
                         }
                     }
+                    Ok(slash_commands::ParsedCommand::Fast) => {
+                        if session_provider.as_ref().is_some_and(|provider| {
+                            provider.provider == llm_provider::ProviderKind::Openai
+                        }) {
+                            status.fast_mode = !status.fast_mode;
+                            vec![format!(
+                                "Fast mode {}.",
+                                if status.fast_mode {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            )]
+                        } else {
+                            status.fast_mode = false;
+                            vec!["Fast mode is not supported by the active provider.".into()]
+                        }
+                    }
                     Ok(slash_commands::ParsedCommand::Rules(action)) => handle_rules(
                         context.rules_engine,
                         context.rules_handle,
@@ -883,6 +904,7 @@ async fn run_loop(
                         context.rules_handle.restore_from_log(&[]);
                         status.used_tokens = None;
                         status.session_tokens = 0;
+                        status.fast_mode = false;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
                     Ok(slash_commands::ParsedCommand::Login) => match handle_login(
@@ -896,6 +918,7 @@ async fn run_loop(
                     {
                         Ok((lines, Some(index))) => {
                             context.provider_index = Some(index);
+                            status.fast_mode = false;
                             session_provider = Some(
                                 context
                                     .settings
@@ -1990,6 +2013,7 @@ async fn submit(
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
         effective_context_window: status.context_capacity,
+        fast_mode: status.fast_mode,
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {
@@ -3287,6 +3311,7 @@ mod tests {
             used_tokens: None,
             context_capacity: None,
             session_tokens: 0,
+            fast_mode: false,
             extension_values: Vec::new(),
         };
         assert_eq!(

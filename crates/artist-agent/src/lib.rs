@@ -131,6 +131,8 @@ pub struct SessionHandles {
     /// Effective model context window from the normalized catalog. Unknown
     /// models use the adapter's conservative fallback.
     pub effective_context_window: Option<u64>,
+    /// Request OpenAI priority processing for this session.
+    pub fast_mode: bool,
     pub cancel: CancellationToken,
 }
 
@@ -145,6 +147,7 @@ impl Default for SessionHandles {
             conversation_id: "default".to_owned(),
             provider_context: artist_session::ProviderContextHandle::noop(),
             effective_context_window: None,
+            fast_mode: false,
             cancel: CancellationToken::new(),
         }
     }
@@ -435,6 +438,7 @@ where
             overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
             handles.effective_context_window,
+            handles.fast_mode,
         ) {
             builder = builder.additional_params(params);
         }
@@ -783,7 +787,13 @@ pub(crate) fn request_params(
     cache_key: &str,
     reasoning_effort: Option<&str>,
     effective_context_window: Option<u64>,
+    fast_mode: bool,
 ) -> Option<serde_json::Value> {
+    if provider == llm_provider::ProviderKind::Openai
+        && api.unwrap_or_default() == llm_provider::OpenAiApi::ChatCompletions
+    {
+        return fast_mode.then(|| json!({ "service_tier": "priority" }));
+    }
     if provider != llm_provider::ProviderKind::Chatgpt
         && !(provider == llm_provider::ProviderKind::Openai
             && api.unwrap_or_default() == llm_provider::OpenAiApi::Responses)
@@ -813,6 +823,9 @@ pub(crate) fn request_params(
         Some(effort) => json!({ "effort": effort, "summary": "auto", "context": "all_turns" }),
         None => json!({ "summary": "auto", "context": "all_turns" }),
     };
+    if fast_mode && provider == llm_provider::ProviderKind::Openai {
+        params["service_tier"] = json!("priority");
+    }
     Some(params)
 }
 
@@ -886,13 +899,20 @@ mod tests {
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {
-        let params =
-            request_params(ProviderKind::Chatgpt, None, "cache", Some("high"), None).unwrap();
+        let params = request_params(
+            ProviderKind::Chatgpt,
+            None,
+            "cache",
+            Some("high"),
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(params["reasoning"]["effort"], "high");
         assert_eq!(params["reasoning"]["summary"], "auto");
 
         let default_effort =
-            request_params(ProviderKind::Chatgpt, None, "cache", None, None).unwrap();
+            request_params(ProviderKind::Chatgpt, None, "cache", None, None, false).unwrap();
         assert_eq!(default_effort["reasoning"]["summary"], "auto");
         assert!(default_effort["reasoning"].get("effort").is_none());
     }
@@ -905,7 +925,8 @@ mod tests {
                 Some(llm_provider::OpenAiApi::Responses),
                 "cache",
                 Some("high"),
-                None
+                None,
+                false,
             )
             .unwrap()["prompt_cache_key"],
             "cache"
@@ -917,6 +938,7 @@ mod tests {
                 "cache",
                 None,
                 None,
+                false,
             )
             .is_none()
         );
@@ -930,6 +952,7 @@ mod tests {
             "cache",
             None,
             Some(200_000),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -942,11 +965,36 @@ mod tests {
             "cache",
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(
             unknown["context_management"][0]["compact_threshold"],
             100_000
         );
+    }
+    #[test]
+    fn fast_mode_requests_openai_priority_tier() {
+        let params = request_params(
+            ProviderKind::Openai,
+            Some(llm_provider::OpenAiApi::Responses),
+            "cache",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(params["service_tier"], "priority");
+
+        let normal = request_params(
+            ProviderKind::Openai,
+            Some(llm_provider::OpenAiApi::Responses),
+            "cache",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(normal.get("service_tier").is_none());
     }
 }
