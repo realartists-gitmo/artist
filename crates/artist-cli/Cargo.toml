@@ -9,10 +9,21 @@ rust-version.workspace = true
 name = "artist"
 path = "src/main.rs"
 
+[features]
+default = ["webview"]
+# WebKitGTK (Linux) and WebView2 (Windows) are system libraries, not crates.
+# Building without this feature drops canvas windows, not canvases.
+webview = ["dep:wry", "dep:tao"]
+
 [dependencies]
 artist-agent = { path = "../artist-agent" }
+artist-canvas = { path = "../artist-canvas" }
+tao = { version = "0.36", optional = true }
+wry = { version = "0.56", optional = true }
+artist-computer = { path = "../artist-computer" }
 artist-extensions = { path = "../artist-extensions" }
 artist-rules = { path = "../artist-rules", features = ["wasm"] }
+artist-memory = { path = "../artist-memory" }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
 fs2 = "0.4"

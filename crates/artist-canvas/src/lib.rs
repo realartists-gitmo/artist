@@ -19,6 +19,7 @@ pub mod registry;
 pub mod server;
 pub mod state;
 pub mod templates;
+pub mod window;
 pub mod transform;
 
 pub use bridge::{CanvasHost, Denied, SendMode};

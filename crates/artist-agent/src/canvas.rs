@@ -241,10 +241,37 @@ impl CanvasTool {
             slug: slug.to_owned(),
             port: self.server.addr().port(),
         });
+
+        let url = self.server.url(slug);
+        let title = registry
+            .get(slug)
+            .map(|canvas| canvas.manifest.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| slug.to_owned());
+
+        // A window artist owns beats a tab the user has to find. Falling back
+        // to the URL matters more than it sounds: over SSH, or in a build
+        // without a webview, that is the only way in.
+        if artist_canvas::window::available() {
+            match artist_canvas::window::open(&url, &title) {
+                Ok(_) => {
+                    return Ok(format!(
+                        "Opened `{slug}` in a window. It reloads itself whenever you edit the \
+                         canvas, and closes when this session ends.\n\n\
+                         If the window did not appear, give the user this URL instead:\n{url}"
+                    ));
+                }
+                Err(error) => {
+                    return Ok(format!(
+                        "Could not open a window ({error}). Give the user this URL instead:\n{url}"
+                    ));
+                }
+            }
+        }
+
         Ok(format!(
-            "{}\n\nGive the user this URL. It stays live while this session runs, and reloads \
-             itself whenever you edit the canvas.",
-            self.server.url(slug)
+            "{url}\n\nNo display is available, so give the user this URL. It stays live while \
+             this session runs, and reloads itself whenever you edit the canvas."
         ))
     }
 
