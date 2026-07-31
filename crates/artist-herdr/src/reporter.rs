@@ -327,4 +327,17 @@ mod tests {
         integration.shutdown().await;
         assert!(started.elapsed() < Duration::from_millis(500));
     }
+
+    #[tokio::test]
+    async fn missing_cli_is_silently_nonfatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = HerdrContext {
+            pane_id: Arc::from("9-9"),
+            binary: Arc::new(dir.path().join("missing-herdr")),
+            socket_path: None,
+        };
+        let integration = HerdrIntegration::start(context);
+        integration.handle().claim_idle();
+        integration.shutdown().await;
+    }
 }
