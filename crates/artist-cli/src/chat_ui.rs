@@ -923,28 +923,35 @@ async fn run_loop(
                         status.fast_mode = false;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
-                    Ok(slash_commands::ParsedCommand::Login) => match handle_login(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        viewport_height,
-                        &footer,
-                    )
-                    .await
-                    {
-                        Ok((lines, Some(index))) => {
-                            context.provider_index = Some(index);
-                            status.fast_mode = false;
-                            session_provider = Some(
-                                context
-                                    .settings
-                                    .apply_to(context.store.providers[index].clone()),
-                            );
-                            lines
-                        }
-                        Ok((lines, None)) => lines,
-                        Err(error) => vec![format!("Login failed: {error:#}")],
-                    },
+                    Ok(slash_commands::ParsedCommand::Login) => {
+                        context.herdr.set_auth_blocked(true);
+                        let result = match handle_login(
+                            &mut terminal,
+                            context.store,
+                            context.store_path,
+                            viewport_height,
+                            &footer,
+                        )
+                        .await
+                        {
+                            Ok((lines, Some(index))) => {
+                                context.provider_index = Some(index);
+                                status.fast_mode = false;
+                                session_provider = Some(
+                                    context
+                                        .settings
+                                        .apply_to(context.store.providers[index].clone()),
+                                );
+                                lines
+                            }
+                            Ok((lines, None)) => lines,
+                            Err(error) => vec![format!("Login failed: {error:#}")],
+                        };
+                        context
+                            .herdr
+                            .set_auth_blocked(context.provider_index.is_none());
+                        result
+                    }
                     Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
                         context.sessions,
                         context.project,
@@ -1051,6 +1058,7 @@ async fn run_loop(
                         .save(context.store_path)
                         .context("save refreshed ChatGPT login")?;
                 }
+                context.herdr.set_auth_blocked(false);
                 // Carry refreshed account credentials into the request without
                 // clobbering a model/reasoning choice made via `/model`.
                 session_provider = Some(provider_with_session_selection(
@@ -1088,17 +1096,27 @@ async fn run_loop(
                 // rest of the loop's state) so the user's resend succeeds.
                 if result.auth_expired {
                     match crate::force_refresh(&mut context.store.providers[provider_index]).await {
-                        Ok(()) => match context.store.save(context.store_path) {
-                            Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
-                            Err(error) => insert_status(
+                        Ok(()) => {
+                            context.herdr.set_auth_blocked(false);
+                            match context.store.save(context.store_path) {
+                                Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
+                                Err(error) => insert_status(
+                                    &mut terminal,
+                                    &format!(
+                                        "  ⚠ login refreshed but couldn't be saved: {error:#}"
+                                    ),
+                                )?,
+                            }
+                        }
+                        Err(error) => {
+                            context.herdr.set_auth_blocked(true);
+                            insert_status(
                                 &mut terminal,
-                                &format!("  ⚠ login refreshed but couldn't be saved: {error:#}"),
-                            )?,
-                        },
-                        Err(error) => insert_status(
-                            &mut terminal,
-                            &format!("  ⚠ couldn't refresh login: {error:#} — run `artist login`"),
-                        )?,
+                                &format!(
+                                    "  ⚠ couldn't refresh login: {error:#} — run `artist login`"
+                                ),
+                            )?
+                        }
                     }
                 }
                 // Restore anything typed into the box mid-stream but not sent,
