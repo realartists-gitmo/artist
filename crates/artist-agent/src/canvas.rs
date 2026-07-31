@@ -134,6 +134,11 @@ fn description_text() -> String {
              DataTable, Plot, Code, Diff, SchemaForm, Transcript, ToolLog, AskDock, Approve\n\
              • @artist/react — useCanvasState, useAgent, useAgentEvents, useAsk, useTool, useTheme\n\
              • @artist/canvas — artist.send, artist.call, artist.state, artist.highlight\n\n\
+             artist.send(text, {{mode}}) needs a mode: \"steer\" corrects the turn that is \
+             running (and is refused if none is), \"queue\" starts one after it. It resolves to \
+             the outcome, so a button can tell the user what happened. artist.state.set(k, v, \
+             {{notify: true}}) also raises a badge in the terminal, which is how a click reaches \
+             you when no turn is running.\n\n\
              useCanvasState(key, initial) is shared state: the user's clicks land in it, you read \
              it with mode=state, and you write it with mode=state entries={{...}}. That is the \
              normal way to feed a canvas.\n\n\

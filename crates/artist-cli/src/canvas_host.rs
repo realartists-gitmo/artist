@@ -12,7 +12,7 @@ use std::sync::{
 };
 
 use artist_agent::ToolRegistryHandle;
-use artist_canvas::bridge::{CanvasHost, Denied, HostFuture, SendMode};
+use artist_canvas::bridge::{CanvasHost, Denied, HostFuture, SendMode, SendOutcome};
 use artist_session::ask::{Answer, AskRegistry, Question};
 
 /// What the canvas bridge is allowed to reach.
@@ -37,6 +37,8 @@ struct Inner {
     /// Tool calls a canvas made, for the TUI to show. A page acting on the
     /// user's behalf must be visible, not silent.
     audit: Mutex<Vec<AuditEntry>>,
+    /// Canvases that wrote state asking to be noticed, and which keys.
+    nudges: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,13 +94,18 @@ impl CanvasControl {
         std::mem::take(&mut *self.inner.audit.lock().expect("canvas audit poisoned"))
     }
 
+    /// Drain the canvases asking to be noticed, for the TUI to badge.
+    pub fn take_nudges(&self) -> Vec<(String, Vec<String>)> {
+        std::mem::take(&mut *self.inner.nudges.lock().expect("canvas nudges poisoned"))
+    }
+
     pub fn ask_registry(&self) -> Option<AskRegistry> {
         self.inner.ask.lock().expect("canvas ask poisoned").clone()
     }
 }
 
 impl CanvasHost for CanvasControl {
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, ()> {
+    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
         Box::pin(async move {
             let control = self
                 .inner
@@ -106,20 +113,32 @@ impl CanvasHost for CanvasControl {
                 .lock()
                 .expect("canvas control poisoned")
                 .clone();
-            let Some(control) = control else { return };
+            let Some(control) = control else {
+                return SendOutcome::NoTurnRunning;
+            };
 
             use artist_extensions::HostControl as _;
-            let steer = match mode {
-                SendMode::Steer => true,
-                SendMode::Next => false,
-                // A button's author cannot know whether a turn happens to be
-                // running; pick the delivery that reaches the model soonest.
-                SendMode::Auto => self.inner.busy.load(Ordering::Acquire),
-            };
-            if steer {
-                control.steer(text).await;
-            } else {
-                control.prompt_after(text).await;
+            // Steering is only ever delivered on a tool result, so asking for it
+            // with no turn running dropped the click on the floor with nothing
+            // shown on either side. Refuse it and say so instead.
+            if mode == SendMode::Steer && !self.inner.busy.load(Ordering::Acquire) {
+                self.record_audit("send (steer, no turn)", false);
+                return SendOutcome::NoTurnRunning;
+            }
+
+            // Audited like a tool call: a page injecting text into the
+            // conversation is if anything more notable than one reading a file.
+            match mode {
+                SendMode::Steer => {
+                    self.record_audit("send (steer)", true);
+                    control.steer(text).await;
+                    SendOutcome::Steered
+                }
+                SendMode::Queue => {
+                    self.record_audit("send (queue)", true);
+                    control.prompt_after(text).await;
+                    SendOutcome::Queued
+                }
             }
         })
     }
@@ -160,6 +179,14 @@ impl CanvasHost for CanvasControl {
                 None => Err(Denied::Unknown { tool }),
             }
         })
+    }
+
+    fn state_changed(&self, slug: &str, keys: Vec<String>) {
+        let mut nudges = self.inner.nudges.lock().expect("canvas nudges poisoned");
+        if nudges.len() >= 32 {
+            nudges.remove(0);
+        }
+        nudges.push((slug.to_owned(), keys));
     }
 
     fn pending_questions(&self) -> Vec<Question> {
@@ -280,17 +307,30 @@ mod tests {
     /// Auto must reach the model soonest: steering lands on the next tool
     /// result mid-turn, but is never delivered if no turn is running.
     #[tokio::test]
-    async fn auto_steers_mid_turn_and_queues_when_idle() {
+    async fn steering_is_refused_when_there_is_no_turn_to_steer() {
         let extension = crate::extension_control::ExtensionControl::default();
         let canvas = CanvasControl::default();
         canvas.attach(extension.clone(), AskRegistry::new(), ToolRegistryHandle::new());
 
         canvas.set_busy(false);
-        canvas.send("while idle".into(), SendMode::Auto).await;
+        assert_eq!(
+            canvas.send("while idle".into(), SendMode::Queue).await,
+            SendOutcome::Queued
+        );
         assert_eq!(extension.take_prompts(), ["while idle"]);
 
+        // Steering with nothing to steer is refused rather than swallowed.
+        assert_eq!(
+            canvas.send("nothing to correct".into(), SendMode::Steer).await,
+            SendOutcome::NoTurnRunning
+        );
+        assert!(extension.take_prompts().is_empty(), "it must not become a queued turn");
+
         canvas.set_busy(true);
-        canvas.send("mid turn".into(), SendMode::Auto).await;
+        assert_eq!(
+            canvas.send("mid turn".into(), SendMode::Steer).await,
+            SendOutcome::Steered
+        );
         // Steering goes to the steering handle, not the prompt queue.
         assert!(extension.take_prompts().is_empty());
     }

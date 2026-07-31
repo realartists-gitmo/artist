@@ -36,9 +36,9 @@ export function useCanvasState(key, initial) {
   }, [key, initial]);
 
   const set = useCallback(
-    (next) => {
+    (next, options) => {
       const resolved = typeof next === "function" ? next(artist.state.get(key)) : next;
-      return artist.state.set(key, resolved);
+      return artist.state.set(key, resolved, options);
     },
     [key],
   );

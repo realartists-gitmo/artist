@@ -17,20 +17,36 @@ use serde::{Deserialize, Serialize};
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// When a prompt from a canvas should reach the model.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+///
+/// There is deliberately no default and no `auto`. `auto` resolved by whether a
+/// turn happened to be running, so the same button either interrupted the
+/// agent's current work or scheduled new work depending on timing the button's
+/// author could not observe — a race the user loses, dressed as a convenience.
+/// Making the caller choose costs one argument and removes the ambiguity.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SendMode {
-    /// Correct the model mid-turn. Delivered on the next tool result.
+    /// Correct the model mid-turn. Delivered on the next tool result, and
+    /// refused outright when no turn is running rather than silently dropped.
     Steer,
     /// Start a turn once the current one finishes.
-    Next,
-    /// Steer while a turn is in flight, prompt otherwise.
-    ///
-    /// This is the default because the page cannot know which it wants: the
-    /// user clicked a button, and whether a turn happens to be running is not
-    /// something the button's author should have to reason about.
-    #[default]
-    Auto,
+    Queue,
+}
+
+/// What became of a prompt the page sent.
+///
+/// Returned so the page can show the user something. A button that fires into
+/// silence is the loop's worst moment, and `steer` with no turn running used to
+/// be exactly that.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SendOutcome {
+    /// Delivered into the running turn.
+    Steered,
+    /// Will start a turn when the current one ends, or immediately if idle.
+    Queued,
+    /// `steer` was asked for with nothing to steer.
+    NoTurnRunning,
 }
 
 /// Why a tool call from a canvas was refused.
@@ -63,8 +79,8 @@ impl std::fmt::Display for Denied {
 
 /// The agent, as far as a canvas can see it.
 pub trait CanvasHost: Send + Sync {
-    /// Put text into the conversation.
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, ()>;
+    /// Put text into the conversation, reporting what became of it.
+    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome>;
 
     /// Invoke a tool on the canvas's behalf.
     ///
@@ -78,6 +94,13 @@ pub trait CanvasHost: Send + Sync {
         arguments: serde_json::Value,
         allowed: Vec<String>,
     ) -> HostFuture<'_, Result<String, Denied>>;
+
+    /// A canvas wrote state it wants acted on.
+    ///
+    /// State is otherwise passive: the model sees it only when it thinks to
+    /// ask, so a click while no turn is running was invisible. This is the
+    /// nudge — a badge in the terminal, not a fabricated user message.
+    fn state_changed(&self, slug: &str, keys: Vec<String>);
 
     /// Questions currently awaiting an answer.
     fn pending_questions(&self) -> Vec<Question>;
@@ -99,8 +122,8 @@ pub trait CanvasHost: Send + Sync {
 pub struct DetachedHost;
 
 impl CanvasHost for DetachedHost {
-    fn send(&self, _text: String, _mode: SendMode) -> HostFuture<'_, ()> {
-        Box::pin(async {})
+    fn send(&self, _text: String, _mode: SendMode) -> HostFuture<'_, SendOutcome> {
+        Box::pin(async { SendOutcome::NoTurnRunning })
     }
 
     fn call_tool(
@@ -111,6 +134,8 @@ impl CanvasHost for DetachedHost {
     ) -> HostFuture<'_, Result<String, Denied>> {
         Box::pin(async move { Err(Denied::Unknown { tool }) })
     }
+
+    fn state_changed(&self, _slug: &str, _keys: Vec<String>) {}
 
     fn pending_questions(&self) -> Vec<Question> {
         Vec::new()
@@ -129,13 +154,20 @@ impl CanvasHost for DetachedHost {
 mod tests {
     use super::*;
 
+    /// No default: a page has to say which it means. `auto` silently picked
+    /// based on whether a turn was running, which the page cannot see.
     #[test]
-    fn auto_is_the_default_send_mode() {
-        assert_eq!(SendMode::default(), SendMode::Auto);
+    fn a_send_mode_must_be_named() {
         assert_eq!(
             serde_json::from_str::<SendMode>("\"steer\"").expect("parses"),
             SendMode::Steer
         );
+        assert_eq!(
+            serde_json::from_str::<SendMode>("\"queue\"").expect("parses"),
+            SendMode::Queue
+        );
+        assert!(serde_json::from_str::<SendMode>("\"auto\"").is_err());
+        assert!(serde_json::from_str::<SendMode>("null").is_err());
     }
 
     /// The message is what the model reads when a call is refused, so it has to

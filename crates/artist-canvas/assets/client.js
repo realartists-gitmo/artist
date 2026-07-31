@@ -101,7 +101,12 @@ let stateEntries = {};
 function applyState(payload) {
   if (payload.rev < stateRev) return;
   stateRev = payload.rev;
-  stateEntries = payload.entries ?? {};
+  // `entries` is a full seed (the initial fetch); `changed` is a delta. Merging
+  // rather than replacing is what keeps a write to one key from re-rendering
+  // every consumer of every other key.
+  stateEntries = payload.entries
+    ? payload.entries
+    : { ...stateEntries, ...(payload.changed ?? {}) };
   stateChannel.emit(stateEntries);
 }
 
@@ -245,11 +250,18 @@ function hideOverlay() {
 
 export const artist = {
   /**
-   * Put text into the conversation.
-   * mode: "auto" steers a running turn and prompts an idle one — which is
-   * almost always what a button wants.
+   * Put text into the conversation. `mode` is required:
+   *   "steer" — correct the turn that is running. Refused if none is.
+   *   "queue" — start a turn after the current one, or now if idle.
+   * Resolves to {outcome: "steered" | "queued" | "no_turn_running"} so a button
+   * can tell the user what happened rather than firing into silence.
    */
-  send: (text, { mode = "auto" } = {}) => rpc("canvas.send", { text, mode }),
+  send: (text, { mode } = {}) => {
+    if (mode !== "steer" && mode !== "queue") {
+      return Promise.reject(new Error('artist.send needs mode: "steer" or "queue"'));
+    }
+    return rpc("canvas.send", { text, mode });
+  },
 
   /** Invoke a tool this canvas declared in [permissions] allow. */
   call: async (tool, args = {}) => (await rpc("canvas.call", { tool, arguments: args })).output,
@@ -262,14 +274,19 @@ export const artist = {
     // already safe to hand out.
     get: (key) => (key === undefined ? stateEntries : stateEntries[key]),
     all: () => stateEntries,
+    /**
+     * Write shared state. `notify: true` also raises a badge in the terminal,
+     * so a click the agent should act on is not invisible until it next thinks
+     * to look.
+     */
     rev: () => stateRev,
-    async set(key, value) {
+    async set(key, value, { notify = false } = {}) {
       const entries = typeof key === "object" && key !== null ? key : { [key]: value };
       // Apply locally first so the UI does not wait a round trip; the echo
       // from the server carries the authoritative revision.
       stateEntries = { ...stateEntries, ...entries };
       stateChannel.emit(stateEntries);
-      return rpc("canvas.state.set", { entries });
+      return rpc("canvas.state.set", { entries, notify });
     },
     subscribe: stateChannel.subscribe,
   },

@@ -249,3 +249,69 @@ async fn a_canvas_cannot_borrow_another_canvases_permissions() {
         .expect("post");
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+/// The bridge had no end-to-end coverage at all — the headline feature of two
+/// commits, exercised only by unit tests either side of the HTTP boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_state_round_trips_and_pushes_only_what_changed() {
+    let project = Project::new("state");
+    project.canvas("demo", "", ENTRY);
+
+    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let url = server.url("demo");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
+    let http = reqwest::Client::new();
+    let rpc = |method: &str, params: serde_json::Value| {
+        let request = http
+            .post(format!("http://{}/_artist/rpc?k={key}&slug=demo", server.addr()))
+            .header("origin", format!("http://{}", server.addr()))
+            .json(&serde_json::json!({"method": method, "params": params}));
+        async move { request.send().await.expect("rpc") }
+    };
+
+    // A write from the page is visible to the harness...
+    let response = rpc("canvas.state.set", serde_json::json!({"entries": {"rows": [1, 2, 3]}})).await;
+    assert!(response.status().is_success());
+    assert_eq!(server.state("demo").get("rows"), Some(serde_json::json!([1, 2, 3])));
+
+    // ...and a write from the harness is visible to the page.
+    server.publish_state("demo", std::collections::BTreeMap::from([
+        ("selected".to_owned(), serde_json::json!(2)),
+    ]));
+    let body: serde_json::Value = rpc("canvas.state.get", serde_json::json!({}))
+        .await
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["entries"]["selected"], 2);
+    assert_eq!(body["entries"]["rows"], serde_json::json!([1, 2, 3]));
+    assert!(body["rev"].as_u64().expect("rev") >= 2, "revisions must advance");
+}
+
+/// `send` needs an explicit mode: `auto` resolved by whether a turn happened to
+/// be running, which the page cannot see.
+#[tokio::test(flavor = "multi_thread")]
+async fn send_requires_an_explicit_mode() {
+    let project = Project::new("send");
+    project.canvas("demo", "", ENTRY);
+
+    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let url = server.url("demo");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
+    let http = reqwest::Client::new();
+
+    for (params, expected) in [
+        (serde_json::json!({"text": "hi"}), reqwest::StatusCode::BAD_REQUEST),
+        (serde_json::json!({"text": "hi", "mode": "auto"}), reqwest::StatusCode::BAD_REQUEST),
+        (serde_json::json!({"text": "hi", "mode": "queue"}), reqwest::StatusCode::OK),
+    ] {
+        let response = http
+            .post(format!("http://{}/_artist/rpc?k={key}&slug=demo", server.addr()))
+            .header("origin", format!("http://{}", server.addr()))
+            .json(&serde_json::json!({"method": "canvas.send", "params": params}))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), expected, "params were {params}");
+    }
+}

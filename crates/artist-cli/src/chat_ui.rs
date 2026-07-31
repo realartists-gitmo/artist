@@ -346,10 +346,17 @@ pub(crate) struct SubmittedPrompt {
 
 impl SubmittedPrompt {
     /// Text pushed in by a canvas or an extension. Never a command.
+    ///
+    /// `display` carries an attribution marker because the transcript renders
+    /// injected text identically to something the user typed — so without it,
+    /// a message the user never wrote is indistinguishable from one they did.
+    /// Only the display copy is marked; the model still receives the text.
     pub(crate) fn injected(content: String) -> Self {
+        let plain = Self::from(content);
         Self {
+            display: format!("↩ from canvas · {}", plain.display),
             typed: false,
-            ..Self::from(content)
+            ..plain
         }
     }
 }
@@ -1359,6 +1366,15 @@ async fn run_loop(
             );
             status.refresh(&context.store.status_bar, context.project);
             continue;
+        }
+        for (slug, keys) in context.canvas_control.take_nudges() {
+            insert_status(
+                &mut terminal,
+                &format!(
+                    "  canvas {slug} updated {} — ask it with canvas(mode=\"state\", name=\"{slug}\")",
+                    keys.join(", ")
+                ),
+            )?;
         }
         // The drain above only runs after a turn returns. A queued follow-up
         // therefore sat unnoticed while the box was idle, waiting for the user
@@ -3685,6 +3701,22 @@ mod tests {
             );
             assert_eq!(staged.content, dangerous, "content must reach the model verbatim");
         }
+    }
+
+    /// The transcript renders injected text identically to a typed message —
+    /// pinned by a test in message_box. So the attribution has to live in the
+    /// display copy, and must not reach the model.
+    #[test]
+    fn injected_text_is_attributed_on_screen_but_not_to_the_model() {
+        let injected = SubmittedPrompt::injected("look at the failing suite".to_owned());
+        assert!(injected.display.starts_with("↩ from canvas"), "{}", injected.display);
+        assert_eq!(
+            injected.content, "look at the failing suite",
+            "the marker must not reach the model"
+        );
+
+        let typed = SubmittedPrompt::from("look at the failing suite".to_owned());
+        assert_eq!(typed.display, typed.content, "typed input is never marked");
     }
 
     /// The converse: a slash command the user typed mid-stream is deferred and

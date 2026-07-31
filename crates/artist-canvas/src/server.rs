@@ -74,12 +74,15 @@ enum Signal {
         /// Canvas-relative, matching the URL the page originally imported.
         path: String,
     },
-    /// Shared state changed. Carries only what moved, plus the revision, so a
-    /// page can ignore an update older than what it already applied.
+    /// Shared state changed.
+    ///
+    /// Carries only the keys that moved, plus the revision. It used to say that
+    /// and send the whole map, so every consumer re-rendered on every write to
+    /// any key, and a large state meant a large frame per keystroke.
     State {
         slug: String,
         rev: u64,
-        entries: serde_json::Value,
+        changed: serde_json::Value,
     },
     /// The set of open questions changed.
     Ask {
@@ -205,11 +208,12 @@ impl Server {
     ///
     /// This is how the model feeds a canvas: it writes rows, the page rerenders.
     pub fn publish_state(&self, slug: &str, values: BTreeMap<String, serde_json::Value>) -> u64 {
+        let changed = serde_json::to_value(&values).unwrap_or_default();
         let snapshot = self.inner.state_for(slug).merge(values);
         let _ = self.inner.signals.send(Signal::State {
             slug: slug.to_owned(),
             rev: snapshot.rev,
-            entries: serde_json::to_value(snapshot.plain()).unwrap_or_default(),
+            changed,
         });
         snapshot.rev
     }
@@ -621,13 +625,17 @@ async fn serve_rpc(
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
-            let snapshot = inner.state_for(&slug).merge(merged);
+            let notify = params.get("notify").and_then(|v| v.as_bool()).unwrap_or(false);
+            let snapshot = inner.state_for(&slug).merge(merged.clone());
+            if notify {
+                inner.host.state_changed(&slug, merged.keys().cloned().collect());
+            }
             // Echo to every open tab, including the one that wrote: it needs
             // the revision to know its optimistic update was accepted.
             let _ = inner.signals.send(Signal::State {
                 slug,
                 rev: snapshot.rev,
-                entries: serde_json::to_value(snapshot.plain()).unwrap_or_default(),
+                changed: serde_json::to_value(&merged).unwrap_or_default(),
             });
             ok(serde_json::json!({"rev": snapshot.rev}))
         }
@@ -636,12 +644,16 @@ async fn serve_rpc(
             let Some(text) = params.get("text").and_then(|v| v.as_str()) else {
                 return bad("send needs `text`");
             };
-            let mode = params
+            // No default: the page has to say whether it means to interrupt the
+            // running turn or schedule a new one.
+            let Some(mode) = params
                 .get("mode")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
-            inner.host.send(text.to_owned(), mode).await;
-            ok(serde_json::json!({"ok": true}))
+                .and_then(|v| serde_json::from_value::<crate::bridge::SendMode>(v.clone()).ok())
+            else {
+                return bad("send needs `mode`: \"steer\" to correct a running turn, or \"queue\" to start one");
+            };
+            let outcome = inner.host.send(text.to_owned(), mode).await;
+            ok(serde_json::json!({"ok": true, "outcome": outcome}))
         }
 
         "canvas.call" => {

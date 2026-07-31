@@ -13,11 +13,19 @@
 use std::sync::{Arc, Mutex};
 
 use rig_core::tool::{PortableDynamicTool, ToolExecutionError};
+use tokio_util::sync::CancellationToken;
 
 /// A shared, swappable view of the tools registered for the current attempt.
 #[derive(Clone, Default)]
 pub struct ToolRegistryHandle {
     tools: Arc<Mutex<Arc<Vec<PortableDynamicTool>>>>,
+    /// Cancelled and replaced on every publish.
+    ///
+    /// A canvas call that began under one attempt would otherwise keep running
+    /// against a tool the next attempt removed from policy — and if a tool was
+    /// disabled *because* the turn went wrong, that is exactly the call you do
+    /// not want completing.
+    generation: Arc<Mutex<CancellationToken>>,
 }
 
 impl ToolRegistryHandle {
@@ -29,6 +37,9 @@ impl ToolRegistryHandle {
     /// already filtered it — so what lands here is exactly what the model got.
     pub fn publish(&self, tools: Vec<PortableDynamicTool>) {
         *self.tools.lock().expect("tool registry poisoned") = Arc::new(tools);
+        let mut generation = self.generation.lock().expect("tool registry poisoned");
+        generation.cancel();
+        *generation = CancellationToken::new();
     }
 
     /// Names currently registered, for permission checks and diagnostics.
@@ -63,7 +74,13 @@ impl ToolRegistryHandle {
             .iter()
             .find(|tool| tool.name() == name)
             .cloned()?;
-        Some(tool.execute(arguments).await.map(flatten))
+        let cancel = self.generation.lock().expect("tool registry poisoned").clone();
+        Some(tokio::select! {
+            result = tool.execute(arguments) => result.map(flatten),
+            () = cancel.cancelled() => Err(ToolExecutionError::other(
+                "the turn moved on before this canvas call finished",
+            )),
+        })
     }
 
     fn snapshot(&self) -> Arc<Vec<PortableDynamicTool>> {
@@ -154,6 +171,32 @@ mod tests {
         registry.publish(vec![echo("read")]);
         assert_eq!(registry.names(), ["read"]);
         assert!(registry.execute("write", serde_json::json!({})).await.is_none());
+    }
+
+    /// A call in flight when policy changes must not outlive the policy that
+    /// permitted it.
+    #[tokio::test]
+    async fn republishing_cancels_a_call_already_running() {
+        let registry = ToolRegistryHandle::new();
+        registry.publish(vec![PortableDynamicTool::new(
+            "slow",
+            "never finishes",
+            serde_json::json!({"type": "object"}),
+            |_| Box::pin(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            }),
+        )]);
+
+        let running = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.execute("slow", serde_json::json!({})).await })
+        };
+        tokio::task::yield_now().await;
+
+        registry.publish(Vec::new());
+        let outcome = running.await.expect("joined").expect("was registered");
+        assert!(outcome.is_err(), "the call should have been cancelled");
     }
 
     #[test]
