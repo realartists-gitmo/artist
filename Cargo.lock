@@ -217,6 +217,7 @@ dependencies = [
  "arboard",
  "artist-agent",
  "artist-extensions",
+ "artist-herdr",
  "artist-rules",
  "artist-session",
  "artist-tools",
