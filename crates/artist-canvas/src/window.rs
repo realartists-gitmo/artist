@@ -23,22 +23,35 @@ use std::{
 /// implementation detail of `canvas open`, not something to invoke by hand.
 pub const WINDOW_SUBCOMMAND: &str = "__canvas-window";
 
+/// How the child receives the URL, which contains the session key.
+pub const URL_VAR: &str = "ARTIST_CANVAS_URL";
+
 /// Launch a window showing `url`.
 ///
 /// Returns the child so a caller can kill it; dropping the handle leaves the
 /// window open, which is what a user expects when the agent moves on.
 pub fn open(url: &str, title: &str) -> io::Result<Child> {
-    let executable: PathBuf = std::env::current_exe()?;
-    Command::new(executable)
+    command(std::env::current_exe()?, url, title).spawn()
+}
+
+/// The command `open` will spawn.
+///
+/// Separated so a test can inspect it without launching a window.
+fn command(executable: PathBuf, url: &str, title: &str) -> Command {
+    let mut command = Command::new(executable);
+    // The URL carries the session key, and an argument is world-readable in
+    // `ps` and `/proc/<pid>/cmdline`. Another process's environment is not, so
+    // the child reads it from there instead.
+    command
         .arg(WINDOW_SUBCOMMAND)
-        .arg(url)
         .arg(title)
+        .env(URL_VAR, url)
         // The child must not write to the terminal the TUI is drawing in.
         // A stray line from a GTK warning would corrupt the viewport.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+        .stderr(Stdio::null());
+    command
 }
 
 /// Whether a windowing system is available at all.
@@ -62,6 +75,28 @@ mod tests {
     fn the_subcommand_is_stable_and_clearly_internal() {
         assert_eq!(WINDOW_SUBCOMMAND, "__canvas-window");
         assert!(WINDOW_SUBCOMMAND.starts_with("__"));
+    }
+
+    /// The URL contains the session key, so it must not become an argument:
+    /// `/proc/<pid>/cmdline` is world-readable and `ps` shows the whole thing.
+    #[test]
+    fn the_url_travels_out_of_band() {
+        let url = "http://127.0.0.1:4242/c/supersecretkey/demo/";
+        let spawned = command(PathBuf::from("/usr/bin/artist"), url, "Demo");
+
+        let args: Vec<_> = spawned.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(
+            !args.iter().any(|arg| arg.contains("supersecretkey")),
+            "the key reached the command line: {args:?}"
+        );
+        assert_eq!(args, [WINDOW_SUBCOMMAND, "Demo"]);
+
+        let passed = spawned
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(URL_VAR))
+            .and_then(|(_, value)| value)
+            .expect("the child needs the url");
+        assert_eq!(passed.to_string_lossy(), url);
     }
 
     /// A headless session must fall back to printing a URL rather than

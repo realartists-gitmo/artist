@@ -120,8 +120,9 @@ async fn the_page_can_report_its_own_errors_back_to_the_harness() {
     let http = reqwest::Client::new();
 
     let response = http
-        .post(format!("{rpc}?k={key}&slug=demo"))
+        .post(format!("{rpc}?slug=demo"))
         .header("origin", format!("http://{}", server.addr()))
+        .header("x-artist-key", key)
         .json(&serde_json::json!({
             "method": "canvas.report",
             "params": {"level": "error", "message": "boom", "detail": {"line": 3}},
@@ -149,8 +150,9 @@ async fn another_page_on_loopback_cannot_drive_the_bridge() {
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
 
     let response = reqwest::Client::new()
-        .post(format!("http://{}/_artist/rpc?k={key}&slug=demo", server.addr()))
+        .post(format!("http://{}/_artist/rpc?slug=demo", server.addr()))
         .header("origin", "http://127.0.0.1:1")
+        .header("x-artist-key", key)
         .json(&serde_json::json!({"method": "canvas.report", "params": {}}))
         .send()
         .await
@@ -201,11 +203,9 @@ async fn a_forged_slug_cannot_escape_the_canvas_directory() {
     let escape = project.root.join("ESCAPED");
     for slug in ["../../../ESCAPED", "..%2F..%2F..%2FESCAPED", "demo/../../.."] {
         let response = http
-            .post(format!(
-                "http://{}/_artist/rpc?k={key}&slug={slug}",
-                server.addr()
-            ))
+            .post(format!("http://{}/_artist/rpc?slug={slug}", server.addr()))
             .header("origin", format!("http://{}", server.addr()))
+            .header("x-artist-key", key)
             .json(&serde_json::json!({
                 "method": "canvas.state.set",
                 "params": {"entries": {"pwned": true}},
@@ -238,11 +238,9 @@ async fn a_canvas_cannot_borrow_another_canvases_permissions() {
     // reached the permission gate under the slug it claimed rather than being
     // silently resolved to the permissive sibling.
     let response = reqwest::Client::new()
-        .post(format!(
-            "http://{}/_artist/rpc?k={key}&slug=open-one",
-            server.addr()
-        ))
+        .post(format!("http://{}/_artist/rpc?slug=open-one", server.addr()))
         .header("origin", format!("http://{}", server.addr()))
+        .header("x-artist-key", key)
         .json(&serde_json::json!({"method": "canvas.call", "params": {"tool": "bash"}}))
         .send()
         .await
@@ -263,8 +261,9 @@ async fn shared_state_round_trips_and_pushes_only_what_changed() {
     let http = reqwest::Client::new();
     let rpc = |method: &str, params: serde_json::Value| {
         let request = http
-            .post(format!("http://{}/_artist/rpc?k={key}&slug=demo", server.addr()))
+            .post(format!("http://{}/_artist/rpc?slug=demo", server.addr()))
             .header("origin", format!("http://{}", server.addr()))
+            .header("x-artist-key", key)
             .json(&serde_json::json!({"method": method, "params": params}));
         async move { request.send().await.expect("rpc") }
     };
@@ -306,12 +305,61 @@ async fn send_requires_an_explicit_mode() {
         (serde_json::json!({"text": "hi", "mode": "queue"}), reqwest::StatusCode::OK),
     ] {
         let response = http
-            .post(format!("http://{}/_artist/rpc?k={key}&slug=demo", server.addr()))
+            .post(format!("http://{}/_artist/rpc?slug=demo", server.addr()))
             .header("origin", format!("http://{}", server.addr()))
+            .header("x-artist-key", key)
             .json(&serde_json::json!({"method": "canvas.send", "params": params}))
             .send()
             .await
             .expect("send");
         assert_eq!(response.status(), expected, "params were {params}");
     }
+}
+
+/// The key must travel in a header, not the URL. The window child takes its URL
+/// as a command-line argument, so a key in the path is visible in `ps` to any
+/// process on the machine — and the client was already sending the header.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rpc_endpoint_only_accepts_the_key_as_a_header() {
+    let project = Project::new("keyhdr");
+    project.canvas("demo", "", ENTRY);
+
+    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let url = server.url("demo");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
+    let http = reqwest::Client::new();
+    let endpoint = format!("http://{}/_artist/rpc", server.addr());
+    let origin = format!("http://{}", server.addr());
+    let body = serde_json::json!({"method": "canvas.state.get", "params": {}});
+
+    // The old shape — key in the query string — is no longer enough.
+    let query_only = http
+        .post(format!("{endpoint}?k={key}&slug=demo"))
+        .header("origin", &origin)
+        .json(&body)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(query_only.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let with_header = http
+        .post(format!("{endpoint}?slug=demo"))
+        .header("origin", &origin)
+        .header("x-artist-key", key)
+        .json(&body)
+        .send()
+        .await
+        .expect("post");
+    assert!(with_header.status().is_success(), "{:?}", with_header.status());
+
+    // And a wrong header value is refused.
+    let wrong = http
+        .post(format!("{endpoint}?slug=demo"))
+        .header("origin", &origin)
+        .header("x-artist-key", "x".repeat(32))
+        .json(&body)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(wrong.status(), reqwest::StatusCode::NOT_FOUND);
 }

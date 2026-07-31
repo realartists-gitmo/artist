@@ -1,5 +1,7 @@
 mod activity_indicator;
 mod args;
+mod canvas_host;
+mod canvas_window;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
@@ -51,6 +53,19 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    // Dispatched before clap, and before anything touches the terminal: this
+    // process exists only to own a webview's event loop, and it is spawned by
+    // artist itself rather than typed by a user.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).is_some_and(|arg| arg == artist_canvas::window::WINDOW_SUBCOMMAND) {
+        // Out of band, because the URL carries the session key and arguments
+        // are world-readable.
+        let url = std::env::var(artist_canvas::window::URL_VAR)
+            .context("canvas window needs ARTIST_CANVAS_URL")?;
+        let title = raw.get(2).map(String::as_str).unwrap_or("Canvas");
+        return canvas_window::run(&url, title);
+    }
+
     let mut cli = Cli::parse();
     enter_positional_project(&mut cli)?;
     let path = config_path()?;
@@ -109,6 +124,25 @@ async fn run() -> Result<()> {
             match args.action {
                 ProfilesCommand::List => profiles_list(&project),
                 ProfilesCommand::Show { name } => profiles_show(&name)?,
+            }
+        }
+        Some(Command::Memory(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            let project = std::env::current_dir().context("find current project directory")?;
+            memory_command(config_root, &project, args.action).await?;
+        }
+        Some(Command::Computer(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
+            let project = std::env::current_dir().context("find current project directory")?;
+            let sessions = SessionStore::new(config_root);
+            match args.action {
+                args::ComputerCommand::Log { id } => {
+                    computer_log(&sessions, &project, id.as_deref())?
+                }
+                args::ComputerCommand::Distill { id, include_failed } => {
+                    computer_distill(&sessions, &project, id.as_deref(), include_failed)?
+                }
+                args::ComputerCommand::Frame { digest, out } => {
+                    computer_frame(&sessions, &project, &digest, out)?
+                }
             }
         }
         Some(_) => bail!("prompts and --resume cannot be combined with a subcommand"),
@@ -175,6 +209,22 @@ async fn run() -> Result<()> {
             let tools = tool_bundle(config_root, &project)?;
             let rules_engine = artist_rules::RulesEngine::discover(&project);
             let rules_handle = artist_rules::state::RulesHandle::default();
+            // Canvases share one loopback server for the session. A failed bind
+            // is not fatal — the session works fine without them, and the tool
+            // is simply not offered rather than failing when the model calls it.
+            let canvas_control = canvas_host::CanvasControl::default();
+            let ask = artist_session::ask::AskRegistry::new();
+            // One registry for the session: the agent loop republishes into it
+            // each attempt, and the canvas bridge dispatches through it.
+            let tool_registry = artist_agent::ToolRegistryHandle::new();
+            canvas_control.attach(extension_control.clone(), ask.clone(), tool_registry.clone());
+            let canvas = artist_canvas::server::Server::start_with_host(
+                project.clone(),
+                std::sync::Arc::new(canvas_control.clone()),
+            )
+            .await
+            .ok()
+            .map(std::sync::Arc::new);
             chat_ui::run(
                 terminal,
                 &mut store,
@@ -190,6 +240,9 @@ async fn run() -> Result<()> {
                     rules_engine: &rules_engine,
                     rules_handle: &rules_handle,
                     settings: &effective,
+                    canvas: canvas.as_ref(),
+                    canvas_control: &canvas_control,
+                    tool_registry: &tool_registry,
                 },
                 resumed,
                 cli.prompt,
@@ -315,12 +368,14 @@ async fn execute_prompt(
                     .find(|model| Some(&model.slug) == session_provider.model.as_ref())
                     .and_then(|model| model.effective_context_window())
             });
+    let durable_memory = open_memory(config_root, &project, &effective.memory).await;
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
         rules,
         rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
         memory: Arc::new(active.memory.clone()),
+        durable_memory,
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
         effective_context_window,
@@ -336,6 +391,11 @@ async fn execute_prompt(
             todos
         },
         handoff_depth: artist_session::handoff_depth(&resumed_events),
+        // No stage in a one-shot run: bringing a display up costs more than the
+        // run is worth, so the tool is simply not offered.
+        computer: None,
+        // No canvas in a one-shot run, so nothing reads this registry.
+        tools: artist_agent::ToolRegistryHandle::new(),
     };
     extension_control.set_steering(Some(steering));
     extensions
@@ -357,6 +417,8 @@ async fn execute_prompt(
             &session_profile,
             &agent_input,
             artist_agent::ToolContext {
+                // One-shot runs exit before anyone could open a page.
+                canvas: None,
                 native: &tools,
                 mcp,
                 extensions: Some(extensions),
@@ -579,6 +641,222 @@ fn sessions_render(sessions: &SessionStore, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Print the computer-use trace for a session.
+///
+/// Reads the event log directly rather than a projection: the log is the record,
+/// and `computer.acted` carries exactly the `(anchor, action, expect)` triples a
+/// replayable macro would be distilled from.
+fn computer_log(sessions: &SessionStore, project: &std::path::Path, id: Option<&str>) -> Result<()> {
+    let id = match id {
+        Some(id) => id.to_owned(),
+        None => sessions
+            .list()?
+            .into_iter()
+            .filter(|session| session.project == project)
+            .max_by_key(|session| session.created_at_ms)
+            .map(|session| session.id)
+            .context("no sessions for this project")?,
+    };
+    let (_, events) = sessions.peek(&id)?;
+
+    let mut seen = 0usize;
+    for envelope in &events {
+        match envelope.event() {
+            artist_session::SessionEvent::ComputerStageOpened(opened) => {
+                seen += 1;
+                println!(
+                    "stage {} opened ({}{})",
+                    opened.stage,
+                    opened.backend,
+                    opened
+                        .display
+                        .map(|display| format!(", {display}"))
+                        .unwrap_or_default()
+                );
+            }
+            artist_session::SessionEvent::ComputerStageClosed(closed) => {
+                seen += 1;
+                println!("stage {} closed: {}", closed.stage, closed.reason);
+            }
+            artist_session::SessionEvent::ComputerObserved(observed) => {
+                seen += 1;
+                println!(
+                    "observe {} epoch {} rung {} · {} node(s), {} bytes{}",
+                    observed.surface,
+                    observed.epoch,
+                    observed.rung,
+                    observed.nodes,
+                    observed.bytes,
+                    observed
+                        .image
+                        .map(|digest| format!(" · img:{}", short(&digest)))
+                        .unwrap_or_default()
+                );
+            }
+            artist_session::SessionEvent::ComputerActed(acted) => {
+                seen += 1;
+                println!("act {} epoch {}", acted.surface, acted.epoch);
+                for (index, step) in acted.steps.iter().enumerate() {
+                    // Claimed vs actual side by side: a mismatch here is the
+                    // single most useful thing to see after a bad run.
+                    let target = match (&step.label, &step.resolved_name) {
+                        (Some(label), Some(actual)) if label != actual => {
+                            format!(" {label:?} (actually {actual:?})")
+                        }
+                        (Some(label), _) => format!(" {label:?}"),
+                        (None, Some(actual)) => format!(" {actual:?}"),
+                        _ => String::new(),
+                    };
+                    let anchor = step
+                        .anchor
+                        .as_ref()
+                        .map(|anchor| format!(" [{anchor}]"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {}. {}{target}{anchor} — {}",
+                        index + 1,
+                        step.action,
+                        step.outcome
+                    );
+                }
+                if let Some(failed) = acted.failed_step {
+                    println!("  stopped at step {}", failed + 1);
+                }
+                match acted.expect_met {
+                    Some(true) => println!("  expect: met"),
+                    Some(false) => println!("  expect: NOT met"),
+                    None => {}
+                }
+                if let Some(ms) = acted.settled_ms {
+                    println!("  settled in {ms}ms");
+                }
+            }
+            artist_session::SessionEvent::ComputerElided(elided) => {
+                seen += 1;
+                println!(
+                    "elided {} observation(s), {} reclaimed",
+                    elided.count,
+                    format_size(elided.bytes_saved)
+                );
+            }
+            _ => {}
+        }
+    }
+    if seen == 0 {
+        println!("no computer-use activity in session {id}");
+    }
+    Ok(())
+}
+
+/// Emit a replayable macro from a session's successful programs.
+///
+/// This is what the event log was shaped for. A trajectory the model worked out
+/// once — which anchors, in what order, and what it expected to land on — is
+/// exactly a script, and replaying it deterministically is orders of magnitude
+/// cheaper than rediscovering it. The `expect` on each step is what makes replay
+/// safe: if the interface has changed, the macro stops at the step that no
+/// longer lands where it did, rather than carrying on blindly.
+///
+/// Failed programs are excluded by default: a macro built from steps that did
+/// not work is worse than no macro.
+fn computer_distill(
+    sessions: &SessionStore,
+    project: &std::path::Path,
+    id: Option<&str>,
+    include_failed: bool,
+) -> Result<()> {
+    let id = match id {
+        Some(id) => id.to_owned(),
+        None => sessions
+            .list()?
+            .into_iter()
+            .filter(|session| session.project == project)
+            .max_by_key(|session| session.created_at_ms)
+            .map(|session| session.id)
+            .context("no sessions for this project")?,
+    };
+    let (_, events) = sessions.peek(&id)?;
+
+    let mut programs = Vec::new();
+    for envelope in &events {
+        let artist_session::SessionEvent::ComputerActed(acted) = envelope.event() else {
+            continue;
+        };
+        let clean = acted.failed_step.is_none() && acted.expect_met != Some(false);
+        if !clean && !include_failed {
+            continue;
+        }
+        // Emitted in the schema `artist_computer::macros` replays. Anchors are
+        // deliberately *not* carried: they are per-session tokens from one
+        // observation, while the label is how the element identifies itself and
+        // is what a replayer resolves against a fresh screen.
+        let steps: Vec<artist_computer::macros::MacroStep> = acted
+            .steps
+            .iter()
+            .map(|step| artist_computer::macros::MacroStep {
+                action: step.action.clone(),
+                label: step.resolved_name.clone().or_else(|| step.label.clone()),
+                text: None,
+                key: None,
+            })
+            .collect();
+
+        programs.push(artist_computer::macros::MacroProgram {
+            surface: acted.surface.clone(),
+            steps,
+            expect: acted.expect.clone(),
+        });
+    }
+
+    if programs.is_empty() {
+        println!("no replayable programs in session {id}");
+        return Ok(());
+    }
+    let distilled = artist_computer::macros::Macro {
+        session: id,
+        programs,
+    };
+    println!("{}", serde_json::to_string_pretty(&distilled)?);
+    Ok(())
+}
+
+/// Write a captured frame out so it can be opened in an image viewer.
+fn computer_frame(
+    sessions: &SessionStore,
+    project: &std::path::Path,
+    digest: &str,
+    out: Option<std::path::PathBuf>,
+) -> Result<()> {
+    // Accept the `img:<sha>` form the transcript prints, and short prefixes.
+    let wanted = digest.strip_prefix("img:").unwrap_or(digest);
+
+    for session in sessions.list()? {
+        if session.project != project {
+            continue;
+        }
+        let dir = session.dir().join("attachments");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(wanted) {
+                continue;
+            }
+            let bytes = std::fs::read(entry.path())?;
+            let path = out.unwrap_or_else(|| std::path::PathBuf::from(format!("{name}.png")));
+            std::fs::write(&path, &bytes)?;
+            println!("wrote {} ({})", path.display(), format_size(bytes.len() as u64));
+            return Ok(());
+        }
+    }
+    bail!("no attachment matching {digest} in this project's sessions")
+}
+
+fn short(digest: &str) -> &str {
+    &digest[..digest.len().min(12)]
+}
+
 fn sessions_gc(
     sessions: &SessionStore,
     keep: usize,
@@ -597,10 +875,12 @@ fn sessions_gc(
     }
     let mut removed = 0usize;
     let mut reclaimed = 0u64;
+    let mut survivors = Vec::new();
     for (_, mut entries) in by_project {
         entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-        for session in entries.into_iter().skip(keep) {
-            if session.created_at_ms >= cutoff {
+        for (index, session) in entries.into_iter().enumerate() {
+            if index < keep || session.created_at_ms >= cutoff {
+                survivors.push(session);
                 continue;
             }
             let size = dir_size(session.dir());
@@ -619,12 +899,51 @@ fn sessions_gc(
             }
         }
     }
+    // Surviving sessions can still hold orphaned image blobs — compaction and
+    // rewind both leave attachments no event refers to any more.
+    let mut orphans = 0usize;
+    for session in survivors {
+        let dir = session.dir();
+        let store = artist_session::AttachmentStore::new(dir.join("attachments"));
+        if !store.dir().exists() {
+            continue;
+        }
+        let Ok(events) = artist_session::EventLogReader::new(dir).read_all() else {
+            continue;
+        };
+        let referenced = artist_session::referenced_attachments(&events);
+        if dry_run {
+            let present = std::fs::read_dir(store.dir())
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|entry| {
+                            entry
+                                .file_name()
+                                .to_str()
+                                .is_some_and(|name| !referenced.contains(name))
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            orphans += present;
+        } else if let Ok(pruned) = store.prune(&referenced) {
+            orphans += pruned;
+        }
+    }
+
     println!(
         "{}{} session(s), {}",
         if dry_run { "would delete " } else { "deleted " },
         removed,
         format_size(reclaimed)
     );
+    if orphans > 0 {
+        println!(
+            "{}{orphans} orphaned attachment(s) in retained sessions",
+            if dry_run { "would prune " } else { "pruned " }
+        );
+    }
     Ok(())
 }
 
@@ -649,7 +968,7 @@ fn dir_size(dir: &std::path::Path) -> u64 {
     total
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     match bytes {
         0..=1023 => format!("{bytes} B"),
         1024..=1048575 => format!("{:.1} KiB", bytes as f64 / 1024.0),
@@ -735,14 +1054,145 @@ fn profiles_show(name: &str) -> Result<()> {
 }
 
 fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Result<ToolBundle> {
+    Ok(ToolBundle::new(Workspace::open(
+        std::fs::canonicalize(project)?,
+        project_state_dir(config_root, project)?,
+    )?))
+}
+
+/// Per-project state, keyed by canonical path. Shared with the file tools, so
+/// the memory database lands beside `hashlines.sqlite3` rather than inventing
+/// a second location convention.
+fn project_state_dir(
+    config_root: &std::path::Path,
+    project: &std::path::Path,
+) -> Result<std::path::PathBuf> {
     use std::hash::{Hash, Hasher};
     let canonical = std::fs::canonicalize(project)?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonical.hash(&mut hasher);
-    let state = config_root
+    Ok(config_root
         .join("tools")
-        .join(format!("{:x}", hasher.finish()));
-    Ok(ToolBundle::new(Workspace::open(canonical, state)?))
+        .join(format!("{:x}", hasher.finish())))
+}
+
+/// Open the memory subsystem, or return `None` when it is off or unusable.
+///
+/// Every failure here degrades to "no memory" rather than aborting the session:
+/// a missing embedding model or an unreadable database should cost recall, not
+/// the ability to work. The reason it is disabled by default is the same one —
+/// silently degrading to lexical-only recall would read as memory being broken.
+async fn open_memory(
+    config_root: &std::path::Path,
+    project: &std::path::Path,
+    settings: &settings::MemoryConfig,
+) -> Option<artist_agent::memory::MemoryHandle> {
+    if !settings.enabled {
+        return None;
+    }
+    let state_dir = project_state_dir(config_root, project).ok()?;
+    let memory = match artist_memory::Memory::open(config_root, &state_dir).await {
+        Ok(memory) => memory,
+        Err(error) => {
+            eprintln!("warning: memory disabled, could not open the store: {error}");
+            return None;
+        }
+    };
+    let model_dir = settings
+        .model_dir
+        .as_ref()
+        .map(|dir| {
+            let path = std::path::Path::new(dir);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_root.join(path)
+            }
+        })
+        .unwrap_or_else(|| config_root.join("models").join("code-embed"));
+    let embedder = match artist_memory::Embedder::load(&model_dir, settings.dim).await {
+        Ok(embedder) => Some(embedder),
+        Err(error) => {
+            eprintln!(
+                "warning: memory recall will be lexical only, no embedding model at {}: {error}",
+                model_dir.display()
+            );
+            None
+        }
+    };
+    Some(artist_agent::memory::MemoryHandle::new(memory, embedder))
+}
+
+/// Maintenance for the memory store.
+///
+/// These deliberately open the store directly rather than going through
+/// `open_memory`: they must work when the subsystem is disabled in settings or
+/// when no embedding model is installed, since that is exactly when you want to
+/// inspect or rescue what is there.
+async fn memory_command(
+    config_root: &std::path::Path,
+    project: &std::path::Path,
+    action: args::MemoryCommand,
+) -> Result<()> {
+    use args::MemoryCommand;
+    let state_dir = project_state_dir(config_root, project)?;
+    let memory = artist_memory::Memory::open(config_root, &state_dir)
+        .await
+        .context("opening the memory store")?;
+
+    match action {
+        MemoryCommand::List => {
+            for (label, store) in [("project", memory.project()), ("global", memory.global())] {
+                let facts = store.live_facts().await?;
+                println!("{label}: {} fact(s)", facts.len());
+                for fact in facts {
+                    println!("  [{}] ({}) {}", fact.id, fact.origin, fact.text);
+                }
+            }
+        }
+        MemoryCommand::Search { query } => {
+            // No embedder here, so this exercises the lexical leg only — which
+            // is also the honest picture of what recall degrades to without a
+            // model installed.
+            let hits = memory.search(&query, &[], 20).await?;
+            if hits.is_empty() {
+                println!("No memories matched.");
+            }
+            for hit in hits {
+                println!(
+                    "[{}] ({}, {:.4}) {}",
+                    hit.id,
+                    hit.scope.as_str(),
+                    hit.score,
+                    hit.text
+                );
+            }
+        }
+        MemoryCommand::Export => {
+            println!("{}", memory.project().export_json().await?);
+        }
+        MemoryCommand::Import { path } => {
+            let payload = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {path}"))?;
+            memory.project().import_json(payload).await?;
+            println!("Imported and reindexed.");
+        }
+        MemoryCommand::Reindex => {
+            memory.project().reindex().await?;
+            println!("Rebuilt every index.");
+        }
+        MemoryCommand::Verify => {
+            for (label, store) in [("project", memory.project()), ("global", memory.global())] {
+                println!(
+                    "{label}: schema v{:?}, {} live fact(s), {} chunk(s)",
+                    store.schema_version().await?,
+                    store.fact_count().await?,
+                    store.chunk_count().await?,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn list(store: &ProviderStore) {

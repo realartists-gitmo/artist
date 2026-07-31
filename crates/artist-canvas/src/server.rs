@@ -171,7 +171,7 @@ impl Server {
             .route("/@artist/react.js", get(serve_hooks))
             .route("/@artist/refresh.js", get(serve_refresh))
             .route("/@vendor/{*path}", get(serve_vendor))
-            .route("/@dep/{specifier}", get(serve_dep))
+            .route("/@dep/{key}/{slug}/{specifier}", get(serve_dep))
             .route("/_artist/events", get(serve_events))
             .route("/_artist/rpc", post(serve_rpc))
             .with_state(Arc::clone(&inner));
@@ -377,6 +377,21 @@ async fn serve_shell(
     let Some(manifest) = manifest else {
         return (StatusCode::NOT_FOUND, format!("no canvas named {slug}")).into_response();
     };
+    // Reported on every load rather than at parse time: the model reads
+    // `status`, and this is the kind of thing it needs told twice.
+    let shadowed = assets::shadowed_specifiers(&manifest);
+    if !shadowed.is_empty() {
+        inner.push_report(Report {
+            slug: slug.clone(),
+            level: "style".into(),
+            message: format!(
+                "{} replaces a module shipped in the binary. The canvas now needs the network \
+                 to load, and a version mismatch with the vendored React will not be obvious.",
+                shadowed.join(", ")
+            ),
+            detail: None,
+        });
+    }
     html(assets::shell(&slug, &manifest, &inner.key))
 }
 
@@ -497,15 +512,23 @@ async fn serve_hooks() -> Response {
 ///
 /// The URL comes from the manifest on disk, never from the request, so this
 /// cannot be driven into fetching an arbitrary host.
-async fn serve_dep(State(inner): Shared, UrlPath(specifier): UrlPath<String>) -> Response {
+async fn serve_dep(
+    State(inner): Shared,
+    UrlPath((key, slug, specifier)): UrlPath<(String, String, String)>,
+) -> Response {
+    if key != inner.key {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Scoped to the canvas that asked. Searching every canvas meant directory
+    // order decided which version won when two pinned the same package, and a
+    // canvas could resolve a specifier it had never declared.
     let declared = Registry::discover(&inner.project)
-        .canvases
-        .iter()
-        .find_map(|canvas| canvas.manifest.deps.get(&specifier).cloned());
+        .get(&slug)
+        .and_then(|canvas| canvas.manifest.deps.get(&specifier).cloned());
     let Some(url) = declared else {
         return (
             StatusCode::NOT_FOUND,
-            format!("`{specifier}` is not declared under [deps] in any canvas"),
+            format!("`{specifier}` is not declared under [deps] in canvas `{slug}`"),
         )
             .into_response();
     };
@@ -569,7 +592,15 @@ async fn serve_rpc(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if session.k != inner.key {
+    // The key comes from a header here, not the query string. A URL is visible
+    // in `ps` (the window child takes one as an argument), leaks by Referer,
+    // and lands in logs; a custom header does none of that and cannot be sent
+    // cross-origin without a preflight this server never answers.
+    let presented = headers
+        .get("x-artist-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if presented != inner.key {
         return StatusCode::NOT_FOUND.into_response();
     }
     // A page on another origin can POST here without reading the response, so
@@ -586,7 +617,8 @@ async fn serve_rpc(
     // it to select a permission set, so it must be resolved against the
     // registry here — not merely trusted because the shell handlers happened to
     // resolve their own copy of it.
-    let Some(canvas) = Registry::discover(&inner.project).get(&session.slug).cloned() else {
+    let registry = Registry::discover(&inner.project);
+    let Some(canvas) = registry.get(&session.slug).cloned() else {
         return (
             StatusCode::NOT_FOUND,
             format!("no canvas named `{}`", session.slug),

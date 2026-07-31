@@ -7,7 +7,12 @@
 // model cannot write.
 
 const boot = globalThis.__ARTIST__ ?? {};
-const query = `k=${encodeURIComponent(boot.key ?? "")}&slug=${encodeURIComponent(boot.slug ?? "")}`;
+// The slug identifies which canvas is talking; the key authenticates it. Only
+// the SSE stream carries the key in the URL, because EventSource cannot set a
+// header — everything else sends it as `x-artist-key`, which stays out of `ps`,
+// out of Referer, and out of logs.
+const query = `slug=${encodeURIComponent(boot.slug ?? "")}`;
+const streamQuery = `k=${encodeURIComponent(boot.key ?? "")}&${query}`;
 
 /** Call the harness. Returns the parsed body; throws only on a refusal. */
 async function rpc(method, params = {}) {
@@ -118,7 +123,7 @@ let events;
 let backoff = 250;
 
 function connect() {
-  events = new EventSource(`/_artist/events?${query}`);
+  events = new EventSource(`/_artist/events?${streamQuery}`);
 
   events.addEventListener("open", () => {
     backoff = 250;

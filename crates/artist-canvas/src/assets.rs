@@ -99,6 +99,23 @@ const OURS: &[(&str, &str)] = &[
     ("@artist/refresh", "/@artist/refresh.js"),
 ];
 
+/// Specifiers a canvas declared that replace something shipped in the binary.
+///
+/// Allowed, because pinning a newer React is a legitimate thing to want — but
+/// loud, because it silently defeats the offline guarantee this module's own
+/// header asserts, and a mismatched React is the hardest failure to diagnose.
+pub fn shadowed_specifiers(manifest: &Manifest) -> Vec<String> {
+    manifest
+        .deps
+        .keys()
+        .filter(|specifier| {
+            BARE.iter().any(|(bare, _)| bare == *specifier)
+                || OURS.iter().any(|(ours, _)| ours == *specifier)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Fetch a vendored asset by file name.
 pub fn vendored(name: &str) -> Option<&'static [u8]> {
     VENDOR.get_file(name).map(|file| file.contents())
@@ -119,7 +136,7 @@ pub fn content_type(name: &str) -> &'static str {
     }
 }
 
-fn import_map(manifest: &Manifest) -> String {
+fn import_map(manifest: &Manifest, slug: &str, key: &str) -> String {
     let mut imports: BTreeMap<&str, String> = BARE
         .iter()
         .map(|(specifier, file)| (*specifier, format!("/@vendor/{file}")))
@@ -128,10 +145,13 @@ fn import_map(manifest: &Manifest) -> String {
     // Declared packages are proxied rather than linked directly: the canvas
     // then works offline after the first load, and the browser never talks to
     // a third-party host.
+    // Keyed and slugged: a module import cannot carry a header, so the proxy's
+    // only gate is the path — and naming the canvas is what stops one canvas
+    // resolving a specifier out of another's manifest.
     for specifier in manifest.deps.keys() {
         imports.insert(
             specifier.as_str(),
-            format!("/@dep/{}", urlencode(specifier)),
+            format!("/@dep/{key}/{slug}/{}", urlencode(specifier)),
         );
     }
     let entries = imports
@@ -191,7 +211,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
         tokens = crate::palette::tokens_css(),
         base = crate::palette::BASE_CSS,
         theme = crate::palette::theme_css(),
-        map = import_map(manifest),
+        map = import_map(manifest, slug, key),
         slug_json = json_string(slug),
         key_json = json_string(key),
         tailwind = tailwind,
@@ -263,7 +283,7 @@ mod tests {
     /// fails to resolve it at load time with no useful message.
     #[test]
     fn the_kit_only_imports_what_the_map_resolves() {
-        let map = import_map(&Manifest::default());
+        let map = import_map(&Manifest::default(), "demo", "k");
         for source in [UI, HOOKS] {
             for line in source.lines().filter(|line| line.starts_with("import ")) {
                 let Some(start) = line.rfind(" from \"") else {
@@ -280,7 +300,7 @@ mod tests {
 
     #[test]
     fn react_resolves_for_the_bundles_that_import_it() {
-        let map = import_map(&Manifest::default());
+        let map = import_map(&Manifest::default(), "demo", "k");
         assert!(map.contains("\"react\": \"/@vendor/react.js\""), "{map}");
         assert!(map.contains("\"react/jsx-runtime\""), "{map}");
     }
@@ -294,8 +314,8 @@ mod tests {
             deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three".to_owned())]),
             ..Manifest::default()
         };
-        let map = import_map(&manifest);
-        assert!(map.contains("\"three\": \"/@dep/three\""), "{map}");
+        let map = import_map(&manifest, "demo", "k");
+        assert!(map.contains("\"three\": \"/@dep/k/demo/three\""), "{map}");
         assert!(!map.contains("esm.sh"), "the CDN URL leaked into the page: {map}");
         assert!(map.contains("\"react\""), "{map}");
     }
@@ -308,7 +328,7 @@ mod tests {
             deps: BTreeMap::from([("@scope/pkg".to_owned(), "https://esm.sh/x".to_owned())]),
             ..Manifest::default()
         };
-        assert!(import_map(&manifest).contains("/@dep/%40scope%2Fpkg"));
+        assert!(import_map(&manifest, "demo", "k").contains("/@dep/k/demo/%40scope%2Fpkg"));
         assert_eq!(urlencode("@scope/pkg"), "%40scope%2Fpkg");
     }
 
