@@ -205,9 +205,6 @@ const HARNESS_TOOLS: [&str; 2] = ["handoff", "todo"];
 impl Profiles {
     pub fn discover(project: &Path) -> Self {
         let root = crate::prompt_config::config_root();
-        if let Some(root) = &root {
-            crate::prompt_config::scaffold(root);
-        }
         Self::discover_from(project, root.as_deref())
     }
 

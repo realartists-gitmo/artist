@@ -50,6 +50,11 @@ shared prompt is the whole of it — that is how `default` is expressed. Discove
 winning by name; built-in profiles are replaced by a same-named definition at
 either layer.
 
+Nothing is written to these paths: the built-ins live in the binary and a file
+is purely an override. Scaffolding editable copies would fork every install
+from the shipped defaults on first launch, so a later improvement to a built-in
+prompt could never reach it.
+
 ```markdown
 ---
 name: reviewer
