@@ -1,6 +1,9 @@
 #![cfg(unix)]
 
-use crate::{HerdrContext, HerdrIntegration, command::CommandRunner};
+use crate::{
+    HerdrContext, HerdrIntegration,
+    command::{CommandRunner, Report},
+};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -139,6 +142,43 @@ async fn retries_after_cli_failure_and_recovers() {
 }
 
 #[tokio::test]
+async fn saturation_resynchronizes_the_final_state_after_recovery() {
+    let fake = fake("if [ -f \"$0.fail\" ]; then exit 1; fi");
+    let marker = PathBuf::from(format!("{}.fail", fake.context.binary().display()));
+    fs::write(&marker, "fail").unwrap();
+    let integration = HerdrIntegration::start(fake.context);
+    let handle = integration.handle();
+    handle.claim_idle();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let turn = handle.start_turn();
+    for _ in 0..31 {
+        handle.set_blocked("question", true);
+        handle.set_blocked("question", false);
+    }
+    handle.set_blocked("question", true);
+    handle.set_blocked("question", false);
+    turn.finish();
+    fs::remove_file(marker).unwrap();
+
+    let calls = wait_for(&fake.log, |calls| {
+        calls
+            .iter()
+            .filter(|line| line.split_whitespace().nth(1) == Some("report-agent"))
+            .count()
+            >= 66
+    })
+    .await;
+    let last_state = calls
+        .iter()
+        .rev()
+        .find(|line| line.split_whitespace().nth(1) == Some("report-agent"))
+        .unwrap();
+    assert!(last_state.contains("--state idle"));
+    integration.shutdown().await;
+}
+
+#[tokio::test]
 async fn release_retries_before_shutdown_returns() {
     let fake = fake(
         "case \"$*\" in *release-agent*) n=$(cat \"$0.count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$0.count\"; [ $n -lt 3 ] && exit 1;; esac",
@@ -154,6 +194,19 @@ async fn release_retries_before_shutdown_returns() {
             .unwrap()
             .contains("pane release-agent 9-9")
     );
+}
+
+#[tokio::test]
+async fn fallback_and_async_release_attempts_are_serialized() {
+    let fake = fake(
+        "case \"$*\" in *release-agent*) mkdir \"$0.lock\" 2>/dev/null || touch \"$0.race\"; sleep 0.1; rmdir \"$0.lock\" 2>/dev/null;; esac",
+    );
+    let race = PathBuf::from(format!("{}.race", fake.context.binary().display()));
+    let runner = CommandRunner::new(fake.context);
+    runner.spawn_release();
+    assert!(runner.run(Report::Release).await);
+    wait_for(&fake.log, |calls| calls.len() == 2).await;
+    assert!(!race.exists());
 }
 
 #[tokio::test]
