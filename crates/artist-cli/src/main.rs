@@ -313,6 +313,7 @@ async fn execute_prompt(
         provider_context: active.provider_context.clone(),
         effective_context_window,
         fast_mode: false,
+        lifecycle: artist_agent::LifecycleEmitter::default(),
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));

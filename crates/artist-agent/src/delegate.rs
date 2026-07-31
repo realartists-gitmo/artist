@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    PromptEvent, SessionHandles,
+    LifecycleEvent, PromptEvent, SessionHandles,
     capture::{CaptureHook, ToolMeta},
     delegate_jobs::DelegateJobs,
     resources::Resources,
@@ -93,6 +93,17 @@ impl Delegate {
     }
 
     fn emit_child(&self, id: &str, event: PromptEvent) {
+        match &event {
+            PromptEvent::ToolExecutionStart { id: tool_id, .. } => self
+                .handles
+                .lifecycle
+                .emit(LifecycleEvent::ToolStarted(format!("{id}:{tool_id}"))),
+            PromptEvent::ToolResult { id: tool_id, .. } => self
+                .handles
+                .lifecycle
+                .emit(LifecycleEvent::ToolFinished(format!("{id}:{tool_id}"))),
+            _ => {}
+        }
         self.emit(PromptEvent::SubagentEvent {
             id: id.to_owned(),
             event: Box::new(event),
@@ -100,6 +111,9 @@ impl Delegate {
     }
 
     fn finish_child(&self, id: &str, outcome: &str) {
+        self.handles
+            .lifecycle
+            .emit(LifecycleEvent::SubagentFinished(id.to_owned()));
         self.emit(PromptEvent::SubagentFinished {
             id: id.to_owned(),
             outcome: outcome.to_owned(),
@@ -383,6 +397,9 @@ impl Delegate {
             .tools
             .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        self.handles
+            .lifecycle
+            .emit(LifecycleEvent::SubagentStarted(actor.clone()));
         self.emit(PromptEvent::SubagentStarted {
             id: actor.clone(),
             role: role.name.clone(),

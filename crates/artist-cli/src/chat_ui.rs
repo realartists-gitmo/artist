@@ -2018,6 +2018,7 @@ async fn submit(
         provider_context: active.provider_context.clone(),
         effective_context_window: status.context_capacity,
         fast_mode: status.fast_mode,
+        lifecycle: artist_agent::LifecycleEmitter::default(),
         cancel: cancel.clone(),
     };
     let task = tokio::spawn(async move {

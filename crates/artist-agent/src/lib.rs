@@ -7,6 +7,7 @@ mod delegate;
 mod delegate_jobs;
 #[cfg(test)]
 mod delegate_tests;
+mod lifecycle;
 pub mod mcp;
 pub mod openai_responses;
 mod prompt_config;
@@ -17,6 +18,7 @@ mod ttsr;
 #[cfg(test)]
 mod ttsr_tests;
 
+pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use resources::AvailableSkill;
 mod steering;
 mod subagents;
@@ -133,6 +135,8 @@ pub struct SessionHandles {
     pub effective_context_window: Option<u64>,
     /// Request OpenAI priority processing for this session.
     pub fast_mode: bool,
+    /// Non-display lifecycle notifications remain live for background delegates.
+    pub lifecycle: LifecycleEmitter,
     pub cancel: CancellationToken,
 }
 
@@ -148,6 +152,7 @@ impl Default for SessionHandles {
             provider_context: artist_session::ProviderContextHandle::noop(),
             effective_context_window: None,
             fast_mode: false,
+            lifecycle: LifecycleEmitter::default(),
             cancel: CancellationToken::new(),
         }
     }
@@ -663,10 +668,15 @@ where
                 Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                     tool_call,
                     internal_call_id,
-                }) => on_event(PromptEvent::ToolExecutionStart {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                })?,
+                }) => {
+                    handles.lifecycle.emit(LifecycleEvent::ToolStarted(format!(
+                        "main:{internal_call_id}"
+                    )));
+                    on_event(PromptEvent::ToolExecutionStart {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                    })?;
+                }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     on_event(PromptEvent::CompletionUsage {
                         total_tokens: call.usage.total_tokens,
@@ -694,6 +704,9 @@ where
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
+                    handles.lifecycle.emit(LifecycleEvent::ToolFinished(format!(
+                        "main:{internal_call_id}"
+                    )));
                     on_event(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,
