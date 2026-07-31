@@ -51,6 +51,18 @@ struct DelegateRun {
     background: bool,
 }
 
+struct SubagentActivityGuard {
+    lifecycle: crate::LifecycleEmitter,
+    id: String,
+}
+
+impl Drop for SubagentActivityGuard {
+    fn drop(&mut self) {
+        self.lifecycle
+            .emit(LifecycleEvent::SubagentFinished(self.id.clone()));
+    }
+}
+
 impl DelegateRun {
     fn new(task_id: Option<String>) -> Self {
         let background = task_id.is_some();
@@ -191,16 +203,27 @@ impl PortableTool for Delegate {
                 let task_role = role.clone();
                 Ok(self
                     .jobs
-                    .start(prompt, role, move |task_id| async move {
+                    .start(prompt, role, move |task_id| {
                         delegate
-                            .run_agent(
-                                task_prompt,
-                                &task_role,
-                                args.fork.unwrap_or(false),
-                                Some(task_id),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())
+                            .handles
+                            .lifecycle
+                            .emit(LifecycleEvent::SubagentStarted(task_id.clone()));
+                        let activity = SubagentActivityGuard {
+                            lifecycle: delegate.handles.lifecycle.clone(),
+                            id: task_id.clone(),
+                        };
+                        async move {
+                            let _activity = activity;
+                            delegate
+                                .run_agent(
+                                    task_prompt,
+                                    &task_role,
+                                    args.fork.unwrap_or(false),
+                                    Some(task_id),
+                                )
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
                     })
                     .await)
             }
@@ -397,9 +420,11 @@ impl Delegate {
             .tools
             .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        self.handles
-            .lifecycle
-            .emit(LifecycleEvent::SubagentStarted(actor.clone()));
+        if !run.background {
+            self.handles
+                .lifecycle
+                .emit(LifecycleEvent::SubagentStarted(actor.clone()));
+        }
         self.emit(PromptEvent::SubagentStarted {
             id: actor.clone(),
             role: role.name.clone(),
