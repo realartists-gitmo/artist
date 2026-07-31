@@ -689,7 +689,7 @@ function stroke(index) {
   // Read the tokens the server injects, not Tailwind's `--color-*`: those are
   // produced by the browser JIT for use inside utilities and are not exposed
   // on :root, so asking for them silently yields "" and every line goes grey.
-  const token = `--a-chart-${(index % 5) + 1}`;
+  const token = `--a-chart-${(index % 8) + 1}`;
   return getComputedStyle(document.documentElement).getPropertyValue(token).trim() || "#888";
 }
 

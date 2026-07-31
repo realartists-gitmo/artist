@@ -43,34 +43,97 @@ pub const STEPS: [u16; 11] = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 9
 /// 200 is where surface colours are reached for.
 const ANCHOR_STEP: usize = 2;
 
-/// Which Tailwind families each anchor claims.
+/// Every Tailwind family, at its own hue.
 ///
-/// Every default family is covered deliberately: an unmapped one would fall
-/// through to stock Tailwind and be the single off-brand thing on the page.
-pub const FAMILIES: &[(&str, u32)] = &[
-    ("slate", WHITE),
-    ("gray", WHITE),
-    ("zinc", WHITE),
-    ("neutral", WHITE),
-    ("stone", WHITE),
-    ("red", RED),
-    ("orange", YELLOW),
-    ("amber", YELLOW),
-    ("yellow", YELLOW),
-    ("lime", MINT),
-    ("green", MINT),
-    ("emerald", MINT),
-    ("teal", MINT),
-    ("cyan", BLUE),
-    ("sky", BLUE),
-    ("blue", BLUE),
-    ("indigo", BLUE),
-    ("violet", BLUSH),
-    ("purple", BLUSH),
-    ("fuchsia", PINK),
-    ("pink", PINK),
-    ("rose", PINK),
+/// The first attempt folded 22 families onto 6 anchors, which left `blue`,
+/// `sky`, `cyan` and `indigo` as one colour — so a canvas colouring four
+/// categories got one colour and no warning. Twenty-two hues is what a
+/// dashboard actually needs.
+///
+/// Artist's identity survives because it was never the six hues. It is the
+/// *treatment*: barely-saturated surfaces, neutrals driven to grey, and a dark
+/// end solved for contrast rather than lightness. Every family below wears that
+/// treatment at Tailwind's own hue, and the six terminal colours are used
+/// verbatim where they land, so the palette still starts in the TUI.
+///
+/// `hue` is degrees; `saturation` is the surface-step saturation, which the
+/// ramp then adjusts as it darkens.
+pub const FAMILIES: &[Family] = &[
+    // Neutrals. A trace of the terminal's warmth, driven to grey as they darken.
+    Family::neutral("slate", 215.0, 0.09),
+    Family::neutral("gray", 220.0, 0.07),
+    Family::neutral("zinc", 240.0, 0.05),
+    Family::neutral("neutral", 40.0, 0.03),
+    Family::anchored("stone", WHITE),
+    // Warm.
+    Family::anchored("red", RED),
+    Family::pastel("orange", 18.0, 0.70),
+    Family::pastel("amber", 32.0, 0.66),
+    Family::anchored("yellow", YELLOW),
+    // Green.
+    Family::pastel("lime", 90.0, 0.45),
+    Family::pastel("green", 128.0, 0.40),
+    Family::anchored("emerald", MINT),
+    Family::pastel("teal", 172.0, 0.36),
+    // Blue.
+    Family::anchored("cyan", BLUE),
+    Family::pastel("sky", 202.0, 0.44),
+    Family::pastel("blue", 220.0, 0.46),
+    Family::pastel("indigo", 240.0, 0.42),
+    // Purple and pink.
+    Family::pastel("violet", 262.0, 0.44),
+    Family::pastel("purple", 280.0, 0.42),
+    Family::pastel("fuchsia", 300.0, 0.48),
+    Family::anchored("pink", PINK),
+    Family::anchored("rose", BLUSH),
 ];
+
+/// One colour family: either one of artist's own, or a hue wearing its
+/// treatment.
+#[derive(Clone, Copy, Debug)]
+pub struct Family {
+    pub name: &'static str,
+    hue: f64,
+    saturation: f64,
+    /// Present when this family *is* one of the terminal's colours, in which
+    /// case the surface step is that exact value rather than a re-derivation.
+    anchor: Option<u32>,
+    neutral: bool,
+}
+
+impl Family {
+    /// A family taken straight from the TUI palette.
+    pub const fn anchored(name: &'static str, anchor: u32) -> Self {
+        Family { name, hue: 0.0, saturation: 0.0, anchor: Some(anchor), neutral: false }
+    }
+
+    /// A hue Tailwind has and the terminal does not, wearing artist's treatment.
+    pub const fn pastel(name: &'static str, hue: f64, saturation: f64) -> Self {
+        Family { name, hue, saturation, anchor: None, neutral: false }
+    }
+
+    /// A grey. Kept near-neutral the whole way down; see `saturated_for`.
+    pub const fn neutral(name: &'static str, hue: f64, saturation: f64) -> Self {
+        Family { name, hue, saturation, anchor: None, neutral: true }
+    }
+
+    /// The colour this family's surface step shows.
+    pub fn surface(&self) -> u32 {
+        match self.anchor {
+            Some(anchor) => anchor,
+            // Placed at the same lightness artist's own pastels sit at, so a
+            // derived family reads as one of them rather than as a tint.
+            None => from_hsl(self.hue, self.saturation, PASTEL_LIGHTNESS),
+        }
+    }
+
+    pub fn ramp(&self) -> [u32; 11] {
+        ramp(self.surface())
+    }
+}
+
+/// Mean lightness of artist's six, so a derived surface sits with them.
+const PASTEL_LIGHTNESS: f64 = 0.885;
 
 /// The surface the dark end of a ramp is read against.
 const LIGHT_SURFACE: u32 = 0xFF_FF_FF;
@@ -268,9 +331,9 @@ pub fn hex(color: u32) -> String {
 /// thinking resolves to artist's colours.
 pub fn theme_css() -> String {
     let mut out = String::from("@theme {\n");
-    for (family, anchor) in FAMILIES {
-        for (step, color) in STEPS.iter().zip(ramp(*anchor)) {
-            out.push_str(&format!("  --color-{family}-{step}: {};\n", hex(color)));
+    for family in FAMILIES {
+        for (step, color) in STEPS.iter().zip(family.ramp()) {
+            out.push_str(&format!("  --color-{}-{step}: {};\n", family.name, hex(color)));
         }
     }
     // Semantic aliases the kit and templates use, so a canvas can say what it
@@ -283,6 +346,24 @@ pub fn theme_css() -> String {
         hex(ramp(MINT)[7]),
     ));
     out.push_str("}\n");
+
+    // The utilities have to flip with the scheme, or `bg-red-100 text-red-800`
+    // — the idiom the ramp's own test blesses — paints a near-white block on a
+    // near-black page. Reversing the ramp keeps the *relationship* the model
+    // wrote: a low number is still a surface and a high number is still text.
+    out.push_str("@media (prefers-color-scheme: dark) {\n  :root {\n");
+    for family in FAMILIES {
+        let ramp = family.ramp();
+        for (index, step) in STEPS.iter().enumerate() {
+            let mirrored = ramp[STEPS.len() - 1 - index];
+            out.push_str(&format!(
+                "    --color-{}-{step}: {};\n",
+                family.name,
+                hex(mirrored)
+            ));
+        }
+    }
+    out.push_str("  }\n}\n");
     out
 }
 
@@ -400,9 +481,36 @@ mod tests {
 
     /// Families must stay distinguishable. If saturation compensation pushed
     /// every dark step toward the same grey, the palette would collapse.
+    /// Every pair, not a chosen four. Folding 22 families onto 6 anchors made
+    /// blue/sky/cyan/indigo one colour, and a canvas colouring four categories
+    /// got one colour with no warning.
     #[test]
-    fn families_remain_distinct_at_text_weight() {
-        let families = [("mint", MINT), ("blue", BLUE), ("pink", PINK), ("yellow", YELLOW)];
+    fn every_family_pair_is_distinguishable_at_text_weight() {
+        let mut collisions = Vec::new();
+        for (index, left) in FAMILIES.iter().enumerate() {
+            for right in &FAMILIES[index + 1..] {
+                // Greys are meant to resemble each other; hues are not.
+                let (a, b) = (left.ramp()[7], right.ramp()[7]);
+                let difference: i32 = (0..3)
+                    .map(|shift| {
+                        let channel = |c: u32| (c >> (shift * 8) & 0xFF) as i32;
+                        (channel(a) - channel(b)).abs()
+                    })
+                    .sum();
+                let neutral_pair = NEUTRALS.contains(&left.name) && NEUTRALS.contains(&right.name);
+                if difference < 24 && !neutral_pair {
+                    collisions.push(format!("{} vs {} ({difference})", left.name, right.name));
+                }
+            }
+        }
+        assert!(collisions.is_empty(), "indistinguishable families: {collisions:?}");
+    }
+
+    const NEUTRALS: [&str; 5] = ["slate", "gray", "zinc", "neutral", "stone"];
+
+    #[test]
+    fn legacy_anchor_set_stays_distinct() {
+        let families = [("emerald", MINT), ("cyan", BLUE), ("pink", PINK), ("yellow", YELLOW)];
         for (index, (left_name, left)) in families.iter().enumerate() {
             for (right_name, right) in &families[index + 1..] {
                 let left = step(*left, 700);
@@ -448,7 +556,7 @@ mod tests {
         ];
         for family in expected {
             assert!(
-                FAMILIES.iter().any(|(name, _)| *name == family),
+                FAMILIES.iter().any(|entry| entry.name == family),
                 "{family} would fall through to stock Tailwind"
             );
         }
@@ -470,7 +578,8 @@ mod tests {
         assert!(css.starts_with("@theme {"));
         assert!(css.contains("--color-blue-700:"));
         assert!(css.contains("--color-accent:"));
-        for (family, _) in FAMILIES {
+        for family in FAMILIES {
+            let family = family.name;
             for step in STEPS {
                 assert!(
                     css.contains(&format!("--color-{family}-{step}:")),
@@ -490,11 +599,9 @@ mod preview {
     #[test]
     #[ignore]
     fn show_ramps() {
-        for (name, anchor) in [
-            ("pink", PINK), ("blush", BLUSH), ("mint", MINT),
-            ("yellow", YELLOW), ("blue", BLUE), ("white", WHITE), ("red", RED),
-        ] {
-            print!("{name:>7} ");
+        for family in FAMILIES {
+            let (name, anchor) = (family.name, family.surface());
+            print!("{name:>8} ");
             for (step, color) in STEPS.iter().zip(ramp(anchor)) {
                 let (r, g, b) = (color >> 16 & 0xFF, color >> 8 & 0xFF, color & 0xFF);
                 let fg = if luminance(color) > 0.4 { "30" } else { "97" };
@@ -535,11 +642,7 @@ pub fn tokens_css() -> String {
          \x20 --a-danger: {danger};\n\
          \x20 --a-ok: {ok};\n\
          \x20 --a-warn: {warn};\n\
-         \x20 --a-chart-1: {chart1};\n\
-         \x20 --a-chart-2: {chart2};\n\
-         \x20 --a-chart-3: {chart3};\n\
-         \x20 --a-chart-4: {chart4};\n\
-         \x20 --a-chart-5: {chart5};\n\
+{charts_light}\
          \x20 --a-radius: 8px;\n\
          \x20 --a-sp: 4px;\n\
          \x20 --a-font: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif;\n\
@@ -557,6 +660,7 @@ pub fn tokens_css() -> String {
          \x20   --a-danger: {dark_danger};\n\
          \x20   --a-ok: {dark_ok};\n\
          \x20   --a-warn: {dark_warn};\n\
+{charts_dark}\
          \x20 }}\n\
          }}\n",
         fg = hex(neutral[10]),
@@ -567,11 +671,7 @@ pub fn tokens_css() -> String {
         danger = hex(red[7]),
         ok = hex(mint[7]),
         warn = hex(yellow[7]),
-        chart1 = hex(blue[6]),
-        chart2 = hex(mint[6]),
-        chart3 = hex(ramp(PINK)[6]),
-        chart4 = hex(yellow[6]),
-        chart5 = hex(ramp(BLUSH)[6]),
+        charts_light = chart_block(6),
         // Dark mode reads off the opposite end: the pastels themselves become
         // the foregrounds they were designed to be in the terminal.
         dark_bg = hex(mix(neutral[10], 0x00_00_00, 0.55)),
@@ -586,7 +686,32 @@ pub fn tokens_css() -> String {
         dark_danger = hex(red[3]),
         dark_ok = hex(mint[2]),
         dark_warn = hex(yellow[2]),
+        // Charts sit on the dark ground in dark mode, so their lines come from
+        // the light end of each ramp — the same inversion the utilities get.
+        charts_dark = chart_block(3),
     )
+}
+
+/// Series colours, in visiting order.
+///
+/// Eight rather than five, ordered for maximum separation rather than by
+/// declaration: most charts have two or three series, so the front of this list
+/// matters most. The previous five cycled through two near-identical pinks and
+/// said nothing. `slate` sits last because a grey series is what a baseline or
+/// an "other" bucket wants.
+pub const CHART_FAMILIES: [&str; 8] =
+    ["cyan", "pink", "amber", "emerald", "violet", "lime", "orange", "slate"];
+
+fn chart_block(step: usize) -> String {
+    let indent = "         \x20   ";
+    CHART_FAMILIES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let family = FAMILIES.iter().find(|f| f.name == *name).expect("charted family exists");
+            format!("{indent}--a-chart-{}: {};\n", index + 1, hex(family.ramp()[step]))
+        })
+        .collect()
 }
 
 /// Typographic and shape defaults, so an element the model never styled still
@@ -682,6 +807,42 @@ mod token_tests {
             contrast(neutral[10], 0xFF_FF_FF) > light,
             "muted should be dimmer than body text"
         );
+    }
+
+    /// Every charted family must exist and be told apart from its neighbours;
+    /// the previous five cycled through two near-identical pinks in silence.
+    #[test]
+    fn chart_colours_are_real_and_separable() {
+        let colors: Vec<u32> = CHART_FAMILIES
+            .iter()
+            .map(|name| {
+                FAMILIES
+                    .iter()
+                    .find(|f| f.name == *name)
+                    .unwrap_or_else(|| panic!("{name} is charted but not a family"))
+                    .ramp()[6]
+            })
+            .collect();
+
+        for (index, left) in colors.iter().enumerate() {
+            for right in &colors[index + 1..] {
+                let difference: i32 = (0..3)
+                    .map(|shift| {
+                        let channel = |c: u32| (c >> (shift * 8) & 0xFF) as i32;
+                        (channel(*left) - channel(*right)).abs()
+                    })
+                    .sum();
+                assert!(difference > 60, "{} and {} are too close", hex(*left), hex(*right));
+            }
+        }
+    }
+
+    /// Series lines sit on the ground, so they must invert with it.
+    #[test]
+    fn charts_have_a_dark_variant() {
+        let tokens = tokens_css();
+        assert_eq!(tokens.matches("--a-chart-1:").count(), 2, "no dark override");
+        assert!(tokens.contains("--a-chart-8:"), "only five colours shipped");
     }
 
     #[test]
