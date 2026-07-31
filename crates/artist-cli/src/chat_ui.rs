@@ -823,6 +823,7 @@ async fn run_loop(
                         &mut input,
                         target,
                         fork,
+                        context.herdr,
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
@@ -951,6 +952,7 @@ async fn run_loop(
                         &mut history,
                         context.rules_handle,
                         id,
+                        context.herdr,
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
@@ -1405,6 +1407,7 @@ async fn handle_rewind(
     input: &mut ChatInput,
     target: Option<usize>,
     fork: bool,
+    herdr: &crate::herdr::Lifecycle,
 ) -> Result<Vec<String>> {
     let Some(current) = active.as_ref() else {
         return Ok(vec!["No session yet — nothing to rewind.".to_owned()]);
@@ -1457,6 +1460,9 @@ async fn handle_rewind(
         )?;
         if let Some(old) = active.replace(forked) {
             old.close().await?;
+        }
+        if let Some(active) = active.as_ref() {
+            herdr.report_session(&active.session.id);
         }
     } else {
         current.recorder.record(artist_session::HistoryRewind {
@@ -1529,6 +1535,7 @@ async fn handle_resume(
     history: &mut Vec<Message>,
     rules_handle: &RulesHandle,
     id: Option<&str>,
+    herdr: &crate::herdr::Lifecycle,
 ) -> Result<Vec<String>> {
     let Some(id) = id else {
         return handle_sessions(sessions, project, active);
@@ -1549,6 +1556,7 @@ async fn handle_resume(
     if let Some(old) = active.replace(opened) {
         old.close().await?;
     }
+    herdr.report_session(id);
     Ok(vec![format!(
         "Resumed session {id}{}.",
         label
