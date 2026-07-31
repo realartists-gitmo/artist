@@ -868,7 +868,11 @@ async fn run_loop(
                     }
                     Ok(slash_commands::ParsedCommand::Fast) => {
                         if session_provider.as_ref().is_some_and(|provider| {
-                            provider.provider == llm_provider::ProviderKind::Openai
+                            matches!(
+                                provider.provider,
+                                llm_provider::ProviderKind::Openai
+                                    | llm_provider::ProviderKind::Chatgpt
+                            )
                         }) {
                             status.fast_mode = !status.fast_mode;
                             vec![format!(

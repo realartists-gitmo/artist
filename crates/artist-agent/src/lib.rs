@@ -823,7 +823,12 @@ pub(crate) fn request_params(
         Some(effort) => json!({ "effort": effort, "summary": "auto", "context": "all_turns" }),
         None => json!({ "summary": "auto", "context": "all_turns" }),
     };
-    if fast_mode && provider == llm_provider::ProviderKind::Openai {
+    if fast_mode
+        && matches!(
+            provider,
+            llm_provider::ProviderKind::Openai | llm_provider::ProviderKind::Chatgpt
+        )
+    {
         params["service_tier"] = json!("priority");
     }
     Some(params)
@@ -996,5 +1001,9 @@ mod tests {
         )
         .unwrap();
         assert!(normal.get("service_tier").is_none());
+
+        let subscription =
+            request_params(ProviderKind::Chatgpt, None, "cache", None, None, true).unwrap();
+        assert_eq!(subscription["service_tier"], "priority");
     }
 }
