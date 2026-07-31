@@ -42,7 +42,79 @@ pub(super) fn title(name: &str, arguments: &Value) -> ToolTitle {
         "bash" => bash_title(arguments),
         "skill" => skill_title(arguments),
         "subagent" => subagent_title(arguments),
+        "computer" => computer_title(arguments),
+        "canvas" => canvas_title(arguments),
         _ => plain(humanize(name)),
+    }
+}
+
+/// Name a canvas action by mode and slug.
+///
+/// Every mode rendered as a bare `Canvas` before, so creating an app looked
+/// identical to reading its status — and the slug, the one thing that lets the
+/// user find it again, was nowhere.
+fn canvas_title(arguments: &Value) -> ToolTitle {
+    let name = string(arguments, "name");
+    let mode = string(arguments, "mode");
+    let mode = if mode.is_empty() { "status".to_owned() } else { mode };
+    match mode.as_str() {
+        "create" => composed([prose("Built canvas "), input(name)]),
+        "open" => composed([prose("Opened canvas "), input(name)]),
+        "status" => composed([prose("Checked canvas "), input(name)]),
+        "state" => composed([prose("Updated canvas "), input(name)]),
+        "eject" => composed([prose("Ejected canvas "), input(name)]),
+        "list" => plain("Listed canvases".to_owned()),
+        "docs" => {
+            let topic = string(arguments, "topic");
+            if topic.is_empty() {
+                plain("Read the canvas reference".to_owned())
+            } else {
+                composed([prose("Read canvas docs for "), input(topic)])
+            }
+        }
+        other => composed([prose("Canvas "), input(other.to_owned())]),
+    }
+}
+
+/// Name a computer action by what the model said it was touching.
+///
+/// The label, not the anchor: `kv7` means nothing to a reader watching the
+/// transcript, and the label is exactly the human-readable string the model was
+/// required to echo from the observation.
+fn computer_title(arguments: &Value) -> ToolTitle {
+    let surface = string(arguments, "surface");
+    let steps = arguments.get("steps").and_then(Value::as_array);
+    match string(arguments, "mode").as_str() {
+        "observe" => composed([prose("Observed "), input(surface)]),
+        "screenshot" => composed([prose("Captured "), input(surface)]),
+        "launch" => composed([prose("Launched "), input(string(arguments, "program"))]),
+        "open" => plain("Opened a stage"),
+        "close" => plain("Closed the stage"),
+        "list" | "surfaces" => plain("Listed computer surfaces"),
+        _ => match steps.map(Vec::as_slice) {
+            // One step reads better named than counted.
+            Some([step]) => {
+                let action = step
+                    .as_object()
+                    .and_then(|map| map.keys().next().cloned())
+                    .unwrap_or_else(|| "acted".to_owned());
+                let label = step
+                    .as_object()
+                    .and_then(|map| map.values().next())
+                    .map(|value| string(value, "label"))
+                    .unwrap_or_default();
+                if label.is_empty() {
+                    composed([prose(humanize(&action)), prose(" on "), input(surface)])
+                } else {
+                    composed([prose(humanize(&action)), prose(" "), input(label)])
+                }
+            }
+            Some(steps) => composed([
+                prose(format!("Ran {} steps on ", steps.len())),
+                input(surface),
+            ]),
+            None => plain(humanize("computer")),
+        },
     }
 }
 
@@ -187,6 +259,31 @@ mod tests {
                 TitleSegment::Prose(_) => None,
             })
             .collect()
+    }
+
+    /// Every mode rendered as a bare `Canvas`, so building an app looked like
+    /// reading its status, and the slug — the only way back to it — was absent.
+    #[test]
+    fn canvas_titles_name_the_mode_and_the_canvas() {
+        assert_eq!(
+            title("canvas", &serde_json::json!({"mode":"create","name":"test-dashboard"}))
+                .plain_text(),
+            "Built canvas test-dashboard"
+        );
+        assert_eq!(
+            title("canvas", &serde_json::json!({"mode":"open","name":"test-dashboard"}))
+                .plain_text(),
+            "Opened canvas test-dashboard"
+        );
+        // status is the default, and the commonest call.
+        assert_eq!(
+            title("canvas", &serde_json::json!({"name":"test-dashboard"})).plain_text(),
+            "Checked canvas test-dashboard"
+        );
+        assert_eq!(
+            title("canvas", &serde_json::json!({"mode":"list"})).plain_text(),
+            "Listed canvases"
+        );
     }
 
     #[test]

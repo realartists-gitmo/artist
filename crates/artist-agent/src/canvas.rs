@@ -95,7 +95,7 @@ impl PortableTool for CanvasTool {
         match mode {
             "create" => self.create(&slug, args),
             "open" => self.open(&slug),
-            "status" => Ok(self.status(&slug)),
+            "status" => Ok(self.status(&slug).await),
             "eject" => self.eject(&slug),
             "state" => self.state(&slug, args),
             other => Err(CanvasError(format!(
@@ -160,7 +160,9 @@ fn schema() -> Value {
                         "create: scaffold a new canvas from a template. open: get its URL to give \
                          the user. status: compile errors, browser errors, console output and \
                          current state — call this after every edit. state: read shared state, or \
-                         write it by passing `entries`. docs: component reference. list: every \
+                         write it by passing `entries`. status also describes what is on \
+                         screen — the text, contrast failures, overflow — which is the only \
+                         way you can see what you built. docs: component reference. list: every \
                          canvas in this project. eject: convert to a standalone Vite project when \
                          a canvas outgrows the built-in dependency set — after which Artist stops \
                          serving it."
@@ -287,7 +289,7 @@ impl CanvasTool {
 
     /// The feedback loop. Everything the model needs to know about a canvas it
     /// cannot see, in one place.
-    fn status(&self, slug: &str) -> String {
+    async fn status(&self, slug: &str) -> String {
         let registry = Registry::discover(&self.project);
         let Some(canvas) = registry.get(slug) else {
             return self.unknown(slug, &registry);
@@ -333,6 +335,41 @@ impl CanvasTool {
             out.push_str(&format!("\n{} console message(s):\n", chatter.len()));
             for report in chatter.iter().take(20) {
                 out.push_str(&format!("  [{}] {}\n", report.level, report.message));
+            }
+        }
+
+        // What is actually on screen. Every other line above reports whether
+        // the code ran; this is the only one that reports what it produced —
+        // and a wrong number or an unreadable label is invisible without it.
+        match self.server.request_digest(slug).await {
+            None => out.push_str("\nNo open window, so nothing to inspect. Use mode=open.\n"),
+            Some(digest) if digest.get("mounted").is_none() => out.push_str(&format!(
+                "\nThe page did not mount: {}\n",
+                digest.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")
+            )),
+            Some(digest) => {
+                out.push_str("\nOn screen now:\n");
+                if let Some(text) = digest.get("text").and_then(|t| t.as_array()) {
+                    let visible: Vec<_> = text
+                        .iter()
+                        .filter_map(|line| line.as_str())
+                        .take(40)
+                        .collect();
+                    out.push_str(&format!("  text: {}\n", visible.join(" | ")));
+                }
+                for (key, label) in [
+                    ("elements", "elements"),
+                    ("overflowing", "overflowing their container"),
+                    ("unreadable", "below 4.5:1 contrast"),
+                ] {
+                    if let Some(items) = digest.get(key).and_then(|v| v.as_array())
+                        && !items.is_empty()
+                    {
+                        let rendered: Vec<_> =
+                            items.iter().filter_map(|i| i.as_str()).collect();
+                        out.push_str(&format!("  {label}: {}\n", rendered.join(", ")));
+                    }
+                }
             }
         }
 

@@ -9,7 +9,7 @@ description = "Agent-authored, hot-reloading local React apps for Artist"
 [dependencies]
 # JSX/TSX -> JS in-process. The umbrella crate keeps the oxc sub-crates on one
 # version; they release in lockstep and mixing them is a build hazard.
-oxc = { version = "0.142", features = ["codegen", "semantic", "transformer"] }
+oxc = { version = "0.142", features = ["ast_visit", "codegen", "semantic", "transformer"] }
 
 anyhow = "1"
 artist-session = { path = "../artist-session" }

@@ -92,6 +92,10 @@ enum Signal {
     Agent {
         event: serde_json::Value,
     },
+    /// Asks any open page to describe what it is showing.
+    Digest {
+        slug: String,
+    },
 }
 
 impl Signal {
@@ -100,6 +104,7 @@ impl Signal {
         match self {
             Signal::Reload { slug }
             | Signal::Update { slug, .. }
+            | Signal::Digest { slug }
             | Signal::State { slug, .. } => Some(slug),
             Signal::Ask { .. } | Signal::Agent { .. } => None,
         }
@@ -112,6 +117,7 @@ impl Signal {
             Signal::State { .. } => "state",
             Signal::Ask { .. } => "ask",
             Signal::Agent { .. } => "agent",
+            Signal::Digest { .. } => "digest",
         }
     }
 }
@@ -122,6 +128,8 @@ struct Inner {
     addr: SocketAddr,
     signals: broadcast::Sender<Signal>,
     reports: Mutex<VecDeque<Report>>,
+    /// The last thing each canvas said it was showing.
+    digests: Mutex<std::collections::HashMap<String, serde_json::Value>>,
     /// One store per canvas, opened lazily and kept for the process lifetime so
     /// two tabs of the same canvas share one revision counter.
     states: DashMap<String, Arc<StateStore>>,
@@ -159,6 +167,7 @@ impl Server {
             addr,
             signals,
             reports: Mutex::new(VecDeque::new()),
+            digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
             host,
         });
@@ -226,6 +235,45 @@ impl Server {
     /// Forward an agent event to any page subscribed to the stream.
     pub fn publish_agent_event(&self, event: serde_json::Value) {
         let _ = self.inner.signals.send(Signal::Agent { event });
+    }
+
+    /// Ask any open page for a description of what it is showing, and wait
+    /// briefly for the answer.
+    ///
+    /// Returns `None` when no page is open — which is itself worth telling the
+    /// model, since it means nobody has looked at the canvas yet.
+    pub async fn request_digest(&self, slug: &str) -> Option<serde_json::Value> {
+        self.inner
+            .digests
+            .lock()
+            .expect("digest lock poisoned")
+            .remove(slug);
+        if self
+            .inner
+            .signals
+            .send(Signal::Digest {
+                slug: slug.to_owned(),
+            })
+            .is_err()
+        {
+            // No subscribers: nothing has the canvas open.
+            return None;
+        }
+        // A page answers in a frame or two; this is a tool call, so a short
+        // wait is cheaper than making the model ask twice.
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Some(digest) = self
+                .inner
+                .digests
+                .lock()
+                .expect("digest lock poisoned")
+                .remove(slug)
+            {
+                return Some(digest);
+            }
+        }
+        None
     }
 
     /// Everything the page has reported since the last drain.
@@ -733,6 +781,15 @@ async fn serve_rpc(
             ok(serde_json::json!({"accepted": accepted}))
         }
 
+        "canvas.digest" => {
+            inner
+                .digests
+                .lock()
+                .expect("digest lock poisoned")
+                .insert(slug, params);
+            ok(serde_json::json!({"ok": true}))
+        }
+
         "canvas.context" => ok(inner.host.context()),
 
         "canvas.highlight" => {
@@ -1000,6 +1057,7 @@ mod tests {
             addr: "127.0.0.1:54321".parse().expect("loopback addr"),
             signals: broadcast::channel(1).0,
             reports: Mutex::new(VecDeque::new()),
+            digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
             host: Arc::new(crate::bridge::DetachedHost),
         };

@@ -138,6 +138,15 @@ function connect() {
     askChannel.emit(pendingQuestions);
   });
   events.addEventListener("agent", (event) => agentChannel.emit(JSON.parse(event.data).event));
+  // The harness asks; the page answers. A digest gathered on demand describes
+  // what is on screen now rather than what was there when the page loaded.
+  events.addEventListener("digest", () => {
+    try {
+      rpc("canvas.digest", digest()).catch(() => {});
+    } catch (error) {
+      rpc("canvas.digest", { error: String(error?.message ?? error) }).catch(() => {});
+    }
+  });
   events.addEventListener("build-error", (event) => showOverlay(JSON.parse(event.data)));
 
   events.addEventListener("error", () => {
@@ -225,6 +234,83 @@ function isRefreshBoundary(runtime, module) {
       return false;
     }
   });
+}
+
+// -------------------------------------------------------------------- digest
+
+/**
+ * A description of what is actually on screen.
+ *
+ * The model writes a UI it cannot see, and every other channel reports on
+ * whether the code *ran*. This reports on what it produced — so a header
+ * reading 603 next to a card reading 604, which no compiler will ever catch,
+ * is at least visible.
+ */
+function digest() {
+  const root = document.getElementById("root");
+  if (!root) return { error: "no #root — the entry never mounted" };
+
+  const seen = new Map();
+  const text = [];
+  const overflowing = [];
+  const unreadable = [];
+
+  const parse = (value) => {
+    const match = /rgba?\(([^)]+)\)/.exec(value || "");
+    if (!match) return null;
+    const [r, g, b, a = "1"] = match[1].split(",").map((n) => parseFloat(n));
+    return a === 0 ? null : [r, g, b];
+  };
+  const luminance = ([r, g, b]) =>
+    [r, g, b]
+      .map((c) => (c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+      .reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
+
+  const backdrop = (node) => {
+    for (let at = node; at && at !== document.documentElement; at = at.parentElement) {
+      const colour = parse(getComputedStyle(at).backgroundColor);
+      if (colour) return colour;
+    }
+    return parse(getComputedStyle(document.body).backgroundColor) ?? [255, 255, 255];
+  };
+
+  for (const node of root.querySelectorAll("*")) {
+    const tag = node.tagName.toLowerCase();
+    seen.set(tag, (seen.get(tag) ?? 0) + 1);
+
+    // Content the user can actually read, in document order.
+    const own = [...node.childNodes]
+      .filter((child) => child.nodeType === 3)
+      .map((child) => child.textContent.trim())
+      .filter(Boolean)
+      .join(" ");
+    if (own && text.length < 120) text.push(own);
+
+    if (node.scrollWidth > node.clientWidth + 2 && getComputedStyle(node).overflowX === "visible") {
+      overflowing.push(`${tag}${node.id ? "#" + node.id : ""}`);
+    }
+
+    if (own) {
+      const fg = parse(getComputedStyle(node).color);
+      if (fg) {
+        const [light, dark] = [luminance(fg), luminance(backdrop(node))].sort((a, b) => b - a);
+        const ratio = (light + 0.05) / (dark + 0.05);
+        if (ratio < 4.5 && unreadable.length < 8) {
+          unreadable.push(`"${own.slice(0, 40)}" at ${ratio.toFixed(2)}:1`);
+        }
+      }
+    }
+  }
+
+  return {
+    mounted: true,
+    elements: [...seen.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .map(([tag, n]) => `${tag}×${n}`),
+    text,
+    overflowing: overflowing.slice(0, 8),
+    unreadable,
+    size: { width: innerWidth, height: innerHeight, scrollHeight: document.body.scrollHeight },
+  };
 }
 
 // ------------------------------------------------------------------- overlay
@@ -318,6 +404,9 @@ export const artist = {
    */
   highlight: (source, language = "txt", dark = matchMedia("(prefers-color-scheme: dark)").matches) =>
     rpc("canvas.highlight", { source, language, dark }),
+
+  /** What is on screen right now, for `canvas status`. */
+  digest,
 
   /** Surface a message in the TUI and in `canvas status`. */
   log: (...args) => report("log", args.map(stringify).join(" ")),

@@ -81,6 +81,20 @@ pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
             SessionEvent::SteeringDelivered(steering) => {
                 items.push(ReplayItem::Steering(steering.content));
             }
+            // Canvas activity was recorded and then dropped on replay, so a
+            // resumed session showed no trace that a canvas existed at all.
+            SessionEvent::CanvasCreated(canvas) => {
+                items.push(ReplayItem::Tool {
+                    name: "canvas".to_owned(),
+                    preview: format!("built {} — {}", canvas.slug, canvas.title),
+                });
+            }
+            SessionEvent::CanvasOpened(canvas) => {
+                items.push(ReplayItem::Tool {
+                    name: "canvas".to_owned(),
+                    preview: format!("opened {} · reopen with /canvas {}", canvas.slug, canvas.slug),
+                });
+            }
             SessionEvent::RuleFired(fired) => {
                 items.push(ReplayItem::RuleFired {
                     rule: fired.rule,
@@ -249,6 +263,27 @@ pub fn markdown_fragment(envelope: &Envelope) -> Option<String> {
                 "rule" => None, // rendered by the RuleInjection fragment
                 _ => Some(format!("\n## User\n\n{text}\n")),
             }
+        }
+        // Only `acted` is rendered. Observations are already visible as the
+        // tool row, and re-rendering every look at a screen would bury the
+        // transcript; what a reader wants is the record of what was *done*.
+        SessionEvent::ComputerActed(acted) => {
+            let steps = acted
+                .steps
+                .iter()
+                .map(|step| match (&step.anchor, &step.label) {
+                    (Some(anchor), Some(label)) => {
+                        format!("{} {label:?} ({anchor}) — {}", step.action, step.outcome)
+                    }
+                    _ => format!("{} — {}", step.action, step.outcome),
+                })
+                .map(|line| format!("> - {line}\n"))
+                .collect::<String>();
+            Some(format!(
+                "\n> computer: {} step(s) on `{}`\n{steps}",
+                acted.steps.len(),
+                acted.surface
+            ))
         }
         SessionEvent::ModelTurn(turn) => {
             let text = blocks_text(&turn.content);
