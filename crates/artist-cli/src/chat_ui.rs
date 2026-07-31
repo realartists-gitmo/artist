@@ -648,6 +648,30 @@ fn skill_completions<'a>(
     (Some(range), matches)
 }
 
+/// Move prompts queued from outside the input box — extensions today, canvases
+/// next — into the local queue, and take the next one to submit if nothing is
+/// already staged. Returns whether `pending` ended up set.
+///
+/// Callers must reach this on the idle path as well as after a turn: whoever
+/// queued the prompt is not the person at the keyboard, so nothing else is
+/// guaranteed to come along and pick it up.
+fn stage_queued_prompt(
+    control: &crate::extension_control::ExtensionControl,
+    queued: &mut VecDeque<SubmittedPrompt>,
+    pending: &mut Option<SubmittedPrompt>,
+) -> bool {
+    queued.extend(
+        control
+            .take_prompts()
+            .into_iter()
+            .map(SubmittedPrompt::from),
+    );
+    if pending.is_none() {
+        *pending = queued.pop_front();
+    }
+    pending.is_some()
+}
+
 async fn run_loop(
     mut terminal: &mut ratatui::DefaultTerminal,
     mut context: ChatContext<'_>,
@@ -1169,27 +1193,27 @@ async fn run_loop(
                     prompt_history.push(delivered, InputAtoms::default());
                 }
                 queued_prompts.extend(result.queued);
-                queued_prompts.extend(
-                    context
-                        .extension_control
-                        .take_prompts()
-                        .into_iter()
-                        .map(SubmittedPrompt::from),
-                );
-                pending = queued_prompts.pop_front();
                 viewport_floor = 3;
             }
-            if pending.is_none() {
-                queued_prompts.extend(
-                    context
-                        .extension_control
-                        .take_prompts()
-                        .into_iter()
-                        .map(SubmittedPrompt::from),
-                );
-                pending = queued_prompts.pop_front();
-            }
+            stage_queued_prompt(
+                context.extension_control,
+                &mut queued_prompts,
+                &mut pending,
+            );
             status.refresh(&context.store.status_bar, context.project);
+            continue;
+        }
+        // The drain above only runs after a turn returns. A queued follow-up
+        // therefore sat unnoticed while the box was idle, waiting for the user
+        // to submit something of their own before it could be picked up — so
+        // anything that queues a prompt without the user typing (an extension,
+        // or a canvas the user is clicking in another window) stalled until
+        // they did. Drain here too, before parking on the poll below.
+        if stage_queued_prompt(
+            context.extension_control,
+            &mut queued_prompts,
+            &mut pending,
+        ) {
             continue;
         }
         if !event::poll(std::time::Duration::from_millis(120))? {
@@ -3401,8 +3425,45 @@ fn clear_inline(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extension_control::ExtensionControl;
+    use artist_extensions::HostControl;
     use llm_provider::{Auth, ProviderId, SavedProvider, Secret};
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// A prompt queued from outside the input box has nobody waiting on it: the
+    /// person who queued it is a canvas or an extension, not the user. Staging
+    /// must therefore work from a standing start, with no turn just finished
+    /// and nothing already in the local queue.
+    #[tokio::test]
+    async fn a_prompt_queued_while_idle_is_staged_without_user_input() {
+        let control = ExtensionControl::default();
+        let mut queued = VecDeque::new();
+        let mut pending = None;
+
+        assert!(!stage_queued_prompt(&control, &mut queued, &mut pending));
+
+        control.prompt_after("run the tests".into()).await;
+
+        assert!(stage_queued_prompt(&control, &mut queued, &mut pending));
+        assert_eq!(pending.as_ref().map(|p| p.content.as_str()), Some("run the tests"));
+    }
+
+    /// Staging runs on both the idle path and the post-turn path, so it can be
+    /// reached with a prompt already staged. It must not drop that prompt on
+    /// the floor, and must keep the newcomer queued behind it.
+    #[tokio::test]
+    async fn staging_preserves_an_already_staged_prompt() {
+        let control = ExtensionControl::default();
+        let mut queued = VecDeque::new();
+        let mut pending = Some(SubmittedPrompt::from("first".to_owned()));
+
+        control.prompt_after("second".into()).await;
+
+        assert!(stage_queued_prompt(&control, &mut queued, &mut pending));
+        assert_eq!(pending.as_ref().map(|p| p.content.as_str()), Some("first"));
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].content, "second");
+    }
 
     /// Atoms index into the buffer, so replacing the buffer must drop them.
     /// A slash-completion or steering suggestion replaces a long buffer holding
