@@ -1,3 +1,7 @@
+mod state;
+
+pub use state::{Activity, TurnActivity};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HerdrState {
     Idle,
