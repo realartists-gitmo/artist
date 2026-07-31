@@ -72,7 +72,15 @@ impl CommandRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let _ = command.spawn();
+        if let Ok(mut child) = command.spawn() {
+            // This path runs only while unwinding or after bounded async release
+            // retries fail. Reap without delaying Artist's own shutdown.
+            let _ = std::thread::Builder::new()
+                .name("artist-herdr-release".into())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
     }
 
     fn command(&self, report: Report<'_>) -> Command {
