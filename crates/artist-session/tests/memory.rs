@@ -80,6 +80,10 @@ async fn compaction_replaces_model_context_without_replacing_transcript() {
         Message::assistant("next answer"),
     ]);
     assert_eq!(memory.load("s").await.unwrap(), normalized(expected));
+    // `load` reads live context from RAM, but the event log is written by the
+    // recorder task. Reading the file without flushing races that task, which
+    // is why this test failed roughly one run in twenty.
+    recorder.flush().await;
     let events = EventLogReader::new(dir.path()).read_all().unwrap();
     assert_eq!(
         replay_for_ui(&events),
