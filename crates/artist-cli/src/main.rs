@@ -821,3 +821,21 @@ pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) ->
     *provider.chatgpt_auth_mut()? = refreshed;
     Ok(())
 }
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_unknown_resume_is_a_clear_error() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let sessions = SessionStore::new(root.path());
+        let error = load_resumed(&sessions, &project, Some("missing-session"))
+            .err()
+            .expect("unknown resume should fail");
+        assert!(error.to_string().contains("missing-session"));
+        assert!(error.to_string().contains("not found"));
+    }
+}

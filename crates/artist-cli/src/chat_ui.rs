@@ -3771,6 +3771,35 @@ mod tests {
         assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "");
     }
 
+    #[tokio::test]
+    async fn interactive_resume_rejects_other_project_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let sessions = SessionStore::new(root.path());
+        let other = sessions.create(&second, None).unwrap();
+        let id = other.session.id.clone();
+        other.close().await.unwrap();
+        let mut active = None;
+        let mut history = Vec::new();
+        let rules = RulesHandle::default();
+        let error = handle_resume(
+            &sessions,
+            &first,
+            &mut active,
+            &mut history,
+            &rules,
+            Some(&id),
+            &crate::herdr::Lifecycle::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("different project"));
+        assert!(active.is_none());
+    }
+
     #[test]
     fn renders_at_full_width() {
         let backend = TestBackend::new(20, 3);
