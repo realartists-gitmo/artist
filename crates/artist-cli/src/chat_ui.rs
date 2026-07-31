@@ -281,6 +281,14 @@ struct SubmitContext<'a> {
     show_splash: bool,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
+    /// Every configured account, so a delegated or handed-off profile naming a
+    /// `provider:` resolves against the same set the session picked from.
+    providers: llm_provider::ProviderSet,
+    /// The profile this session is running as. Changes when the agent hands
+    /// off, and persists across turns and resumes.
+    profile: String,
+    /// Harness-owned todo lists, shared across every turn of the session.
+    todos: artist_agent::todo::TodoStore,
 }
 
 pub(crate) struct SubmittedPrompt {
@@ -311,6 +319,8 @@ struct SubmitResult {
     /// The turn failed with an authentication error (AUTH-2). The run loop
     /// force-refreshes the access token so a resend can succeed.
     auth_expired: bool,
+    /// The profile the agent handed off to, so subsequent turns run as it.
+    handed_off_to: Option<String>,
 }
 
 /// Whether an error chain looks like an expired/invalid access token — a 401,
@@ -623,6 +633,13 @@ async fn run_loop(
         }
         None => Vec::new(),
     };
+    // A resumed session runs as whatever profile it last handed off to. The
+    // event log is the source of truth, so a rewind past a handoff boundary
+    // restores the earlier profile for free.
+    let mut current_profile = artist_session::active_profile(&resumed_events)
+        .unwrap_or_else(|| "default".to_owned());
+    let todos = artist_agent::todo::TodoStore::default();
+    todos.restore(&resumed_events);
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
     let custom_commands = crate::custom_commands::discover(context.project);
@@ -799,6 +816,29 @@ async fn run_loop(
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
+                    Ok(slash_commands::ParsedCommand::Handoff { profile }) => {
+                        let profiles =
+                            artist_agent::profiles::Profiles::discover(context.project);
+                        if profiles.get(profile).is_err() {
+                            command_panel = vec![format!(
+                                "Unknown profile {profile}. Available: {}",
+                                profiles.names().join(", ")
+                            )];
+                            continue;
+                        }
+                        if profile == current_profile {
+                            command_panel = vec![format!(
+                                "Already running as {profile}. A profile cannot hand off to itself — use /compact to reclaim context."
+                            )];
+                            continue;
+                        }
+                        // The agent writes the payload: it has the context the
+                        // summary needs, and the user does not.
+                        pending = Some(SubmittedPrompt::from(format!(
+                            "The user has asked you to hand this session off to the '{profile}' profile.                              Call the handoff tool now with a summary complete enough for {profile} to                              continue without your context — it will not be able to ask you anything."
+                        )));
+                        continue;
+                    }
                     Ok(slash_commands::ParsedCommand::Compact { instructions }) => {
                         let Some(active_session) = active.as_ref() else {
                             command_panel = vec!["Nothing to compact in a fresh session.".into()];
@@ -1048,6 +1088,11 @@ async fn run_loop(
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
+                        providers: llm_provider::ProviderSet::new(
+                            context.store.providers.clone(),
+                        ),
+                        profile: current_profile.clone(),
+                        todos: todos.clone(),
                     },
                     &mut active,
                     &mut history,
@@ -1057,6 +1102,11 @@ async fn run_loop(
                 )
                 .await?;
                 viewport_height = result.viewport_height;
+                // A handoff is terminal for the outgoing profile, so every
+                // later turn in this session runs as the target.
+                if let Some(profile) = result.handed_off_to {
+                    current_profile = profile;
+                }
                 // AUTH-2: the turn 401'd, so the token is stale regardless of
                 // its recorded expiry. Force-refresh it now (non-blocking to the
                 // rest of the loop's state) so the user's resend succeeds.
@@ -1913,6 +1963,7 @@ async fn submit(
     let terminal_size = terminal.size()?;
     let mut stream_viewport = StreamingViewport::new(viewport_height, terminal_size);
     let mut phase = "thinking";
+    let mut handed_off_to: Option<String> = None;
     let mut steering = SteeringQueue::default();
     let steering_handle = artist_agent::SteeringHandle::default();
     context
@@ -1940,6 +1991,7 @@ async fn submit(
         kind: "state_transition".into(),
         payload: serde_json::json!({"state":"thinking"}),
     });
+    let task_profile = context.profile.clone();
     let task_handles = artist_agent::SessionHandles {
         steering: task_steering,
         rules: context.rules_handle.clone(),
@@ -1949,10 +2001,13 @@ async fn submit(
         conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
+        providers: context.providers.clone(),
+        todos: context.todos.clone(),
     };
     let task = tokio::spawn(async move {
-        artist_agent::stream_chat(
+        artist_agent::stream_chat_as(
             &task_provider,
+            &task_profile,
             &task_prompt,
             artist_agent::ToolContext {
                 native: &task_tools,
@@ -2253,6 +2308,32 @@ async fn submit(
                             status,
                         );
                     }
+                    artist_agent::PromptEvent::HandedOff { from, to } => {
+                        handed_off_to = Some(to.clone());
+                        // The transcript above stays; the model's context does
+                        // not. Mark the boundary so the scrollback reads as one
+                        // session rather than two conversations spliced together.
+                        phase = "thinking";
+                        visible.clear();
+                        reasoning.clear();
+                        response.clear();
+                        response_renderer.reset();
+                        response_started = false;
+                        response_since_tool = false;
+                        insert_status(
+                            terminal,
+                            &format!("  ── {from} handed off to {to} ──"),
+                        )?;
+                    }
+                    artist_agent::PromptEvent::ProviderFallback { from, reason } => {
+                        // A silent move to a weaker model is discovered hours
+                        // later; make the downgrade visible where it happens.
+                        let excerpt: String = reason.chars().take(80).collect();
+                        insert_status(
+                            terminal,
+                            &format!("  ⚠ {from} unavailable ({excerpt}) — falling back"),
+                        )?;
+                    }
                     artist_agent::PromptEvent::RuleFired { rule, matched } => {
                         // The aborted partial output never entered the model's
                         // context; drop it from the pending buffers too.
@@ -2377,6 +2458,7 @@ async fn submit(
     )?;
     let delivered = delivered_steering;
     Ok(SubmitResult {
+        handed_off_to,
         viewport_height: stream_viewport.height,
         queued: steering
             .take()

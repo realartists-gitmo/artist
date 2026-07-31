@@ -34,15 +34,18 @@ pub use convert::{
 };
 pub use event::{
     ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished, DelegateStarted,
-    Envelope, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired, RuleInjection,
+    Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn, RuleFired,
+    RuleInjection,
     RuleRetroFindings, RunFinished, RunStarted, SCHEMA_VERSION, SessionCreated, SessionEvent,
-    SteeringDelivered, ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent, TurnUser,
+    SteeringDelivered, TodoItem, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
+    ToolResultImagesEvent, TurnUser,
 };
 pub use history::{HistoryOptions, build as build_history};
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use memory::SessionMemory;
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{
-    ReplayItem, markdown_fragment, render_markdown, replay_for_ui, rewind_targets, user_prompts,
+    ReplayItem, active_profile, markdown_fragment, render_markdown, replay_for_ui, rewind_targets,
+    user_prompts,
     visible_events,
 };

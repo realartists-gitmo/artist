@@ -7,7 +7,10 @@ mod delegate;
 mod delegate_jobs;
 #[cfg(test)]
 mod delegate_tests;
+mod fallback;
+pub mod handoff;
 pub mod mcp;
+pub mod profiles;
 mod prompt_config;
 mod resources;
 mod rig_provider;
@@ -17,7 +20,9 @@ mod ttsr_tests;
 
 pub use resources::AvailableSkill;
 mod steering;
-mod subagents;
+
+mod thinking;
+pub mod todo;
 mod tool_prompt;
 
 pub use steering::SteeringHandle;
@@ -45,7 +50,6 @@ use rig_core::{
     memory::{ConversationMemory, InMemoryConversationMemory},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingPrompt},
 };
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use capture::{CaptureHook, ToolMeta};
@@ -103,13 +107,32 @@ pub enum PromptEvent {
         rule: String,
         matched: String,
     },
+    /// A routing candidate failed and the run moved to the next one. Surfaced
+    /// because a silent move to a weaker model is discovered hours later.
+    ProviderFallback {
+        from: String,
+        reason: String,
+    },
+    /// The session changed profile. The transcript above stays on screen; the
+    /// model's context does not.
+    HandedOff {
+        from: String,
+        to: String,
+    },
 }
 
 /// How a `stream_chat` run ended (errors surface via `Result`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunOutcome {
     Completed,
     Cancelled,
+    /// The agent handed the session to another profile. Terminal for this run:
+    /// the caller clears the conversation and starts the target profile with
+    /// [`handoff::Handoff::seed`] as its opening task.
+    HandedOff {
+        from: String,
+        handoff: handoff::Handoff,
+    },
 }
 
 /// Everything a run needs beyond the prompt: shared handles owned by the
@@ -127,6 +150,13 @@ pub struct SessionHandles {
     /// Blob store for tool-result image payloads. `None` for inert handles,
     /// where nothing is recorded and so nothing needs storing.
     pub attachments: Option<artist_session::AttachmentStore>,
+    /// The configured provider accounts, so a profile naming a `provider:` can
+    /// be resolved to an account other than the one running the session.
+    /// Empty for inert handles, where every profile inherits the parent.
+    pub providers: llm_provider::ProviderSet,
+    /// Harness-owned todo lists, keyed by owner. Lives outside the model
+    /// context so it survives compaction and handoff intact.
+    pub todos: todo::TodoStore,
 }
 
 impl Default for SessionHandles {
@@ -140,6 +170,8 @@ impl Default for SessionHandles {
             conversation_id: "default".to_owned(),
             cancel: CancellationToken::new(),
             attachments: None,
+            providers: llm_provider::ProviderSet::default(),
+            todos: todo::TodoStore::default(),
         }
     }
 }
@@ -216,6 +248,7 @@ impl From<String> for ChatInput {
 
 /// The tool surfaces available to a run: native tools, MCP proxies,
 /// extension-provided tools, and the user's disabled-tool list.
+#[derive(Clone, Copy)]
 pub struct ToolContext<'a> {
     pub native: &'a ToolBundle,
     pub mcp: &'a mcp::McpManager,
@@ -259,6 +292,7 @@ pub async fn provider_health_check_with_device_flow(
 
 /// Executes one prompt and emits model output as it arrives. Rig loads and
 /// persists the conversation through [`SessionHandles::memory`].
+/// Runs a turn on the session's default profile.
 pub async fn stream_chat(
     provider: &SavedProvider,
     input: &ChatInput,
@@ -266,358 +300,254 @@ pub async fn stream_chat(
     handles: SessionHandles,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
-    use llm_provider::OpenAiApi;
-    use rig_provider::{
-        build_anthropic, build_azure, build_chatgpt, build_cohere, build_copilot, build_deepseek,
-        build_gemini, build_groq, build_huggingface, build_hyperbolic, build_llamafile,
-        build_minimax, build_minimax_anthropic, build_mira, build_mistral, build_moonshot,
-        build_moonshot_anthropic, build_ollama, build_openai_chat, build_openai_responses,
-        build_openrouter, build_perplexity, build_together, build_xai, build_xiaomimimo,
-        build_xiaomimimo_anthropic, build_zai, build_zai_anthropic,
-    };
-
-    match provider.provider {
-        ProviderKind::Chatgpt => {
-            stream_chat_with(
-                build_chatgpt(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Copilot => {
-            stream_chat_with(
-                build_copilot(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Azure => {
-            stream_chat_with(
-                build_azure(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Llamafile => {
-            stream_chat_with(
-                build_llamafile(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Ollama => {
-            stream_chat_with(
-                build_ollama(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Openai => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                stream_chat_with(
-                    build_openai_responses(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                stream_chat_with(
-                    build_openai_chat(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-        },
-        ProviderKind::Anthropic => {
-            stream_chat_with(
-                build_anthropic(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Cohere => {
-            stream_chat_with(
-                build_cohere(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Gemini => {
-            stream_chat_with(
-                build_gemini(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Deepseek => {
-            stream_chat_with(
-                build_deepseek(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Groq => {
-            stream_chat_with(
-                build_groq(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Huggingface => {
-            stream_chat_with(
-                build_huggingface(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Hyperbolic => {
-            stream_chat_with(
-                build_hyperbolic(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Mira => {
-            stream_chat_with(
-                build_mira(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Mistral => {
-            stream_chat_with(
-                build_mistral(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Openrouter => {
-            stream_chat_with(
-                build_openrouter(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Perplexity => {
-            stream_chat_with(
-                build_perplexity(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Together => {
-            stream_chat_with(
-                build_together(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Xai => {
-            stream_chat_with(
-                build_xai(provider)?,
-                provider,
-                input,
-                tool_context,
-                handles,
-                on_event,
-            )
-            .await
-        }
-        ProviderKind::Minimax => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                stream_chat_with(
-                    build_minimax(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                stream_chat_with(
-                    build_minimax_anthropic(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-        },
-        ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                stream_chat_with(
-                    build_moonshot(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                stream_chat_with(
-                    build_moonshot_anthropic(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-        },
-        ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                stream_chat_with(
-                    build_xiaomimimo(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                stream_chat_with(
-                    build_xiaomimimo_anthropic(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-        },
-        ProviderKind::Zai => match provider.api.unwrap_or_default() {
-            OpenAiApi::Responses => {
-                stream_chat_with(
-                    build_zai(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-            OpenAiApi::ChatCompletions => {
-                stream_chat_with(
-                    build_zai_anthropic(provider)?,
-                    provider,
-                    input,
-                    tool_context,
-                    handles,
-                    on_event,
-                )
-                .await
-            }
-        },
-    }
+    stream_chat_as(provider, "default", input, tool_context, handles, on_event).await
 }
 
-async fn stream_chat_with<C: CompletionClient>(
-    client: C,
+/// Runs a turn with the session root instantiated from a named profile.
+///
+/// The profile determines the system prompt, the tool surface, and the routing:
+/// `provider` is only the account the session was launched with, and a profile
+/// naming its own account resolves against [`SessionHandles::providers`]
+/// instead. This is the same object and the same resolution a delegated
+/// subagent uses — the session root is one of its three instantiation modes.
+pub async fn stream_chat_as(
     provider: &SavedProvider,
+    profile_name: &str,
     input: &ChatInput,
     tool_context: ToolContext<'_>,
     handles: SessionHandles,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome> {
+    let mut chain = vec![profile_name.to_owned()];
+    let mut current = profile_name.to_owned();
+    let mut seeded: Option<ChatInput> = None;
+    loop {
+        let turn = seeded.as_ref().unwrap_or(input);
+        let outcome = run_profile(
+            provider,
+            &current,
+            turn,
+            tool_context,
+            handles.clone(),
+            &mut on_event,
+        )
+        .await?;
+        let RunOutcome::HandedOff { from, handoff } = outcome else {
+            return Ok(outcome);
+        };
+        chain.push(handoff.to.clone());
+        // Functionally `/clear` followed by a fresh session on the target
+        // profile: the conversation reset is the same event compaction emits,
+        // and the payload becomes the incoming profile's opening task.
+        handles.recorder.record(artist_session::HandoffPerformed {
+            from: from.clone(),
+            to: handoff.to.clone(),
+            summary: handoff.summary.clone(),
+            chain: chain.clone(),
+            read_files: Vec::new(),
+            modified_files: Vec::new(),
+            jobs: Vec::new(),
+            todos: handles.todos.get(&handles.conversation_id),
+        });
+        handles
+            .memory
+            .clear(&handles.conversation_id)
+            .await
+            .context("clear conversation for handoff")?;
+        on_event(PromptEvent::HandedOff {
+            from,
+            to: handoff.to.clone(),
+        })?;
+        seeded = Some(ChatInput {
+            text: handoff.seed(
+                &current,
+                &input.text,
+                &chain,
+                &todo::render(&handles.todos.get(&handles.conversation_id)),
+            ),
+            images: Vec::new(),
+        });
+        current = handoff.to.clone();
+    }
+}
+
+/// One profile's turn, including its candidate fallback.
+async fn run_profile(
+    provider: &SavedProvider,
+    profile_name: &str,
+    input: &ChatInput,
+    tool_context: ToolContext<'_>,
+    handles: SessionHandles,
+    on_event: &mut impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome> {
+    let profiles = profiles::Profiles::discover(tool_context.native.project_root());
+    let profile = profiles.get(profile_name).map_err(|error| anyhow!(error))?;
+    let breaker = fallback::Breaker::global();
+    let mut skipped = Vec::new();
+    let mut last_error = None;
+
+    // Ordered, not round-robin: candidate 0 is preferred while healthy.
+    for candidate in &profile.candidates {
+        let label = fallback::candidate_label(candidate);
+        let resolved = match candidate.resolve(&handles.providers, provider) {
+            Ok(resolved) => resolved.clone(),
+            Err(error) => {
+                skipped.push(fallback::Skipped {
+                    candidate: label,
+                    reason: error,
+                });
+                continue;
+            }
+        };
+        let Some(model) = candidate.model_for(&resolved) else {
+            skipped.push(fallback::Skipped {
+                candidate: label,
+                reason: "no model configured on the candidate or its account".into(),
+            });
+            continue;
+        };
+        let key = fallback::CandidateKey {
+            provider: resolved.id.as_str().to_owned(),
+            model: model.clone(),
+        };
+        if breaker.is_tripped(&key) {
+            skipped.push(fallback::Skipped {
+                candidate: label,
+                reason: "cooling down after repeated failures".into(),
+            });
+            continue;
+        }
+        let run = RootRun {
+            profiles: profiles.clone(),
+            profile: profile.clone(),
+            thinking: candidate.thinking.unwrap_or_default(),
+            model,
+        };
+        match attempt(&resolved, &run, input, tool_context, handles.clone(), on_event).await {
+            Ok(outcome) => {
+                breaker.record_success(&key);
+                return Ok(outcome);
+            }
+            Err(error) if error.downcast_ref::<fallback::Unavailable>().is_some() => {
+                breaker.record_failure(&key);
+                let reason = error.to_string();
+                on_event(PromptEvent::ProviderFallback {
+                    from: label,
+                    reason: reason.clone(),
+                })?;
+                last_error = Some(reason);
+            }
+            // A permanent failure reproduces on every candidate, so trying the
+            // rest would only replace the real error with the last one.
+            Err(error) => return Err(error),
+        }
+    }
+    Err(anyhow!(fallback::exhausted(
+        &profile.name,
+        last_error,
+        &skipped
+    )))
+}
+
+/// One attempt on one resolved candidate.
+///
+/// Each arm monomorphizes `stream_chat_with` separately, which is why this
+/// stays a match over provider kinds rather than a unified client type.
+async fn attempt(
+    resolved: &SavedProvider,
+    run: &RootRun,
+    input: &ChatInput,
+    tool_context: ToolContext<'_>,
+    handles: SessionHandles,
+    on_event: &mut impl FnMut(PromptEvent) -> Result<()>,
+) -> Result<RunOutcome> {
+    use llm_provider::OpenAiApi;
+
+    macro_rules! run_with {
+        ($build:ident) => {
+            stream_chat_with(
+                rig_provider::$build(resolved)?,
+                resolved,
+                run,
+                input,
+                tool_context,
+                handles,
+                on_event,
+            )
+            .await
+        };
+    }
+    match resolved.provider {
+        ProviderKind::Anthropic => run_with!(build_anthropic),
+        ProviderKind::Azure => run_with!(build_azure),
+        ProviderKind::Chatgpt => run_with!(build_chatgpt),
+        ProviderKind::Cohere => run_with!(build_cohere),
+        ProviderKind::Copilot => run_with!(build_copilot),
+        ProviderKind::Deepseek => run_with!(build_deepseek),
+        ProviderKind::Gemini => run_with!(build_gemini),
+        ProviderKind::Groq => run_with!(build_groq),
+        ProviderKind::Huggingface => run_with!(build_huggingface),
+        ProviderKind::Hyperbolic => run_with!(build_hyperbolic),
+        ProviderKind::Llamafile => run_with!(build_llamafile),
+        ProviderKind::Mira => run_with!(build_mira),
+        ProviderKind::Mistral => run_with!(build_mistral),
+        ProviderKind::Ollama => run_with!(build_ollama),
+        ProviderKind::Openrouter => run_with!(build_openrouter),
+        ProviderKind::Perplexity => run_with!(build_perplexity),
+        ProviderKind::Together => run_with!(build_together),
+        ProviderKind::Xai => run_with!(build_xai),
+        ProviderKind::Minimax => match resolved.api.unwrap_or_default() {
+            OpenAiApi::Responses => run_with!(build_minimax),
+            OpenAiApi::ChatCompletions => run_with!(build_minimax_anthropic),
+        },
+        ProviderKind::Moonshot => match resolved.api.unwrap_or_default() {
+            OpenAiApi::Responses => run_with!(build_moonshot),
+            OpenAiApi::ChatCompletions => run_with!(build_moonshot_anthropic),
+        },
+        ProviderKind::Openai => match resolved.api.unwrap_or_default() {
+            OpenAiApi::Responses => run_with!(build_openai_responses),
+            OpenAiApi::ChatCompletions => run_with!(build_openai_chat),
+        },
+        ProviderKind::Xiaomimimo => match resolved.api.unwrap_or_default() {
+            OpenAiApi::Responses => run_with!(build_xiaomimimo),
+            OpenAiApi::ChatCompletions => run_with!(build_xiaomimimo_anthropic),
+        },
+        ProviderKind::Zai => match resolved.api.unwrap_or_default() {
+            OpenAiApi::Responses => run_with!(build_zai),
+            OpenAiApi::ChatCompletions => run_with!(build_zai_anthropic),
+        },
+    }
+}
+
+
+/// The resolved profile context for a session-root run.
+struct RootRun {
+    profiles: profiles::Profiles,
+    profile: profiles::Profile,
+    thinking: profiles::Thinking,
+    model: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_chat_with<C: CompletionClient>(
+    client: C,
+    provider: &SavedProvider,
+    run: &RootRun,
+    input: &ChatInput,
+    tool_context: ToolContext<'_>,
+    handles: SessionHandles,
+    on_event: &mut impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome>
 where
     C::CompletionModel: 'static,
 {
     let tools = tool_context.native;
     let mcp = tool_context.mcp;
-    let model = provider
-        .model
-        .as_deref()
-        .context("no model selected; run `artist model` first")?;
+    let model = run.model.as_str();
+    let profile = &run.profile;
+    let profiles = &run.profiles;
 
     let resources = resources::Resources::discover(tools.project_root());
-    let subagents = subagents::Subagents::discover(tools.project_root());
     handles.rules.note_user_turn();
 
     let mut seed_history = handles
@@ -645,6 +575,9 @@ where
     let visible_steering = handles.steering.clone();
     let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
+    // Where a fired handoff lands. Shared with the tool for the whole turn so a
+    // TTSR retry rebuilds the tool against the same slot.
+    let pending_handoff = handoff::HandoffShared::default();
 
     // Per-run abort-retry budget: spans this turn's retries but is isolated
     // from concurrent delegate runs (each has its own counter).
@@ -689,22 +622,50 @@ where
         // These fields belong to the ChatGPT subscription transport. Keep them
         // off OpenAI Responses and Chat Completions requests, whose accepted
         // parameter shapes differ.
-        if let Some(params) = request_params(
-            provider.provider,
-            &cache_key,
-            provider.reasoning_effort.as_deref(),
-        ) {
+        if let Some(params) =
+            thinking::request_params(provider.provider, &cache_key, run.thinking)
+        {
             builder = builder.additional_params(params);
         }
-        let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = vec![
-            Box::new(tools.bash.clone()),
-            Box::new(tools.read.clone()),
-            Box::new(tools.find.clone()),
-            Box::new(tools.grep.clone()),
-            Box::new(tools.edit.clone()),
-            Box::new(tools.write.clone()),
-            Box::new(resources.skill_tool()),
-            Box::new(delegate::Delegate::new(
+        let mut registered: Vec<Box<dyn rig_core::tool::ToolDyn>> = Vec::new();
+        if profile.permits("bash") {
+            registered.push(Box::new(tools.bash.clone()));
+        }
+        if profile.permits("read") {
+            registered.push(Box::new(tools.read.clone()));
+        }
+        if profile.permits("find") {
+            registered.push(Box::new(tools.find.clone()));
+        }
+        if profile.permits("grep") {
+            registered.push(Box::new(tools.grep.clone()));
+        }
+        if profile.permits("edit") {
+            registered.push(Box::new(tools.edit.clone()));
+        }
+        if profile.permits("write") {
+            registered.push(Box::new(tools.write.clone()));
+        }
+        if profile.permits("skill") {
+            registered.push(Box::new(resources.skill_tool()));
+        }
+        if profile.permits("todo") {
+            registered.push(Box::new(todo::TodoTool::new(
+                handles.todos.clone(),
+                handles.recorder.clone(),
+                handles.conversation_id.clone(),
+                None,
+            )));
+        }
+        if profile.permits("handoff") && profiles.names().len() > 1 {
+            registered.push(Box::new(handoff::HandoffTool::new(
+                pending_handoff.clone(),
+                profiles.clone(),
+                profile.name.clone(),
+            )));
+        }
+        if profile.permits("subagent") {
+            registered.push(Box::new(delegate::Delegate::new(
                 provider.clone(),
                 tools.clone(),
                 fork_context,
@@ -714,9 +675,9 @@ where
                     events: subagent_events_tx.clone(),
                 },
                 tool_context.disabled.to_vec(),
-                subagents.clone(),
-            )),
-        ];
+                profiles.clone(),
+            )));
+        }
         registered.extend(
             mcp_tools
                 .iter()
@@ -726,22 +687,22 @@ where
         if let Some(extensions) = tool_context.extensions {
             registered.extend(extensions.tools());
         }
+        // MCP and extension tools are addressable by the same glob policy, so a
+        // profile can trim a bloated server down to the handful it needs.
+        registered.retain(|tool| profile.permits(&tool.name()));
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
-        let (main_prompt, prompt_diagnostics) = prompt_config::main_prompt();
-        let prompt_diagnostics = prompt_diagnostics
+        let prompt_diagnostics = profiles
+            .diagnostics()
             .iter()
             .map(|d| format!("<diagnostic>{}</diagnostic>", d))
             .collect::<String>();
         let system_prompt = format!(
-            "{}\n\n{}{}{}\nCurrent working directory: {}",
-            main_prompt,
+            "{}\n\n{}{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}",
+            profile.instructions,
             prompt_diagnostics,
             tool_prompt::render(&registered),
-            format!(
-                "{}<available_subagents>{}</available_subagents>",
-                resources.prompt_section(),
-                subagents.catalog()
-            ),
+            resources.prompt_section(),
+            profiles.catalog(),
             tools.project_root().display()
         );
         let persistence = conversation::PersistenceStatus::default();
@@ -766,7 +727,11 @@ where
         run_recorder.record(RunStarted {
             provider: format!("{:?}", provider.provider).to_lowercase(),
             model: model.to_owned(),
-            reasoning_effort: provider.reasoning_effort.clone(),
+            reasoning_effort: run
+                .thinking
+                .level
+                .map(|level| level.as_str().to_owned())
+                .or_else(|| provider.reasoning_effort.clone()),
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
@@ -954,6 +919,14 @@ where
                         duration_ms: meta.map(|(_, duration)| duration),
                         images,
                     });
+                    if let Some(handoff) = pending_handoff.take() {
+                        drop(stream);
+                        run_recorder.record(RunFinished::Completed);
+                        return Ok(RunOutcome::HandedOff {
+                            from: profile.name.clone(),
+                            handoff,
+                        });
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -980,31 +953,14 @@ where
                     run_recorder.record(RunFinished::Error {
                         error: error.to_string(),
                     });
+                    if crate::fallback::classify(&error) == crate::fallback::Failure::Unavailable {
+                        return Err(anyhow!(fallback::Unavailable(error.to_string())));
+                    }
                     return Err(error).context("stream Artist agent");
                 }
             }
         }
     }
-}
-
-/// Provider parameters shared by every request attempt in a turn.
-fn request_params(
-    provider: llm_provider::ProviderKind,
-    cache_key: &str,
-    reasoning_effort: Option<&str>,
-) -> Option<serde_json::Value> {
-    if provider != llm_provider::ProviderKind::Chatgpt {
-        return None;
-    }
-    let mut params = json!({ "prompt_cache_key": cache_key });
-    // Request a provider-generated trace for the live UI even when the model's
-    // default effort is in use. Rig's memory policy is independent: streaming
-    // this summary does not make the CLI responsible for model context.
-    params["reasoning"] = match reasoning_effort {
-        Some(effort) => json!({ "effort": effort, "summary": "auto" }),
-        None => json!({ "summary": "auto" }),
-    };
-    Some(params)
 }
 
 /// A stable `prompt_cache_key` derived from the project root and model, so a
@@ -1079,26 +1035,4 @@ pub async fn stream_prompt(
         on_event,
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::request_params;
-    use llm_provider::ProviderKind;
-
-    #[test]
-    fn reasoning_requests_a_live_summary_trace() {
-        let params = request_params(ProviderKind::Chatgpt, "cache", Some("high")).unwrap();
-        assert_eq!(params["reasoning"]["effort"], "high");
-        assert_eq!(params["reasoning"]["summary"], "auto");
-
-        let default_effort = request_params(ProviderKind::Chatgpt, "cache", None).unwrap();
-        assert_eq!(default_effort["reasoning"]["summary"], "auto");
-        assert!(default_effort["reasoning"].get("effort").is_none());
-    }
-
-    #[test]
-    fn chatgpt_only_params_are_not_sent_to_openai() {
-        assert!(request_params(ProviderKind::Openai, "cache", Some("high")).is_none());
-    }
 }

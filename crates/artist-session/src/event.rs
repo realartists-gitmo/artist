@@ -60,6 +60,8 @@ pub enum SessionEvent {
     RuleFired(RuleFired),
     RuleInjection(RuleInjection),
     RuleRetroFindings(RuleRetroFindings),
+    HandoffPerformed(HandoffPerformed),
+    TodoUpdated(TodoUpdated),
     /// Forward-compat: a kind this binary does not understand.
     Unknown {
         kind: String,
@@ -136,6 +138,8 @@ event_kinds!(
     (RuleFired, RuleFired, "rule.fired"),
     (RuleInjection, RuleInjection, "rule.injection"),
     (RuleRetroFindings, RuleRetroFindings, "rule.retro_findings"),
+    (HandoffPerformed, HandoffPerformed, "handoff.performed"),
+    (TodoUpdated, TodoUpdated, "todo.updated"),
 );
 
 /// One content block inside a message. Structurally mirrors rig's content
@@ -325,6 +329,66 @@ pub struct ConversationCompacted {
     pub read_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modified_files: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Done,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TodoItem {
+    pub text: String,
+    #[serde(default)]
+    pub status: TodoStatus,
+}
+
+/// The todo list after an update.
+///
+/// A snapshot rather than a delta: replay is last-writer-wins per owner, which
+/// keeps rewind correct without folding a history of edits. The list is owned
+/// by the harness, not by the model context, so it survives the context wipe a
+/// handoff performs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TodoUpdated {
+    /// The session for the root agent's list, or a subagent's task id.
+    pub owner: String,
+    pub items: Vec<TodoItem>,
+}
+
+/// A profile handed the session to another profile. Audit metadata: the
+/// adjacent conversation reset carries the authoritative replacement context,
+/// exactly as with compaction.
+///
+/// Resume reads the most recent one of these to decide which profile the
+/// session is running as; rewinding past it restores the previous profile
+/// because the event is masked along with everything after it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HandoffPerformed {
+    pub from: String,
+    pub to: String,
+    pub summary: String,
+    /// Every profile this session has passed through, oldest first. A handoff
+    /// cannot hand back, but it can hand onward into a cycle; each hop is a
+    /// fresh instance that could not otherwise see the loop.
+    #[serde(default)]
+    pub chain: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modified_files: Vec<String>,
+    /// Background subagents still running at the moment of the handoff, so the
+    /// incoming profile inherits them rather than orphaning their results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<String>,
+    /// The harness-owned todo list, carried verbatim. This is the one thing
+    /// crossing the boundary that is not lossy prose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<TodoItem>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

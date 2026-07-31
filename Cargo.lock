@@ -190,6 +190,8 @@ dependencies = [
  "dashmap",
  "dirs 6.0.0",
  "futures",
+ "globset",
+ "http",
  "llm-provider",
  "rig-core",
  "rmcp 2.2.0",

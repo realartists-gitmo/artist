@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) const ROLE_NAMES: [&str; 5] = ["default", "worker", "explorer", "planner", "reviewer"];
+pub(crate) use crate::profiles::BUILTIN_NAMES;
 
 pub(crate) fn config_root() -> Option<PathBuf> {
     std::env::var_os("ARTIST_CONFIG_DIR")
@@ -9,39 +9,55 @@ pub(crate) fn config_root() -> Option<PathBuf> {
 }
 
 /// Creates the editable defaults, but never changes an existing file.
+///
+/// Each built-in profile is written as markdown with frontmatter, so editing a
+/// scaffolded file is the same operation as writing a new profile from scratch.
+/// The scaffolded copy must reproduce the built-in's tool policy — a
+/// `planner.md` written without its `tools.allow` block would silently gain
+/// write access the moment it replaced the built-in.
 pub(crate) fn scaffold(root: &Path) -> Vec<String> {
     let mut diagnostics = Vec::new();
-    let prompt_dir = root.join("prompts/subagents");
-    if let Err(error) = std::fs::create_dir_all(&prompt_dir) {
+    let profile_dir = root.join("profiles");
+    if let Err(error) = std::fs::create_dir_all(&profile_dir) {
         diagnostics.push(format!(
-            "{}: cannot create prompt directory: {error}",
-            prompt_dir.display()
+            "{}: cannot create profile directory: {error}",
+            profile_dir.display()
         ));
         return diagnostics;
     }
-    create(
-        &root.join("prompts/main.md"),
-        include_str!("system_prompt.md"),
-        &mut diagnostics,
-    );
-    for name in ROLE_NAMES {
+    for name in BUILTIN_NAMES {
         create(
-            &prompt_dir.join(format!("{name}.md")),
-            role_prompt(name),
+            &profile_dir.join(format!("{name}.md")),
+            &profile_file(name, root),
             &mut diagnostics,
         );
     }
-    let config = root.join("subagents.toml");
-    let body = ROLE_NAMES.iter().map(|name| format!(
-        "[agents.{name}]\ndescription = \"{}\"\ninstructions_file = \"prompts/subagents/{name}.md\"\n\n",
-        role_description(name)
-    )).collect::<String>();
-    create(
-        &config,
-        &format!("[settings]\nmax_concurrent = 4\n\n{body}"),
-        &mut diagnostics,
-    );
     diagnostics
+}
+
+fn profile_file(name: &str, root: &Path) -> String {
+    let tools = match name {
+        "explorer" | "planner" | "reviewer" => "tools:\n  allow: [read, find, grep, skill]\n",
+        _ => "",
+    };
+    let body = match name {
+        "default" => inherited_main_prompt(root),
+        _ => profile_prompt(name).to_owned(),
+    };
+    format!(
+        "---\ndescription: {}\n{tools}---\n\n{body}",
+        profile_description(name),
+    )
+}
+
+/// Before profiles, the session prompt lived in `prompts/main.md`. Seed the
+/// default profile from a customized copy so upgrading does not silently
+/// discard the user's edits.
+fn inherited_main_prompt(root: &Path) -> String {
+    std::fs::read_to_string(root.join("prompts/main.md"))
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| include_str!("system_prompt.md").to_owned())
 }
 
 fn create(path: &Path, contents: &str, diagnostics: &mut Vec<String>) {
@@ -49,46 +65,13 @@ fn create(path: &Path, contents: &str, diagnostics: &mut Vec<String>) {
         return;
     }
     if let Err(error) = std::fs::write(path, contents) {
-        diagnostics.push(format!(
-            "{}: cannot create default: {error}",
-            path.display()
-        ));
+        diagnostics.push(format!("{}: cannot create default: {error}", path.display()));
     }
 }
 
-pub(crate) fn main_prompt() -> (String, Vec<String>) {
-    load_main(config_root().as_deref())
-}
-
-fn load_main(root: Option<&Path>) -> (String, Vec<String>) {
-    let fallback = include_str!("system_prompt.md").trim_end().to_owned();
-    let Some(root) = root else {
-        return (fallback, vec![]);
-    };
-    let mut diagnostics = scaffold(root);
-    let path = root.join("prompts/main.md");
-    match std::fs::read_to_string(&path) {
-        Ok(value) if !value.trim().is_empty() => (value.trim_end().to_owned(), diagnostics),
-        Ok(_) => {
-            diagnostics.push(format!(
-                "{}: custom main prompt is empty; using built-in",
-                path.display()
-            ));
-            (fallback, diagnostics)
-        }
-        Err(error) => {
-            diagnostics.push(format!(
-                "{}: cannot read custom main prompt ({error}); using built-in",
-                path.display()
-            ));
-            (fallback, diagnostics)
-        }
-    }
-}
-
-pub(crate) fn role_description(name: &str) -> &'static str {
+pub(crate) fn profile_description(name: &str) -> &'static str {
     match name {
-        "default" => "General-purpose agent inheriting the parent configuration",
+        "default" => "General-purpose agent carrying the full session prompt",
         "worker" => "Implementation-focused agent for bounded changes and verification",
         "explorer" => "Read-heavy agent for tracing code and gathering evidence",
         "planner" => {
@@ -97,9 +80,12 @@ pub(crate) fn role_description(name: &str) -> &'static str {
         _ => "Review agent focused on correctness, regressions, security, and missing tests",
     }
 }
-pub(crate) fn role_prompt(name: &str) -> &'static str {
+
+pub(crate) fn profile_prompt(name: &str) -> &'static str {
     match name {
-        "default" => "Complete the delegated task and return concise findings with evidence.\n",
+        // The session root is instantiated from `default`, so this profile
+        // carries the full system prompt rather than a delegation blurb.
+        "default" => include_str!("system_prompt.md"),
         "worker" => {
             "Implement the requested change, verify it, and report modified files and residual risks.\n"
         }
@@ -122,28 +108,60 @@ mod tests {
     fn scaffold_does_not_overwrite() {
         let d = tempfile::tempdir().unwrap();
         scaffold(d.path());
-        let main = d.path().join("prompts/main.md");
-        std::fs::write(&main, "mine").unwrap();
-        let config = d.path().join("subagents.toml");
-        std::fs::write(&config, "mine-config").unwrap();
+        let worker = d.path().join("profiles/worker.md");
+        std::fs::write(&worker, "mine-profile").unwrap();
         scaffold(d.path());
-        assert_eq!(std::fs::read_to_string(main).unwrap(), "mine");
-        assert_eq!(std::fs::read_to_string(config).unwrap(), "mine-config");
-        for name in ROLE_NAMES {
-            assert!(
-                d.path()
-                    .join(format!("prompts/subagents/{name}.md"))
-                    .is_file()
-            );
+        assert_eq!(std::fs::read_to_string(worker).unwrap(), "mine-profile");
+        for name in BUILTIN_NAMES {
+            assert!(d.path().join(format!("profiles/{name}.md")).is_file());
         }
     }
 
+    /// Upgrading from the pre-profile layout must not discard a customized
+    /// system prompt: the default profile is seeded from `prompts/main.md`.
     #[test]
-    fn unreadable_main_uses_embedded_fallback() {
+    fn a_customized_main_prompt_seeds_the_default_profile() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join("prompts/main.md")).unwrap();
-        let (prompt, diagnostics) = load_main(Some(d.path()));
-        assert_eq!(prompt, include_str!("system_prompt.md").trim_end());
-        assert!(diagnostics.iter().any(|d| d.contains("using built-in")));
+        std::fs::create_dir_all(d.path().join("prompts")).unwrap();
+        std::fs::write(d.path().join("prompts/main.md"), "my careful prompt").unwrap();
+
+        scaffold(d.path());
+
+        let default = std::fs::read_to_string(d.path().join("profiles/default.md")).unwrap();
+        assert!(default.contains("my careful prompt"), "{default}");
+        let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
+        assert_eq!(
+            profiles.get("default").unwrap().instructions,
+            "my careful prompt"
+        );
     }
+
+    #[test]
+    fn a_fresh_install_seeds_the_default_profile_from_the_builtin_prompt() {
+        let d = tempfile::tempdir().unwrap();
+        scaffold(d.path());
+        let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
+        assert_eq!(
+            profiles.get("default").unwrap().instructions,
+            include_str!("system_prompt.md").trim()
+        );
+    }
+
+    /// The scaffolded copy replaces the built-in, so it has to carry the same
+    /// tool policy or a read-only profile silently gains write access.
+    #[test]
+    fn scaffolded_profiles_reproduce_builtin_policy() {
+        let d = tempfile::tempdir().unwrap();
+        scaffold(d.path());
+        let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
+        for name in ["explorer", "planner", "reviewer"] {
+            let profile = profiles.get(name).unwrap();
+            assert!(profile.permits("read"), "{name} should keep read");
+            assert!(!profile.permits("write"), "{name} must not gain write");
+            assert!(!profile.permits("bash"), "{name} must not gain bash");
+        }
+        assert!(profiles.get("worker").unwrap().permits("bash"));
+        assert!(profiles.diagnostics().is_empty(), "{:?}", profiles.diagnostics());
+    }
+
 }

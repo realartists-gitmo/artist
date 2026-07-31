@@ -9,6 +9,7 @@ mod error;
 mod provider;
 mod registry;
 mod secret;
+mod set;
 
 pub use chatgpt::{
     CHATGPT_CODEX_BASE_URL, CODEX_CLIENT_ID, ChatGptOAuth, LoginRequest, PendingLogin,
@@ -18,3 +19,4 @@ pub use error::{Error, Result};
 pub use provider::{Auth, Credentials, OpenAiApi, ProviderId, RequestAuth, SavedProvider};
 pub use registry::{PROVIDERS, ProviderKind, ProviderMetadata, metadata};
 pub use secret::Secret;
+pub use set::ProviderSet;

@@ -36,7 +36,7 @@ pub(crate) struct Delegate {
     resources: Resources,
     handles: SessionHandles,
     disabled_tools: Vec<String>,
-    subagents: crate::subagents::Subagents,
+    profiles: crate::profiles::Profiles,
     events: UnboundedSender<PromptEvent>,
 }
 
@@ -68,7 +68,7 @@ impl Delegate {
         resources: Resources,
         runtime: DelegateRuntime,
         disabled_tools: Vec<String>,
-        subagents: crate::subagents::Subagents,
+        profiles: crate::profiles::Profiles,
     ) -> Self {
         let jobs = DelegateJobs::for_project(tools.project_root());
         Self {
@@ -79,7 +79,7 @@ impl Delegate {
             resources,
             handles: runtime.handles,
             disabled_tools,
-            subagents,
+            profiles,
             events: runtime.events,
         }
     }
@@ -120,10 +120,12 @@ pub(crate) struct DelegateArgs {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DelegateError {
-    #[error("subagent model is not configured")]
-    MissingModel,
     #[error("subagent failed: {0}")]
     Failed(String),
+    /// An availability failure on this candidate. The fallback loop advances
+    /// to the next candidate rather than failing the run.
+    #[error("subagent provider unavailable: {0}")]
+    Unavailable(String),
 }
 
 impl Tool for Delegate {
@@ -140,7 +142,7 @@ impl Tool for Delegate {
         json!({"type":"object","properties":{
             "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run"},
             "prompt":{"type":"string"},
-            "agent":{"type":"string","enum":self.subagents.names(),"description":"Configured subagent role"},
+            "agent":{"type":"string","enum":self.profiles.names(),"description":"Configured subagent role"},
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
             "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
             "taskId":{"type":"string"},
@@ -226,382 +228,188 @@ impl Delegate {
     async fn run_agent(
         &self,
         prompt: String,
-        role_name: &str,
+        profile_name: &str,
         fork: bool,
         task_id: Option<String>,
     ) -> Result<String, DelegateError> {
         let run = DelegateRun::new(task_id);
-        let role = self
-            .subagents
-            .role(role_name)
+        let profile = self
+            .profiles
+            .get(profile_name)
             .map_err(DelegateError::Failed)?;
         let _permit = self
-            .subagents
+            .profiles
             .semaphore
             .clone()
             .try_acquire_owned()
             .map_err(|_| DelegateError::Failed("subagent concurrency limit reached".into()))?;
-        let model = role
-            .model
-            .as_deref()
-            .or(self.provider.model.as_deref())
-            .ok_or(DelegateError::MissingModel)?;
-        use llm_provider::OpenAiApi;
-        match self.provider.provider {
-            llm_provider::ProviderKind::Chatgpt => {
-                self.run_agent_with(
-                    crate::rig_provider::build_chatgpt(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Copilot => {
-                self.run_agent_with(
-                    crate::rig_provider::build_copilot(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Azure => {
-                self.run_agent_with(
-                    crate::rig_provider::build_azure(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Llamafile => {
-                self.run_agent_with(
-                    crate::rig_provider::build_llamafile(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Ollama => {
-                self.run_agent_with(
-                    crate::rig_provider::build_ollama(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Openai => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_openai_responses(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
+        let breaker = crate::fallback::Breaker::global();
+        let mut skipped = Vec::new();
+        let mut last_error = None;
+
+        // Ordered, not round-robin: candidate 0 is preferred while healthy.
+        for candidate in &profile.candidates {
+            let label = crate::fallback::candidate_label(candidate);
+            let provider = match self.resolve_provider(candidate) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    skipped.push(crate::fallback::Skipped {
+                        candidate: label,
+                        reason: error.to_string(),
+                    });
+                    continue;
                 }
-                OpenAiApi::ChatCompletions => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_openai_chat(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
+            };
+            let Some(model) = candidate.model_for(&provider) else {
+                skipped.push(crate::fallback::Skipped {
+                    candidate: label,
+                    reason: "no model configured on the candidate or its account".into(),
+                });
+                continue;
+            };
+            let key = crate::fallback::CandidateKey {
+                provider: provider.id.as_str().to_owned(),
+                model: model.clone(),
+            };
+            if breaker.is_tripped(&key) {
+                skipped.push(crate::fallback::Skipped {
+                    candidate: label,
+                    reason: "cooling down after repeated failures".into(),
+                });
+                continue;
+            }
+            let thinking = candidate.thinking.unwrap_or_default();
+            match self
+                .dispatch(
+                    &provider,
+                    &model,
+                    thinking,
+                    prompt.clone(),
+                    &profile,
+                    fork,
+                    &run,
+                )
+                .await
+            {
+                Ok(output) => {
+                    breaker.record_success(&key);
+                    return Ok(output);
                 }
+                Err(DelegateError::Unavailable(message)) => {
+                    breaker.record_failure(&key);
+                    self.emit(PromptEvent::ProviderFallback {
+                        from: label,
+                        reason: message.clone(),
+                    });
+                    last_error = Some(message);
+                }
+                // A permanent failure reproduces on every candidate, so trying
+                // the rest would only replace the real error with the last one.
+                Err(other) => return Err(other),
+            }
+        }
+        Err(DelegateError::Failed(crate::fallback::exhausted(
+            &profile.name,
+            last_error,
+            &skipped,
+        )))
+    }
+
+    /// A profile names a provider *account*, not a provider kind. Resolving
+    /// against the session's configured set is what lets a delegated profile
+    /// run on a different account — and a different provider entirely — from
+    /// the parent that spawned it. An unnamed provider inherits the parent's.
+    fn resolve_provider(
+        &self,
+        candidate: &crate::profiles::Candidate,
+    ) -> Result<SavedProvider, DelegateError> {
+        candidate
+            .resolve(&self.handles.providers, &self.provider)
+            .cloned()
+            .map_err(DelegateError::Failed)
+    }
+
+    /// Select the typed Rig client for the resolved account. Each arm
+    /// monomorphizes `run_agent_with` separately, which is why this stays a
+    /// match over provider kinds rather than a unified client type.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch(
+        &self,
+        provider: &SavedProvider,
+        model: &str,
+        thinking: crate::profiles::Thinking,
+        prompt: String,
+        profile: &crate::profiles::Profile,
+        fork: bool,
+        run: &DelegateRun,
+    ) -> Result<String, DelegateError> {
+        use llm_provider::{OpenAiApi, ProviderKind};
+        macro_rules! run_with {
+            ($build:ident) => {
+                self.run_agent_with(
+                    crate::rig_provider::$build(provider)
+                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
+                    prompt,
+                    profile,
+                    provider,
+                    thinking,
+                    fork,
+                    model,
+                    run,
+                )
+                .await
+            };
+        }
+        match provider.provider {
+            ProviderKind::Anthropic => run_with!(build_anthropic),
+            ProviderKind::Azure => run_with!(build_azure),
+            ProviderKind::Chatgpt => run_with!(build_chatgpt),
+            ProviderKind::Cohere => run_with!(build_cohere),
+            ProviderKind::Copilot => run_with!(build_copilot),
+            ProviderKind::Deepseek => run_with!(build_deepseek),
+            ProviderKind::Gemini => run_with!(build_gemini),
+            ProviderKind::Groq => run_with!(build_groq),
+            ProviderKind::Huggingface => run_with!(build_huggingface),
+            ProviderKind::Hyperbolic => run_with!(build_hyperbolic),
+            ProviderKind::Llamafile => run_with!(build_llamafile),
+            ProviderKind::Mira => run_with!(build_mira),
+            ProviderKind::Mistral => run_with!(build_mistral),
+            ProviderKind::Ollama => run_with!(build_ollama),
+            ProviderKind::Openrouter => run_with!(build_openrouter),
+            ProviderKind::Perplexity => run_with!(build_perplexity),
+            ProviderKind::Together => run_with!(build_together),
+            ProviderKind::Xai => run_with!(build_xai),
+            ProviderKind::Minimax => match provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => run_with!(build_minimax),
+                OpenAiApi::ChatCompletions => run_with!(build_minimax_anthropic),
             },
-            llm_provider::ProviderKind::Anthropic => {
-                self.run_agent_with(
-                    crate::rig_provider::build_anthropic(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Cohere => {
-                self.run_agent_with(
-                    crate::rig_provider::build_cohere(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Gemini => {
-                self.run_agent_with(
-                    crate::rig_provider::build_gemini(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Deepseek => {
-                self.run_agent_with(
-                    crate::rig_provider::build_deepseek(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Groq => {
-                self.run_agent_with(
-                    crate::rig_provider::build_groq(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Huggingface => {
-                self.run_agent_with(
-                    crate::rig_provider::build_huggingface(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Hyperbolic => {
-                self.run_agent_with(
-                    crate::rig_provider::build_hyperbolic(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Mira => {
-                self.run_agent_with(
-                    crate::rig_provider::build_mira(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Mistral => {
-                self.run_agent_with(
-                    crate::rig_provider::build_mistral(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Openrouter => {
-                self.run_agent_with(
-                    crate::rig_provider::build_openrouter(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Perplexity => {
-                self.run_agent_with(
-                    crate::rig_provider::build_perplexity(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Together => {
-                self.run_agent_with(
-                    crate::rig_provider::build_together(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Xai => {
-                self.run_agent_with(
-                    crate::rig_provider::build_xai(&self.provider)
-                        .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                    prompt,
-                    &role,
-                    fork,
-                    model,
-                    &run,
-                )
-                .await
-            }
-            llm_provider::ProviderKind::Minimax => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_minimax(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
-                OpenAiApi::ChatCompletions => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_minimax_anthropic(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
+            ProviderKind::Moonshot => match provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => run_with!(build_moonshot),
+                OpenAiApi::ChatCompletions => run_with!(build_moonshot_anthropic),
             },
-            llm_provider::ProviderKind::Moonshot => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_moonshot(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
-                OpenAiApi::ChatCompletions => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_moonshot_anthropic(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
+            ProviderKind::Openai => match provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => run_with!(build_openai_responses),
+                OpenAiApi::ChatCompletions => run_with!(build_openai_chat),
             },
-            llm_provider::ProviderKind::Xiaomimimo => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_xiaomimimo(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
-                OpenAiApi::ChatCompletions => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_xiaomimimo_anthropic(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
+            ProviderKind::Xiaomimimo => match provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => run_with!(build_xiaomimimo),
+                OpenAiApi::ChatCompletions => run_with!(build_xiaomimimo_anthropic),
             },
-            llm_provider::ProviderKind::Zai => match self.provider.api.unwrap_or_default() {
-                OpenAiApi::Responses => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_zai(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
-                OpenAiApi::ChatCompletions => {
-                    self.run_agent_with(
-                        crate::rig_provider::build_zai_anthropic(&self.provider)
-                            .map_err(|error| DelegateError::Failed(error.to_string()))?,
-                        prompt,
-                        &role,
-                        fork,
-                        model,
-                        &run,
-                    )
-                    .await
-                }
+            ProviderKind::Zai => match provider.api.unwrap_or_default() {
+                OpenAiApi::Responses => run_with!(build_zai),
+                OpenAiApi::ChatCompletions => run_with!(build_zai_anthropic),
             },
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_agent_with<C: CompletionClient>(
         &self,
         client: C,
         prompt: String,
-        role: &crate::subagents::Role,
+        role: &crate::profiles::Profile,
+        provider: &SavedProvider,
+        thinking: crate::profiles::Thinking,
         fork: bool,
         model: &str,
         run: &DelegateRun,
@@ -642,6 +450,17 @@ impl Delegate {
             if role.permits("skill") {
                 tools.push(Box::new(self.resources.skill_tool()));
             }
+            if role.permits("todo") {
+                // A child owns its own list and may read its parent's, but not
+                // write to it: concurrent siblings sharing one list would race
+                // with no obvious merge.
+                tools.push(Box::new(crate::todo::TodoTool::new(
+                    self.handles.todos.clone(),
+                    recorder.clone(),
+                    actor.clone(),
+                    Some(self.handles.conversation_id.clone()),
+                )));
+            }
             if role.permits("bash") {
                 tools.push(Box::new(child_tools.bash.clone()));
             }
@@ -655,11 +474,10 @@ impl Delegate {
             tools
         };
         let prompt_tools = registered_tools();
-        let role_instructions = role.instructions.as_deref().unwrap_or("Complete only the delegated task and return concise findings with evidence. You cannot delegate further.");
         let policy = format!(
-            "You are the '{}' subagent role.\n{}\n\n{}{}\nCurrent working directory: {}",
+            "You are the '{}' subagent profile.\n{}\n\n{}{}\nCurrent working directory: {}",
             role.name,
-            role_instructions,
+            role.instructions,
             crate::tool_prompt::render(&prompt_tools),
             self.resources.prompt_section(),
             self.tools.project_root().display()
@@ -691,19 +509,13 @@ impl Delegate {
                 retries_used < retry_budget,
             );
             let mut builder = client.agent(model).preamble(&policy);
-            if self.provider.provider == llm_provider::ProviderKind::Chatgpt {
-                let mut params = json!({ "prompt_cache_key": cache_key.clone() });
-                // The subagent's own `reasoning` arg overrides the main agent's
-                // effort (main b9d9193); fall back to the provider default.
-                if let Some(effort) = role
-                    .reasoning_effort
-                    .as_deref()
-                    .or(self.provider.reasoning_effort.as_deref())
-                {
-                    params["reasoning"] = json!({ "effort": effort, "summary": "auto" });
-                } else {
-                    params["reasoning"] = json!({ "summary": "auto" });
-                }
+            // The profile's own thinking configuration wins over the resolved
+            // account's default effort (main b9d9193). Translation is
+            // per-provider: mode and level are separate fields on Anthropic and
+            // a single `reasoning` block on the ChatGPT backend.
+            if let Some(params) =
+                crate::thinking::request_params(provider.provider, &cache_key, thinking)
+            {
                 builder = builder.additional_params(params);
             }
             let tool_meta = ToolMeta::default();
@@ -714,12 +526,12 @@ impl Delegate {
                 .default_max_turns(usize::MAX)
                 .build();
             run_recorder.record(RunStarted {
-                provider: format!("{:?}", self.provider.provider).to_lowercase(),
+                provider: format!("{:?}", provider.provider).to_lowercase(),
                 model: model.to_owned(),
-                reasoning_effort: role
-                    .reasoning_effort
-                    .clone()
-                    .or_else(|| self.provider.reasoning_effort.clone()),
+                reasoning_effort: thinking
+                    .level
+                    .map(|level| level.as_str().to_owned())
+                    .or_else(|| provider.reasoning_effort.clone()),
             });
 
             let mut stream = agent
@@ -907,7 +719,14 @@ impl Delegate {
                             outcome: "error".into(),
                         });
                         self.finish_child(&actor, "error");
-                        return Err(DelegateError::Failed(error.to_string()));
+                        return Err(match crate::fallback::classify(&error) {
+                            crate::fallback::Failure::Unavailable => {
+                                DelegateError::Unavailable(error.to_string())
+                            }
+                            crate::fallback::Failure::Permanent => {
+                                DelegateError::Failed(error.to_string())
+                            }
+                        });
                     }
                 }
             }

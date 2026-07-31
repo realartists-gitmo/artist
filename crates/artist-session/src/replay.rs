@@ -132,6 +132,26 @@ pub fn user_prompts(events: &[Envelope]) -> Vec<String> {
 
 /// Events not hidden by rewind masks — the "current" view of
 /// the session that on-demand scans should see.
+/// The profile a session is running as: the target of its most recent
+/// handoff, or `None` when it has never handed off.
+///
+/// Rewind masking is applied, so rewinding past a handoff boundary restores
+/// the profile that was active at that point without any extra bookkeeping —
+/// the handoff event is masked along with everything after it.
+pub fn active_profile(events: &[Envelope]) -> Option<String> {
+    let masks = resolve_masks(events, None);
+    events
+        .iter()
+        .filter(|envelope| {
+            envelope.lineage == crate::event::MAIN_LINEAGE && !masks.covers(envelope.seq)
+        })
+        .filter_map(|envelope| match envelope.event() {
+            SessionEvent::HandoffPerformed(handoff) => Some(handoff.to),
+            _ => None,
+        })
+        .next_back()
+}
+
 pub fn visible_events(events: &[Envelope]) -> Vec<&Envelope> {
     let masks = resolve_masks(events, None);
     events
@@ -305,6 +325,73 @@ mod tests {
             kind: event.kind().to_owned(),
             payload: event.payload(),
         }
+    }
+
+    fn handoff(seq: u64, from: &str, to: &str) -> Envelope {
+        envelope(
+            seq,
+            "main",
+            SessionEvent::HandoffPerformed(crate::event::HandoffPerformed {
+                from: from.into(),
+                to: to.into(),
+                summary: "carry on".into(),
+                chain: vec![from.into(), to.into()],
+                read_files: Vec::new(),
+                modified_files: Vec::new(),
+                jobs: Vec::new(),
+                todos: Vec::new(),
+            }),
+        )
+    }
+
+    #[test]
+    fn a_session_that_never_handed_off_has_no_recorded_profile() {
+        let events = vec![envelope(
+            0,
+            "main",
+            SessionEvent::RuleFired(RuleFired {
+                rule: "r".into(),
+                target: "text".into(),
+                matched: "m".into(),
+                turn: 0,
+                per_turn: false,
+            }),
+        )];
+        assert_eq!(active_profile(&events), None);
+    }
+
+    #[test]
+    fn resume_uses_the_most_recent_handoff_target() {
+        let events = vec![
+            handoff(0, "default", "planner"),
+            handoff(1, "planner", "worker"),
+        ];
+        assert_eq!(active_profile(&events).as_deref(), Some("worker"));
+    }
+
+    /// Rewinding past a handoff boundary restores the profile that was active
+    /// at that point — the handoff event is masked along with everything after
+    /// it, so no separate bookkeeping is needed.
+    #[test]
+    fn rewinding_past_a_handoff_restores_the_earlier_profile() {
+        let events = vec![
+            handoff(0, "default", "planner"),
+            handoff(1, "planner", "worker"),
+            envelope(
+                2,
+                "main",
+                SessionEvent::HistoryRewind(crate::event::HistoryRewind {
+                    to_seq: 0,
+                    reason: "user".into(),
+                    by: "user".into(),
+                }),
+            ),
+        ];
+        assert_eq!(
+            active_profile(&events).as_deref(),
+            Some("planner"),
+            "the second handoff is masked by the rewind"
+        );
     }
 
     #[test]

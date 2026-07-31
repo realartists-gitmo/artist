@@ -15,6 +15,7 @@ base64 = "0.23"
 dashmap = "6"
 dirs = "6"
 futures = "0.3"
+globset = "0.4"
 llm-provider = { path = "../llm-provider" }
 rig-core = { version = "0.40.0", features = ["rmcp"] }
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
@@ -28,6 +29,7 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+http = "1"
 rig-core = { version = "0.40.0", features = ["test-utils"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

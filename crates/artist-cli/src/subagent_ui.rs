@@ -188,7 +188,10 @@ fn phase_for(event: &artist_agent::PromptEvent) -> Option<&'static str> {
         artist_agent::PromptEvent::ToolCall { .. }
         | artist_agent::PromptEvent::ToolExecutionStart { .. }
         | artist_agent::PromptEvent::SubagentStarted { .. }
-        | artist_agent::PromptEvent::SubagentFinished { .. } => Some("working"),
+        | artist_agent::PromptEvent::SubagentFinished { .. }
+        | artist_agent::PromptEvent::ProviderFallback { .. } => Some("working"),
+        // Subagents cannot hand off; a child never emits this.
+        artist_agent::PromptEvent::HandedOff { .. } => None,
         artist_agent::PromptEvent::SubagentEvent { event, .. } => phase_for(event),
         artist_agent::PromptEvent::CompletionUsage { .. } => None,
     }

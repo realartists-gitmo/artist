@@ -38,6 +38,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/rewind [n] [fork]",
     },
     SlashCommand {
+        name: "/handoff",
+        description: "Hand the session to another profile",
+        usage: "/handoff <profile>",
+    },
+    SlashCommand {
         name: "/compact",
         description: "Summarize old context while preserving recent work",
         usage: "/compact [instructions]",
@@ -116,6 +121,11 @@ pub(crate) enum ParsedCommand<'a> {
     Compact {
         instructions: Option<&'a str>,
     },
+    /// Ask the current profile to hand the session to another profile. The
+    /// agent writes the payload itself — it has the context the summary needs.
+    Handoff {
+        profile: &'a str,
+    },
     Rules(RulesAction<'a>),
     /// Start a fresh session.
     New,
@@ -182,6 +192,11 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
     }
     let arguments: Vec<_> = words.collect();
     Some(match (command, arguments.as_slice()) {
+        ("/handoff", [profile]) => Ok(ParsedCommand::Handoff { profile }),
+        ("/handoff", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/handoff <profile>",
+        }),
         ("/help", []) => Ok(ParsedCommand::Help),
         ("/quit", []) => Ok(ParsedCommand::Quit),
         ("/quit", _) => Err(ParseError::InvalidUsage {
@@ -433,6 +448,7 @@ mod tests {
                 "/tools",
                 "/mcp",
                 "/rewind",
+                "/handoff",
                 "/compact",
                 "/rules",
                 "/new",

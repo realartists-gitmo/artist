@@ -323,6 +323,14 @@ async fn execute_prompt(
         conversation_id: active.session.id.clone(),
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
+        providers: llm_provider::ProviderSet::new(store.providers.clone()),
+        todos: {
+            // Harness-owned, so a resumed session picks the list back up
+            // exactly where it was rather than re-deriving it from prose.
+            let todos = artist_agent::todo::TodoStore::default();
+            todos.restore(&resumed_events);
+            todos
+        },
     };
     extension_control.set_steering(Some(steering));
     extensions
@@ -336,8 +344,12 @@ async fn execute_prompt(
     let mut response = String::new();
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
     let outcome = {
-        let chat = artist_agent::stream_chat(
+        // A resumed session runs as whatever profile it last handed off to.
+        let session_profile = artist_session::active_profile(&resumed_events)
+            .unwrap_or_else(|| "default".to_owned());
+        let chat = artist_agent::stream_chat_as(
             &session_provider,
+            &session_profile,
             &agent_input,
             artist_agent::ToolContext {
                 native: &tools,
@@ -381,6 +393,13 @@ async fn execute_prompt(
                     PromptEvent::RuleFired { rule, matched } => {
                         let excerpt: String = matched.chars().take(60).collect();
                         eprintln!("rule {rule} fired on \"{excerpt}\" — rewound, retrying");
+                    }
+                    PromptEvent::HandedOff { from, to } => {
+                        eprintln!("── {from} handed off to {to} ──");
+                    }
+                    PromptEvent::ProviderFallback { from, reason } => {
+                        let excerpt: String = reason.chars().take(80).collect();
+                        eprintln!("{from} unavailable ({excerpt}) — falling back");
                     }
                 }
                 output.flush()?;
@@ -508,6 +527,8 @@ fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_age
         PromptEvent::SubagentStarted { .. } | PromptEvent::SubagentEvent { .. } => Some("working"),
         PromptEvent::SubagentFinished { .. } => Some("thinking"),
         PromptEvent::RuleFired { .. } => Some("rewinding"),
+        PromptEvent::ProviderFallback { .. } => Some("working"),
+        PromptEvent::HandedOff { .. } => Some("thinking"),
         PromptEvent::CompletionUsage { .. } => None,
     };
     if let Some(state) = state {

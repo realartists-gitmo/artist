@@ -194,7 +194,7 @@ and off in `artist-rules`' own tests.
   session without activating it ("would have fired 3×, excerpts…").
 - `artist rules new <name>` — scaffold a commented rule template.
 
-Out of scope so far, by decision: tool-result match target (v1 rules are
+Out of scope so far, by decision: tool-result match target (current rules are
 pure abort-retry), user-prompt matching, trust prompts for project rules
 (consistent with unsandboxed bash).
 
@@ -377,6 +377,15 @@ oversized tool output in a valid JSON envelope with an explicit `truncated`
 marker and degrades server-map access gracefully. The tool set is snapshotted
 per turn; `/mcp start` binds on the next message.
 
+The ChatGPT web integration uses one published bootstrap app whose remote MCP
+surface contains only `artist_open`. That call mounts an immutable reviewed
+component. The component then registers the authorized Artist tools directly
+with the ChatGPT host through MCP Apps, signs and encrypts each exact invocation,
+and sends it over Veilid to `artistd`. Sensitive arguments and results never
+traverse the shared remote MCP service. ChatGPT remains the sole agent;
+the component is deterministic protocol/transport code, and `artistd` is the
+local authority and canonical tool executor. See `docs/chatgpt-web-mesh.md`.
+
 ---
 
 ## Testing
@@ -405,7 +414,7 @@ for cross-run replay.
 ## Open items
 
 - Codex replay spike not yet run against a live login (degrade path ready).
-- Tool-result rule target (inject-only semantics) deferred from v1.
+- Tool-result rule target (inject-only semantics) remains an open item.
 - Subagent activity is recorded in the log but not yet surfaced in the TUI.
 - Full clean-rewind rendering of aborted partial output in scrollback
   (currently the unflushed tail clears and an amber card marks the rewind).
@@ -417,3 +426,4 @@ for cross-run replay.
 - `crates/llm-provider/README.md` — OAuth and secret handling notes
 - `crates/hashline-tools/FRANKENSTEIN.md` / `docs/mnemonic-anchors.md`
 - `crates/artist-agent/src/system_prompt.md` — model-facing tool policy
+- `docs/chatgpt-web-mesh.md` — component-owned ChatGPT tools over the Veilid mesh
