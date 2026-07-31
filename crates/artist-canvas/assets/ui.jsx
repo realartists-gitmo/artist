@@ -59,7 +59,16 @@ export function AppShell({ title, subtitle, actions, sidebar, children }) {
             {sidebar}
           </aside>
         )}
-        <main style={{ flex: "1 1 auto", overflow: "auto", padding: sp(4), minWidth: 0 }}>
+        <main
+          style={{
+            flex: "1 1 auto", overflow: "auto", padding: sp(4), minWidth: 0,
+            // Reserve the scrollbar's space whether or not it is showing.
+            // Without this, moving between a tall panel and a short one adds
+            // and removes 15px of gutter, and the entire page jumps sideways
+            // on every switch — which reads as a flash, not as a scrollbar.
+            scrollbarGutter: "stable",
+          }}
+        >
           {children}
         </main>
       </div>
@@ -242,21 +251,35 @@ export function Select({ label, options = [], style, ...rest }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: sp(1) }}>
       {label && <label htmlFor={id} style={{ fontSize: 12, color: "var(--a-muted)" }}>{label}</label>}
-      <select
-        id={id}
-        className="a-focus"
-        style={{
-          padding: sp(2), borderRadius: "var(--a-radius)", border: "1px solid var(--a-border)",
-          background: "var(--a-bg)", color: "var(--a-fg)", font: "13px var(--a-font)", ...style,
-        }}
-        {...rest}
-      >
+      <div style={{ position: "relative", display: "grid" }}>
+        <select
+          id={id}
+          className="a-focus"
+          style={{
+            padding: sp(2), borderRadius: "var(--a-radius)", border: "1px solid var(--a-border)",
+            background: "var(--a-bg)", color: "var(--a-fg)", font: "13px var(--a-font)",
+            width: "100%", ...style,
+          }}
+          {...rest}
+        >
         {options.map((option) => {
           const value = typeof option === "string" ? option : option.value;
           const label = typeof option === "string" ? option : (option.label ?? option.value);
           return <option key={value} value={value}>{label}</option>;
-        })}
-      </select>
+          })}
+        </select>
+        {/* The native arrow goes with the native appearance, so draw one that
+            follows the theme. Non-interactive, so clicks reach the select. */}
+        <span
+          aria-hidden="true"
+          style={{
+            position: "absolute", right: sp(3), top: "50%", transform: "translateY(-50%)",
+            pointerEvents: "none", color: "var(--a-muted)", fontSize: 10,
+          }}
+        >
+          ▼
+        </span>
+      </div>
     </div>
   );
 }
@@ -305,9 +328,13 @@ export function Tabs({ tabs = [], value, onChange, children }) {
             className="a-focus"
             style={{
               padding: `${sp(2)} ${sp(3)}`, background: "transparent", border: "none",
+              // Square: the global button radius made the focus ring trace a
+              // rounded box around a tab whose indicator is a flat underline.
+              borderRadius: 0,
               borderBottom: `2px solid ${tab.id === active ? "var(--a-accent)" : "transparent"}`,
               color: tab.id === active ? "var(--a-fg)" : "var(--a-muted)",
-              font: "500 13px var(--a-font)", cursor: "pointer",
+              font: `${tab.id === active ? 600 : 500} 13px var(--a-font)`,
+              cursor: "pointer",
             }}
           >
             {tab.label}
@@ -725,23 +752,41 @@ export function Plot({ data, series, height = 240, title, scales, ...rest }) {
  * Syntax-highlighted code, coloured by the same Rust that colours the
  * transcript. No grammar files reach the browser.
  */
+// Highlighting survives unmount. Switching tabs used to re-request it and
+// re-render unstyled text for a frame, which showed as a flash on every swap.
+const highlighted = new Map();
+
 export function Code({ children, language = "txt", showLines, wrap, style }) {
   const source = typeof children === "string" ? children : String(children ?? "");
-  const [lines, setLines] = useState(null);
+  const dark = typeof matchMedia === "function"
+    ? matchMedia("(prefers-color-scheme: dark)").matches
+    : true;
+  const key = `${language}\u0000${dark}\u0000${source}`;
+
+  // Seeded from the cache, so a block that has been rendered before comes back
+  // already styled rather than passing through a plain-text frame.
+  const [lines, setLines] = useState(() => highlighted.get(key) ?? null);
 
   useEffect(() => {
+    const cached = highlighted.get(key);
+    if (cached) {
+      setLines(cached);
+      return;
+    }
     let live = true;
-    const dark = matchMedia("(prefers-color-scheme: dark)").matches;
     artist
       .highlight(source, language, dark)
-      .then((result) => live && setLines(result.lines))
+      .then((result) => {
+        highlighted.set(key, result.lines);
+        if (live) setLines(result.lines);
+      })
       // Falling back to unstyled code is right: the content is what matters,
       // and a highlighting failure must not blank the block.
       .catch(() => live && setLines(null));
     return () => {
       live = false;
     };
-  }, [source, language]);
+  }, [key, source, language, dark]);
 
   const width = String(source.split("\n").length).length;
 
@@ -753,29 +798,31 @@ export function Code({ children, language = "txt", showLines, wrap, style }) {
         font: "12px/1.6 var(--a-mono)", whiteSpace: wrap ? "pre-wrap" : "pre", ...style,
       }}
     >
-      {lines
-        ? lines.map((spans, index) => (
-            <div key={index}>
-              {showLines && (
-                <span style={{ color: "var(--a-muted)", userSelect: "none", marginRight: sp(3) }}>
-                  {String(index + 1).padStart(width, " ")}
-                </span>
-              )}
-              {spans.map((span, i) => (
-                <span
-                  key={i}
-                  style={{
-                    color: span.color,
-                    fontWeight: span.bold ? 600 : undefined,
-                    fontStyle: span.italic ? "italic" : undefined,
-                  }}
-                >
-                  {span.text}
-                </span>
-              ))}
-            </div>
-          ))
-        : source}
+      {(lines ?? source.split("\n").map((text) => [{ text, color: "inherit" }])).map(
+        (spans, index) => (
+          <div key={index}>
+            {/* Rendered in both branches: a gutter that appears only once
+                highlighting lands would shift every line sideways. */}
+            {showLines && (
+              <span style={{ color: "var(--a-muted)", userSelect: "none", marginRight: sp(3) }}>
+                {String(index + 1).padStart(width, " ")}
+              </span>
+            )}
+            {spans.map((span, i) => (
+              <span
+                key={i}
+                style={{
+                  color: span.color,
+                  fontWeight: span.bold ? 600 : undefined,
+                  fontStyle: span.italic ? "italic" : undefined,
+                }}
+              >
+                {span.text}
+              </span>
+            ))}
+          </div>
+        ),
+      )}
     </pre>
   );
 }

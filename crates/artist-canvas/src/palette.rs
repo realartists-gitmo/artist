@@ -604,6 +604,18 @@ a  { color: var(--a-accent); text-underline-offset: 2px; }
 code, pre, kbd, samp { font-family: var(--a-mono); font-size: .875em; }
 :where(button, input, select, textarea) { font: inherit; color: inherit; }
 :where(button) { border-radius: var(--a-radius); }
+/* WebKit paints native form controls with the platform's own colours and
+   ignores background-color, so in dark mode a <select> came out white with
+   near-white text on it. Opting out of the native appearance is the only way
+   the theme reaches them. */
+:where(select) { appearance: none; -webkit-appearance: none; padding-right: 1.75rem; }
+:where(input[type='number']) { appearance: textfield; -moz-appearance: textfield; }
+:where(input[type='number'])::-webkit-outer-spin-button,
+:where(input[type='number'])::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+:where(input[type='checkbox'], input[type='radio'], progress) { accent-color: var(--a-accent); }
+/* A tab's own indicator is its underline; a ring drawn outside it reads as a
+   detached box, so keep the focus ring inside the tab's bounds. */
+:where([role='tab']):focus-visible { outline-offset: -2px; }
 :where(input, select, textarea) { border-radius: var(--a-radius);
   border: 1px solid var(--a-border); background: var(--a-bg); padding: .375rem .5rem; }
 :where(table) { border-collapse: collapse; }
