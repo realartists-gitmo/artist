@@ -135,3 +135,75 @@ fn multibyte_text_around_an_atom_stays_anchored() {
     assert_ranges_within(&atoms, &text);
     assert!(atoms.expand(&text).text.starts_with("⠀⠀hello\nworld"));
 }
+
+/// The invariant, stated over arbitrary edit sequences rather than the handful
+/// of cases someone thought to write down. Both atom bugs so far were found by
+/// crashing in production; this is the shape that finds them first.
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Paste(String),
+        Insert(String, u8),
+        Remove(u8, u8),
+    }
+
+    /// Snap a percentage into a char boundary of the current text, so the
+    /// generated positions are always ones a caller could really pass.
+    fn boundary(text: &str, percent: u8) -> usize {
+        let mut index = text.len() * usize::from(percent.min(100)) / 100;
+        while index < text.len() && !text.is_char_boundary(index) {
+            index += 1;
+        }
+        index.min(text.len())
+    }
+
+    fn operations() -> impl Strategy<Value = Vec<Op>> {
+        // Multi-byte characters are in the alphabet on purpose: byte-versus-char
+        // confusion is exactly what strands a range.
+        let content = "[a b\n⠀é]{1,6}";
+        prop::collection::vec(
+            prop_oneof![
+                content.prop_map(Op::Paste),
+                (content, any::<u8>()).prop_map(|(text, at)| Op::Insert(text, at)),
+                (any::<u8>(), any::<u8>()).prop_map(|(start, end)| Op::Remove(start, end)),
+            ],
+            0..12,
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn atom_ranges_never_escape_the_text_they_index(ops in operations()) {
+            let mut atoms = InputAtoms::default();
+            let mut text = String::new();
+
+            for op in ops {
+                match op {
+                    Op::Paste(value) => {
+                        let mut cursor = text.len();
+                        atoms.insert_paste(&mut text, &mut cursor, &value);
+                        prop_assert!(cursor <= text.len());
+                    }
+                    Op::Insert(value, at) => {
+                        let at = boundary(&text, at);
+                        atoms.insert_text(at, value.len());
+                        text.insert_str(at, &value);
+                    }
+                    Op::Remove(start, end) => {
+                        let start = boundary(&text, start);
+                        let end = boundary(&text, end).max(start);
+                        text.replace_range(start..end, "");
+                        atoms.remove_text(start, end);
+                    }
+                }
+
+                assert_ranges_within(&atoms, &text);
+                // Expanding is where a stranded range actually panicked.
+                let _ = atoms.expand(&text);
+            }
+        }
+    }
+}

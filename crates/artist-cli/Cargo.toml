@@ -39,4 +39,5 @@ unicode-width = "0.2"
 url = "2"
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"

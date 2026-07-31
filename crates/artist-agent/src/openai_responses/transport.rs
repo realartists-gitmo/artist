@@ -1218,6 +1218,78 @@ mod transport_tests {
         );
     }
 
+    /// The pairing requirement stated over arbitrary item sequences: the
+    /// provider rejects the entire request if any call is unanswered, so this
+    /// has to hold for every history we can assemble, not just the cases
+    /// someone thought to enumerate.
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone)]
+        enum Item {
+            Call(u8),
+            Answer(u8),
+            Message,
+        }
+
+        fn item(kind: &Item) -> Value {
+            match kind {
+                Item::Call(id) => json!({
+                    "type": "function_call", "id": format!("fc{id}"),
+                    "call_id": format!("c{id}"), "name": "read", "arguments": "{}"
+                }),
+                Item::Answer(id) => json!({
+                    "type": "function_call_output",
+                    "call_id": format!("c{id}"), "output": "ok"
+                }),
+                Item::Message => json!({
+                    "type": "message", "role": "assistant", "content": []
+                }),
+            }
+        }
+
+        proptest! {
+            #[test]
+            fn every_call_is_answered_after_reconciling(
+                items in prop::collection::vec(
+                    prop_oneof![
+                        (0u8..4).prop_map(Item::Call),
+                        (0u8..4).prop_map(Item::Answer),
+                        Just(Item::Message),
+                    ],
+                    0..12,
+                )
+            ) {
+                let input: Vec<Value> = items.iter().map(item).collect();
+                let calls_in = input
+                    .iter()
+                    .filter(|entry| entry["type"] == "function_call")
+                    .count();
+
+                let merged = reconcile_inputs(input, &[], Vec::new(), &[]);
+
+                let answered: std::collections::HashSet<&str> = merged
+                    .iter()
+                    .filter(|entry| entry["type"] == "function_call_output")
+                    .filter_map(|entry| entry["call_id"].as_str())
+                    .collect();
+                let calls_out = merged
+                    .iter()
+                    .filter(|entry| entry["type"] == "function_call")
+                    .count();
+
+                prop_assert_eq!(calls_in, calls_out, "reconciling must not drop a call");
+                for entry in &merged {
+                    if entry["type"] == "function_call" {
+                        let call_id = entry["call_id"].as_str().unwrap();
+                        prop_assert!(answered.contains(call_id), "call {} left unanswered", call_id);
+                    }
+                }
+            }
+        }
+    }
+
     fn wrapper(call_id: &str) -> Value {
         json!({
             "type": "function_call",
