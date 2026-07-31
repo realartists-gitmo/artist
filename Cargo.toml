@@ -28,6 +28,18 @@ rustflags = ["-Z", "threads=0"]
 incremental = false
 split-debuginfo = "unpacked"
 
+# `cargo test --release` builds test targets with the bench profile and their
+# dependencies with release — so tests reuse the same dependency artifacts the
+# app build already produced instead of maintaining a parallel debug tree.
+#
+# Release defaults both of these to off. Keeping them on costs nothing at
+# runtime for a test binary and preserves what a debug test run would catch:
+# integer overflow panics instead of silently wrapping, and debug_assert! in
+# our own code and in rig.
+[profile.bench]
+debug-assertions = true
+overflow-checks = true
+
 [profile.profiler]
 inherits = "release"
 opt-level = 3

@@ -4,6 +4,11 @@ linker = "rust-lld.exe"
 [alias]
 # Fat-LTO + native-CPU optimized binary (see [profile.product] in Cargo.toml).
 product = "run --profile product --bin artist"
+# Tests share the release dependency tree rather than building a debug one.
+# Bare `cargo test` still produces target/debug — use these.
+t = "test --release"
+tw = "test --release --workspace"
+
 
 [env]
 # The product profile's fat-LTO bin compile can exceed zccache's default 180s
