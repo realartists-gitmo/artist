@@ -1476,11 +1476,12 @@ async fn handle_rewind(
             &forked.attachments,
             &artist_session::HistoryOptions::default(),
         )?;
-        if let Some(old) = active.replace(forked) {
-            old.close().await?;
-        }
+        let old = active.replace(forked);
         if let Some(active) = active.as_ref() {
             herdr.report_session(&active.session.id);
+        }
+        if let Some(old) = old {
+            old.close().await?;
         }
     } else {
         current.recorder.record(artist_session::HistoryRewind {
@@ -1561,9 +1562,13 @@ async fn handle_resume(
     if active.as_ref().map(|active| active.session.id.as_str()) == Some(id) {
         return Ok(vec![format!("Already on session {id}.")]);
     }
-    let (opened, events) = sessions
-        .open(id)
+    let target = sessions
+        .find(id)
         .with_context(|| format!("no such session: {id}"))?;
+    if target.project != std::fs::canonicalize(project)? {
+        anyhow::bail!("session {id} belongs to a different project");
+    }
+    let (opened, events) = sessions.open(id)?;
     rules_handle.restore_from_log(&events);
     *history = artist_session::build_history(
         &events,
@@ -1571,10 +1576,11 @@ async fn handle_resume(
         &artist_session::HistoryOptions::default(),
     )?;
     let label = opened.session.label.clone();
-    if let Some(old) = active.replace(opened) {
+    let old = active.replace(opened);
+    herdr.report_session(id);
+    if let Some(old) = old {
         old.close().await?;
     }
-    herdr.report_session(id);
     Ok(vec![format!(
         "Resumed session {id}{}.",
         label
