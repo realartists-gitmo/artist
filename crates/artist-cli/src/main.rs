@@ -295,6 +295,8 @@ async fn execute_prompt(
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
+    herdr.report_session(&active.session.id);
+    let turn_lifecycle = herdr.start_turn();
     compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
         .await?;
     let rules_engine = artist_rules::RulesEngine::discover(&project);
@@ -320,7 +322,7 @@ async fn execute_prompt(
         provider_context: active.provider_context.clone(),
         effective_context_window,
         fast_mode: false,
-        lifecycle: artist_agent::LifecycleEmitter::default(),
+        lifecycle: turn_lifecycle.emitter(),
         cancel: cancel.clone(),
     };
     extension_control.set_steering(Some(steering));
@@ -402,6 +404,10 @@ async fn execute_prompt(
         }
     };
     extension_control.set_steering(None);
+    turn_lifecycle.finish(matches!(
+        outcome.as_ref().ok(),
+        Some(artist_agent::RunOutcome::Cancelled)
+    ));
     extensions.update_context(|context| context.agent_state = serde_json::json!({"state":"idle"}));
     let _ = extensions.publish(artist_extensions::Event {
         kind: "state_transition".into(),
