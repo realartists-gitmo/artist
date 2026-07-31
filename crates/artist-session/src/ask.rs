@@ -89,6 +89,10 @@ impl Answer {
 #[derive(Clone, Default)]
 pub struct AskRegistry {
     pending: Arc<Mutex<HashMap<String, Waiting>>>,
+    /// Recording lives here rather than at each call site so that every future
+    /// poster — the planned `ask` tool, a canvas, anything else — is recorded
+    /// by construction instead of by remembering to.
+    recorder: Option<crate::Recorder>,
 }
 
 struct Waiting {
@@ -101,8 +105,22 @@ impl AskRegistry {
         Self::default()
     }
 
+    /// Record posts and answers into the session log, so a resumed or rewound
+    /// session can see what was asked and what the user chose.
+    pub fn with_recorder(recorder: crate::Recorder) -> Self {
+        Self {
+            pending: Arc::default(),
+            recorder: Some(recorder),
+        }
+    }
+
     /// Post a question and hand back the receiver its answer will arrive on.
     pub fn post(&self, question: Question) -> oneshot::Receiver<Answer> {
+        if let Some(recorder) = &self.recorder {
+            recorder.record(crate::AskPosted {
+                question: question.clone(),
+            });
+        }
         let (respond, receive) = oneshot::channel();
         self.pending
             .lock()
@@ -141,10 +159,23 @@ impl AskRegistry {
     /// Answer a question. Returns false if it was already answered or unknown —
     /// a second answer is a race between two surfaces, not an error.
     pub fn answer(&self, answer: Answer) -> bool {
+        self.answer_from(answer, "tui")
+    }
+
+    /// Answer, naming the surface the user answered on.
+    pub fn answer_from(&self, answer: Answer, surface: &str) -> bool {
         let mut pending = self.pending.lock().expect("ask registry poisoned");
         let Some(mut waiting) = pending.remove(&answer.question_id) else {
             return false;
         };
+        // Recorded before delivery: the answer is part of the conversation
+        // whether or not the asker is still listening for it.
+        if let Some(recorder) = &self.recorder {
+            recorder.record(crate::AskAnswered {
+                answer: answer.clone(),
+                surface: surface.to_owned(),
+            });
+        }
         match waiting.respond.take() {
             // A dropped receiver means the asker gave up (cancelled turn); the
             // question is still correctly retired.

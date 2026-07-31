@@ -14,6 +14,12 @@ pub(super) fn present(name: &str, raw_output: &str) -> PresentedOutput {
         "bash" => line_preview(bash_semantic(raw_output), 5),
         "edit" => edit_preview(raw_output),
         "find" | "grep" | "read" => line_preview(raw_output.to_owned(), 10),
+        // Observations are line-oriented deltas; 12 lines shows a typical one
+        // whole rather than cutting it mid-change.
+        "computer" => line_preview(raw_output.to_owned(), 12),
+        // Canvas output is a URL plus a diagnostics report; both are read
+        // line-by-line and a truncated error is worse than a long one.
+        "canvas" => bounded_line_preview(raw_output.to_owned(), 24),
         "skill" => bounded_line_preview(raw_output.to_owned(), 30),
         "write" => edit_preview(raw_output),
         "subagent" => PresentedOutput {

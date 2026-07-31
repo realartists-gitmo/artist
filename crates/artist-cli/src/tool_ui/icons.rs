@@ -15,6 +15,7 @@ pub fn icon_for<'a>(name: &str, custom_icons: &'a HashMap<String, String>) -> Op
 
 pub(crate) fn accent_color(icon: &str) -> Color {
     match icon {
+        "󰍹" => crate::theme::PASTEL_WHITE,
         "" | "" => crate::theme::PASTEL_MINT,
         "" | "" => crate::theme::PASTEL_BLUSH,
         "" | "" => crate::theme::PASTEL_YELLOW,
@@ -31,6 +32,8 @@ pub(crate) fn accent_color(icon: &str) -> Color {
 
 fn builtin_icon(name: &str) -> Option<&'static str> {
     match name {
+        "canvas" => Some("󰸳"),
+        "computer" => Some("󰍹"),
         "bash" => Some(""),
         "subagent" => Some(""),
         "edit" => Some(""),
@@ -68,6 +71,7 @@ mod tests {
             ("read", ""),
             ("skill", ""),
             ("write", ""),
+            ("computer", "󰍹"),
             ("unknown", FALLBACK),
         ] {
             let icon = icon_for(name, &custom).expect("all tools have an icon");
