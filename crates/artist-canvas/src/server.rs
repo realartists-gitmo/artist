@@ -270,6 +270,7 @@ impl Server {
                 let entries = Registry::discover(&project);
                 let mut changed: Vec<(String, Option<String>)> = paths
                     .iter()
+                    .filter(|path| !is_harness_written(path))
                     .filter_map(|path| {
                         let slug = slug_of(&base, path)?;
                         let entry = entries.get(&slug).map(|c| c.manifest.entry.clone());
@@ -311,6 +312,21 @@ fn collect_paths(event: Result<notify::Event, notify::Error>) -> Vec<PathBuf> {
         EventKind::Modify(_) => event.paths,
         EventKind::Access(_) | EventKind::Any | EventKind::Other => Vec::new(),
     }
+}
+
+/// Did the harness write this, rather than the model or the user?
+///
+/// Shared state is persisted on every write, so a click that calls
+/// `useCanvasState` lands a file change milliseconds later. Treating that as a
+/// source edit made the page reload itself on every interaction — the canvas
+/// tearing down and rebuilding in response to its own state, which showed as a
+/// flash on every tab switch.
+fn is_harness_written(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == crate::state::STATE_FILE || name.ends_with(".tmp")
+        })
 }
 
 /// The canvas-relative module path for a change, or `None` if it is not a
@@ -806,6 +822,22 @@ mod tests {
             Some(root.join("components/Chart.jsx"))
         );
         assert_eq!(resolve_within(root, "./main.jsx"), Some(root.join("main.jsx")));
+    }
+
+    /// A canvas writing its own shared state must not be mistaken for someone
+    /// editing the canvas. Reloading on it made every click that touched
+    /// `useCanvasState` rebuild the page.
+    #[test]
+    fn the_harness_writing_state_is_not_an_edit() {
+        let base = Path::new("/p/.artist/canvas/demo");
+        assert!(is_harness_written(&base.join("state.json")));
+        // The atomic write lands a temp file next to it first.
+        assert!(is_harness_written(&base.join("state.json.tmp")));
+
+        // What the model and the user write still counts.
+        assert!(!is_harness_written(&base.join("main.jsx")));
+        assert!(!is_harness_written(&base.join("canvas.toml")));
+        assert!(!is_harness_written(&base.join("data.json")));
     }
 
     /// Serving a module reads it, and a read is an access plus an atime bump.
