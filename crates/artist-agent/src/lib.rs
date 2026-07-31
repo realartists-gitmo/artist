@@ -724,10 +724,9 @@ where
             .map(|d| format!("<diagnostic>{}</diagnostic>", d))
             .collect::<String>();
         let system_prompt = format!(
-            "{}\n\n{}{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}",
+            "{}\n\n{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}",
             persona,
             prompt_diagnostics,
-            tool_prompt::render(&registered),
             resources.prompt_section(),
             profiles.catalog(),
             tools.project_root().display()

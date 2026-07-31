@@ -136,7 +136,7 @@ impl PortableTool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run a focused subagent. Set background=true to continue other work, then use status/read/wait/cancel with taskId. Set fork=true to include the main chat context."
+        "Run a focused subagent for work that benefits from a separate agent. Set background=true to continue other work, then use status/read/wait/cancel with taskId. Set fork=true to include the main chat context. Collect or cancel every background subagent before you finish."
             .into()
     }
     fn parameters(&self) -> Value {
@@ -470,13 +470,11 @@ impl Delegate {
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
             tools
         };
-        let prompt_tools = registered_tools();
         let (base, _) = crate::prompt_config::base_prompt();
         let policy = format!(
-            "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}{}\nCurrent working directory: {}",
+            "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}",
             role.name,
             role.instructions,
-            crate::tool_prompt::render(&prompt_tools),
             self.resources.prompt_section(),
             self.tools.project_root().display()
         );

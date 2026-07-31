@@ -24,7 +24,7 @@ impl PortableTool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace lines in a project-relative or absolute file using ANCHORs from the latest read."
+        "Atomically replace lines in a project-relative or absolute file using ANCHORs from the latest read. Never use line numbers as anchors. If an anchor is stale or unknown, read the file again before retrying."
             .into()
     }
     fn parameters(&self) -> Value {

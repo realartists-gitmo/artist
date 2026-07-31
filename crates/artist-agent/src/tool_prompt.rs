@@ -1,7 +1,13 @@
-//! System-prompt projection of the exact tools registered for a run.
+//! Erasure and filtering for the tools registered on a run.
+//!
+//! Tool definitions reach the model through the API's `tools` field, not the
+//! system prompt: that is the provider-native channel, it is the single source
+//! of truth for name, description, and schema, and it works identically for
+//! built-in, MCP, and extension tools. Per-tool usage guidance therefore lives
+//! in each tool's own `description`.
 
 use rig_core::tool::{IntoToolOutput, PortableDynamicTool, PortableTool};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 /// Erase a typed portable tool into Rig's runtime-authored portable contract.
 pub(crate) fn dynamic<T>(tool: T) -> PortableDynamicTool
@@ -29,62 +35,6 @@ pub(crate) fn retain_enabled(tools: &mut Vec<PortableDynamicTool>, disabled: &[S
     tools.retain(|tool| !disabled.iter().any(|name| name == tool.name()));
 }
 
-pub(crate) fn render(tools: &[PortableDynamicTool]) -> String {
-    if tools.is_empty() {
-        return "No tools are available for this run.".to_owned();
-    }
-    let mut output = String::from("Available tools:\n");
-    let mut names = HashSet::new();
-    for tool in tools {
-        let definition = tool.definition();
-        names.insert(definition.name.clone());
-        output.push_str(&format!(
-            "- `{}`: {}\n",
-            definition.name,
-            one_line(&definition.description)
-        ));
-    }
-    let mut guidance = Vec::new();
-    if names.contains("find") {
-        guidance.push("Use `find` for project file/path discovery, listings, and glob filtering.");
-    }
-    if names.contains("grep") {
-        guidance.push("Use `grep` for project content searches.");
-    }
-    if names.contains("read") {
-        guidance.push("Use `read` to inspect files before making targeted edits.");
-    }
-    if names.contains("edit") {
-        guidance.push("Use `edit` with mnemonic anchors from the latest `read`; never use line numbers. Re-read after stale or unknown anchors.");
-    }
-    if names.contains("write") {
-        guidance.push("Use `write` only for new files or intentional complete-file replacement.");
-    }
-    if names.contains("bash") {
-        guidance.push("Use `bash` for tests, builds, diagnostics, package commands, and persistent development servers.");
-        if names.contains("find") || names.contains("grep") || names.contains("read") {
-            guidance.push("Prefer the available `find`, `grep`, and `read` tools over equivalent shell discovery or content-search commands.");
-        }
-        guidance.push("For independent long-running commands, use background mode, continue useful work, then read or stop the session without polling repeatedly.");
-    }
-    if names.contains("subagent") {
-        guidance.push("Use `subagent` for focused work that benefits from a separate agent. Collect or cancel every background subagent before finishing.");
-    }
-    if !guidance.is_empty() {
-        output.push_str("\nTool-specific guidelines:\n");
-        for line in guidance {
-            output.push_str("- ");
-            output.push_str(line);
-            output.push('\n');
-        }
-    }
-    output.trim_end().to_owned()
-}
-
-fn one_line(description: &str) -> String {
-    description.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,10 +59,10 @@ mod tests {
         }
     }
     #[test]
-    fn renders_and_filters() {
-        let mut tools = vec![dynamic(Stub("Inspect\nfiles"))];
-        assert!(render(&tools).contains("- `read`: Inspect files"));
+    fn disabled_tools_are_dropped() {
+        let mut tools = vec![dynamic(Stub("Inspect files"))];
+        assert_eq!(tools.len(), 1);
         retain_enabled(&mut tools, &["read".into()]);
-        assert_eq!(render(&tools), "No tools are available for this run.");
+        assert!(tools.is_empty());
     }
 }

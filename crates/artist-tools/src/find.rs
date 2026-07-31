@@ -21,7 +21,7 @@ impl PortableTool for FindTool {
     type Args = FindArgs;
     type Output = String;
     fn description(&self) -> String {
-        "FFF-backed ranked fuzzy file and path discovery. Paths may be project-relative or absolute."
+        "FFF-backed ranked fuzzy file and path discovery, directory listings, and glob filtering. Paths may be project-relative or absolute."
             .into()
     }
     fn parameters(&self) -> Value {

@@ -171,7 +171,7 @@ impl PortableTool for BashTool {
     type Args = BashArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Run tests, builds, diagnostics, package commands, or persistent terminal sessions. Commands default to the project root; cwd may be project-relative or absolute. Use the dedicated find, grep, and read tools instead of shell file discovery or content-search commands."
+        "Run tests, builds, diagnostics, package commands, or persistent terminal sessions. Commands default to the project root; cwd may be project-relative or absolute. Use the dedicated find, grep, and read tools instead of shell file discovery or content-search commands. For an independent long-running command, start it in background mode, continue useful work, then read or stop the session rather than polling it repeatedly."
             .into()
     }
     fn parameters(&self) -> Value {
