@@ -27,3 +27,111 @@ fn trusted_image_path_becomes_an_atomic_attachment() {
     assert!(atoms.remove_for_delete(&mut text, &mut cursor));
     assert!(text.is_empty());
 }
+
+/// Every atom range must stay inside the text it indexes. A stale range is
+/// handed straight back by `insertion_point`, which the caller uses as a byte
+/// cursor — so the failure surfaces far away, as an out-of-bounds slice while
+/// wrapping the input for display.
+fn assert_ranges_within(atoms: &InputAtoms, text: &str) {
+    for atom in &atoms.0 {
+        assert!(
+            atom.range.end <= text.len(),
+            "atom {:?} escapes text of length {}",
+            atom.range,
+            text.len()
+        );
+        assert!(text.is_char_boundary(atom.range.start));
+        assert!(text.is_char_boundary(atom.range.end));
+    }
+    assert!(atoms.insertion_point(text.len()) <= text.len());
+}
+
+fn with_paste(prefix: &str, suffix: &str) -> (InputAtoms, String, usize) {
+    let mut atoms = InputAtoms::default();
+    let mut text = prefix.to_owned();
+    let mut cursor = text.len();
+    atoms.insert_paste(&mut text, &mut cursor, "hello\nworld");
+    text.push_str(suffix);
+    (atoms, text, cursor)
+}
+
+/// The crash: replacing a span that overlaps an atom left the atom's range
+/// pointing past the shortened string.
+#[test]
+fn a_replacement_spanning_an_atom_drops_it_and_leaves_ranges_valid() {
+    let (mut atoms, mut text, _) = with_paste("say ", " now");
+    let range = 2..text.len() - 1;
+
+    text.replace_range(range.clone(), "x");
+    atoms.remove_text(range.start, range.end);
+    atoms.insert_text(range.start, 1);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, text, "no atom survives the cut");
+}
+
+#[test]
+fn a_removal_after_an_atom_leaves_it_anchored() {
+    let (mut atoms, mut text, _) = with_paste("say ", " now");
+    let start = text.len() - 2;
+    let end = text.len();
+    text.replace_range(start..end, "");
+    atoms.remove_text(start, end);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, "say hello\nworld n");
+}
+
+#[test]
+fn a_removal_before_an_atom_shifts_it() {
+    let (mut atoms, mut text, _) = with_paste("say ", "");
+    text.replace_range(0..2, "");
+    atoms.remove_text(0, 2);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, "y hello\nworld");
+}
+
+#[test]
+fn a_removal_strictly_inside_an_atom_drops_it() {
+    let (mut atoms, mut text, _) = with_paste("say ", "");
+    text.replace_range(6..9, "");
+    atoms.remove_text(6, 9);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, text);
+}
+
+#[test]
+fn an_insertion_inside_an_atom_drops_it() {
+    let (mut atoms, mut text, _) = with_paste("say ", "");
+    text.insert_str(6, "zz");
+    atoms.insert_text(6, 2);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, text);
+}
+
+#[test]
+fn empty_edits_leave_every_atom_intact() {
+    let (mut atoms, text, _) = with_paste("say ", "");
+    atoms.remove_text(6, 6);
+    atoms.insert_text(6, 0);
+
+    assert_ranges_within(&atoms, &text);
+    assert_eq!(atoms.expand(&text).text, "say hello\nworld");
+}
+
+/// Multi-byte content is where this first surfaced: the stale range overshot
+/// by exactly the width of the characters that had been removed.
+#[test]
+fn multibyte_text_around_an_atom_stays_anchored() {
+    let (mut atoms, mut text, _) = with_paste("⠀⠀", "⠀⠀");
+    let start = text.len() - 6;
+    let end = text.len();
+    text.replace_range(start..end, "");
+    atoms.remove_text(start, end);
+
+    assert_ranges_within(&atoms, &text);
+    assert!(atoms.expand(&text).text.starts_with("⠀⠀hello\nworld"));
+}

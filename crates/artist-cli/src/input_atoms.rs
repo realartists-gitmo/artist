@@ -26,13 +26,26 @@ impl InputAtoms {
             .map_or(at, |atom| atom.range.end)
     }
 
+    /// Re-anchor atoms across an insertion of `bytes` at `at`.
+    ///
+    /// Total: every atom is either shifted, left alone, or dropped, so callers
+    /// carry no precondition about where they edit. An insertion landing
+    /// strictly inside an atom splits its display text, and a split atom can no
+    /// longer stand for the value it replaced, so it stops being an atom and
+    /// the remaining characters become ordinary text.
     pub fn insert_text(&mut self, at: usize, bytes: usize) {
-        for atom in &mut self.0 {
+        if bytes == 0 {
+            return;
+        }
+        self.0.retain_mut(|atom| {
             if atom.range.start >= at {
                 atom.range.start += bytes;
                 atom.range.end += bytes;
+                true
+            } else {
+                at >= atom.range.end
             }
-        }
+        });
     }
 
     pub fn insert_paste(&mut self, text: &mut String, cursor: &mut usize, value: &str) {
@@ -87,14 +100,26 @@ impl InputAtoms {
         self.0.sort_by_key(|atom| atom.range.start);
     }
 
+    /// Re-anchor atoms across a removal of `start..end`.
+    ///
+    /// Total, for the same reason as [`Self::insert_text`]: an atom the removal
+    /// cut into is dropped rather than left pointing at text that has moved or
+    /// gone. Leaving it would strand a range past the end of the string, which
+    /// [`Self::insertion_point`] would then hand back as a cursor.
     pub fn remove_text(&mut self, start: usize, end: usize) {
         let removed = end.saturating_sub(start);
-        for atom in &mut self.0 {
+        if removed == 0 {
+            return;
+        }
+        self.0.retain_mut(|atom| {
             if atom.range.start >= end {
                 atom.range.start -= removed;
                 atom.range.end -= removed;
+                true
+            } else {
+                atom.range.end <= start
             }
-        }
+        });
     }
 
     pub fn remove_for_backspace(&mut self, text: &mut String, cursor: &mut usize) -> bool {

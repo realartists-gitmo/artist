@@ -33,3 +33,6 @@ Later, a Codex-app-like desktop app developed in native-Rust via **GPUI** will b
 
 ## Contributing
 Bug fix PRs are welcome. For new features, create an issue discussion first.
+
+### Tool schema guidance
+Tool argument instructions belong in the JSON Schema property where the argument is used. Add `description` to individual properties (including nested object and array-item properties) for argument-specific constraints, examples, and formatting rules. Keep the top-level tool description focused on the operation and its broad lifecycle; do not duplicate property-level guidance there unless provider compatibility requires it.
