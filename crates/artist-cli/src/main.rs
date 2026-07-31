@@ -24,6 +24,7 @@ mod startup_splash;
 mod status_bar;
 mod store;
 mod subagent_ui;
+mod termination;
 mod test_provider;
 mod text_wrap;
 mod theme;
@@ -46,7 +47,10 @@ use store::{ProviderStore, config_path};
 #[tokio::main]
 async fn main() {
     let herdr_runtime = herdr::Runtime::detect();
-    let result = run(herdr_runtime.lifecycle()).await;
+    let result = tokio::select! {
+        result = run(herdr_runtime.lifecycle()) => result,
+        _ = termination::requested() => Err(anyhow::anyhow!("interrupted")),
+    };
     herdr_runtime.shutdown().await;
     if let Err(error) = result {
         eprintln!("Error: {error:#}");
