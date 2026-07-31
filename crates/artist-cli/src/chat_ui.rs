@@ -2167,6 +2167,9 @@ async fn submit(
                     artist_agent::PromptEvent::TextDelta(delta) => {
                         phase = "responding";
                         if !reasoning.is_empty() {
+                            if transcript_gap {
+                                insert_blank(terminal)?;
+                            }
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                             transcript_gap = false;
@@ -2199,6 +2202,9 @@ async fn submit(
                             response_since_tool = false;
                         }
                         if !reasoning.is_empty() {
+                            if transcript_gap {
+                                insert_blank(terminal)?;
+                            }
                             insert_reasoning(terminal, &reasoning)?;
                             reasoning.clear();
                             transcript_gap = false;
@@ -2372,6 +2378,9 @@ async fn submit(
         delivered_steering.push(message.content);
     }
     if !reasoning.is_empty() {
+        if transcript_gap {
+            insert_blank(terminal)?;
+        }
         insert_reasoning(terminal, &reasoning)?;
     }
     if !visible.is_empty() {
