@@ -43,6 +43,15 @@ impl ConversationReplay {
                                         .take(TOOL_PREVIEW_CAP)
                                         .collect(),
                                 ),
+                                // A result that is only an image still gets a
+                                // line on resume, so the transcript shows what
+                                // the model actually saw rather than a blank.
+                                ToolResultContent::Image(image) => Some(
+                                    crate::convert::image_marker(image)
+                                        .chars()
+                                        .take(TOOL_PREVIEW_CAP)
+                                        .collect(),
+                                ),
                                 _ => None,
                             })
                             .unwrap_or_default();

@@ -46,6 +46,55 @@ pub(crate) fn projected_context_tokens(
         .saturating_add((image_count as u64).saturating_mul(1_200))
 }
 
+/// Replace stale computer observations with stubs before a turn.
+///
+/// Runs *before* the compaction threshold check, so the reclaimed context
+/// counts toward it — decaying a few screenshots often avoids a compaction
+/// outright, which is much cheaper than summarizing.
+///
+/// **Skipped when the provider sidecar is authoritative.** On ChatGPT and
+/// OpenAI Responses, remote compaction resets Rig memory to empty and the
+/// canonical history lives provider-side; rewriting a local copy the provider is
+/// about to supersede changes nothing the model sees and saves no tokens.
+pub(crate) async fn decay(
+    active: &ActiveSession,
+    provider: &SavedProvider,
+    settings: crate::settings::ComputerConfig,
+) -> Result<Option<Vec<Message>>> {
+    if !settings.enabled || settings.keep_recent_observations == 0 {
+        return Ok(None);
+    }
+    if supports_remote_compaction(provider) {
+        return Ok(None);
+    }
+
+    active.recorder.flush().await;
+    let mut history = active
+        .memory
+        .load(&active.session.id)
+        .await
+        .context("load history for observation decay")?;
+
+    let policy = artist_session::decay::DecayPolicy {
+        keep_recent: settings.keep_recent_observations,
+        ..artist_session::decay::DecayPolicy::default()
+    };
+    let Some(outcome) = artist_session::decay::decay_observations(&mut history, &policy) else {
+        return Ok(None);
+    };
+
+    active
+        .memory
+        .revise(history.clone())
+        .await
+        .context("record decayed history")?;
+    active.recorder.record(artist_session::ComputerElided {
+        count: outcome.elided,
+        bytes_saved: outcome.bytes_saved,
+    });
+    Ok(Some(history))
+}
+
 /// Generate and atomically append a compaction checkpoint plus its reset
 /// snapshot. Until summary generation succeeds, the active memory is untouched.
 pub(crate) async fn compact(

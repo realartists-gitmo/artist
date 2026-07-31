@@ -1,0 +1,70 @@
+[package]
+name = "artist-memory"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Grammars are compiled C. Each costs roughly 0.5-5 MB of incompressible
+# binary, so the default set is the languages this project actually works in;
+# anything without a grammar falls back to heuristic chunking rather than
+# becoming unindexable.
+default = ["lang-rust", "lang-markdown"]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-markdown = ["dep:tree-sitter-md"]
+lang-python = ["dep:tree-sitter-python"]
+lang-go = ["dep:tree-sitter-go"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+
+[dependencies]
+artist-logic = { path = "../artist-logic" }
+num-bigint = "0.4"
+anyhow = "1"
+artist-session = { path = "../artist-session" }
+dirs = "6"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "time", "fs", "macros"] }
+
+# Storage. Pinned exactly: the crate makes no storage-format stability promise
+# and the RocksDB backend asserts storage_version == 3 at open, panicking on a
+# mismatch. `default-features = false` drops the `requests`/minreq feature,
+# which only powers URL fetching in CsvReader/JsonReader and is unused here.
+#
+# NOTE: mnestic-rocks 0.1.10 vendors a RocksDB whose headers omit
+# `#include <cstdint>`, so GCC 13+ needs CXXFLAGS="-include cstdint" to build.
+# Do not also set CFLAGS -- that breaks zstd-sys, which is C.
+#
+# `graph-algo` is deliberately absent: it gates the graph algorithms and
+# `BudgetedTraversal`, none of which are used, and pulls in `graph` + `rayon`
+# for the privilege. The fused-retrieval rules we actually rely on —
+# `ReciprocalRankFusion` and `MaximalMarginalRelevance` — are registered
+# unconditionally, so they work in this minimal build.
+mnestic = { version = "=0.13.1", default-features = false, features = [
+    "storage-rocksdb",
+] }
+
+# Embeddings: pure-Rust ONNX runtime and tokenizer. rten-text covers WordPiece
+# + BertNormalizer, which lets us avoid the HuggingFace `tokenizers` crate
+# whose defaults pull in onig (C) and esaxx-rs (C++).
+rten = "0.24"
+rten-tensor = "0.24"
+rten-text = "0.24"
+
+# Chunking.
+text-splitter = { version = "0.32", features = ["code"] }
+tree-sitter = "0.26"
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-md = { version = "0.5", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

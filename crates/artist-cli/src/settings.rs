@@ -34,8 +34,149 @@ pub struct Settings {
     pub reasoning_effort: Option<String>,
     #[serde(default, skip_serializing_if = "CompactionSettings::is_empty")]
     pub compaction: CompactionSettings,
+    #[serde(default, skip_serializing_if = "MemorySettings::is_empty")]
+    pub memory: MemorySettings,
+    #[serde(default, skip_serializing_if = "ComputerSettings::is_empty")]
+    pub computer: ComputerSettings,
     #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
+}
+
+/// Optional per-layer computer-use values.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// How many observations stay materialized in model context before older
+    /// ones decay to a stub. `0` disables decay entirely.
+    #[serde(
+        default,
+        alias = "keepRecentObservations",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_recent_observations: Option<usize>,
+    /// Which `Stage` backend to use. Absent means "pick the best available".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    /// The isolated display's size, as `WIDTHxHEIGHT`.
+    ///
+    /// Worth configuring: viewport size changes what an application shows, so a
+    /// responsive page lays out differently and a list renders a different
+    /// number of rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
+}
+
+impl ComputerSettings {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.keep_recent_observations.is_none()
+            && self.stage.is_none()
+            && self.screen.is_none()
+    }
+}
+
+/// Resolved computer-use policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputerConfig {
+    pub enabled: bool,
+    pub keep_recent_observations: usize,
+    pub stage: Option<String>,
+    /// Virtual screen size for the isolated display.
+    pub screen: (i32, i32),
+}
+
+impl Default for ComputerConfig {
+    fn default() -> Self {
+        Self {
+            // On by default: unlike memory, the subsystem needs no model and no
+            // download, and a stage that cannot start reports that plainly
+            // rather than the tool silently not existing.
+            enabled: true,
+            keep_recent_observations: 3,
+            stage: None,
+            screen: (1920, 1080),
+        }
+    }
+}
+
+/// Parse a `WIDTHxHEIGHT` screen setting.
+///
+/// A malformed value falls back to the default rather than failing the whole
+/// settings load: a typo in an optional display size should not stop the agent
+/// from starting.
+fn parse_screen(value: &str) -> Option<(i32, i32)> {
+    let (width, height) = value.trim().split_once(['x', 'X'])?;
+    Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
+/// Optional per-layer memory values.
+///
+/// Behaviour only — the embedding model runs locally, so there is no credential
+/// here and nothing that belongs in `providers.toml`.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Directory holding `model.onnx` and `tokenizer.json`. Relative paths
+    /// resolve against the config root.
+    #[serde(default, alias = "modelDir", skip_serializing_if = "Option::is_none")]
+    pub model_dir: Option<String>,
+    /// Embedding width. Must match the model; changing it forces a rebuild.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dim: Option<usize>,
+    /// Facts returned per recall.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall_limit: Option<usize>,
+    /// Whether the automatic write triggers may store facts. With this off the
+    /// `memory` tool still works, so the model can record deliberately while
+    /// nothing is captured behind your back.
+    #[serde(default, alias = "autoWrite", skip_serializing_if = "Option::is_none")]
+    pub auto_write: Option<bool>,
+    /// Whether to maintain the embedded code index. Separable from facts
+    /// because a full index costs close to two hours on a large repository.
+    #[serde(default, alias = "indexCode", skip_serializing_if = "Option::is_none")]
+    pub index_code: Option<bool>,
+}
+
+impl MemorySettings {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.model_dir.is_none()
+            && self.dim.is_none()
+            && self.recall_limit.is_none()
+            && self.auto_write.is_none()
+            && self.index_code.is_none()
+    }
+}
+
+/// Resolved memory policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryConfig {
+    pub enabled: bool,
+    pub model_dir: Option<String>,
+    pub dim: usize,
+    pub recall_limit: usize,
+    pub auto_write: bool,
+    pub index_code: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            // Off until a model is present: the subsystem needs a local
+            // embedding model, and silently degrading to lexical-only recall
+            // would look like memory simply not working.
+            enabled: false,
+            model_dir: None,
+            dim: 768,
+            recall_limit: 8,
+            auto_write: true,
+            index_code: false,
+        }
+    }
 }
 
 /// Optional per-layer compaction values. The effective defaults match Pi.
@@ -127,6 +268,8 @@ pub struct EffectiveSettings {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub compaction: CompactionConfig,
+    pub memory: MemoryConfig,
+    pub computer: ComputerConfig,
     /// The full set of tool names the agent may not use — the union of the
     /// global `disabled_tools` and every layer's `permissions.deny`.
     pub denied_tools: Vec<String>,
@@ -170,6 +313,64 @@ impl EffectiveSettings {
                 .or(global.compaction.keep_recent_tokens)
                 .unwrap_or(defaults.keep_recent_tokens),
         };
+        let memory_defaults = MemoryConfig::default();
+        let memory = MemoryConfig {
+            enabled: project
+                .memory
+                .enabled
+                .or(global.memory.enabled)
+                .unwrap_or(memory_defaults.enabled),
+            model_dir: project
+                .memory
+                .model_dir
+                .clone()
+                .or_else(|| global.memory.model_dir.clone()),
+            dim: project
+                .memory
+                .dim
+                .or(global.memory.dim)
+                .unwrap_or(memory_defaults.dim),
+            recall_limit: project
+                .memory
+                .recall_limit
+                .or(global.memory.recall_limit)
+                .unwrap_or(memory_defaults.recall_limit),
+            auto_write: project
+                .memory
+                .auto_write
+                .or(global.memory.auto_write)
+                .unwrap_or(memory_defaults.auto_write),
+            index_code: project
+                .memory
+                .index_code
+                .or(global.memory.index_code)
+                .unwrap_or(memory_defaults.index_code),
+        };
+        let computer_defaults = ComputerConfig::default();
+        let computer = ComputerConfig {
+            enabled: project
+                .computer
+                .enabled
+                .or(global.computer.enabled)
+                .unwrap_or(computer_defaults.enabled),
+            keep_recent_observations: project
+                .computer
+                .keep_recent_observations
+                .or(global.computer.keep_recent_observations)
+                .unwrap_or(computer_defaults.keep_recent_observations),
+            stage: project
+                .computer
+                .stage
+                .clone()
+                .or_else(|| global.computer.stage.clone()),
+            screen: project
+                .computer
+                .screen
+                .as_deref()
+                .or(global.computer.screen.as_deref())
+                .and_then(parse_screen)
+                .unwrap_or(computer_defaults.screen),
+        };
         let mut denied_tools = Vec::new();
         for name in base_denied
             .iter()
@@ -184,6 +385,8 @@ impl EffectiveSettings {
             model,
             reasoning_effort,
             compaction,
+            memory,
+            computer,
             denied_tools,
         }
     }
@@ -379,5 +582,51 @@ mod tests {
         let project = from_str("model = \"m\"\n");
         let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
         assert!(effective.denied_tools.iter().any(|t| t == "write"));
+    }
+
+    #[test]
+    fn computer_settings_layer_project_over_global() {
+        let global = from_str("[computer]\nkeep_recent_observations = 5\nstage = \"wayland\"\n");
+        let project = from_str("[computer]\nkeep_recent_observations = 1\n");
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+
+        assert_eq!(effective.computer.keep_recent_observations, 1);
+        // An absent project value defers to the lower layer rather than resetting.
+        assert_eq!(effective.computer.stage.as_deref(), Some("wayland"));
+        assert!(effective.computer.enabled);
+    }
+
+    #[test]
+    fn a_screen_size_parses_and_a_typo_falls_back() {
+        let global = from_str("[computer]\nscreen = \"1280x800\"\n");
+        let effective = EffectiveSettings::resolve(
+            &global,
+            &Settings::default(),
+            &Overrides::default(),
+            &[],
+        );
+        assert_eq!(effective.computer.screen, (1280, 800));
+
+        // A typo in an optional display size must not stop the agent starting.
+        let broken = from_str("[computer]\nscreen = \"enormous\"\n");
+        let effective = EffectiveSettings::resolve(
+            &broken,
+            &Settings::default(),
+            &Overrides::default(),
+            &[],
+        );
+        assert_eq!(effective.computer.screen, (1920, 1080));
+    }
+
+    #[test]
+    fn computer_defaults_apply_when_unset() {
+        let effective = EffectiveSettings::resolve(
+            &Settings::default(),
+            &Settings::default(),
+            &Overrides::default(),
+            &[],
+        );
+        assert_eq!(effective.computer, ComputerConfig::default());
+        assert_eq!(effective.computer.keep_recent_observations, 3);
     }
 }

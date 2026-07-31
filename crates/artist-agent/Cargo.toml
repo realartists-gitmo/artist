@@ -8,15 +8,19 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
+artist-memory = { path = "../artist-memory" }
 artist-rules = { path = "../artist-rules" }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
+artist-canvas = { path = "../artist-canvas" }
+artist-computer = { path = "../artist-computer" }
 artist-extensions = { path = "../artist-extensions" }
 base64 = "0.23"
 dashmap = "6"
 dirs = "6"
 futures = "0.3"
 globset = "0.4"
+regex = "1"
 llm-provider = { path = "../llm-provider" }
 rig-core = "0.41.0"
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }

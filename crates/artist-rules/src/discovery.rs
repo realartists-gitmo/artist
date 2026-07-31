@@ -31,11 +31,47 @@ yourself. Handle the error, propagate it, or explain in a comment why \
 ignoring it is genuinely correct here.",
 );
 
+/// The guardrail on irreversible GUI actions.
+///
+/// This is the reason the `computer` tool requires a `label` on every anchor
+/// reference. The matcher regexes the streamed tool-argument text, and an
+/// argument of `{"click":{"anchor":"kv7"}}` says nothing about what `kv7` is —
+/// so without the model's own echo of the element's name there would be
+/// nothing here to match on, and no way to catch a destructive click before it
+/// happens.
+///
+/// `per-turn`, not `once`: a once-per-session guardrail protects the cheap
+/// first mistake and is dormant for the expensive later one.
+///
+/// The patterns anchor on the verb rather than requiring a closed quote,
+/// because `on_tool_call_delta` matches mid-JSON and may only have seen
+/// `"label":"Delete acc` when it fires.
+const COMPUTER_DESTRUCTIVE_ACTIONS: (&str, &str) = (
+    r#"name: computer-destructive-actions
+description: Confirm with the user before an irreversible action in a GUI
+targets: [tool-args]
+patterns:
+  - '"label"\s*:\s*"[^"]{0,60}?(?i)\b(delete|remove|discard|erase|send|pay|purchase|buy|confirm|transfer|deactivate|deregister|unsubscribe|publish|revoke|reset|format|wipe|overwrite)\b'
+  - '"key"\s*:\s*"(?i)(ctrl\+|shift\+)*delete"'
+tools: [computer]
+fire: per-turn"#,
+    "That step looks irreversible. Confirm with the user before doing anything \
+that deletes, sends, pays, publishes, or otherwise cannot be undone — describe \
+exactly what you are about to do and wait for an answer.\n\n\
+Note that this aborted the whole program before any step ran, so anything \
+earlier in it still needs doing. Re-issue the safe steps, then put the \
+irreversible step in its own single-step call once the user has agreed.",
+);
+
 pub fn builtin_rules() -> Vec<DeclarativeRule> {
-    let (yaml, body) = NO_SWALLOWED_ERRORS;
-    let mut rule = parse_parts(yaml, body, None).expect("builtin rule parses");
-    rule.id = crate::types::RuleId(format!("builtin:{}", rule.id.0));
-    vec![rule]
+    [NO_SWALLOWED_ERRORS, COMPUTER_DESTRUCTIVE_ACTIONS]
+        .into_iter()
+        .map(|(yaml, body)| {
+            let mut rule = parse_parts(yaml, body, None).expect("builtin rule parses");
+            rule.id = crate::types::RuleId(format!("builtin:{}", rule.id.0));
+            rule
+        })
+        .collect()
 }
 
 /// The rule directories consulted for a project, in precedence order
@@ -285,13 +321,51 @@ pub fn fingerprint(roots: &[PathBuf]) -> u64 {
 mod tests {
     use super::*;
 
+    fn builtin(name: &str) -> DeclarativeRule {
+        builtin_rules()
+            .into_iter()
+            .find(|rule| rule.id.0 == format!("builtin:{name}"))
+            .unwrap_or_else(|| panic!("no builtin named {name}"))
+    }
+
     #[test]
-    fn builtin_parses_and_is_enabled() {
+    fn every_builtin_parses_and_ships_enabled() {
         let rules = builtin_rules();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].id.0, "builtin:no-swallowed-errors");
-        assert!(rules[0].enabled);
-        assert_eq!(rules[0].tools, vec!["write", "edit"]);
+        assert!(!rules.is_empty());
+        for rule in &rules {
+            assert!(rule.id.0.starts_with("builtin:"), "{}", rule.id.0);
+            assert!(rule.enabled, "{} must ship enabled", rule.id.0);
+            assert!(!rule.reminder.is_empty(), "{} needs a reminder", rule.id.0);
+        }
+    }
+
+    #[test]
+    fn the_swallowed_errors_builtin_targets_the_file_tools() {
+        let rule = builtin("no-swallowed-errors");
+        assert_eq!(rule.tools, vec!["write", "edit"]);
+    }
+
+    #[test]
+    fn the_destructive_action_builtin_matches_a_label_not_an_anchor() {
+        let rule = builtin("computer-destructive-actions");
+        assert_eq!(rule.tools, vec!["computer"]);
+        // Per-turn, not once: the guardrail must still be armed for the second
+        // irreversible action of a session, which is usually the costly one.
+        assert_eq!(rule.fire, crate::types::FirePolicy::PerTurn);
+
+        let set = crate::matcher::RuleSet::compile(vec![rule]);
+        let matches = |text: &str| {
+            !set.scan_all(crate::types::MatchTarget::ToolArgs, text, Some("computer"))
+                .is_empty()
+        };
+
+        assert!(matches(r#"{"click":{"anchor":"kv7","label":"Delete account"}}"#));
+        assert!(matches(r#"{"click":{"anchor":"kv7","label":"Send message"}}"#));
+        // Mid-stream, before the closing quote has arrived.
+        assert!(matches(r#"{"click":{"anchor":"kv7","label":"Delete acc"#));
+        // The anchor alone carries no meaning and must not fire anything.
+        assert!(!matches(r#"{"click":{"anchor":"kv7"}}"#));
+        assert!(!matches(r#"{"click":{"anchor":"kv7","label":"Compose"}}"#));
     }
 
     #[test]
@@ -306,8 +380,19 @@ mod tests {
         .unwrap();
         let mut diagnostics = Vec::new();
         let rules = discover_roots(&[root], &mut diagnostics);
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].reminder, "mine");
+        let shadowed = rules
+            .iter()
+            .find(|rule| rule.id.0.ends_with("no-swallowed-errors"))
+            .expect("the shadowing rule survives");
+        assert_eq!(shadowed.reminder, "mine");
+        assert_eq!(
+            rules
+                .iter()
+                .filter(|rule| rule.id.0.ends_with("no-swallowed-errors"))
+                .count(),
+            1,
+            "the builtin must be replaced, not duplicated"
+        );
         assert_eq!(diagnostics.len(), 1);
     }
 

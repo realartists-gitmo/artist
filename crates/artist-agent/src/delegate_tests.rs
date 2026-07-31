@@ -61,7 +61,11 @@ fn nested_prompt_event_preserves_child_identity_and_full_tool_result() {
             content: "complete tool output".into(),
             outcome: Some(ToolOutcomeRecord::Success),
             duration_ms: Some(42),
-            images: 2,
+            images: vec![crate::ToolImage {
+                attachment: "ab12cd".into(),
+                media_type: Some("png".into()),
+                bytes: 1024,
+            }],
         }),
     };
 
@@ -74,7 +78,8 @@ fn nested_prompt_event_preserves_child_identity_and_full_tool_result() {
     assert_eq!(value["event"]["content"], "complete tool output");
     assert_eq!(value["event"]["outcome"]["status"], "success");
     assert_eq!(value["event"]["duration_ms"], 42);
-    assert_eq!(value["event"]["images"], 2);
+    assert_eq!(value["event"]["images"][0]["attachment"], "ab12cd");
+    assert_eq!(value["event"]["images"][0]["bytes"], 1024);
 }
 
 #[tokio::test]

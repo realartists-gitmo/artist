@@ -72,7 +72,11 @@ impl AgentHook for CaptureHook {
             .remove(event.internal_call_id)
             .map(|start| start.elapsed().as_millis() as u64)
             .unwrap_or(0);
-        let result = event.presentation.as_text().unwrap_or_default();
+        // `render()`, not `as_text()`: the latter is `None` for any multi-block
+        // output, which would record an empty message for every failure of a
+        // multimodal tool.
+        let result = event.presentation.render();
+        let result = result.as_str();
         let raw = event.raw_result;
         let record = if raw.is_success() {
             ToolOutcomeRecord::Success

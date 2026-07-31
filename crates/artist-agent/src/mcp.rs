@@ -342,7 +342,6 @@ impl McpProxyTool {
             Box::pin(async move {
                 tool.call_inner(args)
                     .await
-                    .map(rig_core::tool::ToolOutput::text)
                     .map_err(|error| {
                         rig_core::tool::ToolExecutionError::from_error(McpCallError(format!(
                             "{error:#}"
@@ -352,7 +351,7 @@ impl McpProxyTool {
         })
     }
 
-    async fn call_inner(&self, args: serde_json::Value) -> Result<String> {
+    async fn call_inner(&self, args: serde_json::Value) -> Result<rig_core::tool::ToolOutput> {
         self.manager.start(&self.server).await?;
         let server = self
             .manager
@@ -381,9 +380,21 @@ impl McpProxyTool {
         } else {
             request
         };
-        let result = tokio::time::timeout(CALL_TIMEOUT, peer.call_tool(request))
+        let mut result = tokio::time::timeout(CALL_TIMEOUT, peer.call_tool(request))
             .await
             .context("MCP tool timed out")??;
+        // Lift image blocks out before serializing. Left in place they would be
+        // inline base64 inside the JSON envelope — unreadable to the model, and
+        // large enough to blow the truncation budget on its own. Screenshot MCP
+        // servers are the common case.
+        let mut images = Vec::new();
+        result.content.retain(|block| match block {
+            rmcp::model::ContentBlock::Image(image) => {
+                images.push(mcp_image(&image.data, &image.mime_type));
+                false
+            }
+            _ => true,
+        });
         let mut text = serde_json::to_string(&result)?;
         if text.len() > MAX_OUTPUT {
             // Truncating serialized JSON at a byte boundary would hand the
@@ -415,9 +426,42 @@ impl McpProxyTool {
                 boundary = floor(&text, boundary.saturating_sub(overflow.max(64)));
             }
         }
-        Ok(text)
+        let mut content = rig_core::OneOrMany::one(
+            rig_core::completion::message::ToolResultContent::text(text),
+        );
+        for image in images {
+            content.push(image);
+        }
+        Ok(rig_core::tool::ToolOutput::content(content))
     }
 }
+
+/// Convert an MCP image block into rig tool-result content.
+///
+/// An unrecognized MIME type still passes the payload through with no declared
+/// media type rather than dropping it: providers that sniff the bytes handle it,
+/// and dropping the only image a tool returned is the worse failure.
+fn mcp_image(data: &str, mime_type: &str) -> rig_core::completion::message::ToolResultContent {
+    use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+
+    let media_type = match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => Some(ImageMediaType::PNG),
+        "image/jpeg" | "image/jpg" => Some(ImageMediaType::JPEG),
+        "image/gif" => Some(ImageMediaType::GIF),
+        "image/webp" => Some(ImageMediaType::WEBP),
+        "image/svg+xml" => Some(ImageMediaType::SVG),
+        "image/heic" => Some(ImageMediaType::HEIC),
+        "image/heif" => Some(ImageMediaType::HEIF),
+        _ => None,
+    };
+    rig_core::completion::message::ToolResultContent::Image(Image {
+        data: DocumentSourceKind::Base64(data.to_owned()),
+        media_type,
+        detail: None,
+        additional_params: None,
+    })
+}
+
 fn sanitize(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.bytes() {

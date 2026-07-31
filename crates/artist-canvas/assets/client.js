@@ -405,6 +405,12 @@ export const artist = {
   highlight: (source, language = "txt", dark = matchMedia("(prefers-color-scheme: dark)").matches) =>
     rpc("canvas.highlight", { source, language, dark }),
 
+  /** Render markdown with the harness's renderer, code blocks highlighted. */
+  markdown: (source) => rpc("canvas.markdown", { source }).then((body) => body.html),
+
+  /** Open a file in the user's editor, at a line if given. */
+  edit: (path, line) => rpc("canvas.edit", { path, line: line ?? null }),
+
   /** What is on screen right now, for `canvas status`. */
   digest,
 

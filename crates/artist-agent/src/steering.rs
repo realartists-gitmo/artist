@@ -1,4 +1,5 @@
 use rig_agent::agent::{AgentHook, HookContext, ToolResultAction, ToolResultEvent};
+use rig_core::{completion::message::ToolResultContent, tool::ToolOutput};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -72,7 +73,10 @@ impl AgentHook for SteeringHook {
         _context: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
-        let result = event.presentation.as_text().unwrap_or_default();
+        // `render()` rather than `as_text()`: the latter yields `None` for any
+        // multi-block output, so a multimodal result would stash an empty
+        // original and the display would lose it on restore.
+        let result = event.presentation.render();
         let messages = {
             let mut state = self.0.lock();
             let messages = state.pending.drain(..).collect::<Vec<_>>();
@@ -80,7 +84,7 @@ impl AgentHook for SteeringHook {
             if !messages.is_empty() {
                 state
                     .original_results
-                    .insert(event.internal_call_id.to_owned(), result.to_owned());
+                    .insert(event.internal_call_id.to_owned(), result);
             }
             messages
         };
@@ -92,13 +96,72 @@ impl AgentHook for SteeringHook {
             .map(|message| format!("<user_steering>\n{message}\n</user_steering>"))
             .collect::<Vec<_>>()
             .join("\n\n");
-        ToolResultAction::rewrite(format!("{result}\n\n{steering}"))
+        ToolResultAction::rewrite_output(append_steering(event.presentation, steering))
     }
+}
+
+/// Attach steering to a tool result without discarding any of its content.
+///
+/// Rewriting through a plain string would collapse a multimodal result to text,
+/// silently dropping every image block. Steering merges into the trailing plain
+/// text block when there is one — preserving the exact wire form single-text
+/// tools produced before — and otherwise becomes its own trailing block.
+fn append_steering(presentation: &ToolOutput, steering: String) -> ToolOutput {
+    let mut content = presentation.as_content().clone();
+    match content.last_mut() {
+        ToolResultContent::Text(text) if text.additional_params.is_none() => {
+            text.text = format!("{}\n\n{steering}", text.text);
+        }
+        _ => content.push(ToolResultContent::text(steering)),
+    }
+    ToolOutput::content(content)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::{OneOrMany, completion::message::Image};
+
+    fn image_block() -> ToolResultContent {
+        ToolResultContent::Image(Image {
+            media_type: Some(rig_core::completion::message::ImageMediaType::PNG),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn merges_steering_into_a_trailing_text_block() {
+        let presentation = ToolOutput::text("tool said this");
+        let rewritten = append_steering(&presentation, "<user_steering>go</user_steering>".into());
+        assert_eq!(
+            rewritten.as_text(),
+            Some("tool said this\n\n<user_steering>go</user_steering>"),
+            "single-text results must keep the exact pre-existing wire form"
+        );
+    }
+
+    #[test]
+    fn steering_preserves_image_blocks() {
+        let presentation = ToolOutput::content(
+            OneOrMany::many([ToolResultContent::text("a screenshot"), image_block()]).unwrap(),
+        );
+        let rewritten = append_steering(&presentation, "<user_steering>go</user_steering>".into());
+
+        let blocks = rewritten.as_content();
+        assert_eq!(blocks.len(), 3, "the image block must survive: {blocks:?}");
+        assert_eq!(blocks.iter().filter(|b| b.as_text().is_some()).count(), 2);
+        assert!(
+            blocks
+                .iter()
+                .any(|block| matches!(block, ToolResultContent::Image(_))),
+            "steering must never discard image content: {blocks:?}"
+        );
+        assert_eq!(
+            blocks.last_ref().as_text(),
+            Some("<user_steering>go</user_steering>"),
+            "steering becomes its own trailing block when the last block is not text"
+        );
+    }
 
     #[test]
     fn atomically_edits_and_removes_pending_steering() {

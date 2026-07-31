@@ -60,7 +60,10 @@ pub async fn run(
         }),
         // Session and account verbs need live session/store state and are
         // dispatched in chat_ui before reaching here.
-        ParsedCommand::New | ParsedCommand::Sessions | ParsedCommand::Resume { .. } => {
+        ParsedCommand::New
+        | ParsedCommand::Sessions
+        | ParsedCommand::Resume { .. }
+        | ParsedCommand::Canvas { .. } => {
             Ok(CommandOutput {
                 lines: vec!["that command is only available inside a chat session".to_owned()],
                 context_capacity: None,

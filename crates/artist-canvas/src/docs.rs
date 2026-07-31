@@ -50,18 +50,61 @@ const ENTRIES: &[Entry] = &[
                dock. Start every canvas with it rather than laying out a header by hand.",
     },
     Entry {
+        name: "Pending",
+        signature: "<Pending label=\"Running the test suite…\" />",
+        body: "Waiting, with a reason. Say what is being waited on: work you hand to the\n\
+               agent can take a minute, and an unlabelled spinner for a minute is\n\
+               indistinguishable from a hang.",
+    },
+    Entry {
+        name: "Metric",
+        signature: "<Metric label value hint variant trend={[…]} />",
+        body: "One headline number. `variant` (ok|warn|danger|accent) turns `hint` into a\n\
+               badge; `trend` draws a sparkline beside it. Put several in a\n\
+               <Stack horizontal> for the row of figures a dashboard opens with.",
+    },
+    Entry {
+        name: "Alert",
+        signature: "<Alert variant=\"warn\" title=\"…\">…</Alert>",
+        body: "A callout: default|accent|ok|warn|danger. Use it rather than a tinted div —\n\
+               a hand-picked background does not flip with the colour scheme.",
+    },
+    Entry {
+        name: "Markdown",
+        signature: "<Markdown>{text}</Markdown>",
+        body: "Markdown rendered by the harness, with fenced code highlighted by the same\n\
+               highlighter <Code> uses. Reach for this whenever you are putting prose on\n\
+               screen. Raw HTML in the source is dropped rather than rendered.",
+    },
+    Entry {
+        name: "FileLink",
+        signature: "<FileLink path=\"src/lib.rs\" line={131} />",
+        body: "A path that opens in the user's editor when clicked. Use it every time a\n\
+               canvas names a file — it is the shortest route from what you found to the\n\
+               place the user fixes it. Paths are relative to the project.",
+    },
+    Entry {
         name: "DataTable",
-        signature: "<DataTable rows columns onRowClick empty dense />",
+        signature: "<DataTable rows columns onRowClick empty dense height filterable />",
         body: "Sortable, filterable table. `columns` is optional — omit it and the columns\n\
                are inferred from the rows. A column may be a string, or\n\
-               {key, label, render(value, row)}. Numbers sort numerically.",
+               {key, label, align, render(value, row)}. Numbers sort numerically and are\n\
+               right-aligned with tabular figures. A filter box appears past a dozen rows;\n\
+               past a few hundred the table windows, so large row counts are fine.",
     },
     Entry {
         name: "Plot",
-        signature: "<Plot data={[xs, ys, …]} series height title />",
+        signature: "<Plot data={[xs, ys, …]} series height title kind />",
         body: "A chart. `data` is uPlot's column-major form: the first array is the x axis,\n\
-               each subsequent array is a series. Resizes with its container.\n\n\
+               each subsequent array is a series. `kind` is \"line\" (default), \"area\", or\n\
+               \"bars\". Axes and grid follow the theme. Resizes with its container.\n\n\
                Example: <Plot data={[[0,1,2],[3,1,4]]} series={[{}, {label:'rps'}]} />",
+    },
+    Entry {
+        name: "Sparkline",
+        signature: "<Sparkline values={[…]} width height />",
+        body: "A bare trend line with no axes, sized to sit beside a number rather than to\n\
+               be read off. For anything with a scale worth reading, use <Plot>.",
     },
     Entry {
         name: "Code",
@@ -101,9 +144,11 @@ const ENTRIES: &[Entry] = &[
     Entry {
         name: "artist.send",
         signature: "artist.send(text, {mode})",
-        body: "Put text into the conversation. mode is \"auto\" (default), \"steer\" to\n\
-               correct a running turn, or \"next\" to queue a new one. Auto steers when a\n\
-               turn is running and prompts when idle, which is what a button wants.",
+        body: "Put text into the conversation. `mode` is required and is either \"steer\" —\n\
+               land it in the turn that is running now — or \"queue\", which waits for the\n\
+               current turn to finish. There is no default: the two do visibly different\n\
+               things, and a button that guesses wrong interrupts work the user is\n\
+               watching. Returns {outcome} — \"steered\", \"queued\", or \"no-turn-running\".",
     },
     Entry {
         name: "artist.call",
@@ -131,9 +176,13 @@ Also resolvable: react, react-dom/client, uplot, @tanstack/react-table.
 Tailwind utility classes work. No other package resolves — add one under
 [deps] in canvas.toml if you truly need it (that requires network at load).
 
-Components not listed below: Toolbar, Stack, Split, Card, EmptyState, Skeleton,
+Components not listed below: Toolbar, Stack, Split, Card, EmptyState, Pending,
 Button, Input, Select, Checkbox, Badge, Tabs, Dialog, Toaster/toast,
 ErrorBoundary, AskDock. They behave as their names suggest.
+
+Everything that comes in flavours takes `variant`: default | accent | ok | warn
+| danger. Button adds `ghost`. Reach for the kit before styling by hand — a
+prop it does not read is dropped silently, and `canvas status` will tell you.
 ";
 
 /// Render the reference, whole or for one symbol.
@@ -199,15 +248,38 @@ mod tests {
     fn lookup_is_forgiving_about_case_and_qualification() {
         assert!(render(Some("useCanvasState")).contains("Shared, durable state"));
         assert!(render(Some("usecanvasstate")).contains("Shared, durable state"));
-        assert!(render(Some("send")).contains("mode is \"auto\""));
+        assert!(render(Some("send")).contains("\"steer\""));
     }
 
     /// An unknown topic must say what does exist, not just fail.
     #[test]
     fn an_unknown_topic_lists_what_is_documented() {
-        let response = render(Some("Sparkline"));
-        assert!(response.contains("No canvas docs for `Sparkline`"), "{response}");
+        let response = render(Some("Histogram"));
+        assert!(response.contains("No canvas docs for `Histogram`"), "{response}");
         assert!(response.contains("DataTable"), "{response}");
+    }
+
+    /// The reference is how the model learns the kit exists at all, so a
+    /// component it cannot find is a component it will rebuild by hand — which
+    /// is the whole thing the kit is here to prevent.
+    #[test]
+    fn everything_worth_reaching_for_is_documented() {
+        for component in ["Metric", "Alert", "Markdown", "FileLink", "Sparkline"] {
+            assert!(
+                render(Some(component)).contains('<'),
+                "{component} has no docs entry"
+            );
+        }
+    }
+
+    /// The two send modes do visibly different things and the client refuses
+    /// anything else, so the docs must not describe a third.
+    #[test]
+    fn the_send_docs_match_what_the_client_accepts() {
+        let send = render(Some("artist.send"));
+        assert!(send.contains("\"steer\"") && send.contains("\"queue\""), "{send}");
+        assert!(!send.contains("\"auto\""), "the removed auto mode is still documented");
+        assert!(!send.contains("\"next\""), "the renamed next mode is still documented");
     }
 
     #[test]

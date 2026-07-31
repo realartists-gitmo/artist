@@ -1,0 +1,62 @@
+[package]
+name = "artist-computer"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Generalized computer use: one observation contract over every application surface"
+
+[features]
+# The compositor is the heaviest thing in the tree to build and needs libgbm,
+# libEGL and a DRM render node. Gating it keeps the PTY, CDP and adapter rungs
+# — and the whole test suite — usable on a machine without any of that.
+default = ["stage-wayland"]
+stage-wayland = ["dep:smithay", "dep:calloop"]
+
+[dependencies]
+anyhow = "1"
+artist-session = { path = "../artist-session" }
+artist-tools = { path = "../artist-tools" }
+async-trait = "0.1"
+atspi-proxies = "0.13"
+base64 = "0.23"
+blake3 = "1"
+# Must match the calloop smithay itself uses, or the XWayland event source
+# cannot be inserted into our loop.
+calloop = { version = "0.14", optional = true }
+# No default features: they pull in `chromiumoxide_fetcher`, which exists to
+# download a Chromium build. The stage always launches the system browser
+# itself, so the fetcher is dead weight that also fails to compile.
+chromiumoxide = { version = "0.9", default-features = false }
+dashmap = "6"
+dirs = "6"
+futures = "0.3"
+toml = "1.1"
+hashline-tools = { path = "../hashline-tools" }
+png = "0.18"
+portable-pty = "0.9"
+rig-core = "0.41.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_egl",
+    "backend_gbm",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+    "xwayland",
+], optional = true }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+unicode-normalization = "0.1"
+vt100 = "0.16"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# A Wayland client of our own is the highest-leverage test fixture in the crate:
+# it lets the compositor be exercised — windows, input, frame callbacks — with
+# no GUI, no real application, and no display of any kind.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }

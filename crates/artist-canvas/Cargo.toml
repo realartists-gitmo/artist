@@ -26,6 +26,7 @@ include_dir = "0.7"
 notify = { version = "8", default-features = false, features = [
     "macos_fsevent",
 ] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,3 +40,4 @@ toml = "1.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tempfile = "3"

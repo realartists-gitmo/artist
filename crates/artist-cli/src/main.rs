@@ -796,8 +796,11 @@ fn computer_distill(
             .map(|step| artist_computer::macros::MacroStep {
                 action: step.action.clone(),
                 label: step.resolved_name.clone().or_else(|| step.label.clone()),
-                text: None,
-                key: None,
+                // The payload is the step. Dropping it made every distilled
+                // macro a no-op that reported success: `key` replayed as an
+                // empty chord, `type` typed nothing.
+                text: (step.action == "type").then(|| step.payload.clone()).flatten(),
+                key: (step.action == "key").then(|| step.payload.clone()).flatten(),
             })
             .collect();
 

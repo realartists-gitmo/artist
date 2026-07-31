@@ -36,11 +36,14 @@ artist/                          # Cargo workspace
 │   ├── artist-agent/            # Agent loop + TTSR driver, hooks, MCP, delegate
 │   ├── artist-rules/            # Stream rules: parsing, matching, WASM host
 │   ├── artist-session/          # Event-sourced session store + projections
+│   ├── artist-memory/           # Durable memory: Mnestic store, local embeddings, code index
 │   ├── artist-tools/            # Built-in tools: bash, read, write, edit, find, grep
+│   ├── artist-computer/         # Computer use: surfaces, anchors, the isolated Stage
 │   ├── hashline-tools/          # Mnemonic line anchors + multi-agent file coordination
 │   └── llm-provider/            # ChatGPT OAuth, SavedProvider, Secret
 └── docs/
-    └── architecture.md          # This file
+    ├── architecture.md          # This file
+    └── computer-use.md          # The computer-use subsystem
 ```
 
 | Crate | Responsibility |
@@ -50,8 +53,10 @@ artist/                          # Cargo workspace
 | **artist-rules** | The rules engine: declarative rule files, discovery + hot reload, streaming matcher, per-session state, retro scanning, wasmtime plugin host (feature `wasm`). |
 | **artist-extensions** | Trusted WASM extensions: persistent component instances discovered from `<config>/extensions` manifests, with a powerful host interface (run/spawn commands, steer, queue prompts, stop the agent, live context, event bus). Distinct trust model from rule plugins — extensions are trusted and capable; rule plugins are untrusted and sandboxed. Both hosts share one wasmtime (46). |
 | **artist-session** | Rig `ConversationMemory` persistence in `events.jsonl`, operational events, legacy converters, and lossy display/rewind projections. |
+| **artist-memory** | Durable cross-session memory: a Mnestic (CozoDB fork) store holding curated facts and an embedded code index, local CPU embeddings via rten, and AST-aware chunking. |
 | **artist-tools** | Tool implementations bound to a `Workspace` (project-jailed file tools, PTY bash, FFF find/grep). |
-| **hashline-tools** | Standalone file-tool core: mnemonic anchors, hidden line hashes, SQLite anchor state, cross-process path locks. |
+| **artist-computer** | Generalized computer use: one observation contract over every application surface, an isolated graphical Stage (headless Wayland compositor + private session bus), and the abstraction ladder that picks the cheapest rung per surface. See [computer use](computer-use.md). |
+| **hashline-tools** | Standalone file-tool core: mnemonic anchors, hidden line hashes, SQLite anchor state, cross-process path locks. Its mnemonic allocator is shared with `artist-computer`, so file anchors and screen anchors mint identically. |
 | **llm-provider** | ChatGPT subscription auth (PKCE), provider records, redacted-but-serializable secrets. |
 
 Workspace edition is Rust 2024; MSRV `1.88`. License: MIT OR Apache-2.0.
@@ -68,11 +73,12 @@ retry loop** around a Rig streaming run:
    set, event recorder, and a cancellation token. Rig loads the native
    messages and appends the successful run delta.
 2. Each iteration builds a fresh Rig agent and one ordered tool registry from
-   built-ins, MCP, and extensions. The denylist filters that registry once;
-   provider registration and the generated system-prompt tool section consume
-   the same final list, so descriptions and tool-specific guidance cannot name
-   disabled tools and automatically include extension/MCP tools. The agent then
-   installs three hooks, in order:
+   built-ins, MCP, and extensions. The denylist filters that registry once, and
+   provider registration consumes the final list. Tool definitions reach the
+   model through the API's `tools` field rather than the system prompt — that is
+   the provider-native channel and the single source of truth for name,
+   description and schema — so per-tool guidance lives in each tool's own
+   `description()`. The agent then installs three hooks, in order:
    - **SteeringHook** — injects queued user corrections into tool results
      as `<user_steering>` blocks.
    - **CaptureHook** — captures structured tool outcome/timing metadata for
@@ -295,6 +301,96 @@ are annotated in the `-r` picker.
 
 ---
 
+## Durable memory
+
+Sessions are event-sourced but nothing read them back, so every session started
+cold. `artist-memory` gives the harness two corpora that outlive a session:
+**facts** (curated preferences, constraints, decisions and their rationale) and
+an optional **code index** (AST-chunked, embedded source).
+
+This generalizes the invariant the todo list already established — *harness-owned
+state survives a context wipe without being summarized into lossy prose*
+(`docs/profiles.md`, invariant 7). Memory is never part of the conversation: it
+lives in its own store, is recorded as `memory.written` events, and is injected
+only when relevant.
+
+**Storage.** One [Mnestic](https://github.com/shuruheel/mnestic) database per
+scope — a global one under `<config>/memory/` for preferences that follow you
+between checkouts, and a project one beside the existing tool state at
+`<config>/tools/<project-hash>/memory.rocks`. They are separate databases rather
+than one relation with a scope column because a query-time HNSW `filter:` is
+only a post-filter over the `ef` candidate pool, so partitioning by filter would
+silently drop results.
+
+Relations: `fact` (with a `<F32; 768>` embedding, `live`, `superseded_by`),
+`chunk`, and `meta`. Retrieval fuses an HNSW leg with a BM25 leg through
+Mnestic's built-in `ReciprocalRankFusion`.
+
+Supersession is an ordinary current-state table with a `live` flag and partial
+indexes — Slowly Changing Dimension Type 2, in warehousing terms — rather than a
+temporal table. That is not a workaround for the constraint below so much as the
+shape this system wants anyway: the event log already holds a richer history
+than a temporal sibling could (origin, session, sequence), and essentially every
+query asks what is true *now*.
+
+Three constraints are load-bearing and were verified against a live database
+rather than read from documentation:
+
+- A `TxTime` relation **rejects every index and trigger**, and search atoms take
+  no validity clause — so bitemporality and search cannot coexist on one
+  relation. No production system offers as-of ANN search; an HNSW index is a
+  precomputed graph, and a temporal predicate is a filter, so satisfying one
+  means rebuilding the other.
+- HNSW `filter:`/`radius:` are **post-filters over the `ef` pool**, contradicting
+  the upstream docs. The `live` condition is built into the index at creation
+  time so superseded facts leave recall automatically on `:update`.
+- Every *searchable* index over `fact` needs that condition, not just the vector
+  one: an unfiltered BM25 index resurrects superseded facts through the other
+  half of the fused query. `::fts` spells it `extract_filter`. The `::lsh`
+  dedupe index is the exception — an `extract_filter` there empties it, so
+  liveness is enforced by a join in the query instead.
+
+**The store is a projection, not the record.** Mnestic's RocksDB backend commits
+without syncing its WAL and the durability opt-in does not exist in the pinned
+release, so facts are recorded as `memory.written` session events and
+reconciled on open. That is also what makes memory **rewind-aware for free**:
+replay runs over `visible_events`, so rewinding past a write removes the fact,
+exactly as with `todo.updated`.
+
+**Embeddings are local.** `rten` (pure-Rust ONNX, no C++ runtime) runs
+CodeRankEmbed on CPU. Measured on a 13th-gen i7: ~6–7 sequences/sec at batch 32,
+82–127 ms for a single query, numerically identical to ONNX Runtime to ~1e-6.
+No code leaves the machine and no API key is involved. The published int8 export
+is deliberately **not** used — it measured 0.909 mean cosine against fp32 and
+moved 14% of top-1 results.
+
+**Writes.** A `memory` tool for deliberate recording, plus three automatic
+triggers chosen because they carry signal rather than because they are
+convenient: a user correction (a preference being stated out loud), a model
+decision stated mid-stream with its rationale, and a successful `git commit`.
+All three are fire-and-forget; none may delay a stream or the input box.
+Compaction is deliberately *not* a trigger.
+
+**Reads.** Three channels, all pre-existing mechanisms: the `memory` tool
+(model-pull), a prompt-conditioned prepend riding the user turn beside skill
+sections (never the preamble, which must stay a stable prompt-cache prefix), and
+`RequestPatch::extra_context` injection from a hook — the only channel that
+survives compaction and handoff by construction. The hook shares the stream
+rules' matcher shape but **never aborts**: rules terminate a run to keep a
+mistake out of context, whereas memory only ever adds context.
+
+Configured under `[memory]` in `settings.toml`, off by default because the
+subsystem needs a local embedding model and silently degrading to lexical-only
+recall would read as memory simply not working.
+
+> **Build note.** `mnestic-rocks 0.1.10` vendors a RocksDB whose headers rely on
+> `<cstdint>` arriving transitively, which GCC 13+ stopped doing. The workspace
+> `.cargo/config.toml` sets `CXXFLAGS = "-include cstdint"` so cold builds work
+> without per-developer setup. It must not also be set for `CFLAGS` — that
+> breaks `zstd-sys`.
+
+---
+
 ## Tools and workspace
 
 | Tool | Role |
@@ -353,6 +449,14 @@ reasoning_effort = "high"    # reasoning effort
 
 [permissions]
 deny = ["write", "edit"]     # tools the agent may not use
+
+[memory]                     # durable cross-session memory; off by default
+enabled = true
+model_dir = "models/code-embed"  # holds model.onnx + tokenizer.json; relative to the config root
+dim = 768                    # must match the model; changing it forces a rebuild
+recall_limit = 8             # facts returned per recall
+auto_write = true            # let the automatic triggers store facts (the tool works either way)
+index_code = false           # maintain the embedded code index
 ```
 
 Resolution rules (`settings.rs`): **scalars** (`model`, `reasoning_effort`)

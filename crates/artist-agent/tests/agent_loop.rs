@@ -139,6 +139,7 @@ impl Harness {
             mcp: &self.mcp,
             extensions: None,
             disabled: &[],
+            canvas: None,
         }
     }
 

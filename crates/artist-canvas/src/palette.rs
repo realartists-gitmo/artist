@@ -645,6 +645,10 @@ pub fn tokens_css() -> String {
 {charts_light}\
          \x20 --a-radius: 8px;\n\
          \x20 --a-sp: 4px;\n\
+         \x20 --a-text-micro: 11px;\n\
+         \x20 --a-text-body: 13px;\n\
+         \x20 --a-text-head: 16px;\n\
+         \x20 --a-text-display: 28px;\n\
          \x20 --a-font: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif;\n\
          \x20 --a-mono: ui-monospace, SFMono-Regular, Menlo, \"Cascadia Code\", monospace;\n\
          }}\n\
@@ -718,12 +722,19 @@ fn chart_block(step: usize) -> String {
 /// looks like it belongs.
 pub const BASE_CSS: &str = "\
 *, *::before, *::after { box-sizing: border-box; }
+/* Four sizes and no more. A kit that offers a continuum gets used as one, and
+   what came back was 12px beside 13px beside 14px on the same card — differences
+   too small to read as hierarchy and large enough to read as a mistake. Body,
+   the label under it, the heading over it, and the one number a panel is about;
+   everything else is weight and colour. */
 body { margin: 0; background: var(--a-bg); color: var(--a-fg);
-       font-family: var(--a-font); font-size: 14px; line-height: 1.6;
+       font-family: var(--a-font); font-size: var(--a-text-body); line-height: 1.6;
        -webkit-font-smoothing: antialiased; }
-h1 { font-size: 1.5rem; line-height: 1.25; font-weight: 650; margin: 0 0 .5rem; letter-spacing: -0.01em; }
-h2 { font-size: 1.2rem; line-height: 1.3; font-weight: 600; margin: 1.25rem 0 .4rem; }
-h3 { font-size: 1rem;  line-height: 1.4; font-weight: 600; margin: 1rem 0 .3rem; }
+h1 { font-size: var(--a-text-display); line-height: 1.15; font-weight: 650;
+     margin: 0 0 .5rem; letter-spacing: -0.02em; }
+h2 { font-size: var(--a-text-head); line-height: 1.3; font-weight: 600; margin: 1.5rem 0 .4rem; }
+h3 { font-size: var(--a-text-body); line-height: 1.4; font-weight: 650; margin: 1rem 0 .3rem; }
+small, figcaption { font-size: var(--a-text-micro); color: var(--a-muted); }
 p  { margin: 0 0 .75rem; }
 a  { color: var(--a-accent); text-underline-offset: 2px; }
 code, pre, kbd, samp { font-family: var(--a-mono); font-size: .875em; }
@@ -747,6 +758,36 @@ code, pre, kbd, samp { font-family: var(--a-mono); font-size: .875em; }
 :where(hr) { border: 0; border-top: 1px solid var(--a-border); margin: 1rem 0; }
 ::selection { background: var(--a-accent); color: var(--a-accent-fg); }
 :focus-visible { outline: 2px solid var(--a-accent); outline-offset: 2px; }
+/* Markdown arrives as harness-rendered HTML rather than as components, so it is
+   the one place the kit styles tags directly. Scoped to the block so a canvas's
+   own markup is never caught by these. */
+.a-markdown > :first-child { margin-top: 0; }
+.a-markdown > :last-child { margin-bottom: 0; }
+.a-markdown ul, .a-markdown ol { margin: 0 0 .75rem; padding-left: 1.25rem; }
+.a-markdown li { margin: .125rem 0; }
+.a-markdown blockquote { margin: 0 0 .75rem; padding-left: .75rem;
+  border-left: 2px solid var(--a-border); color: var(--a-muted); }
+.a-markdown table { width: 100%; margin: 0 0 .75rem; font-size: .9em; }
+.a-markdown th, .a-markdown td { border-bottom: 1px solid var(--a-border);
+  padding: .3rem .5rem; text-align: left; }
+.a-markdown th { color: var(--a-muted); font-weight: 600; }
+.a-markdown :not(pre) > code { background: var(--a-subtle);
+  border-radius: 3px; padding: .1em .3em; }
+.a-markdown .a-md-code { background: var(--a-subtle); border: 1px solid var(--a-border);
+  border-radius: var(--a-radius); padding: .625rem .75rem; margin: 0 0 .75rem;
+  overflow-x: auto; line-height: 1.5; }
+.a-markdown img { max-width: 100%; }
+/* The one piece of motion in the kit, so it gets the one media query that
+   matters: a spinner is exactly what makes some people ill. */
+.a-spin { display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--a-border); border-top-color: var(--a-accent);
+  animation: a-spin .7s linear infinite; }
+@keyframes a-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .a-spin { animation-duration: 0s; border-top-color: var(--a-accent); opacity: .7; }
+  *, *::before, *::after { animation-duration: .001ms !important;
+    transition-duration: .001ms !important; }
+}
 ";
 
 #[cfg(test)]
@@ -843,6 +884,48 @@ mod token_tests {
         let tokens = tokens_css();
         assert_eq!(tokens.matches("--a-chart-1:").count(), 2, "no dark override");
         assert!(tokens.contains("--a-chart-8:"), "only five colours shipped");
+    }
+
+    /// A scale that offers a continuum gets used as one. Four steps is the
+    /// constraint that makes hierarchy legible rather than approximate.
+    #[test]
+    fn the_type_scale_has_exactly_four_steps() {
+        let tokens = tokens_css();
+        let sizes: Vec<u32> = ["micro", "body", "head", "display"]
+            .iter()
+            .map(|step| {
+                let needle = format!("--a-text-{step}: ");
+                let start = tokens.find(&needle).unwrap_or_else(|| panic!("{step} missing"))
+                    + needle.len();
+                tokens[start..]
+                    .split("px")
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(|| panic!("{step} is not a px value"))
+            })
+            .collect();
+
+        assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]), "not ascending: {sizes:?}");
+        // Adjacent steps have to be far enough apart to read as different. Two
+        // sizes a pixel apart are a mistake, not a hierarchy.
+        assert!(
+            sizes.windows(2).all(|pair| pair[1] - pair[0] >= 2),
+            "steps too close to distinguish: {sizes:?}"
+        );
+        assert_eq!(
+            tokens.matches("--a-text-").count(),
+            4,
+            "the scale grew a fifth size"
+        );
+    }
+
+    /// Nothing in the kit animates except the one spinner, and that has to be
+    /// something a reduced-motion preference can turn off.
+    #[test]
+    fn motion_is_opt_out() {
+        assert!(BASE_CSS.contains("prefers-reduced-motion"), "no reduced-motion guard");
+        let animations = BASE_CSS.matches("@keyframes").count();
+        assert_eq!(animations, 1, "{animations} animations; the kit is meant to have one");
     }
 
     #[test]

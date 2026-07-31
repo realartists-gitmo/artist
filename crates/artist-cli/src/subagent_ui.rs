@@ -229,7 +229,7 @@ mod tests {
                 content: "result".into(),
                 outcome: None,
                 duration_ms: None,
-                images: 0,
+                images: Vec::new(),
             },
         );
         assert_eq!(statuses.active[0].phase, "thinking");

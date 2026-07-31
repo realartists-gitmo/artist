@@ -556,6 +556,15 @@ mod tests {
             assert!(profile.permits("todo"), "{name} cannot track work");
             assert!(!profile.permits("write"), "{name} must stay read-only");
             assert!(!profile.permits("bash"), "{name} must stay read-only");
+            // Driving a GUI is at least as capable as bash, and it is gated the
+            // same way — by the profile, not by a blanket rule about who may
+            // ask. These three carry an explicit allow list, so they are denied
+            // by construction; the assertion exists so that widening that list
+            // later cannot quietly hand a planner a mouse.
+            assert!(
+                !profile.permits("computer"),
+                "{name} must not be able to drive a GUI"
+            );
             // Delegating expands the capability surface, so it stays opt-in.
             assert!(!profile.permits("subagent"), "{name} should not delegate");
         }

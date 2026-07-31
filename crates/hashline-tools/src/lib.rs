@@ -27,6 +27,7 @@ pub use coordinator::{
     ANCHOR_USAGE,
 };
 pub use error::{HashlineError, HashlineErrorCode};
+pub use mnemonic_anchors::{AnchorTable, not_issued_message, stale_anchor_message};
 pub use file_tools::{
     AnchoredLine, ConfirmationRequired, EditOperation, EditRequest, EditResult, FileToolConfig,
     FileToolManager, ReadFileRequest, ReadFileResult, WriteFileRequest, WriteFileResult,

@@ -28,6 +28,11 @@ pub(crate) static COMMANDS: &[SlashCommand] = &[
         usage: "/statusbar",
     },
     SlashCommand {
+        name: "/canvas",
+        description: "List open canvases and their URLs",
+        usage: "/canvas [name]",
+    },
+    SlashCommand {
         name: "/skills",
         description: "List available Agent Skills",
         usage: "/skills",
@@ -95,6 +100,10 @@ pub(crate) enum ParsedCommand<'a> {
     Login,
     Quit,
     Skills,
+    /// List canvases, or show one canvas's URL.
+    Canvas {
+        name: Option<&'a str>,
+    },
     Tools,
     StatusBar,
     Mcp {
@@ -208,6 +217,8 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             usage: "/mcp [status|start|stop|restart|refresh] [server]",
         }),
         ("/skills", []) => Ok(ParsedCommand::Skills),
+        ("/canvas", []) => Ok(ParsedCommand::Canvas { name: None }),
+        ("/canvas", [name]) => Ok(ParsedCommand::Canvas { name: Some(name) }),
         ("/tools", []) => Ok(ParsedCommand::Tools),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {
@@ -354,6 +365,7 @@ mod tests {
                 "/fast",
                 "/model",
                 "/statusbar",
+                "/canvas",
                 "/skills",
                 "/tools",
                 "/mcp",

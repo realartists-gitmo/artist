@@ -16,10 +16,12 @@
 //!   writer.lock       # exclusive while a process owns the session
 //! ```
 
+pub mod ask;
 mod attachments;
 pub mod compaction;
 mod conversation_replay;
 mod convert;
+pub mod decay;
 mod event;
 mod history;
 mod log;
@@ -30,12 +32,16 @@ mod replay;
 
 pub use attachments::AttachmentStore;
 pub use convert::{
-    assistant_to_blocks, blocks_to_assistant, blocks_to_user, store_tool_image,
-    tool_image_from_block, user_to_blocks,
+    assistant_to_blocks, blocks_to_assistant, blocks_to_user, externalize_images,
+    referenced_attachments, rehydrate_images, store_tool_image, tool_image_from_block,
+    user_to_blocks,
 };
+pub use ask::{Answer, AskRegistry, Question, QuestionOption};
 pub use event::{
+    AskAnswered, AskPosted, CanvasCreated, CanvasOpened, CanvasState, ComputerActed,
+    ComputerElided, ComputerObserved, ComputerStageClosed, ComputerStageOpened, ComputerStep,
     ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished, DelegateStarted,
-    Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE, ModelTurn,
+    Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE, MemoryWritten, ModelTurn,
     ProviderContext, RuleFired, RuleInjection, RuleRetroFindings, RunFinished, RunStarted,
     SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, TodoItem, TodoStatus,
     TodoUpdated, ToolOutcomeRecord, ToolResultEvent, TurnUser,

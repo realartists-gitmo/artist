@@ -26,6 +26,79 @@ pub enum Command {
     Sessions(SessionsArgs),
     /// Inspect agent profiles.
     Profiles(ProfilesArgs),
+    /// Inspect and maintain durable memory.
+    Memory(MemoryArgs),
+    /// Inspect what the agent did with computer use.
+    Computer(ComputerArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ComputerArgs {
+    #[command(subcommand)]
+    pub action: ComputerCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ComputerCommand {
+    /// Print the observe/act sequence for a session.
+    ///
+    /// The event log already holds everything an inspector would show —
+    /// anchors, the label the model claimed, the name the element actually had,
+    /// settle timings and frame digests — so this is the debugging surface for
+    /// computer use.
+    Log {
+        /// Session id. Defaults to the most recent session for this project.
+        id: Option<String>,
+    },
+    /// Emit a replayable macro from what the agent already did.
+    ///
+    /// Every successful program is in the log as `(anchor, action, expect)`
+    /// triples, so a trajectory that worked once can be replayed
+    /// deterministically instead of being rediscovered by the model.
+    Distill {
+        /// Session id. Defaults to the most recent session for this project.
+        id: Option<String>,
+        /// Include programs that failed or whose expectation was not met.
+        #[arg(long)]
+        include_failed: bool,
+    },
+    /// Write a captured frame out by its digest, for an image viewer.
+    Frame {
+        /// The `img:<sha>` digest from a log line or transcript.
+        digest: String,
+        /// Where to write it. Defaults to `<digest>.png` in the current directory.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct MemoryArgs {
+    #[command(subcommand)]
+    pub action: MemoryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    /// List the facts remembered for this project and globally.
+    List,
+    /// Search memory the way the agent would.
+    Search { query: String },
+    /// Write a logical JSON dump to stdout.
+    ///
+    /// The store is a rebuildable projection and the pinned backend commits
+    /// without syncing its WAL, so take one of these before upgrading.
+    Export,
+    /// Load a dump produced by `export`, then rebuild every index.
+    Import { path: String },
+    /// Drop and recreate every search index.
+    ///
+    /// Bulk imports bypass index maintenance, and a full drop-and-create is far
+    /// faster than the incremental reindex path.
+    Reindex,
+    /// Report store health: counts, schema version, and whether the store
+    /// agrees with the session log.
+    Verify,
 }
 
 #[derive(Debug, Args)]

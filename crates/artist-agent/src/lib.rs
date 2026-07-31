@@ -1,5 +1,6 @@
 //! The Artist agent loop, built on Rig.
 
+pub mod canvas;
 mod capture;
 pub mod compaction;
 mod conversation;
@@ -10,6 +11,7 @@ mod delegate_tests;
 mod fallback;
 pub mod handoff;
 pub mod mcp;
+pub mod memory;
 pub mod openai_responses;
 pub mod profiles;
 mod prompt_config;
@@ -26,8 +28,10 @@ mod steering;
 mod thinking;
 pub mod todo;
 mod tool_prompt;
+pub mod tool_registry;
 
 pub use steering::SteeringHandle;
+pub use tool_registry::ToolRegistryHandle;
 
 use std::sync::Arc;
 
@@ -97,9 +101,10 @@ pub enum PromptEvent {
         /// Structured outcome from the capture hook, when recording is on.
         outcome: Option<ToolOutcomeRecord>,
         duration_ms: Option<u64>,
-        /// Count of image content items in the result (rendered as a marker;
-        /// image payloads ride the event log, not the display stream).
-        images: usize,
+        /// Image content items in the result. Each is already stored in the
+        /// session attachment store, so the display stream carries only a
+        /// digest and the payload rides the log.
+        images: Vec<ToolImage>,
     },
     CompletionUsage {
         total_tokens: u64,
@@ -168,9 +173,23 @@ pub struct SessionHandles {
     /// Harness-owned todo lists, keyed by owner. Lives outside the model
     /// context so it survives compaction and handoff intact.
     pub todos: todo::TodoStore,
+    /// Durable cross-session memory. Distinct from `memory` above, which is
+    /// rig's conversation history for this session: this one outlives it.
+    /// `None` disables the whole subsystem, including the tool.
+    pub durable_memory: Option<memory::MemoryHandle>,
+    /// Driveable surfaces for computer use, and the display they run on.
+    /// `None` disables the subsystem, including the tool.
+    ///
+    /// Lives here rather than in [`ToolContext`] because delegates need it too:
+    /// a subagent permitted to drive a GUI gets its own stage budded off this
+    /// one, and `ToolContext` is a per-turn borrow the main agent alone sees.
+    pub computer: Option<artist_computer::SurfaceRegistry>,
     /// Handoffs already performed in this session, so a resumed session keeps
     /// the provider-private lineage its current profile was running on.
     pub handoff_depth: usize,
+    /// The tools registered for the current attempt, published so surfaces
+    /// outside the loop — a canvas today — invoke exactly what the model can.
+    pub tools: ToolRegistryHandle,
 }
 
 impl Default for SessionHandles {
@@ -189,7 +208,10 @@ impl Default for SessionHandles {
             attachments: None,
             providers: llm_provider::ProviderSet::default(),
             todos: todo::TodoStore::default(),
+            durable_memory: None,
+            computer: None,
             handoff_depth: 0,
+            tools: ToolRegistryHandle::new(),
         }
     }
 }
@@ -213,6 +235,53 @@ impl ChatMessage {
             ChatRole::User => Message::user(&self.content),
             ChatRole::Assistant => Message::assistant(&self.content),
         }
+    }
+}
+
+/// One image a tool returned, after it has been stored.
+///
+/// The display stream carries the digest rather than the bytes: a screenshot is
+/// megabytes, the TUI only ever needs to name it, and the blob is already
+/// durable in the session attachment store by the time this is emitted.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ToolImage {
+    /// Content-addressed id in the session attachment store.
+    pub attachment: String,
+    pub media_type: Option<String>,
+    pub bytes: usize,
+}
+
+/// Store a tool-result image, returning how to name it in the display stream.
+///
+/// Returns `None` when there is no attachment store (an unrecorded run) or the
+/// image is not storable, in which case the caller keeps counting it but has no
+/// digest to show.
+pub(crate) fn store_result_image(
+    image: &rig_core::completion::message::Image,
+    attachments: Option<&artist_session::AttachmentStore>,
+) -> Option<ToolImage> {
+    use rig_core::completion::message::DocumentSourceKind;
+
+    let bytes = match &image.data {
+        // Computed rather than decoded: this is a display label, and decoding a
+        // multi-megabyte screenshot twice to produce it is not worth it.
+        DocumentSourceKind::Base64(data) => {
+            let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+            (data.len() / 4 * 3).saturating_sub(padding)
+        }
+        DocumentSourceKind::Raw(raw) => raw.len(),
+        _ => 0,
+    };
+    match artist_session::store_tool_image(image, attachments?)? {
+        artist_session::ContentBlock::Image {
+            attachment,
+            media_type,
+        } => Some(ToolImage {
+            attachment,
+            media_type,
+            bytes,
+        }),
+        _ => None,
     }
 }
 
@@ -272,6 +341,9 @@ pub struct ToolContext<'a> {
     pub mcp: &'a mcp::McpManager,
     pub extensions: Option<&'a artist_extensions::Manager>,
     pub disabled: &'a [String],
+    /// The canvas server, when one is running. Absent in one-shot and headless
+    /// paths, where the tool is simply not registered.
+    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
 }
 
 /// Sends the small completion used by provider health checks through the same
@@ -601,12 +673,49 @@ where
     {
         content.insert(0, UserContent::text(skill_section));
     }
+    // Recalled memory rides the user turn for the same reason skills do: it is
+    // conditioned on what was just typed, so folding it into the preamble would
+    // break the stable prompt-cache prefix. Bounded so a cold embedding model
+    // can never stall a turn — anything slower than this still reaches the
+    // model through the hook's injection channel on a later completion call.
+    if let Some(durable) = &handles.durable_memory {
+        let recalled = tokio::time::timeout(
+            std::time::Duration::from_millis(750),
+            durable.recall(&input.text),
+        )
+        .await
+        .unwrap_or_default();
+        let section = artist_memory::render(&recalled);
+        if !section.is_empty()
+            && let Message::User { content } = &mut seed_prompt
+        {
+            content.insert(0, UserContent::text(section));
+        }
+    }
+    // Observes the model's own output: schedules recall on a stated decision,
+    // injects what has landed on the next completion call, and captures a fact
+    // when a commit succeeds. Inert when memory is disabled.
+    let memory_writer = handles.durable_memory.as_ref().map(|handle| {
+        handle.writer(
+            handles.recorder.clone(),
+            handles.conversation_id.clone(),
+        )
+    });
+    let memory_hook = memory::MemoryHook::new(memory_writer.clone(), true);
+    // Write trigger 1. A correction is the highest-signal moment for memory —
+    // a durable preference stated out loud — so the user's own words are stored
+    // verbatim rather than paraphrased through the model, which is both more
+    // faithful and free.
+    if let Some(writer) = memory_writer.clone() {
+        memory::capture_correction(writer, &input.text);
+    }
     // Delegate tools execute inside `stream.next()`. A separate channel lets
     // their events wake this outer driver while that future is still pending,
     // instead of buffering the entire child transcript until the tool returns.
     let (subagent_events_tx, mut subagent_events_rx) =
         tokio::sync::mpsc::unbounded_channel::<PromptEvent>();
     let visible_steering = handles.steering.clone();
+    let result_attachments = handles.attachments.as_ref();
     let tool_meta = ToolMeta::default();
     let mcp_tools = mcp.tools().await;
     // Where a fired handoff lands. Shared with the tool for the whole turn so a
@@ -693,11 +802,31 @@ where
                 None,
             )));
         }
+        if let Some(writer) = memory_writer.clone().filter(|_| profile.permits("memory")) {
+            registered.push(tool_prompt::dynamic(memory::MemoryTool::new(writer)));
+        }
+        // Only offered when a surface registry exists. A computer tool with no
+        // way to reach a display would be a mode the model discovers by
+        // failing, which is worse than the tool simply not being there.
+        if let Some(surfaces) = handles.computer.as_ref().filter(|_| profile.permits("computer")) {
+            registered.push(tool_prompt::dynamic(
+                artist_computer::ComputerTool::new(surfaces.clone()),
+            ));
+        }
         if profile.permits("handoff") && profiles.names().len() > 1 {
             registered.push(tool_prompt::dynamic(handoff::HandoffTool::new(
                 pending_handoff.clone(),
                 profiles.clone(),
                 profile.name.clone(),
+            )));
+        }
+        // Only offered when a server is actually running: a canvas tool that
+        // cannot serve a page would be a mode the model discovers by failing.
+        if let Some(server) = tool_context.canvas.filter(|_| profile.permits("canvas")) {
+            registered.push(tool_prompt::dynamic(canvas::CanvasTool::new(
+                tools.project_root().to_path_buf(),
+                std::sync::Arc::clone(server),
+                handles.recorder.clone(),
             )));
         }
         if profile.permits("subagent") {
@@ -723,6 +852,9 @@ where
         registered.retain(|tool| profile.permits(tool.name()));
         tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
         let registered: Vec<_> = registered.into_iter().map(tool_prompt::guard).collect();
+        // Publish what the model actually got, so a canvas cannot reach a tool
+        // the profile denied nor miss one it allowed.
+        handles.tools.publish(registered.clone());
         // Every profile is composed on the shared prompt: the body says what is
         // different about this profile, not what is true of every agent.
         let (base, base_diagnostics) = prompt_config::base_prompt();
@@ -766,6 +898,7 @@ where
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(tool_meta.clone()))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
+            .add_hook(memory_hook.clone())
             .default_max_turns(usize::MAX)
             .build();
 
@@ -957,14 +1090,14 @@ where
                     tool_result,
                     internal_call_id,
                 })) => {
-                    let mut images = 0usize;
+                    let mut images = Vec::new();
                     let content = tool_result
                         .content
                         .into_iter()
                         .filter_map(|item| match item {
                             ToolResultContent::Text(text) => Some(text.text),
-                            ToolResultContent::Image(_) => {
-                                images += 1;
+                            ToolResultContent::Image(image) => {
+                                images.extend(store_result_image(&image, result_attachments));
                                 None
                             }
                             ToolResultContent::Json { value } => Some(value.to_string()),
@@ -1212,6 +1345,7 @@ pub async fn stream_prompt(
             mcp,
             extensions: None,
             disabled: &[],
+            canvas: None,
         },
         handles,
         on_event,

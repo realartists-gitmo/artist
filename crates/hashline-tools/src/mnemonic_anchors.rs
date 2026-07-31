@@ -101,6 +101,84 @@ fn recover_cursor(
         })
 }
 
+/// A circular mnemonic-handle allocator over opaque binding strings.
+///
+/// The file tools bind handles to line-content hashes. Nothing about the
+/// allocator is specific to files, though — any caller that can produce a stable
+/// identity per item gets the same guarantees: a surviving binding keeps its
+/// handle across reconciles, a freed one-word handle is not reissued until the
+/// cursor wraps, and a two-word handle is never silently shortened. That is
+/// exactly the contract an on-screen element needs, so screen anchors and file
+/// anchors mint from one implementation rather than two.
+///
+/// Bindings must be unique within a single [`reconcile`](Self::reconcile) call;
+/// a repeated binding collapses to one handle.
+#[derive(Clone, Debug, Default)]
+pub struct AnchorTable {
+    state: HashMap<String, String>,
+}
+
+impl AnchorTable {
+    /// Restore an allocator from previously persisted state.
+    pub fn from_state(state: HashMap<String, String>) -> Self {
+        Self { state }
+    }
+
+    pub fn state(&self) -> &HashMap<String, String> {
+        &self.state
+    }
+
+    pub fn into_state(self) -> HashMap<String, String> {
+        self.state
+    }
+
+    /// Issue or retain one handle per binding, in order.
+    ///
+    /// `reclaim_dead` frees handles whose bindings are absent from `bindings`.
+    /// Callers that recompute the full item set every time — which is the usual
+    /// case for a screen — should pass `true`, or a handle leaks per destroyed
+    /// item until the word space is exhausted.
+    pub fn reconcile(&mut self, bindings: &[String], reclaim_dead: bool) -> Vec<String> {
+        let (state, visible) = reconcile_handles(&self.state, bindings, reclaim_dead);
+        self.state = state;
+        visible
+    }
+
+    /// The binding an issued handle names, or `None` if it was never issued.
+    ///
+    /// Rejects the allocator's internal cursor keys and anything that is not a
+    /// one- or two-word handle from the word list, so a model that invents a
+    /// plausible-looking token cannot address an item by accident.
+    pub fn binding(&self, handle: &str) -> Option<&str> {
+        if !is_mnemonic_handle_in_set(handle, word_set()) {
+            return None;
+        }
+        self.state.get(handle).map(|packed| binding_full(packed))
+    }
+
+    pub fn is_issued(&self, handle: &str) -> bool {
+        self.binding(handle).is_some()
+    }
+}
+
+/// The two halves of the staleness contract.
+///
+/// Shared so the model sees one wording for one concept whether it mis-anchored
+/// a file edit or a click.
+pub fn not_issued_message(handle: &str, what: &str) -> String {
+    format!(
+        "'{handle}' is not an issued anchor for this {what}. Use only the bare mnemonic token, \
+         exactly as it appeared in the most recent output."
+    )
+}
+
+pub fn stale_anchor_message(handle: &str, what: &str) -> String {
+    format!(
+        "anchor '{handle}' is stale: it no longer resolves to anything current. \
+         Re-read the {what} to get fresh anchors before acting on it."
+    )
+}
+
 /// Reconcile model-facing mnemonic handles with a current file view.
 ///
 /// `existing` maps visible handles to packed hidden bindings. When

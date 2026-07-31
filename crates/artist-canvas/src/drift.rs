@@ -47,8 +47,8 @@ const UNIVERSAL: &[&str] = &["key", "ref", "children", "className", "style", "id
 const KIT: &[(&str, &[&str])] = &[
     ("AppShell", &["title", "subtitle", "actions", "sidebar"]),
     ("Card", &["title", "actions"]),
-    ("Button", &["variant", "size", "onClick", "disabled", "type"]),
-    ("Badge", &["tone", "variant"]),
+    ("Button", &["variant", "tone", "size", "onClick", "disabled", "type", "title"]),
+    ("Badge", &["variant", "tone"]),
     ("Input", &["label", "hint", "value", "onChange", "placeholder", "type", "checked"]),
     ("Select", &["label", "options", "value", "onChange"]),
     ("Checkbox", &["label", "checked", "onChange"]),
@@ -57,15 +57,18 @@ const KIT: &[(&str, &[&str])] = &[
     ("Stack", &["gap", "horizontal"]),
     ("Split", &["initial", "min", "vertical"]),
     ("EmptyState", &["title", "hint", "action"]),
-    ("DataTable", &["rows", "columns", "onRowClick", "empty", "dense"]),
-    ("Plot", &["data", "series", "height", "title", "scales"]),
+    ("DataTable", &["rows", "columns", "onRowClick", "empty", "dense", "height", "filterable"]),
+    ("Plot", &["data", "series", "height", "title", "scales", "kind"]),
     ("Code", &["language", "showLines", "wrap"]),
     ("Diff", &["patch", "language"]),
     ("SchemaForm", &["schema", "value", "onChange", "onSubmit", "submitLabel"]),
     ("Transcript", &["events", "height"]),
     ("ToolLog", &["events", "limit"]),
-    ("Metric", &["label", "value", "tone", "hint"]),
-    ("Alert", &["tone", "title"]),
+    ("Metric", &["label", "value", "variant", "tone", "hint", "trend"]),
+    ("Alert", &["variant", "tone", "title"]),
+    ("Markdown", &[]),
+    ("FileLink", &["path", "line"]),
+    ("Sparkline", &["values", "width", "height", "tone"]),
 ];
 
 /// Utility classes that are a light surface, which reads as a glare on the dark

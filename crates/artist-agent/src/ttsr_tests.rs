@@ -68,6 +68,33 @@ impl rig_core::tool::PortableTool for CountingTool {
     }
 }
 
+/// The same counter behind the `computer` name.
+///
+/// `PortableTool::NAME` is a const, so a tool cannot be registered under two
+/// names; sharing the counter instead means `tool.calls` still answers "did
+/// anything execute?" regardless of which tool the model reached for.
+#[derive(Clone, Default)]
+struct ComputerCountingTool {
+    calls: Arc<AtomicUsize>,
+}
+
+impl rig_core::tool::PortableTool for ComputerCountingTool {
+    const NAME: &'static str = "computer";
+    type Error = Never;
+    type Args = serde_json::Value;
+    type Output = String;
+    fn description(&self) -> String {
+        "drive an application".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn call(&self, _args: serde_json::Value) -> Result<String, Never> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok("acted".into())
+    }
+}
+
 struct RunSummary {
     text: String,
     fired: Vec<Firing>,
@@ -95,7 +122,11 @@ async fn drive(
             false,
             retries_used < retry_budget,
         );
-        let mut builder = AgentBuilder::new(model.clone()).tool(tool.clone());
+        let mut builder = AgentBuilder::new(model.clone())
+            .tool(tool.clone())
+            .tool(ComputerCountingTool {
+                calls: Arc::clone(&tool.calls),
+            });
         if let Some(steering) = steering {
             builder = builder.add_hook(SteeringHook(steering.clone()));
         }
@@ -279,6 +310,97 @@ async fn tool_arg_match_aborts_before_the_tool_executes() {
         "the tool must never execute on an arg match"
     );
     assert_eq!(summary.text, "handled the error instead\n");
+}
+
+/// The end-to-end proof that the computer guardrail works: the shipped built-in
+/// rule, matched against the real argument shape the `computer` tool receives,
+/// aborting before any step of the program runs.
+///
+/// This is what the mandatory `label` buys. The same call written as
+/// `{"click":{"anchor":"kv7"}}` carries no evidence of intent, and nothing here
+/// could fire on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builtin_guardrail_stops_a_destructive_click_before_it_happens() {
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call(
+                "fc_1",
+                "computer",
+                serde_json::json!({
+                    "mode": "do",
+                    "surface": "win:3",
+                    "steps": [{"click": {"anchor": "kv7", "label": "Delete account"}}],
+                    "expect": {"anchor": "kx9", "label": "Account deleted"}
+                }),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("Asking first: this would delete the account.\n"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let handle = RulesHandle::default();
+    let rules = std::sync::Arc::new(artist_rules::matcher::RuleSet::compile(
+        artist_rules::discovery::builtin_rules(),
+    ));
+    let tool = CountingTool::default();
+
+    let summary = drive(&model, &handle, &rules, None, &tool, "clean up my account").await;
+
+    assert_eq!(summary.fired.len(), 1);
+    assert_eq!(
+        summary.fired[0].rule.0, "builtin:computer-destructive-actions",
+        "the shipped guardrail must fire on a destructive label"
+    );
+    assert!(
+        summary.fired[0].matched.contains("Delete"),
+        "the excerpt must show what tripped it: {}",
+        summary.fired[0].matched
+    );
+    assert_eq!(
+        tool.calls.load(Ordering::SeqCst),
+        0,
+        "no step of the program may run"
+    );
+    assert_eq!(summary.text, "Asking first: this would delete the account.\n");
+}
+
+/// The complement: an ordinary action must not trip the guardrail. A rule that
+/// fires on everything is worse than no rule, because it teaches the model to
+/// work around it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_builtin_guardrail_ignores_an_ordinary_click() {
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call(
+                "fc_1",
+                "computer",
+                serde_json::json!({
+                    "mode": "do",
+                    "surface": "win:3",
+                    "steps": [{"click": {"anchor": "kv7", "label": "Compose"}}],
+                    "expect": {"anchor": "kx9", "label": "New message"}
+                }),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        // The tool ran, so the model gets its result and answers.
+        vec![
+            MockStreamEvent::text("Compose window is open.\n"),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let handle = RulesHandle::default();
+    let rules = std::sync::Arc::new(artist_rules::matcher::RuleSet::compile(
+        artist_rules::discovery::builtin_rules(),
+    ));
+    let tool = CountingTool::default();
+
+    let summary = drive(&model, &handle, &rules, None, &tool, "write an email").await;
+
+    assert!(summary.fired.is_empty(), "fired on a harmless click");
+    assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

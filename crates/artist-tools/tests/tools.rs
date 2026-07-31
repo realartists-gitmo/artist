@@ -1,5 +1,5 @@
 use artist_tools::{BashTool, ToolBundle, Workspace};
-use rig_core::tool::PortableTool;
+use rig_core::tool::{IntoToolOutput, PortableTool};
 use serde_json::json;
 
 fn workspace(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, Workspace) {
@@ -14,17 +14,18 @@ fn workspace(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, W
     (root, state, workspace)
 }
 
-async fn call<T: PortableTool<Output = String>>(tool: &T, value: serde_json::Value) -> String
+/// Call a tool and render its output as text.
+///
+/// Generic over the output type rather than pinned to `String`: `read` returns
+/// `ToolOutput` so it can carry real image blocks, and every other built-in
+/// still returns a plain string.
+async fn call<T: PortableTool>(tool: &T, value: serde_json::Value) -> String
 where
     T::Error: std::fmt::Debug,
 {
     let args = serde_json::from_value(value).unwrap();
-    tool.call(args)
-        .await
-        .unwrap()
-        .to_string()
-        .trim_matches('"')
-        .replace("\\n", "\n")
+    let output = tool.call(args).await.unwrap().into_tool_output().unwrap();
+    output.render().trim_matches('"').replace("\\n", "\n")
 }
 
 #[test]
@@ -37,6 +38,48 @@ fn edit_schema_uses_nullable_end_for_strict_tools() {
     assert_eq!(
         replacement["properties"]["end"]["anyOf"],
         json!([{"type":"string"}, {"type":"null"}])
+    );
+}
+
+#[tokio::test]
+async fn read_returns_a_real_image_block() {
+    use rig_core::completion::message::ToolResultContent;
+
+    let (root, _state, workspace) = workspace(&[]);
+    // A 1x1 PNG.
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(root.path().join("shot.png"), png).unwrap();
+
+    let tools = ToolBundle::new(workspace);
+    let args = serde_json::from_value(json!({"path":"shot.png"})).unwrap();
+    let output = tools.read.call(args).await.unwrap();
+
+    let blocks = output.as_content();
+    assert_eq!(blocks.len(), 1);
+    let ToolResultContent::Image(image) = blocks.first_ref() else {
+        panic!("read must return a real image block, not a description: {blocks:?}");
+    };
+    assert_eq!(
+        image.media_type,
+        Some(rig_core::completion::message::ImageMediaType::PNG)
+    );
+}
+
+#[tokio::test]
+async fn read_declines_to_inline_a_format_no_model_accepts() {
+    let (root, _state, workspace) = workspace(&[]);
+    std::fs::write(root.path().join("old.bmp"), b"BM not really a bitmap").unwrap();
+    let tools = ToolBundle::new(workspace);
+    let output = call(&tools.read, json!({"path":"old.bmp"})).await;
+    assert!(
+        output.contains("cannot be sent to a model"),
+        "unsupported formats must say so plainly: {output}"
     );
 }
 

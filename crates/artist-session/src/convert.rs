@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use rig_core::OneOrMany;
 use rig_core::completion::message::{
-    AssistantContent, DocumentSourceKind, Image, ImageMediaType, Reasoning, ReasoningContent, Text,
-    ToolCall, ToolFunction, ToolResultContent, UserContent,
+    AssistantContent, DocumentSourceKind, Image, ImageMediaType, Message, Reasoning,
+    ReasoningContent, Text, ToolCall, ToolFunction, ToolResultContent, UserContent,
 };
 
 use crate::attachments::AttachmentStore;
@@ -169,6 +169,171 @@ pub fn blocks_to_user(
             other => anyhow::bail!("content block {other:?} is not valid user content"),
         })
         .collect()
+}
+
+/// Key under which an externalized image carries its attachment digest.
+///
+/// It rides in `additional_params`, which is `#[serde(flatten)]` on rig's
+/// `Image`, so an externalized message round-trips through rig's own serde with
+/// no schema change to [`ConversationMessages`](crate::event::ConversationMessages).
+const ATTACHMENT_PARAM: &str = "artist_attachment";
+
+/// Replace inline image payloads with attachment references, storing the bytes.
+///
+/// rig commits tool results verbatim, so an inline base64 screenshot would land
+/// in `events.jsonl`, be re-read on every load, be copied whole on fork, and be
+/// re-serialized in full by every subsequent reset snapshot. Externalizing at
+/// the memory boundary keeps the log proportional to the number of *distinct*
+/// images rather than to how long the session runs.
+///
+/// Images whose bytes cannot be stored are left inline: degrading to a
+/// reference we cannot resolve would lose content, and staying inline only
+/// costs space.
+pub fn externalize_images(messages: &mut [Message], attachments: &AttachmentStore) {
+    visit_images(messages, &mut |image| {
+        if attachment_digest(image).is_some() {
+            return None;
+        }
+        let bytes = match &image.data {
+            DocumentSourceKind::Base64(data) => base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .ok()?,
+            DocumentSourceKind::Raw(bytes) => bytes.clone(),
+            _ => return None,
+        };
+        let digest = attachments.put(&bytes).ok()?;
+        image.data = DocumentSourceKind::Unknown;
+        let params = image
+            .additional_params
+            .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let Some(map) = params.as_object_mut() {
+            map.insert(ATTACHMENT_PARAM.to_owned(), digest.into());
+        }
+        None
+    });
+}
+
+/// Restore inline payloads from attachment references.
+///
+/// A missing blob degrades to a text placeholder rather than an error: a lost
+/// attachment must never make a session unopenable.
+pub fn rehydrate_images(messages: &mut [Message], attachments: &AttachmentStore) {
+    visit_images(messages, &mut |image| {
+        let digest = attachment_digest(image)?;
+        let Ok(bytes) = attachments.get(&digest) else {
+            return Some(format!("[image unavailable img:{digest}]"));
+        };
+        image.data =
+            DocumentSourceKind::Base64(base64::engine::general_purpose::STANDARD.encode(bytes));
+        if let Some(map) = image
+            .additional_params
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            map.remove(ATTACHMENT_PARAM);
+        }
+        normalize_params(&mut image.additional_params);
+        None
+    });
+}
+
+/// Every attachment digest any of these events refers to.
+///
+/// Deliberately scans **all** events, including ones a rewind mask hides: the
+/// log is append-only and a mask can be undone, so a blob referenced only by
+/// masked history is still live. Walks the payload JSON generically rather than
+/// matching each event kind, so a new kind that carries an image cannot silently
+/// have its blobs pruned out from under it.
+pub fn referenced_attachments(events: &[crate::Envelope]) -> std::collections::HashSet<String> {
+    fn walk(value: &serde_json::Value, found: &mut std::collections::HashSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    // `attachment` is the legacy ContentBlock::Image field;
+                    // `artist_attachment` is the externalized-image param.
+                    if (key == "attachment" || key == ATTACHMENT_PARAM)
+                        && let Some(digest) = item.as_str()
+                    {
+                        found.insert(digest.to_owned());
+                    }
+                    walk(item, found);
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, found)),
+            _ => {}
+        }
+    }
+
+    let mut found = std::collections::HashSet::new();
+    for envelope in events {
+        walk(&envelope.payload, &mut found);
+    }
+    found
+}
+
+/// A one-line display label for an image, naming its attachment when it has one.
+///
+/// The digest is the affordance: the blob lives at
+/// `<session>/attachments/<sha>`, so a reader can go look at what the model saw.
+pub(crate) fn image_marker(image: &Image) -> String {
+    match attachment_digest(image) {
+        Some(digest) => format!("[image img:{}]", &digest[..digest.len().min(12)]),
+        None => "[image]".to_owned(),
+    }
+}
+
+fn attachment_digest(image: &Image) -> Option<String> {
+    image
+        .additional_params
+        .as_ref()?
+        .get(ATTACHMENT_PARAM)?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// Visit every image reachable from a message, in user content, assistant
+/// content, and tool results alike. A visitor returning `Some(text)` replaces
+/// the image with a text block of the enclosing content type.
+fn visit_images(messages: &mut [Message], visit: &mut impl FnMut(&mut Image) -> Option<String>) {
+    for message in messages {
+        match message {
+            Message::System { .. } => {}
+            Message::Assistant { content, .. } => {
+                for item in content.iter_mut() {
+                    let replacement = match item {
+                        AssistantContent::Image(image) => visit(image),
+                        _ => None,
+                    };
+                    if let Some(text) = replacement {
+                        *item = AssistantContent::Text(Text::new(text));
+                    }
+                }
+            }
+            Message::User { content } => {
+                for item in content.iter_mut() {
+                    match item {
+                        UserContent::Image(image) => {
+                            if let Some(text) = visit(image) {
+                                *item = UserContent::Text(Text::new(text));
+                            }
+                        }
+                        UserContent::ToolResult(result) => {
+                            for block in result.content.iter_mut() {
+                                let replacement = match block {
+                                    ToolResultContent::Image(image) => visit(image),
+                                    _ => None,
+                                };
+                                if let Some(text) = replacement {
+                                    *block = ToolResultContent::text(text);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn reasoning_to_blocks(reasoning: &Reasoning) -> Option<Vec<ContentBlock>> {
@@ -423,6 +588,195 @@ mod tests {
         assert!(matches!(blocks[0], ContentBlock::Opaque { .. }));
         let rebuilt = blocks_to_assistant(&blocks, &attachments).unwrap();
         assert_eq!(rebuilt, vec![content]);
+    }
+
+    fn png(bytes: &[u8]) -> Image {
+        Image {
+            data: DocumentSourceKind::Base64(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            ),
+            media_type: Some(ImageMediaType::PNG),
+            detail: None,
+            additional_params: None,
+        }
+    }
+
+    fn tool_result_with(content: Vec<ToolResultContent>) -> Message {
+        Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(
+                rig_core::completion::message::ToolResult {
+                    id: "fc_1".into(),
+                    call_id: None,
+                    content: OneOrMany::many(content).unwrap(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn tool_result_images_externalize_and_rehydrate_exactly() {
+        let (_dir, attachments) = store();
+        let original = vec![tool_result_with(vec![
+            ToolResultContent::text("<observation surface=\"win:3\">"),
+            ToolResultContent::Image(png(b"fake screenshot bytes")),
+        ])];
+
+        let mut messages = original.clone();
+        externalize_images(&mut messages, &attachments);
+
+        let wire = serde_json::to_string(&messages).unwrap();
+        assert!(
+            !wire.contains(
+                &base64::engine::general_purpose::STANDARD.encode(b"fake screenshot bytes")
+            ),
+            "externalized messages must carry no inline base64: {wire}"
+        );
+        assert_eq!(
+            wire.matches(ATTACHMENT_PARAM).count(),
+            1,
+            "exactly one attachment reference per image: {wire}"
+        );
+
+        rehydrate_images(&mut messages, &attachments);
+        assert_eq!(messages, original, "externalize then rehydrate is exact");
+
+        // And it survives the serde round trip the event log performs. Compared
+        // per-image rather than whole-message: rig's `additional_params` are
+        // `#[serde(flatten)]`, so a `None` comes back as `Some({})` on every
+        // text block regardless of images — the pre-existing quirk that
+        // `normalize_params` documents, which `native_conversation` also does
+        // not correct.
+        let mut messages = original.clone();
+        externalize_images(&mut messages, &attachments);
+        let mut restored: Vec<Message> = serde_json::from_str(&wire).unwrap();
+        rehydrate_images(&mut restored, &attachments);
+        assert_eq!(images_of(&restored), images_of(&original));
+    }
+
+    fn images_of(messages: &[Message]) -> Vec<Image> {
+        let mut found = Vec::new();
+        let mut messages = messages.to_vec();
+        visit_images(&mut messages, &mut |image| {
+            found.push(image.clone());
+            None
+        });
+        found
+    }
+
+    #[test]
+    fn user_and_assistant_images_externalize_and_rehydrate() {
+        let (_dir, attachments) = store();
+        let original = vec![
+            Message::User {
+                content: OneOrMany::many(vec![
+                    UserContent::Text(Text::new("look")),
+                    UserContent::Image(png(b"user image")),
+                ])
+                .unwrap(),
+            },
+            Message::Assistant {
+                id: Some("msg_1".into()),
+                content: OneOrMany::one(AssistantContent::Image(png(b"assistant image"))),
+            },
+        ];
+
+        let mut messages = original.clone();
+        externalize_images(&mut messages, &attachments);
+        assert!(!serde_json::to_string(&messages).unwrap().contains("dXNlciBpbWFnZQ"));
+        rehydrate_images(&mut messages, &attachments);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn externalizing_twice_is_idempotent() {
+        let (_dir, attachments) = store();
+        let original = vec![tool_result_with(vec![ToolResultContent::Image(png(b"once"))])];
+
+        let mut messages = original.clone();
+        externalize_images(&mut messages, &attachments);
+        let after_first = messages.clone();
+        externalize_images(&mut messages, &attachments);
+        assert_eq!(
+            messages, after_first,
+            "an already-externalized image must not be re-stored or double-wrapped"
+        );
+
+        rehydrate_images(&mut messages, &attachments);
+        assert_eq!(messages, original);
+    }
+
+    #[test]
+    fn identical_images_share_one_attachment() {
+        let (_dir, attachments) = store();
+        let mut messages = vec![tool_result_with(vec![
+            ToolResultContent::Image(png(b"same bytes")),
+            ToolResultContent::Image(png(b"same bytes")),
+        ])];
+        externalize_images(&mut messages, &attachments);
+        let stored = std::fs::read_dir(attachments.dir()).unwrap().count();
+        assert_eq!(stored, 1, "content addressing must deduplicate identical frames");
+    }
+
+    #[test]
+    fn a_missing_blob_degrades_to_text_rather_than_failing() {
+        let (_dir, attachments) = store();
+        let mut messages = vec![tool_result_with(vec![
+            ToolResultContent::text("observation"),
+            ToolResultContent::Image(png(b"will be deleted")),
+        ])];
+        externalize_images(&mut messages, &attachments);
+
+        for entry in std::fs::read_dir(attachments.dir()).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        rehydrate_images(&mut messages, &attachments);
+
+        let Message::User { content } = &messages[0] else {
+            panic!("expected a user message");
+        };
+        let UserContent::ToolResult(result) = content.first_ref() else {
+            panic!("expected a tool result");
+        };
+        assert_eq!(result.content.len(), 2, "arity must be preserved");
+        let placeholder = result.content.last_ref().as_text().unwrap();
+        assert!(
+            placeholder.starts_with("[image unavailable img:"),
+            "a lost attachment must never make a session unopenable: {placeholder}"
+        );
+    }
+
+    #[test]
+    fn referenced_attachments_finds_both_encodings() {
+        let (_dir, attachments) = store();
+        let mut messages = vec![tool_result_with(vec![ToolResultContent::Image(png(
+            b"externalized",
+        ))])];
+        externalize_images(&mut messages, &attachments);
+        let externalized = attachments.put(b"externalized").unwrap();
+        let legacy = attachments.put(b"legacy").unwrap();
+
+        let envelope = |payload: serde_json::Value| crate::Envelope {
+            v: 1,
+            seq: 1,
+            ts: 0,
+            session: "s".into(),
+            run: None,
+            lineage: "main".into(),
+            kind: "conversation.messages".into(),
+            payload,
+        };
+        let events = vec![
+            envelope(serde_json::json!({ "messages": messages })),
+            // The legacy ContentBlock::Image encoding must be found too.
+            envelope(serde_json::json!({
+                "blocks": [{ "type": "image", "attachment": legacy, "media_type": "png" }]
+            })),
+        ];
+
+        let found = referenced_attachments(&events);
+        assert!(found.contains(&externalized), "missed artist_attachment");
+        assert!(found.contains(&legacy), "missed legacy attachment field");
+        assert_eq!(found.len(), 2);
     }
 
     #[test]

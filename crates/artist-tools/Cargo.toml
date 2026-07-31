@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+base64 = "0.23"
 dashmap = "6"
 dirs = "6"
 fff-search = "0.10.1"

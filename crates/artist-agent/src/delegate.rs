@@ -426,12 +426,25 @@ impl Delegate {
         let recorder = self.handles.recorder.child_lineage(&actor);
         recorder.record(DelegateStarted {
             prompt: prompt.clone(),
-            read_only: !["bash", "edit", "write"]
+            // `computer` counts as write access: a subagent that can drive a
+            // GUI can do anything a person at that keyboard could, so the log
+            // must not record it as read-only.
+            read_only: !["bash", "edit", "write", "computer"]
                 .into_iter()
                 .any(|tool| role.permits(tool)),
             fork,
             background: run.background,
         });
+        // Budded off the parent's, not shared with it: this delegate gets its
+        // own display, session bus and browser profile, and they are torn down
+        // with it. Lazy, so a delegate that never touches a GUI never starts a
+        // compositor — which is most of them.
+        let child_computer = self
+            .handles
+            .computer
+            .as_ref()
+            .map(artist_computer::SurfaceRegistry::for_delegate);
+
         let registered_tools = || {
             let mut tools: Vec<PortableDynamicTool> = Vec::new();
             if role.permits("read") {
@@ -465,6 +478,19 @@ impl Delegate {
             }
             if role.permits("write") {
                 tools.push(crate::tool_prompt::dynamic(child_tools.write.clone()));
+            }
+            // A subagent driving a GUI gets a display of its own, never the
+            // parent's: one stage is one seat, and siblings sharing it would
+            // serialize behind the input lease into uselessness. Whether a
+            // subagent may do this at all is a profile decision like any other
+            // — the read-only built-ins deny it through their allow list, and a
+            // project profile can grant it deliberately.
+            if let Some(surfaces) = &child_computer
+                && role.permits("computer")
+            {
+                tools.push(crate::tool_prompt::dynamic(
+                    artist_computer::ComputerTool::new(surfaces.clone()),
+                ));
             }
             crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
             let guarded: Vec<rig_core::tool::PortableDynamicTool> =
@@ -693,14 +719,17 @@ impl Delegate {
                         tool_result,
                         internal_call_id,
                     })) => {
-                        let mut images = 0usize;
+                        let mut images = Vec::new();
                         let content = tool_result
                             .content
                             .into_iter()
                             .filter_map(|item| match item {
                                 ToolResultContent::Text(text) => Some(text.text),
-                                ToolResultContent::Image(_) => {
-                                    images += 1;
+                                ToolResultContent::Image(image) => {
+                                    images.extend(crate::store_result_image(
+                                        &image,
+                                        self.handles.attachments.as_ref(),
+                                    ));
                                     None
                                 }
                                 ToolResultContent::Json { value } => Some(value.to_string()),

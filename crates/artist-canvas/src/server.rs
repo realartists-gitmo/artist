@@ -790,6 +790,23 @@ async fn serve_rpc(
             ok(serde_json::json!({"ok": true}))
         }
 
+        "canvas.markdown" => {
+            let source = params.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            ok(serde_json::json!({"html": crate::markdown::render(source)}))
+        }
+
+        "canvas.edit" => {
+            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+            let line = params
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .map(|line| line as u32);
+            match crate::editor::open(&inner.project, path, line) {
+                Ok(program) => ok(serde_json::json!({"ok": true, "editor": program})),
+                Err(error) => bad(&error.to_string()),
+            }
+        }
+
         "canvas.context" => ok(inner.host.context()),
 
         "canvas.highlight" => {

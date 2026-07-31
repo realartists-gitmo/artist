@@ -63,6 +63,17 @@ pub enum SessionEvent {
     HandoffPerformed(HandoffPerformed),
     TodoUpdated(TodoUpdated),
     ProviderContext(ProviderContext),
+    CanvasCreated(CanvasCreated),
+    CanvasOpened(CanvasOpened),
+    CanvasState(CanvasState),
+    AskPosted(AskPosted),
+    AskAnswered(AskAnswered),
+    MemoryWritten(MemoryWritten),
+    ComputerStageOpened(ComputerStageOpened),
+    ComputerStageClosed(ComputerStageClosed),
+    ComputerObserved(ComputerObserved),
+    ComputerActed(ComputerActed),
+    ComputerElided(ComputerElided),
     /// Forward-compat: a kind this binary does not understand.
     Unknown {
         kind: String,
@@ -142,7 +153,179 @@ event_kinds!(
     (HandoffPerformed, HandoffPerformed, "handoff.performed"),
     (TodoUpdated, TodoUpdated, "todo.updated"),
     (ProviderContext, ProviderContext, "provider.context.v1"),
+    (CanvasCreated, CanvasCreated, "canvas.created"),
+    (CanvasOpened, CanvasOpened, "canvas.opened"),
+    (CanvasState, CanvasState, "canvas.state"),
+    (AskPosted, AskPosted, "ask.posted"),
+    (AskAnswered, AskAnswered, "ask.answered"),
+    (MemoryWritten, MemoryWritten, "memory.written"),
+    (
+        ComputerStageOpened,
+        ComputerStageOpened,
+        "computer.stage_opened"
+    ),
+    (
+        ComputerStageClosed,
+        ComputerStageClosed,
+        "computer.stage_closed"
+    ),
+    (ComputerObserved, ComputerObserved, "computer.observed"),
+    (ComputerActed, ComputerActed, "computer.acted"),
+    (ComputerElided, ComputerElided, "computer.elided"),
 );
+
+/// An isolated graphical session started on this machine.
+///
+/// Recorded so a transcript shows when the agent acquired a display of its own —
+/// the moment its blast radius changed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerStageOpened {
+    pub stage: String,
+    /// Which `Stage` implementation backs it (`wayland`, `pty`).
+    pub backend: String,
+    /// The stage's own display, never the user's.
+    pub display: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerStageClosed {
+    pub stage: String,
+    pub reason: String,
+}
+
+/// One observation of a surface.
+///
+/// Deliberately metadata only: the node text already reaches the model as the
+/// tool result, and duplicating it here would make the log grow with every look
+/// at an unchanged screen. `image` names the frame in the attachment store.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerObserved {
+    /// Correlates to the tool row, the attachment, and `artist computer log`.
+    pub internal_call_id: String,
+    pub surface: String,
+    pub epoch: u64,
+    pub rung: u8,
+    /// False for a delta observation.
+    pub full: bool,
+    pub nodes: u32,
+    pub bytes: u64,
+    pub image: Option<String>,
+}
+
+/// One step of an action program, as executed.
+///
+/// `label` is what the model claimed the target was called and `resolved_name`
+/// is what it actually was: the pair is the audit trail for the cross-check, and
+/// a mismatch is the single most useful thing to see when a run goes wrong.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerStep {
+    pub action: String,
+    pub anchor: Option<String>,
+    pub label: Option<String>,
+    pub resolved_name: Option<String>,
+    /// The text typed or the chord pressed. Load-bearing for `distill`: a step
+    /// without it cannot be rebuilt, and replays as a silent no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    pub outcome: String,
+}
+
+/// An action program ran against a surface. This is the distillation input:
+/// the `(anchor, action, expect)` triples here are what a replayable macro is
+/// built from.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerActed {
+    pub internal_call_id: String,
+    pub surface: String,
+    pub epoch: u64,
+    pub steps: Vec<ComputerStep>,
+    pub settled_ms: Option<u64>,
+    pub expect: Option<String>,
+    pub expect_met: Option<bool>,
+    /// Index of the step that failed, if the program stopped early.
+    pub failed_step: Option<u32>,
+}
+
+/// Stale observations were replaced with stubs to reclaim model context.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerElided {
+    pub count: u32,
+    pub bytes_saved: u64,
+}
+
+/// A durable memory was recorded, or an existing one retired.
+///
+/// The memory database is a rebuildable projection, not the system of record:
+/// its backend commits without syncing the WAL, and the durability opt-in does
+/// not exist in the pinned release. Recording the write here is what makes the
+/// store reconstructible, and — because replay runs over `visible_events` — is
+/// also what makes memory rewind-aware without any extra machinery, exactly as
+/// with [`TodoUpdated`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MemoryWritten {
+    pub fact_id: i64,
+    /// `global` for preferences that follow the user between checkouts,
+    /// `project` for facts scoped to this repository.
+    pub scope: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    /// The prose the model actually sees on recall.
+    pub text: String,
+    /// Which write point produced this: `tool`, `correction`, `output`, `commit`.
+    pub origin: String,
+    /// Set when this write retires an earlier fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<i64>,
+}
+
+/// A canvas was scaffolded into the project.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CanvasCreated {
+    pub slug: String,
+    pub title: String,
+    /// Which starter it was grown from, for the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// A canvas was handed to the user.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CanvasOpened {
+    pub slug: String,
+    /// Deliberately not the URL: it carries the session key, and an event log
+    /// is copied into forks and read by tooling.
+    #[serde(default)]
+    pub port: u16,
+}
+
+/// A canvas's shared state after a write.
+///
+/// A snapshot rather than a delta, mirroring `todo.updated`: replay is
+/// last-writer-wins per canvas, which keeps rewind correct without folding an
+/// edit history. Like todos, this is harness-owned and survives the context
+/// wipe a handoff performs — a canvas is a durable app, not conversation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CanvasState {
+    pub slug: String,
+    pub rev: u64,
+    pub entries: serde_json::Value,
+}
+
+/// A question was put to the user.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AskPosted {
+    pub question: crate::ask::Question,
+}
+
+/// ...and answered, or dismissed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AskAnswered {
+    pub answer: crate::ask::Answer,
+    /// Which surface the user answered on — `tui` or `canvas:<slug>`.
+    #[serde(default)]
+    pub surface: String,
+}
 
 /// A durable, provider-private context snapshot. Values are deliberately
 /// opaque: projections must never interpret or render them.

@@ -7,10 +7,13 @@ members = [
     "crates/artist-agent",
     "crates/artist-tools",
     "crates/artist-session",
+    "crates/artist-memory",
+    "crates/artist-logic",
     "crates/artist-rules",
     "crates/hashline-tools",
     "crates/artist-extensions",
     "crates/artist-canvas",
+    "crates/artist-computer",
 ]
 resolver = "3"
 

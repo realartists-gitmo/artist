@@ -16,3 +16,14 @@ tw = "test --release --workspace"
 # kills the daemon mid-compile (zccache#666).
 ZCCACHE_WEDGE_RECV_TIMEOUT_SECS = "1800"
 ZCCACHE_COMPILE_PRIORITY = "normal"
+# mnestic-rocks 0.1.10 (the memory store's RocksDB backend) vendors a RocksDB
+# whose headers rely on <cstdint> arriving transitively. GCC 13 stopped doing
+# that, so a cold build dies with a wall of "uint64_t has not been declared" in
+# rocksdb/db/blob/blob_file_meta.h. Setting it here rather than expecting every
+# developer to remember an env var, because artist-agent depends on
+# artist-memory and so this breaks *every* cold build in the workspace.
+#
+# Deliberately not CFLAGS: forcing this include into C compilation breaks
+# zstd-sys. Cargo only applies this when the variable is not already set, so an
+# explicit CXXFLAGS in your shell still wins.
+CXXFLAGS = "-include cstdint"
