@@ -127,11 +127,17 @@ impl Profile {
     /// MCP and extension tools are addressable (`mcp:github/*`).
     ///
     /// This is a bloat and steering control, not a security boundary.
+    ///
+    /// `handoff` and `todo` are exempt from `allow`. They drive the harness
+    /// rather than the world — neither can read, write, or run anything — and
+    /// sweeping them up in a capability allow-list silently breaks the
+    /// plan-then-hand-off flow profiles exist for. `deny` still removes them.
     pub fn permits(&self, tool: &str) -> bool {
-        let allowed = self
-            .allow
-            .as_ref()
-            .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(tool)));
+        let allowed = HARNESS_TOOLS.contains(&tool)
+            || self
+                .allow
+                .as_ref()
+                .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(tool)));
         allowed && !self.deny.iter().any(|pattern| pattern.is_match(tool))
     }
 }
@@ -190,6 +196,11 @@ struct Raw {
 }
 
 const DEFAULT_MAX_CONCURRENT: usize = 4;
+
+/// Session-control tools, governed by `deny` but never narrowed away by
+/// `allow`. `subagent` is deliberately not here: delegating expands the
+/// capability surface, so it stays something a profile opts into.
+const HARNESS_TOOLS: [&str; 2] = ["handoff", "todo"];
 
 impl Profiles {
     pub fn discover(project: &Path) -> Self {
@@ -495,6 +506,23 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
+    /// The headline workflow is "plan, then hand to a worker". An allow-list
+    /// that omits `handoff` and `todo` silently makes that impossible.
+    #[test]
+    fn read_only_builtins_can_still_hand_off_and_track_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = Profiles::discover_from(dir.path(), None);
+        for name in ["explorer", "planner", "reviewer"] {
+            let profile = profiles.get(name).unwrap();
+            assert!(profile.permits("handoff"), "{name} cannot hand off");
+            assert!(profile.permits("todo"), "{name} cannot track work");
+            assert!(!profile.permits("write"), "{name} must stay read-only");
+            assert!(!profile.permits("bash"), "{name} must stay read-only");
+            // Delegating expands the capability surface, so it stays opt-in.
+            assert!(!profile.permits("subagent"), "{name} should not delegate");
+        }
+    }
+
     #[test]
     fn builtins_are_available_without_configuration() {
         let dir = tempfile::tempdir().unwrap();
@@ -598,6 +626,20 @@ mod tests {
         assert!(child.permits("read"));
         assert!(!child.permits("bash"));
         assert_eq!(child.instructions, "child prompt");
+    }
+
+    /// `deny` still reaches the harness tools; only `allow` skips them.
+    #[test]
+    fn deny_still_removes_a_harness_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join(".artist/profiles/terminal.md"),
+            "---\ndescription: t\ntools:\n  deny: [handoff]\n---\nprompt\n",
+        );
+        let profiles = Profiles::discover_from(dir.path(), None);
+        let profile = profiles.get("terminal").unwrap();
+        assert!(!profile.permits("handoff"));
+        assert!(profile.permits("todo"));
     }
 
     #[test]
