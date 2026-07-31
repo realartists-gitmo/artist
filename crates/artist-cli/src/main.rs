@@ -45,13 +45,16 @@ use store::{ProviderStore, config_path};
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
+    let herdr_runtime = herdr::Runtime::detect();
+    let result = run(herdr_runtime.lifecycle()).await;
+    herdr_runtime.shutdown().await;
+    if let Err(error) = result {
         eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
+async fn run(herdr: herdr::Lifecycle) -> Result<()> {
     let mut cli = Cli::parse();
     enter_positional_project(&mut cli)?;
     let path = config_path()?;
@@ -76,6 +79,7 @@ async fn run() -> Result<()> {
             &mcp,
             &extensions,
             &extension_control,
+            &herdr,
         )
         .await;
     }
@@ -184,6 +188,7 @@ async fn run() -> Result<()> {
                     rules_engine: &rules_engine,
                     rules_handle: &rules_handle,
                     settings: &effective,
+                    herdr: &herdr,
                 },
                 resumed,
                 cli.prompt,
@@ -267,6 +272,7 @@ async fn execute_prompt(
     mcp: &artist_agent::mcp::McpManager,
     extensions: &Arc<artist_extensions::Manager>,
     extension_control: &extension_control::ExtensionControl,
+    herdr: &herdr::Lifecycle,
 ) -> Result<()> {
     let selected = default_index(store)?;
     if refresh_if_needed(&mut store.providers[selected]).await? {
@@ -415,6 +421,7 @@ async fn execute_prompt(
             mcp,
             extensions,
             extension_control,
+            herdr,
         ))
         .await?;
     }

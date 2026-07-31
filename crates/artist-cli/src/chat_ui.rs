@@ -386,6 +386,7 @@ struct ChatContext<'a> {
     rules_handle: &'a RulesHandle,
     /// Resolved layered settings: model/reasoning overrides and denied tools.
     settings: &'a crate::settings::EffectiveSettings,
+    herdr: &'a crate::herdr::Lifecycle,
 }
 
 pub struct ChatResources<'a> {
@@ -398,6 +399,7 @@ pub struct ChatResources<'a> {
     pub rules_engine: &'a RulesEngine,
     pub rules_handle: &'a RulesHandle,
     pub settings: &'a crate::settings::EffectiveSettings,
+    pub herdr: &'a crate::herdr::Lifecycle,
 }
 
 /// Compact inline viewport height: input(1) + borders(2) + status(2). The
@@ -526,6 +528,7 @@ pub async fn run(
                     rules_engine: resources.rules_engine,
                     rules_handle: resources.rules_handle,
                     settings: resources.settings,
+                    herdr: resources.herdr,
                 },
                 resumed,
                 initial_prompt,
