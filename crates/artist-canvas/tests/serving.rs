@@ -184,3 +184,68 @@ async fn a_compile_error_is_captured_for_the_model_and_shown_on_the_page() {
     assert_eq!(detail["path"], "main.jsx");
     assert_eq!(detail["line"], 1);
 }
+
+/// The slug is a query parameter, so it is attacker-controlled even from a page
+/// holding the key. Every RPC handler joins it onto a path or uses it to pick a
+/// permission set, so an unresolved slug was an arbitrary-directory write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_slug_cannot_escape_the_canvas_directory() {
+    let project = Project::new("slug");
+    project.canvas("demo", "", ENTRY);
+
+    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let url = server.url("demo");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
+    let http = reqwest::Client::new();
+
+    let escape = project.root.join("ESCAPED");
+    for slug in ["../../../ESCAPED", "..%2F..%2F..%2FESCAPED", "demo/../../.."] {
+        let response = http
+            .post(format!(
+                "http://{}/_artist/rpc?k={key}&slug={slug}",
+                server.addr()
+            ))
+            .header("origin", format!("http://{}", server.addr()))
+            .json(&serde_json::json!({
+                "method": "canvas.state.set",
+                "params": {"entries": {"pwned": true}},
+            }))
+            .send()
+            .await
+            .expect("post");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "slug `{slug}` was accepted"
+        );
+    }
+    assert!(!escape.join("state.json").exists(), "a file was written outside the canvas");
+    assert!(!escape.exists(), "a directory was created outside the canvas");
+}
+
+/// A canvas naming a more permissive sibling must not borrow its grants.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_canvas_cannot_borrow_another_canvases_permissions() {
+    let project = Project::new("borrow");
+    project.canvas("locked", "", ENTRY);
+    project.canvas("open-one", "[permissions]\nallow = [\"bash\"]", ENTRY);
+
+    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let url = server.url("locked");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/locked/").unwrap()];
+
+    // The detached host refuses everything, so a 403 here proves the request
+    // reached the permission gate under the slug it claimed rather than being
+    // silently resolved to the permissive sibling.
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{}/_artist/rpc?k={key}&slug=open-one",
+            server.addr()
+        ))
+        .header("origin", format!("http://{}", server.addr()))
+        .json(&serde_json::json!({"method": "canvas.call", "params": {"tool": "bash"}}))
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+}

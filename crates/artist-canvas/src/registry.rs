@@ -1,8 +1,12 @@
 //! Finding canvases on disk.
 //!
-//! Canvases live at `<project>/.artist/canvas/<slug>/`, which is already
-//! gitignored — so they persist across sessions without being committed by
-//! accident, and a team that wants to share one can un-ignore it deliberately.
+//! Canvases live at `<project>/.artist/canvas/<slug>/`, and are meant to be
+//! committable: a canvas the agent grew is worth sharing with a team.
+//!
+//! Only artist's own repository ignores `.artist/`, so nothing here may assume
+//! a user's project does. Scaffolding writes a `.gitignore` covering the files
+//! the harness rewrites on every interaction, leaving the canvas itself
+//! trackable and the user's `git status` clean.
 
 use std::path::{Path, PathBuf};
 
@@ -101,6 +105,7 @@ pub fn scaffold(
         });
     }
     std::fs::create_dir_all(&root)?;
+    ignore_generated_files(&project.join(CANVAS_DIR))?;
 
     let manifest = crate::templates::manifest_for(title, template);
     std::fs::write(root.join(MANIFEST_FILE), manifest.render())?;
@@ -117,6 +122,23 @@ pub fn scaffold(
         root,
         manifest,
     })
+}
+
+/// Keep the harness's own output out of the user's diffs.
+///
+/// A canvas is meant to be committable — that is the point of it being durable
+/// and project-local — but `state.json` is rewritten on every click, so leaving
+/// it tracked would put the user's UI interactions in `git status`. Written
+/// once, next to the canvases, and never overwritten if it already exists.
+fn ignore_generated_files(canvas_root: &Path) -> std::io::Result<()> {
+    let ignore = canvas_root.join(".gitignore");
+    if ignore.exists() {
+        return Ok(());
+    }
+    std::fs::write(
+        ignore,
+        "# Written by artist on every canvas interaction.\nstate.json\n*.json.tmp\n",
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +243,24 @@ mod tests {
 
     /// A canvas is durable. Recreating one is almost always the model having
     /// forgotten it already exists, not a deliberate reset.
+    /// `.artist/` is gitignored in artist's own repo, not in a user's project,
+    /// so scaffolding has to keep its own churn out of their diffs.
+    #[test]
+    fn scaffolding_keeps_generated_state_out_of_git() {
+        let project = temp();
+        let template = crate::templates::find("blank").expect("template");
+        scaffold(&project, "perf", "Perf", template).expect("scaffold");
+
+        let ignore = project.join(CANVAS_DIR).join(".gitignore");
+        let contents = std::fs::read_to_string(&ignore).expect("gitignore written");
+        assert!(contents.contains("state.json"), "{contents}");
+
+        // A user's own edits to it survive a second scaffold.
+        std::fs::write(&ignore, "mine\n").expect("edit");
+        scaffold(&project, "other", "Other", template).expect("second");
+        assert_eq!(std::fs::read_to_string(&ignore).expect("read"), "mine\n");
+    }
+
     #[test]
     fn scaffolding_refuses_to_overwrite_an_existing_canvas() {
         let project = temp();

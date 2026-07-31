@@ -577,7 +577,19 @@ async fn serve_rpc(
         return StatusCode::BAD_REQUEST.into_response();
     };
 
-    let slug = session.slug;
+    // The slug arrives as a query parameter, so it is attacker-controlled even
+    // when the key is right. Everything downstream joins it onto a path or uses
+    // it to select a permission set, so it must be resolved against the
+    // registry here — not merely trusted because the shell handlers happened to
+    // resolve their own copy of it.
+    let Some(canvas) = Registry::discover(&inner.project).get(&session.slug).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no canvas named `{}`", session.slug),
+        )
+            .into_response();
+    };
+    let slug = canvas.slug.clone();
     let params = request.params;
 
     match request.method.as_str() {
@@ -640,12 +652,10 @@ async fn serve_rpc(
                 .get("arguments")
                 .cloned()
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-            // The declaration travels with the request rather than being
-            // trusted from the page: it is read from canvas.toml on disk.
-            let allowed = Registry::discover(&inner.project)
-                .get(&slug)
-                .map(|canvas| canvas.manifest.permissions.allow.clone())
-                .unwrap_or_default();
+            // Taken from the canvas this request resolved to. Looking it up by
+            // the page's own slug string again would let a canvas name a more
+            // permissive sibling and borrow its grants.
+            let allowed = canvas.manifest.permissions.allow.clone();
             match inner.host.call_tool(tool.to_owned(), arguments, allowed).await {
                 Ok(output) => ok(serde_json::json!({"ok": true, "output": output})),
                 Err(denied) => (

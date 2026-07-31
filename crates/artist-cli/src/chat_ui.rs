@@ -304,9 +304,16 @@ struct SubmitContext<'a> {
     extension_control: &'a crate::extension_control::ExtensionControl,
     disabled_tools: &'a [String],
     compaction: crate::settings::CompactionConfig,
+    computer_settings: crate::settings::ComputerConfig,
     show_splash: bool,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
+    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    canvas_control: &'a crate::canvas_host::CanvasControl,
+    /// Republished by the agent loop each attempt; the canvas bridge reads it.
+    tool_registry: &'a artist_agent::ToolRegistryHandle,
+    /// Driveable surfaces for computer use, shared across every turn.
+    computer: artist_computer::SurfaceRegistry,
     /// Every configured account, so a delegated or handed-off profile naming a
     /// `provider:` resolves against the same set the session picked from.
     providers: llm_provider::ProviderSet,
@@ -315,6 +322,9 @@ struct SubmitContext<'a> {
     profile: String,
     /// Harness-owned todo lists, shared across every turn of the session.
     todos: artist_agent::todo::TodoStore,
+    /// Durable cross-session memory, opened once per session. `None` when the
+    /// subsystem is off or its store could not be opened.
+    durable_memory: Option<artist_agent::memory::MemoryHandle>,
     /// Handoffs performed so far, so each hop keeps its own provider lineage.
     handoff_depth: usize,
 }
@@ -324,6 +334,24 @@ pub(crate) struct SubmittedPrompt {
     pub(crate) content: String,
     pub(crate) images: Vec<ImagePaste>,
     history_atoms: InputAtoms,
+    /// Whether a human typed this.
+    ///
+    /// Only typed input may act as a command. Text arriving from a canvas or an
+    /// extension is a *message*, and running it through the same dispatch made
+    /// `artist.send("/quit")` end the session and `artist.send("!rm -rf ~")`
+    /// run a shell — from a page the model wrote, with the canvas permission
+    /// list bypassed entirely.
+    typed: bool,
+}
+
+impl SubmittedPrompt {
+    /// Text pushed in by a canvas or an extension. Never a command.
+    pub(crate) fn injected(content: String) -> Self {
+        Self {
+            typed: false,
+            ..Self::from(content)
+        }
+    }
 }
 
 impl From<String> for SubmittedPrompt {
@@ -333,6 +361,7 @@ impl From<String> for SubmittedPrompt {
             content,
             images: Vec::new(),
             history_atoms: InputAtoms::default(),
+            typed: true,
         }
     }
 }
@@ -418,6 +447,11 @@ struct ChatContext<'a> {
     rules_handle: &'a RulesHandle,
     /// Resolved layered settings: model/reasoning overrides and denied tools.
     settings: &'a crate::settings::EffectiveSettings,
+    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    canvas_control: &'a crate::canvas_host::CanvasControl,
+    tool_registry: &'a artist_agent::ToolRegistryHandle,
+    /// Driveable surfaces for computer use, shared across every turn.
+    computer: artist_computer::SurfaceRegistry,
 }
 
 pub struct ChatResources<'a> {
@@ -430,6 +464,11 @@ pub struct ChatResources<'a> {
     pub rules_engine: &'a RulesEngine,
     pub rules_handle: &'a RulesHandle,
     pub settings: &'a crate::settings::EffectiveSettings,
+    /// The canvas server, when one started. A failed bind is not fatal: the
+    /// session runs fine without canvases, and the tool is simply not offered.
+    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    pub canvas_control: &'a crate::canvas_host::CanvasControl,
+    pub tool_registry: &'a artist_agent::ToolRegistryHandle,
 }
 
 /// Compact inline viewport height: input(1) + borders(2) + status(2). The
@@ -558,6 +597,10 @@ pub async fn run(
                     rules_engine: resources.rules_engine,
                     rules_handle: resources.rules_handle,
                     settings: resources.settings,
+                    canvas: resources.canvas,
+                    canvas_control: resources.canvas_control,
+                    tool_registry: resources.tool_registry,
+                    computer: artist_computer::SurfaceRegistry::new(),
                 },
                 resumed,
                 initial_prompt,
@@ -648,6 +691,76 @@ fn skill_completions<'a>(
     (Some(range), matches)
 }
 
+/// A one-line summary of canvas activity for the status bar, or `None` when
+/// there is nothing worth a segment.
+fn canvas_status_value(
+    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+) -> Option<String> {
+    let server = server?;
+    let registry = artist_canvas::registry::Registry::discover(server.project());
+    if registry.canvases.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} canvas{}",
+        registry.canvases.len(),
+        if registry.canvases.len() == 1 { "" } else { "es" }
+    ))
+}
+
+/// The picker's list, with a synthetic canvas entry when a server is running.
+///
+/// Canvases are not extensions, but they publish the same shape, so reusing
+/// the declaration list keeps one segment mechanism rather than two.
+fn canvas_status_declarations(
+    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+    mut declarations: Vec<artist_extensions::StatusDeclaration>,
+) -> Vec<artist_extensions::StatusDeclaration> {
+    if server.is_some() {
+        declarations.insert(
+            0,
+            artist_extensions::StatusDeclaration {
+                name: "canvas".to_owned(),
+                description: "Canvases open in this project".to_owned(),
+                refresh_ms: 2000,
+            },
+        );
+    }
+    declarations
+}
+
+/// What `/canvas` prints.
+///
+/// Lists what exists with URLs, because the URL carries the session key and is
+/// otherwise only obtainable by asking the agent to open the canvas again.
+fn canvas_panel(
+    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+    name: Option<&str>,
+) -> Vec<String> {
+    let Some(server) = server else {
+        return vec!["Canvases are unavailable: the local server did not start.".to_owned()];
+    };
+    let registry = artist_canvas::registry::Registry::discover(server.project());
+    if registry.canvases.is_empty() {
+        return vec!["No canvases yet. Ask the agent to build one.".to_owned()];
+    }
+    let wanted = name.map(artist_canvas::registry::slugify);
+    let mut lines = Vec::new();
+    for canvas in &registry.canvases {
+        if wanted.as_deref().is_some_and(|slug| slug != canvas.slug) {
+            continue;
+        }
+        lines.push(format!("{}  {}", canvas.slug, server.url(&canvas.slug)));
+    }
+    for diagnostic in &registry.diagnostics {
+        lines.push(format!("{}  broken: {}", diagnostic.slug, diagnostic.message));
+    }
+    if lines.is_empty() {
+        lines.push(format!("No canvas named `{}`.", name.unwrap_or_default()));
+    }
+    lines
+}
+
 /// Move prompts queued from outside the input box — extensions today, canvases
 /// next — into the local queue, and take the next one to submit if nothing is
 /// already staged. Returns whether `pending` ended up set.
@@ -664,7 +777,7 @@ fn stage_queued_prompt(
         control
             .take_prompts()
             .into_iter()
-            .map(SubmittedPrompt::from),
+            .map(SubmittedPrompt::injected),
     );
     if pending.is_none() {
         *pending = queued.pop_front();
@@ -704,6 +817,27 @@ async fn run_loop(
         artist_session::active_profile(&resumed_events).unwrap_or_else(|| "default".to_owned());
     let todos = artist_agent::todo::TodoStore::default();
     todos.restore(&resumed_events);
+    // Opened once per session rather than per turn: loading the embedding model
+    // costs real time and memory, and every turn shares one handle.
+    // `store_path` is `<config_root>/providers.toml`; the memory stores live
+    // beside the existing per-project tool state under that same root.
+    let config_root = context
+        .store_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let durable_memory =
+        crate::open_memory(config_root, context.project, &context.settings.memory).await;
+    // Reconcile against the log so a rewound session does not recall facts the
+    // user has already taken back.
+    if let Some(handle) = &durable_memory {
+        let report = handle.memory().project().reconcile(&resumed_events).await;
+        if let Err(error) = report {
+            eprintln!("warning: could not reconcile memory with the session log: {error}");
+        }
+        if context.settings.memory.index_code {
+            handle.spawn_code_index(context.project.to_path_buf());
+        }
+    }
     let mut handoff_depth = artist_session::handoff_depth(&resumed_events);
     let mut input = ChatInput::default();
     let skills = artist_agent::available_skills(context.project);
@@ -762,6 +896,11 @@ async fn run_loop(
                 .and_then(|p| p.reasoning_effort.clone());
         });
         status.extension_values = context.extensions.status_items();
+        // Canvases report through the same channel extensions use, so the
+        // existing segment rendering and `/statusbar` picker cover them too.
+        if let Some(summary) = canvas_status_value(context.canvas) {
+            status.extension_values.push(("canvas".to_owned(), summary));
+        }
         // Prompt execution can change any external status (notably the checked-out
         // branch), so refresh both before submission and after it returns.
         if pending.is_some() {
@@ -844,7 +983,12 @@ async fn run_loop(
             {
                 prompt.content = expanded;
             }
-            if let Some(command) = shell_command(&prompt.content) {
+            // Command dispatch is for typed input only. Injected text falls
+            // straight through to the model as a message, whatever it starts
+            // with — otherwise a page could quit the session or run a shell.
+            if !prompt.typed {
+                // fall through to the model
+            } else if let Some(command) = shell_command(&prompt.content) {
                 command_panel = match context.tools.bash.run_input(command).await {
                     Ok(output) => {
                         let mut lines = vec![format!("! {command}")];
@@ -987,6 +1131,10 @@ async fn run_loop(
                         handle_sessions(context.sessions, context.project, &active)
                             .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
                     }
+                    Ok(slash_commands::ParsedCommand::Canvas { name }) => {
+                        command_panel = canvas_panel(context.canvas, name);
+                        continue;
+                    }
                     Ok(slash_commands::ParsedCommand::New) => {
                         if let Some(old) = active.take() {
                             old.close().await?;
@@ -1045,7 +1193,10 @@ async fn run_loop(
                             &skills,
                             context.mcp,
                             &context.extensions.tool_names(),
-                            &context.extensions.status_declarations(),
+                            &canvas_status_declarations(
+                                context.canvas,
+                                context.extensions.status_declarations(),
+                            ),
                             |panel| {
                                 resize_and_draw(
                                     &mut terminal,
@@ -1134,6 +1285,10 @@ async fn run_loop(
                 let result = submit(
                     &mut terminal,
                     SubmitContext {
+                        canvas: context.canvas,
+                        canvas_control: context.canvas_control,
+                        tool_registry: context.tool_registry,
+                        computer: context.computer.clone(),
                         provider: session_provider.as_ref().expect("provider initialized"),
                         sessions: context.sessions,
                         project: context.project,
@@ -1144,12 +1299,14 @@ async fn run_loop(
                         extension_control: context.extension_control,
                         disabled_tools: &denied_tools,
                         compaction: context.settings.compaction,
+                        computer_settings: context.settings.computer.clone(),
                         show_splash,
                         rules_engine: context.rules_engine,
                         rules_handle: context.rules_handle,
                         providers: llm_provider::ProviderSet::new(context.store.providers.clone()),
                         profile: current_profile.clone(),
                         todos: todos.clone(),
+                        durable_memory: durable_memory.clone(),
                         handoff_depth,
                     },
                     &mut active,
@@ -1249,6 +1406,7 @@ async fn run_loop(
                     content: expanded.text,
                     images: expanded.images,
                     history_atoms,
+                    typed: true,
                 });
             }
             Event::Key(key)
@@ -2000,6 +2158,14 @@ async fn submit(
             .find(|model| Some(&model.slug) == context.provider.model.as_ref())
             .and_then(|model| model.effective_context_window());
     }
+    // Decay first: reclaimed observation context counts toward the compaction
+    // threshold below, and dropping a few stale screenshots is far cheaper than
+    // summarizing the conversation.
+    match crate::compaction::decay(active, context.provider, context.computer_settings).await {
+        Ok(Some(decayed)) => *history = decayed,
+        Ok(None) => {}
+        Err(error) => insert_status(terminal, &format!("  observation decay failed: {error:#}"))?,
+    }
     let projected_tokens = crate::compaction::projected_context_tokens(
         history,
         status.used_tokens,
@@ -2086,6 +2252,19 @@ async fn submit(
     context
         .extension_control
         .set_steering(Some(steering_handle.clone()));
+    // `auto` sends steer while a turn is running and queue when it is not, so
+    // the bridge has to know which state we are in.
+    context.canvas_control.set_busy(true);
+    // A canvas renders the same questions the TUI does, so it has to be told
+    // when the set changes rather than polling for it.
+    if let (Some(server), Some(ask)) = (context.canvas, context.canvas_control.ask_registry()) {
+        server.publish_questions(ask.pending());
+    }
+    context.canvas_control.set_session(
+        context.provider.model.clone(),
+        Some(context.profile.clone()),
+        Some(context.project.display().to_string()),
+    );
     let task_steering = steering_handle.clone();
     let mut delivered_steering: Vec<String> = Vec::new();
     let mut pending_delivered = Vec::new();
@@ -2102,6 +2281,10 @@ async fn submit(
     let task_mcp = context.mcp.clone();
     let task_disabled_tools = context.disabled_tools.to_vec();
     let task_extensions = context.extensions.clone();
+    let task_canvas = context.canvas.cloned();
+    // The registry is shared, not copied: surfaces the agent opened on an
+    // earlier turn must still be there on the next one.
+    let task_computer = context.computer.clone();
     let event_extensions = task_extensions.clone();
     let lifecycle_extensions = task_extensions.clone();
     task_extensions
@@ -2125,7 +2308,10 @@ async fn submit(
         attachments: Some(active.attachments.clone()),
         providers: context.providers.clone(),
         todos: context.todos.clone(),
+        durable_memory: context.durable_memory.clone(),
+        computer: Some(task_computer),
         handoff_depth: context.handoff_depth,
+        tools: context.tool_registry.clone(),
     };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat_as(
@@ -2133,6 +2319,7 @@ async fn submit(
             &task_profile,
             &task_prompt,
             artist_agent::ToolContext {
+                canvas: task_canvas.as_ref(),
                 native: &task_tools,
                 mcp: &task_mcp,
                 extensions: Some(&task_extensions),
@@ -2141,6 +2328,13 @@ async fn submit(
             task_handles,
             |event| {
                 crate::publish_prompt_event(&event_extensions, &event);
+                // A canvas watching the agent needs the same stream the TUI
+                // renders; <Transcript> and <ToolLog> are built on it.
+                if let Some(server) = task_canvas.as_ref() {
+                    if let Ok(payload) = serde_json::to_value(&event) {
+                        server.publish_agent_event(payload);
+                    }
+                }
                 tx.send(event)
                     .map_err(|_| anyhow::anyhow!("chat UI closed"))
             },
@@ -2203,6 +2397,20 @@ async fn submit(
             }
             _ = ticker.tick() => {
                 animation_frame = animation_frame.wrapping_add(1);
+                for entry in context.canvas_control.take_audit() {
+                    insert_tool_line(
+                        terminal,
+                        &format!(
+                            "canvas called {}{}",
+                            entry.tool,
+                            if entry.allowed { "" } else { " — refused" }
+                        ),
+                        None,
+                        false,
+                        false,
+                        None,
+                    )?;
+                }
                 if context.extension_control.take_stop() {
                     cancel.cancel();
                     cancelled = true;
@@ -2244,6 +2452,7 @@ async fn submit(
                                 content: expanded.text,
                                 images: expanded.images,
                                 history_atoms,
+                                typed: true,
                             };
                             if prompt.content.trim_start().starts_with('/') {
                                 deferred_commands.push(prompt);
@@ -2412,10 +2621,16 @@ async fn submit(
                             )?;
                             transcript_gap = true;
                         }
-                        if images > 0 {
+                        for image in &images {
                             insert_tool_line(
                                 terminal,
-                                &format!("[{images} image result(s) not shown]"),
+                                &format!(
+                                    "image {} · img:{}",
+                                    crate::format_size(image.bytes as u64),
+                                    // The digest is the affordance: the blob is
+                                    // at <session>/attachments/<sha>.
+                                    &image.attachment[..image.attachment.len().min(12)]
+                                ),
                                 None,
                                 false,
                                 false,
@@ -2555,6 +2770,7 @@ async fn submit(
         payload: serde_json::json!({"state":"idle", "cancelled": cancelled}),
     });
     context.extension_control.set_steering(None);
+    context.canvas_control.set_busy(false);
     collect_delivered(&steering_handle, &mut steering, &mut pending_delivered);
     for message in pending_delivered.drain(..) {
         insert_message(terminal, &message.display)?;
@@ -2640,6 +2856,7 @@ async fn submit(
                 content: entry.content,
                 images: entry.images,
                 history_atoms: entry.atoms,
+                typed: true,
             }))
             .collect(),
         delivered,
@@ -3446,6 +3663,36 @@ mod tests {
 
         assert!(stage_queued_prompt(&control, &mut queued, &mut pending));
         assert_eq!(pending.as_ref().map(|p| p.content.as_str()), Some("run the tests"));
+    }
+
+    /// The one that matters most: a canvas is model-authored, so text it pushes
+    /// must never be able to act as a command. `/quit` would end the session
+    /// and `!rm -rf ~` would run a shell, both bypassing the canvas permission
+    /// list, which gates only `canvas.call`.
+    #[tokio::test]
+    async fn injected_text_is_a_message_never_a_command() {
+        let control = ExtensionControl::default();
+        let mut queued = VecDeque::new();
+        let mut pending = None;
+
+        for dangerous in ["/quit", "!rm -rf ~", "  /new  ", "/handoff planner"] {
+            control.prompt_after(dangerous.into()).await;
+            assert!(stage_queued_prompt(&control, &mut queued, &mut pending));
+            let staged = pending.take().expect("staged");
+            assert!(
+                !staged.typed,
+                "`{dangerous}` was staged as typed input and would dispatch as a command"
+            );
+            assert_eq!(staged.content, dangerous, "content must reach the model verbatim");
+        }
+    }
+
+    /// The converse: a slash command the user typed mid-stream is deferred and
+    /// must still dispatch when it lands.
+    #[test]
+    fn a_deferred_command_the_user_typed_still_dispatches() {
+        assert!(SubmittedPrompt::from("/compact".to_owned()).typed);
+        assert!(!SubmittedPrompt::injected("/compact".to_owned()).typed);
     }
 
     /// Staging runs on both the idle path and the post-turn path, so it can be
