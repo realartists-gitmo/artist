@@ -125,8 +125,10 @@ fn description_text() -> String {
              @tanstack/react-table, and Tailwind classes. Tailwind's palette is remapped to \
              artist's own colours, so ordinary classes like `bg-blue-100` or `text-red-700` are \
              already on-theme — use them, and avoid hard-coded hex, rgb() and named colours, \
-             which bypass the theme and are reported back to you by `status`. Plus the kit — \
-             prefer it over writing your own:\n\
+             which bypass the theme and are reported back to you by `status`. Composed class \
+             names like `text-${{tone}}-700` do work here, unlike in a build-time Tailwind \
+             setup: the palette is generated in the browser from the live DOM, so a class only \
+             has to exist once it is rendered. Plus the kit — prefer it over writing your own:\n\
              • @artist/ui — AppShell, Toolbar, Stack, Split, Card, EmptyState, Skeleton, Button, \
              Input, Select, Checkbox, Badge, Tabs, Dialog, Toaster/toast, ErrorBoundary, \
              DataTable, Plot, Code, Diff, SchemaForm, Transcript, ToolLog, AskDock, Approve\n\
