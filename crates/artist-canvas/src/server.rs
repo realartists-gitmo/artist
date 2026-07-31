@@ -133,6 +133,8 @@ struct Inner {
     /// One store per canvas, opened lazily and kept for the process lifetime so
     /// two tabs of the same canvas share one revision counter.
     states: DashMap<String, Arc<StateStore>>,
+    /// The windows this session put on screen, so they can be closed with it.
+    windows: crate::window::Windows,
     host: Arc<dyn CanvasHost>,
 }
 
@@ -141,6 +143,75 @@ struct Inner {
 pub struct Server {
     inner: Arc<Inner>,
     addr: SocketAddr,
+}
+
+/// A server that has not been started yet, and may never be.
+///
+/// Most sessions never touch a canvas, and the eager version made every one of
+/// them bind a port and stand up an RPC surface holding a session key anyway.
+/// That is attack surface nobody asked for, on a machine where the user is
+/// mostly editing Rust. It now costs nothing until the model actually reaches
+/// for the tool.
+pub struct Lazy {
+    project: PathBuf,
+    host: Arc<dyn CanvasHost>,
+    started: tokio::sync::Mutex<Option<Arc<Server>>>,
+}
+
+impl Lazy {
+    pub fn new(project: PathBuf, host: Arc<dyn CanvasHost>) -> Arc<Self> {
+        Arc::new(Lazy {
+            project,
+            host,
+            started: tokio::sync::Mutex::new(None),
+        })
+    }
+
+    /// The running server, starting it if this is the first ask.
+    ///
+    /// A failed bind is not cached: it is usually transient — a port exhausted,
+    /// a sandbox not yet ready — and permanently disabling canvases for the
+    /// session because of one bad moment would be the wrong trade.
+    pub async fn server(&self) -> anyhow::Result<Arc<Server>> {
+        let mut started = self.started.lock().await;
+        if let Some(server) = started.as_ref() {
+            return Ok(Arc::clone(server));
+        }
+        let server =
+            Arc::new(Server::start_with_host(self.project.clone(), Arc::clone(&self.host)).await?);
+        *started = Some(Arc::clone(&server));
+        Ok(server)
+    }
+
+    /// The server if it is already up, without starting one.
+    ///
+    /// For the status bar and `/canvas`, which should report on what exists
+    /// rather than bring it into being by asking about it.
+    ///
+    /// Never blocks, and so answers "not running" while a start is in flight
+    /// and holding the lock. That is the right trade for a caller drawing a
+    /// frame — a status bar must not stall on a bind — and the wrong one for
+    /// anybody who can wait. Those want `started`.
+    pub fn running(&self) -> Option<Arc<Server>> {
+        self.started
+            .try_lock()
+            .ok()
+            .and_then(|started| started.clone())
+    }
+
+    /// The server if it is already up, waiting out any start in flight.
+    ///
+    /// Same question as `running`, asked by a caller that can await the honest
+    /// answer instead of the cheap one: a tool reporting "nothing is being
+    /// served" because another task happened to be mid-bind would send the
+    /// model off to open a canvas that was already opening.
+    pub async fn started(&self) -> Option<Arc<Server>> {
+        self.started.lock().await.clone()
+    }
+
+    pub fn project(&self) -> &Path {
+        &self.project
+    }
 }
 
 impl Server {
@@ -169,6 +240,7 @@ impl Server {
             reports: Mutex::new(VecDeque::new()),
             digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
+            windows: crate::window::Windows::default(),
             host,
         });
 
@@ -213,18 +285,45 @@ impl Server {
         self.inner.state_for(slug)
     }
 
+    /// Put `slug` on screen, or report that it already is.
+    ///
+    /// The window is owned by the server, so it closes when the session that
+    /// serves it does — a webview showing a canvas whose server has gone is
+    /// worse than no window, because every interaction fails silently.
+    pub fn show(&self, slug: &str, title: &str) -> std::io::Result<crate::window::Opened> {
+        self.inner
+            .windows
+            .open(&self.inner.project, slug, &self.url(slug), title)
+    }
+
+    /// Close one canvas's window.
+    pub fn hide(&self, slug: &str) -> bool {
+        self.inner.windows.close(slug)
+    }
+
+    /// Which canvases have a window up.
+    pub fn showing(&self) -> Vec<String> {
+        self.inner.windows.showing()
+    }
+
     /// Write shared state from the harness side and push it to open pages.
     ///
     /// This is how the model feeds a canvas: it writes rows, the page rerenders.
-    pub fn publish_state(&self, slug: &str, values: BTreeMap<String, serde_json::Value>) -> u64 {
+    /// A refused write pushes nothing: the pages keep the state they have, and
+    /// the caller gets the reason to pass on to whoever asked for the write.
+    pub fn publish_state(
+        &self,
+        slug: &str,
+        values: BTreeMap<String, serde_json::Value>,
+    ) -> Result<u64, crate::state::OverLimit> {
         let changed = serde_json::to_value(&values).unwrap_or_default();
-        let snapshot = self.inner.state_for(slug).merge(values);
+        let snapshot = self.inner.state_for(slug).merge(values)?;
         let _ = self.inner.signals.send(Signal::State {
             slug: slug.to_owned(),
             rev: snapshot.rev,
             changed,
         });
-        snapshot.rev
+        Ok(snapshot.rev)
     }
 
     /// Tell open pages the pending-question set changed.
@@ -309,7 +408,10 @@ impl Server {
             // The directory may not exist yet; the first `canvas create` makes
             // it, so create it here rather than giving up on watching.
             let _ = std::fs::create_dir_all(&base);
-            if watcher.watch(&base, notify::RecursiveMode::Recursive).is_err() {
+            if watcher
+                .watch(&base, notify::RecursiveMode::Recursive)
+                .is_err()
+            {
                 return;
             }
             // A single save produces several events. Collapse anything that
@@ -376,9 +478,7 @@ fn collect_paths(event: Result<notify::Event, notify::Error>) -> Vec<PathBuf> {
 fn is_harness_written(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name == crate::state::STATE_FILE || name.ends_with(".tmp")
-        })
+        .is_some_and(|name| name == crate::state::STATE_FILE || name.ends_with(".tmp"))
 }
 
 /// The canvas-relative module path for a change, or `None` if it is not a
@@ -532,7 +632,10 @@ async fn serve_module(
 }
 
 async fn serve_client() -> Response {
-    raw("text/javascript; charset=utf-8", assets::CLIENT.as_bytes().to_vec())
+    raw(
+        "text/javascript; charset=utf-8",
+        assets::CLIENT.as_bytes().to_vec(),
+    )
 }
 
 async fn serve_ui() -> Response {
@@ -545,14 +648,18 @@ async fn serve_ui() -> Response {
 async fn serve_refresh() -> Response {
     raw(
         "text/javascript; charset=utf-8",
-        assets::compiled("refresh.js", assets::REFRESH).as_bytes().to_vec(),
+        assets::compiled("refresh.js", assets::REFRESH)
+            .as_bytes()
+            .to_vec(),
     )
 }
 
 async fn serve_hooks() -> Response {
     raw(
         "text/javascript; charset=utf-8",
-        assets::compiled("hooks.js", assets::HOOKS).as_bytes().to_vec(),
+        assets::compiled("hooks.js", assets::HOOKS)
+            .as_bytes()
+            .to_vec(),
     )
 }
 
@@ -640,10 +747,14 @@ async fn serve_rpc(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    // The key comes from a header here, not the query string. A URL is visible
-    // in `ps` (the window child takes one as an argument), leaks by Referer,
-    // and lands in logs; a custom header does none of that and cannot be sent
-    // cross-origin without a preflight this server never answers.
+    // The key comes from a header here, not the query string. A URL leaks by
+    // Referer, lands in logs and proxies, and sits in browser history; a custom
+    // header does none of that and cannot be sent cross-origin without a
+    // preflight this server never answers.
+    //
+    // Not because argv would expose it — `window::command` passes the URL to
+    // the child through the environment for exactly that reason, and saying
+    // otherwise here invites someone to "fix" it back into an argument.
     let presented = headers
         .get("x-artist-key")
         .and_then(|value| value.to_str().ok())
@@ -678,7 +789,10 @@ async fn serve_rpc(
 
     match request.method.as_str() {
         "canvas.report" => {
-            let level = params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
+            let level = params
+                .get("level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("log");
             let message = params
                 .get("message")
                 .and_then(|v| v.as_str())
@@ -705,10 +819,32 @@ async fn serve_rpc(
                 .iter()
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect();
-            let notify = params.get("notify").and_then(|v| v.as_bool()).unwrap_or(false);
-            let snapshot = inner.state_for(&slug).merge(merged.clone());
+            let notify = params
+                .get("notify")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Refused rather than truncated: a canvas that silently kept only
+            // some of what it wrote would be far harder to debug than one told
+            // plainly that it wrote nothing.
+            let snapshot = match inner.state_for(&slug).merge(merged.clone()) {
+                Ok(snapshot) => snapshot,
+                Err(over) => {
+                    // Reported as well as returned. The page sees the rejection
+                    // synchronously, but the model is the one that has to fix
+                    // it, and `status` is where it looks.
+                    inner.push_report(Report {
+                        slug: slug.clone(),
+                        level: "error".into(),
+                        message: over.to_string(),
+                        detail: None,
+                    });
+                    return bad(&over.to_string());
+                }
+            };
             if notify {
-                inner.host.state_changed(&slug, merged.keys().cloned().collect());
+                inner
+                    .host
+                    .state_changed(&slug, merged.keys().cloned().collect());
             }
             // Echo to every open tab, including the one that wrote: it needs
             // the revision to know its optimistic update was accepted.
@@ -730,7 +866,9 @@ async fn serve_rpc(
                 .get("mode")
                 .and_then(|v| serde_json::from_value::<crate::bridge::SendMode>(v.clone()).ok())
             else {
-                return bad("send needs `mode`: \"steer\" to correct a running turn, or \"queue\" to start one");
+                return bad(
+                    "send needs `mode`: \"steer\" to correct a running turn, or \"queue\" to start one",
+                );
             };
             let outcome = inner.host.send(text.to_owned(), mode).await;
             ok(serde_json::json!({"ok": true, "outcome": outcome}))
@@ -748,7 +886,11 @@ async fn serve_rpc(
             // the page's own slug string again would let a canvas name a more
             // permissive sibling and borrow its grants.
             let allowed = canvas.manifest.permissions.allow.clone();
-            match inner.host.call_tool(tool.to_owned(), arguments, allowed).await {
+            match inner
+                .host
+                .call_tool(tool.to_owned(), arguments, allowed)
+                .await
+            {
                 Ok(output) => ok(serde_json::json!({"ok": true, "output": output})),
                 Err(denied) => (
                     StatusCode::FORBIDDEN,
@@ -796,7 +938,10 @@ async fn serve_rpc(
         }
 
         "canvas.edit" => {
-            let path = params.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+            let path = params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let line = params
                 .get("line")
                 .and_then(serde_json::Value::as_u64)
@@ -816,8 +961,10 @@ async fn serve_rpc(
                 .and_then(|v| v.as_str())
                 .unwrap_or("txt");
             let dark = params.get("dark").and_then(|v| v.as_bool()).unwrap_or(true);
-            ok(serde_json::to_value(crate::highlight::highlight(source, language, dark))
-                .unwrap_or_default())
+            ok(
+                serde_json::to_value(crate::highlight::highlight(source, language, dark))
+                    .unwrap_or_default(),
+            )
         }
 
         other => bad(&format!("unknown canvas method: {other}")),
@@ -843,10 +990,7 @@ impl Inner {
         if let Some(existing) = self.states.get(slug) {
             return Arc::clone(existing.value());
         }
-        let root = self
-            .project
-            .join(crate::registry::CANVAS_DIR)
-            .join(slug);
+        let root = self.project.join(crate::registry::CANVAS_DIR).join(slug);
         let store = Arc::new(StateStore::open(&root));
         self.states
             .entry(slug.to_owned())
@@ -949,7 +1093,10 @@ mod tests {
             resolve_within(root, "components/Chart.jsx"),
             Some(root.join("components/Chart.jsx"))
         );
-        assert_eq!(resolve_within(root, "./main.jsx"), Some(root.join("main.jsx")));
+        assert_eq!(
+            resolve_within(root, "./main.jsx"),
+            Some(root.join("main.jsx"))
+        );
     }
 
     /// A canvas writing its own shared state must not be mistaken for someone
@@ -988,9 +1135,17 @@ mod tests {
         };
 
         assert!(of(EventKind::Access(AccessKind::Read)).is_empty());
-        assert!(of(EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))).is_empty());
+        assert!(
+            of(EventKind::Modify(ModifyKind::Metadata(
+                MetadataKind::AccessTime
+            )))
+            .is_empty()
+        );
 
-        assert_eq!(of(EventKind::Modify(ModifyKind::Data(DataChange::Content))), [path.clone()]);
+        assert_eq!(
+            of(EventKind::Modify(ModifyKind::Data(DataChange::Content))),
+            [path.clone()]
+        );
         assert_eq!(of(EventKind::Create(CreateKind::File)), [path.clone()]);
         assert_eq!(of(EventKind::Remove(RemoveKind::File)), [path]);
     }
@@ -1005,7 +1160,12 @@ mod tests {
         let entry = Some("main.jsx");
 
         assert_eq!(
-            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/parts/Chart.tsx"), entry),
+            module_path(
+                base,
+                "demo",
+                Path::new("/p/.artist/canvas/demo/parts/Chart.tsx"),
+                entry
+            ),
             Some("parts/Chart.tsx".to_owned())
         );
 
@@ -1013,11 +1173,21 @@ mod tests {
         // createRoot again and discard the very state a hot swap protects, so
         // it is deliberately a full reload.
         assert_eq!(
-            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/main.jsx"), entry),
+            module_path(
+                base,
+                "demo",
+                Path::new("/p/.artist/canvas/demo/main.jsx"),
+                entry
+            ),
             None
         );
         assert_eq!(
-            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/main.jsx"), Some("./main.jsx")),
+            module_path(
+                base,
+                "demo",
+                Path::new("/p/.artist/canvas/demo/main.jsx"),
+                Some("./main.jsx")
+            ),
             None
         );
 
@@ -1031,7 +1201,12 @@ mod tests {
         }
         // A file with no extension is not a module either.
         assert_eq!(
-            module_path(base, "demo", Path::new("/p/.artist/canvas/demo/README"), entry),
+            module_path(
+                base,
+                "demo",
+                Path::new("/p/.artist/canvas/demo/README"),
+                entry
+            ),
             None
         );
     }
@@ -1048,7 +1223,11 @@ mod tests {
         // The previous pair is saved and restored, so modules do not leak their
         // registrar into whatever evaluates next.
         assert!(first.contains("__artistPrevReg"));
-        assert!(first.trim_end().ends_with("window.$RefreshSig$ = __artistPrevSig;"));
+        assert!(
+            first
+                .trim_end()
+                .ends_with("window.$RefreshSig$ = __artistPrevSig;")
+        );
     }
 
     #[test]
@@ -1076,10 +1255,14 @@ mod tests {
             reports: Mutex::new(VecDeque::new()),
             digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
+            windows: crate::window::Windows::default(),
             host: Arc::new(crate::bridge::DetachedHost),
         };
 
-        assert!(origin_is_ours(&headers, &inner), "same-origin sends no Origin");
+        assert!(
+            origin_is_ours(&headers, &inner),
+            "same-origin sends no Origin"
+        );
 
         headers.insert(header::ORIGIN, "http://127.0.0.1:54321".parse().unwrap());
         assert!(origin_is_ours(&headers, &inner));
@@ -1088,7 +1271,10 @@ mod tests {
         assert!(!origin_is_ours(&headers, &inner));
 
         // A host that merely starts with our loopback name is still foreign.
-        headers.insert(header::ORIGIN, "http://127.0.0.1.evil.example".parse().unwrap());
+        headers.insert(
+            header::ORIGIN,
+            "http://127.0.0.1.evil.example".parse().unwrap(),
+        );
         assert!(!origin_is_ours(&headers, &inner));
 
         // Another server on loopback is foreign too — the port is part of the

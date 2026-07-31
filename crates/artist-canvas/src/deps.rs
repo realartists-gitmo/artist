@@ -79,6 +79,12 @@ pub enum DepError {
     HostNotAllowed { host: String },
     #[error("{url} returned {size} bytes; the limit is {MAX_BYTES}")]
     TooLarge { url: String, size: usize },
+    #[error(
+        "{url} redirected off the allowlist (stopped at {status}) — the chain has to stay \
+         within: {}",
+        ALLOWED_HOSTS.join(", ")
+    )]
+    RedirectRefused { url: String, status: u16 },
     #[error("could not fetch {url}: {source}")]
     Fetch {
         url: String,
@@ -150,6 +156,19 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, DepError> {
             source,
         })?;
 
+    // A refused redirect is not an error to reqwest: `Policy::stop` hands back
+    // the 3xx itself, and `error_for_status` only objects to 4xx and 5xx. Left
+    // alone, the redirect's own body — usually an empty or "Moved" page — was
+    // taken for the module and written to the cache, where the read at the top
+    // of this function returned it forever. A dep that once redirected off the
+    // allowlist stayed broken with no way to retry.
+    if response.status().is_redirection() {
+        return Err(DepError::RedirectRefused {
+            url: url.to_owned(),
+            status: response.status().as_u16(),
+        });
+    }
+
     if let Some(length) = response.content_length()
         && length as usize > MAX_BYTES
     {
@@ -194,6 +213,23 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A stopped redirect comes back as a 3xx that `error_for_status` waves
+    /// through, so the status has to be rejected explicitly or the redirect's
+    /// body is cached as the module — permanently, since the cache is read
+    /// before anything else. The message has to name the allowlist, because
+    /// the fix is always either the dep URL or that list.
+    #[test]
+    fn a_refused_redirect_explains_itself() {
+        let message = DepError::RedirectRefused {
+            url: "https://esm.sh/three".into(),
+            status: 302,
+        }
+        .to_string();
+        assert!(message.contains("esm.sh/three"), "{message}");
+        assert!(message.contains("302"), "{message}");
+        assert!(message.contains(ALLOWED_HOSTS[0]), "{message}");
+    }
+
     #[test]
     fn cache_names_are_stable_and_version_specific() {
         let one = "https://esm.sh/three@0.170";
@@ -222,7 +258,12 @@ mod tests {
 
     #[tokio::test]
     async fn plain_http_and_non_urls_are_refused() {
-        for url in ["http://esm.sh/x.js", "./local.js", "file:///etc/passwd", "/@vendor/react.js"] {
+        for url in [
+            "http://esm.sh/x.js",
+            "./local.js",
+            "file:///etc/passwd",
+            "/@vendor/react.js",
+        ] {
             assert!(
                 matches!(fetch(url).await, Err(DepError::NotHttps(_))),
                 "{url} should be refused"

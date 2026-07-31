@@ -23,12 +23,12 @@ pub mod registry;
 pub mod server;
 pub mod state;
 pub mod templates;
-pub mod window;
 pub mod transform;
+pub mod window;
 
 pub use bridge::{CanvasHost, Denied, SendMode};
 pub use manifest::Manifest;
+pub use registry::{Canvas, Registry, slugify};
 pub use state::{Snapshot, StateStore};
 pub use templates::{TEMPLATES, Template};
-pub use registry::{Canvas, Registry, slugify};
 pub use transform::{Diagnostic, TransformError, Transformed, transform};

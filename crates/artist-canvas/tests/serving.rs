@@ -14,7 +14,8 @@ struct Project {
 
 impl Project {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("artist-canvas-it-{}-{name}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("artist-canvas-it-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("project root");
         Project { root }
@@ -46,12 +47,21 @@ async fn a_canvas_is_served_compiled_and_gated_by_its_key() {
     let project = Project::new("serve");
     project.canvas("demo", "title = \"Demo\"", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let base = server.url("demo");
     let http = reqwest::Client::new();
 
     // The shell carries the import map and boots the declared entry.
-    let shell = http.get(&base).send().await.expect("shell").text().await.unwrap();
+    let shell = http
+        .get(&base)
+        .send()
+        .await
+        .expect("shell")
+        .text()
+        .await
+        .unwrap();
     assert!(shell.contains(r#"<script type="importmap">"#), "{shell}");
     assert!(shell.contains(r#""react": "/@vendor/react.js""#), "{shell}");
     assert!(shell.contains("./main.jsx"), "{shell}");
@@ -75,7 +85,10 @@ async fn a_canvas_is_served_compiled_and_gated_by_its_key() {
     assert!(code.contains("react/jsx-dev-runtime"), "{code}");
     // ...and that name is canvas-relative, not the user's home directory.
     assert!(code.contains(r#""main.jsx""#), "{code}");
-    assert!(!code.contains(project.root.to_str().unwrap()), "leaked path:\n{code}");
+    assert!(
+        !code.contains(project.root.to_str().unwrap()),
+        "leaked path:\n{code}"
+    );
 
     // The vendored dependency the entry imports is actually there.
     let react = http
@@ -87,7 +100,10 @@ async fn a_canvas_is_served_compiled_and_gated_by_its_key() {
     assert!(react.text().await.unwrap().len() > 1000);
 
     // A wrong key is indistinguishable from a missing canvas.
-    let forged = base.replace(&base[base.find("/c/").unwrap() + 3..base.rfind("/demo/").unwrap()], "x".repeat(32).as_str());
+    let forged = base.replace(
+        &base[base.find("/c/").unwrap() + 3..base.rfind("/demo/").unwrap()],
+        "x".repeat(32).as_str(),
+    );
     assert_eq!(
         http.get(&forged).send().await.expect("forged").status(),
         reqwest::StatusCode::NOT_FOUND
@@ -113,7 +129,9 @@ async fn the_page_can_report_its_own_errors_back_to_the_harness() {
     let project = Project::new("report");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let rpc = format!("http://{}/_artist/rpc", server.addr());
     let key = server.url("demo");
     let key = &key[key.find("/c/").unwrap() + 3..key.rfind("/demo/").unwrap()];
@@ -145,7 +163,9 @@ async fn another_page_on_loopback_cannot_drive_the_bridge() {
     let project = Project::new("origin");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("demo");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
 
@@ -167,7 +187,9 @@ async fn a_compile_error_is_captured_for_the_model_and_shown_on_the_page() {
     let project = Project::new("broken");
     project.canvas("demo", "", "export default function App() { const x = ; }");
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let code = reqwest::get(format!("{}main.jsx", server.url("demo")))
         .await
         .expect("module")
@@ -195,13 +217,19 @@ async fn a_forged_slug_cannot_escape_the_canvas_directory() {
     let project = Project::new("slug");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("demo");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
     let http = reqwest::Client::new();
 
     let escape = project.root.join("ESCAPED");
-    for slug in ["../../../ESCAPED", "..%2F..%2F..%2FESCAPED", "demo/../../.."] {
+    for slug in [
+        "../../../ESCAPED",
+        "..%2F..%2F..%2FESCAPED",
+        "demo/../../..",
+    ] {
         let response = http
             .post(format!("http://{}/_artist/rpc?slug={slug}", server.addr()))
             .header("origin", format!("http://{}", server.addr()))
@@ -219,8 +247,14 @@ async fn a_forged_slug_cannot_escape_the_canvas_directory() {
             "slug `{slug}` was accepted"
         );
     }
-    assert!(!escape.join("state.json").exists(), "a file was written outside the canvas");
-    assert!(!escape.exists(), "a directory was created outside the canvas");
+    assert!(
+        !escape.join("state.json").exists(),
+        "a file was written outside the canvas"
+    );
+    assert!(
+        !escape.exists(),
+        "a directory was created outside the canvas"
+    );
 }
 
 /// A canvas naming a more permissive sibling must not borrow its grants.
@@ -230,7 +264,9 @@ async fn a_canvas_cannot_borrow_another_canvases_permissions() {
     project.canvas("locked", "", ENTRY);
     project.canvas("open-one", "[permissions]\nallow = [\"bash\"]", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("locked");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/locked/").unwrap()];
 
@@ -238,7 +274,10 @@ async fn a_canvas_cannot_borrow_another_canvases_permissions() {
     // reached the permission gate under the slug it claimed rather than being
     // silently resolved to the permissive sibling.
     let response = reqwest::Client::new()
-        .post(format!("http://{}/_artist/rpc?slug=open-one", server.addr()))
+        .post(format!(
+            "http://{}/_artist/rpc?slug=open-one",
+            server.addr()
+        ))
         .header("origin", format!("http://{}", server.addr()))
         .header("x-artist-key", key)
         .json(&serde_json::json!({"method": "canvas.call", "params": {"tool": "bash"}}))
@@ -255,7 +294,9 @@ async fn shared_state_round_trips_and_pushes_only_what_changed() {
     let project = Project::new("state");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("demo");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
     let http = reqwest::Client::new();
@@ -269,14 +310,24 @@ async fn shared_state_round_trips_and_pushes_only_what_changed() {
     };
 
     // A write from the page is visible to the harness...
-    let response = rpc("canvas.state.set", serde_json::json!({"entries": {"rows": [1, 2, 3]}})).await;
+    let response = rpc(
+        "canvas.state.set",
+        serde_json::json!({"entries": {"rows": [1, 2, 3]}}),
+    )
+    .await;
     assert!(response.status().is_success());
-    assert_eq!(server.state("demo").get("rows"), Some(serde_json::json!([1, 2, 3])));
+    assert_eq!(
+        server.state("demo").get("rows"),
+        Some(serde_json::json!([1, 2, 3]))
+    );
 
     // ...and a write from the harness is visible to the page.
-    server.publish_state("demo", std::collections::BTreeMap::from([
-        ("selected".to_owned(), serde_json::json!(2)),
-    ]));
+    server
+        .publish_state(
+            "demo",
+            std::collections::BTreeMap::from([("selected".to_owned(), serde_json::json!(2))]),
+        )
+        .expect("within the limit");
     let body: serde_json::Value = rpc("canvas.state.get", serde_json::json!({}))
         .await
         .json()
@@ -284,7 +335,10 @@ async fn shared_state_round_trips_and_pushes_only_what_changed() {
         .expect("json");
     assert_eq!(body["entries"]["selected"], 2);
     assert_eq!(body["entries"]["rows"], serde_json::json!([1, 2, 3]));
-    assert!(body["rev"].as_u64().expect("rev") >= 2, "revisions must advance");
+    assert!(
+        body["rev"].as_u64().expect("rev") >= 2,
+        "revisions must advance"
+    );
 }
 
 /// `send` needs an explicit mode: `auto` resolved by whether a turn happened to
@@ -294,15 +348,26 @@ async fn send_requires_an_explicit_mode() {
     let project = Project::new("send");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("demo");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
     let http = reqwest::Client::new();
 
     for (params, expected) in [
-        (serde_json::json!({"text": "hi"}), reqwest::StatusCode::BAD_REQUEST),
-        (serde_json::json!({"text": "hi", "mode": "auto"}), reqwest::StatusCode::BAD_REQUEST),
-        (serde_json::json!({"text": "hi", "mode": "queue"}), reqwest::StatusCode::OK),
+        (
+            serde_json::json!({"text": "hi"}),
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"text": "hi", "mode": "auto"}),
+            reqwest::StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"text": "hi", "mode": "queue"}),
+            reqwest::StatusCode::OK,
+        ),
     ] {
         let response = http
             .post(format!("http://{}/_artist/rpc?slug=demo", server.addr()))
@@ -324,7 +389,9 @@ async fn the_rpc_endpoint_only_accepts_the_key_as_a_header() {
     let project = Project::new("keyhdr");
     project.canvas("demo", "", ENTRY);
 
-    let server = Server::start(project.root.clone()).await.expect("server starts");
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
     let url = server.url("demo");
     let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()];
     let http = reqwest::Client::new();
@@ -350,7 +417,11 @@ async fn the_rpc_endpoint_only_accepts_the_key_as_a_header() {
         .send()
         .await
         .expect("post");
-    assert!(with_header.status().is_success(), "{:?}", with_header.status());
+    assert!(
+        with_header.status().is_success(),
+        "{:?}",
+        with_header.status()
+    );
 
     // And a wrong header value is refused.
     let wrong = http

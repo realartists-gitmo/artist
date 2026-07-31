@@ -23,31 +23,31 @@ pub const TEMPLATES: &[Template] = &[
         name: "blank",
         description: "An empty page with the shell, theme and error boundary already wired.",
         entry: "main.jsx",
-        files: &[("main.jsx", BLANK)],
+        files: &[("main.jsx", MAIN), ("App.jsx", BLANK_APP)],
     },
     Template {
         name: "dashboard",
         description: "Metrics, a live chart and a sortable table. For watching something change.",
         entry: "main.jsx",
-        files: &[("main.jsx", DASHBOARD)],
+        files: &[("main.jsx", MAIN), ("App.jsx", DASHBOARD_APP)],
     },
     Template {
         name: "review",
         description: "Side-by-side list and diff viewer with approve/reject. For walking a change set.",
         entry: "main.jsx",
-        files: &[("main.jsx", REVIEW)],
+        files: &[("main.jsx", MAIN), ("App.jsx", REVIEW_APP)],
     },
     Template {
         name: "form",
         description: "A form whose result is sent back into the conversation. For collecting a decision.",
         entry: "main.jsx",
-        files: &[("main.jsx", FORM)],
+        files: &[("main.jsx", MAIN), ("App.jsx", FORM_APP)],
     },
     Template {
         name: "report",
         description: "A long-form document with headings, code blocks and tables. For explaining something.",
         entry: "main.jsx",
-        files: &[("main.jsx", REPORT)],
+        files: &[("main.jsx", MAIN), ("App.jsx", REPORT_APP)],
     },
 ];
 
@@ -68,16 +68,45 @@ pub fn manifest_for(title: &str, template: &Template) -> Manifest {
     }
 }
 
-const BLANK: &str = r#"import { createRoot } from "react-dom/client";
-import { AppShell, Card, ErrorBoundary, Toaster } from "@artist/ui";
+/// The mount, identical for every template.
+///
+/// Split from the app on purpose. A module that mounts the root has a top-level
+/// side effect, and the client only hot-swaps a module whose every export is a
+/// component (`isRefreshBoundary` in `assets/client.js`) — so a single-file
+/// canvas can never be a Fast Refresh boundary, and every save fell back to a
+/// full page reload. Keeping the side effect in a file nobody edits is what
+/// lets the file everybody *does* edit swap in place, with local state, scroll
+/// and focus intact.
+const MAIN: &str = r#"import { createRoot } from "react-dom/client";
+import { ErrorBoundary, Toaster } from "@artist/ui";
+import App from "./App.jsx";
+
+// Mounting is a side effect, so editing this file always costs a full reload.
+// It is kept to exactly this line for that reason — write the app in App.jsx,
+// which updates in place on save.
+createRoot(document.getElementById("root")).render(
+  <ErrorBoundary>
+    <App />
+    <Toaster />
+  </ErrorBoundary>,
+);
+"#;
+
+/// Every `*_APP` constant below must export components and nothing else.
+///
+/// One exported constant, helper or store is enough to drop the file out of
+/// Fast Refresh and send every save back to a full reload. Module-local
+/// definitions are free — only exports are checked — so helpers stay unexported
+/// rather than moving out of the file.
+const BLANK_APP: &str = r#"import { AppShell, Card } from "@artist/ui";
 import { useCanvasState } from "@artist/react";
 
-function App() {
+export default function App() {
   // Shared with the agent and every other open tab, and still here tomorrow.
   const [note, setNote] = useCanvasState("note", "");
 
   return (
-    <AppShell title="New canvas" subtitle="Edit main.jsx — the page reloads itself">
+    <AppShell title="New canvas" subtitle="Edit App.jsx — the page updates in place">
       <Card title="Start here">
         <input
           value={note}
@@ -89,18 +118,10 @@ function App() {
     </AppShell>
   );
 }
-
-createRoot(document.getElementById("root")).render(
-  <ErrorBoundary>
-    <App />
-    <Toaster />
-  </ErrorBoundary>,
-);
 "#;
 
-const DASHBOARD: &str = r#"import { createRoot } from "react-dom/client";
-import {
-  AppShell, Badge, Button, Card, DataTable, ErrorBoundary, Plot, Stack, Toaster,
+const DASHBOARD_APP: &str = r#"import {
+  AppShell, Badge, Button, Card, DataTable, Plot, Stack,
 } from "@artist/ui";
 import { useAgent, useCanvasState } from "@artist/react";
 
@@ -115,7 +136,7 @@ function Metric({ label, value, tone }) {
   );
 }
 
-function App() {
+export default function App() {
   // The agent fills these with: canvas(mode="state", entries={...})
   const [rows] = useCanvasState("rows", []);
   const [seriesX] = useCanvasState("x", [0, 1, 2, 3, 4]);
@@ -150,23 +171,15 @@ function App() {
     </AppShell>
   );
 }
-
-createRoot(document.getElementById("root")).render(
-  <ErrorBoundary>
-    <App />
-    <Toaster />
-  </ErrorBoundary>,
-);
 "#;
 
-const REVIEW: &str = r#"import { createRoot } from "react-dom/client";
-import {
-  AppShell, Badge, Button, Card, Diff, EmptyState, ErrorBoundary, Split, Stack, Toaster, toast,
+const REVIEW_APP: &str = r#"import {
+  AppShell, Badge, Button, Card, Diff, EmptyState, Split, Stack, toast,
 } from "@artist/ui";
 import { useCanvasState } from "@artist/react";
 import { artist } from "@artist/canvas";
 
-function App() {
+export default function App() {
   // Each: {path, patch, status}. The agent supplies them.
   const [changes, setChanges] = useCanvasState("changes", []);
   const [selected, setSelected] = useCanvasState("selected", 0);
@@ -229,17 +242,9 @@ function App() {
     </AppShell>
   );
 }
-
-createRoot(document.getElementById("root")).render(
-  <ErrorBoundary>
-    <App />
-    <Toaster />
-  </ErrorBoundary>,
-);
 "#;
 
-const FORM: &str = r#"import { createRoot } from "react-dom/client";
-import { AppShell, Card, ErrorBoundary, SchemaForm, Toaster, toast } from "@artist/ui";
+const FORM_APP: &str = r#"import { AppShell, Card, SchemaForm, toast } from "@artist/ui";
 import { useCanvasState } from "@artist/react";
 import { artist } from "@artist/canvas";
 
@@ -255,7 +260,7 @@ const SCHEMA = {
   },
 };
 
-function App() {
+export default function App() {
   const [answers, setAnswers] = useCanvasState("answers", {});
 
   return (
@@ -276,17 +281,9 @@ function App() {
     </AppShell>
   );
 }
-
-createRoot(document.getElementById("root")).render(
-  <ErrorBoundary>
-    <App />
-    <Toaster />
-  </ErrorBoundary>,
-);
 "#;
 
-const REPORT: &str = r#"import { createRoot } from "react-dom/client";
-import { AppShell, Card, Code, DataTable, ErrorBoundary, Stack, Toaster } from "@artist/ui";
+const REPORT_APP: &str = r#"import { AppShell, Card, Code, DataTable, Stack } from "@artist/ui";
 import { useCanvasState } from "@artist/react";
 
 function Section({ title, children }) {
@@ -298,7 +295,7 @@ function Section({ title, children }) {
   );
 }
 
-function App() {
+export default function App() {
   const [report] = useCanvasState("report", {
     summary: "The agent writes this section.",
     snippet: "fn main() {\n    println!(\"hello\");\n}",
@@ -327,13 +324,6 @@ function App() {
     </AppShell>
   );
 }
-
-createRoot(document.getElementById("root")).render(
-  <ErrorBoundary>
-    <App />
-    <Toaster />
-  </ErrorBoundary>,
-);
 "#;
 
 /// Turn a canvas into a standalone Vite project.
@@ -443,7 +433,10 @@ mod tests {
     fn every_template_ships_its_entry() {
         for template in TEMPLATES {
             assert!(
-                template.files.iter().any(|(path, _)| *path == template.entry),
+                template
+                    .files
+                    .iter()
+                    .any(|(path, _)| *path == template.entry),
                 "{} declares entry {} but does not include it",
                 template.name,
                 template.entry
@@ -462,13 +455,24 @@ mod tests {
     #[test]
     fn templates_import_only_known_specifiers() {
         let known = [
-            "react", "react-dom/client", "react/jsx-runtime", "uplot",
-            "@tanstack/react-table", "@artist/ui", "@artist/react", "@artist/canvas",
+            "react",
+            "react-dom/client",
+            "react/jsx-runtime",
+            "uplot",
+            "@tanstack/react-table",
+            "@artist/ui",
+            "@artist/react",
+            "@artist/canvas",
         ];
         for template in TEMPLATES {
             for (path, source) in template.files {
-                for line in source.lines().filter(|line| line.trim_start().starts_with("import ")) {
-                    let Some(start) = line.rfind(" from \"") else { continue };
+                for line in source
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("import "))
+                {
+                    let Some(start) = line.rfind(" from \"") else {
+                        continue;
+                    };
                     let specifier = line[start + 7..].trim_end_matches("\";");
                     assert!(
                         known.contains(&specifier) || specifier.starts_with("./"),
@@ -503,13 +507,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The property the split exists for.
+    ///
+    /// `isRefreshBoundary` in `assets/client.js` swaps a module in place only
+    /// when it has at least one export and every one of them is a component.
+    /// A single-file template met neither half — it exported nothing at all —
+    /// so every save fell through to `location.reload()` and took the user's
+    /// local state, scroll and focus with it. These assertions are what keep a
+    /// convenience export from quietly turning hot reload back into a reload.
+    #[test]
+    fn every_template_ships_a_hot_swappable_app() {
+        for template in TEMPLATES {
+            let app = template
+                .files
+                .iter()
+                .find(|(path, _)| *path == "App.jsx")
+                .map(|(_, source)| *source)
+                .unwrap_or_else(|| panic!("{} ships no App.jsx", template.name));
+
+            let exports: Vec<&str> = app
+                .lines()
+                .map(str::trim_start)
+                .filter(|line| line.starts_with("export "))
+                .collect();
+            assert!(
+                !exports.is_empty(),
+                "{}: App.jsx exports nothing, so it can never be a refresh boundary",
+                template.name
+            );
+            for line in &exports {
+                assert!(
+                    line.starts_with("export default function App(")
+                        || line.starts_with("export function "),
+                    "{}: `{line}` is not a component export, which drops App.jsx out of Fast \
+                     Refresh — keep helpers and constants module-local",
+                    template.name
+                );
+            }
+
+            // The mount is the side effect, and it belongs in the file nobody
+            // edits. In App.jsx it would defeat the whole split.
+            assert!(
+                !app.contains("createRoot"),
+                "{}: App.jsx mounts the root, which makes it unswappable",
+                template.name
+            );
+
+            // Exporting components is only half of it — the transform has to
+            // actually register them, or `performReactRefresh` has no family to
+            // swap and the edit does nothing at all. Proving it here covers the
+            // one shape this depends on, `export default function App()`.
+            let compiled = transform(
+                Path::new("App.jsx"),
+                app,
+                Options {
+                    refresh: true,
+                    development: true,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{}: App.jsx failed: {error:?}", template.name));
+            assert!(
+                compiled.code.contains("$RefreshReg$"),
+                "{}: App.jsx compiles without refresh registrations, so a save would \
+                 re-evaluate it to no effect",
+                template.name
+            );
+        }
+    }
+
+    /// The mount stays in `main.jsx`, and stays the entry the manifest names.
+    #[test]
+    fn the_entry_mounts_the_app_it_ships() {
+        for template in TEMPLATES {
+            let main = template
+                .files
+                .iter()
+                .find(|(path, _)| *path == template.entry)
+                .map(|(_, source)| *source)
+                .unwrap_or_else(|| panic!("{} ships no entry", template.name));
+            assert!(
+                main.contains("createRoot"),
+                "{}: the entry does not mount anything",
+                template.name
+            );
+            assert!(
+                main.contains("./App.jsx"),
+                "{}: the entry does not import the app it ships",
+                template.name
+            );
+        }
+    }
+
     #[test]
     fn blank_is_available_and_named_consistently() {
         assert!(find("blank").is_some());
         assert!(find("nope").is_none());
         assert!(names().contains(&"dashboard"));
         for template in TEMPLATES {
-            assert!(!template.description.is_empty(), "{} needs a description", template.name);
+            assert!(
+                !template.description.is_empty(),
+                "{} needs a description",
+                template.name
+            );
         }
     }
 }

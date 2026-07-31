@@ -21,7 +21,11 @@ const ENTRIES: &[Entry] = &[
                canvas mode=state), and by tomorrow's session. Use it for what the canvas is\n\
                about — the selection, the rows, the answer. Use plain useState for what only\n\
                one tab cares about.\n\n\
-               setValue accepts a value or an updater, like useState.",
+               setValue accepts a value or an updater, like useState.\n\n\
+               Durable means a file in the user's repo, so it is capped — 4 MiB by default,\n\
+               which is thousands of rows. Writing state on every render will meet that; a\n\
+               canvas that genuinely holds more raises it with [limits] state_bytes in\n\
+               canvas.toml. A write over the cap is refused whole, never truncated.",
     },
     Entry {
         name: "useAgent",
@@ -190,7 +194,11 @@ pub fn render(topic: Option<&str>) -> String {
     let Some(topic) = topic.map(str::trim).filter(|topic| !topic.is_empty()) else {
         let mut out = String::from(PREAMBLE);
         for entry in ENTRIES {
-            out.push_str(&format!("\n{}\n  {}\n", entry.signature, entry.body.replace('\n', "\n  ")));
+            out.push_str(&format!(
+                "\n{}\n  {}\n",
+                entry.signature,
+                entry.body.replace('\n', "\n  ")
+            ));
         }
         return out;
     };
@@ -219,7 +227,13 @@ pub fn render(topic: Option<&str>) -> String {
 
     found
         .iter()
-        .map(|entry| format!("{}\n  {}", entry.signature, entry.body.replace('\n', "\n  ")))
+        .map(|entry| {
+            format!(
+                "{}\n  {}",
+                entry.signature,
+                entry.body.replace('\n', "\n  ")
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -255,7 +269,10 @@ mod tests {
     #[test]
     fn an_unknown_topic_lists_what_is_documented() {
         let response = render(Some("Histogram"));
-        assert!(response.contains("No canvas docs for `Histogram`"), "{response}");
+        assert!(
+            response.contains("No canvas docs for `Histogram`"),
+            "{response}"
+        );
         assert!(response.contains("DataTable"), "{response}");
     }
 
@@ -277,9 +294,18 @@ mod tests {
     #[test]
     fn the_send_docs_match_what_the_client_accepts() {
         let send = render(Some("artist.send"));
-        assert!(send.contains("\"steer\"") && send.contains("\"queue\""), "{send}");
-        assert!(!send.contains("\"auto\""), "the removed auto mode is still documented");
-        assert!(!send.contains("\"next\""), "the renamed next mode is still documented");
+        assert!(
+            send.contains("\"steer\"") && send.contains("\"queue\""),
+            "{send}"
+        );
+        assert!(
+            !send.contains("\"auto\""),
+            "the removed auto mode is still documented"
+        );
+        assert!(
+            !send.contains("\"next\""),
+            "the renamed next mode is still documented"
+        );
     }
 
     #[test]

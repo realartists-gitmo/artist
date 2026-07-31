@@ -67,7 +67,11 @@ pub struct Options {
 
 /// Compile one module. `path` is used to pick the dialect (`.tsx` implies both
 /// TypeScript and JSX) and to label diagnostics.
-pub fn transform(path: &Path, source: &str, options: Options) -> Result<Transformed, TransformError> {
+pub fn transform(
+    path: &Path,
+    source: &str,
+    options: Options,
+) -> Result<Transformed, TransformError> {
     let label = path.display().to_string();
     let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::jsx());
 
@@ -96,8 +100,8 @@ pub fn transform(path: &Path, source: &str, options: Options) -> Result<Transfor
         ..TransformOptions::default()
     };
 
-    let result =
-        Transformer::new(&allocator, path, &transform_options).build_with_scoping(scoping, &mut program);
+    let result = Transformer::new(&allocator, path, &transform_options)
+        .build_with_scoping(scoping, &mut program);
     if !result.diagnostics.is_empty() {
         return Err(TransformError {
             path: label,

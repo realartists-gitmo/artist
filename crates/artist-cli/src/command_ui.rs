@@ -63,13 +63,11 @@ pub async fn run(
         ParsedCommand::New
         | ParsedCommand::Sessions
         | ParsedCommand::Resume { .. }
-        | ParsedCommand::Canvas { .. } => {
-            Ok(CommandOutput {
-                lines: vec!["that command is only available inside a chat session".to_owned()],
-                context_capacity: None,
-                model_changed: false,
-            })
-        }
+        | ParsedCommand::Canvas { .. } => Ok(CommandOutput {
+            lines: vec!["that command is only available inside a chat session".to_owned()],
+            context_capacity: None,
+            model_changed: false,
+        }),
         ParsedCommand::Quit => Ok(CommandOutput {
             lines: vec!["/quit exits artist".to_owned()],
             context_capacity: None,

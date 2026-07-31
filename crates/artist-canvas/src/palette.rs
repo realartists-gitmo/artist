@@ -98,23 +98,44 @@ pub struct Family {
     /// Present when this family *is* one of the terminal's colours, in which
     /// case the surface step is that exact value rather than a re-derivation.
     anchor: Option<u32>,
-    neutral: bool,
 }
 
 impl Family {
     /// A family taken straight from the TUI palette.
     pub const fn anchored(name: &'static str, anchor: u32) -> Self {
-        Family { name, hue: 0.0, saturation: 0.0, anchor: Some(anchor), neutral: false }
+        Family {
+            name,
+            hue: 0.0,
+            saturation: 0.0,
+            anchor: Some(anchor),
+        }
     }
 
     /// A hue Tailwind has and the terminal does not, wearing artist's treatment.
     pub const fn pastel(name: &'static str, hue: f64, saturation: f64) -> Self {
-        Family { name, hue, saturation, anchor: None, neutral: false }
+        Family {
+            name,
+            hue,
+            saturation,
+            anchor: None,
+        }
     }
 
-    /// A grey. Kept near-neutral the whole way down; see `saturated_for`.
+    /// A grey. Kept near-neutral the whole way down.
+    ///
+    /// Nothing downstream reads a flag for this: `saturated_for` decides what
+    /// is a neutral from the saturation it measures off the colour itself.
+    /// That has to be the inference rather than a property of the family,
+    /// because the near-grey anchors artist takes from the terminal arrive
+    /// through `anchored` and need the same treatment — artist's off-white is
+    /// the one that turns khaki without it.
     pub const fn neutral(name: &'static str, hue: f64, saturation: f64) -> Self {
-        Family { name, hue, saturation, anchor: None, neutral: true }
+        Family {
+            name,
+            hue,
+            saturation,
+            anchor: None,
+        }
     }
 
     /// The colour this family's surface step shows.
@@ -333,7 +354,11 @@ pub fn theme_css() -> String {
     let mut out = String::from("@theme {\n");
     for family in FAMILIES {
         for (step, color) in STEPS.iter().zip(family.ramp()) {
-            out.push_str(&format!("  --color-{}-{step}: {};\n", family.name, hex(color)));
+            out.push_str(&format!(
+                "  --color-{}-{step}: {};\n",
+                family.name,
+                hex(color)
+            ));
         }
     }
     // Semantic aliases the kit and templates use, so a canvas can say what it
@@ -503,14 +528,22 @@ mod tests {
                 }
             }
         }
-        assert!(collisions.is_empty(), "indistinguishable families: {collisions:?}");
+        assert!(
+            collisions.is_empty(),
+            "indistinguishable families: {collisions:?}"
+        );
     }
 
     const NEUTRALS: [&str; 5] = ["slate", "gray", "zinc", "neutral", "stone"];
 
     #[test]
     fn legacy_anchor_set_stays_distinct() {
-        let families = [("emerald", MINT), ("cyan", BLUE), ("pink", PINK), ("yellow", YELLOW)];
+        let families = [
+            ("emerald", MINT),
+            ("cyan", BLUE),
+            ("pink", PINK),
+            ("yellow", YELLOW),
+        ];
         for (index, (left_name, left)) in families.iter().enumerate() {
             for (right_name, right) in &families[index + 1..] {
                 let left = step(*left, 700);
@@ -610,7 +643,12 @@ mod preview {
             println!("  anchor {}", hex(anchor));
         }
         println!("\ncontrast on white: 700 =");
-        for (name, anchor) in [("mint", MINT), ("blue", BLUE), ("yellow", YELLOW), ("white", WHITE)] {
+        for (name, anchor) in [
+            ("mint", MINT),
+            ("blue", BLUE),
+            ("yellow", YELLOW),
+            ("white", WHITE),
+        ] {
             let c = ramp(anchor)[7];
             println!("  {name:>7}-700 {} {:.2}:1", hex(c), contrast(c, 0xFFFFFF));
         }
@@ -703,8 +741,9 @@ pub fn tokens_css() -> String {
 /// matters most. The previous five cycled through two near-identical pinks and
 /// said nothing. `slate` sits last because a grey series is what a baseline or
 /// an "other" bucket wants.
-pub const CHART_FAMILIES: [&str; 8] =
-    ["cyan", "pink", "amber", "emerald", "violet", "lime", "orange", "slate"];
+pub const CHART_FAMILIES: [&str; 8] = [
+    "cyan", "pink", "amber", "emerald", "violet", "lime", "orange", "slate",
+];
 
 fn chart_block(step: usize) -> String {
     let indent = "         \x20   ";
@@ -712,8 +751,15 @@ fn chart_block(step: usize) -> String {
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            let family = FAMILIES.iter().find(|f| f.name == *name).expect("charted family exists");
-            format!("{indent}--a-chart-{}: {};\n", index + 1, hex(family.ramp()[step]))
+            let family = FAMILIES
+                .iter()
+                .find(|f| f.name == *name)
+                .expect("charted family exists");
+            format!(
+                "{indent}--a-chart-{}: {};\n",
+                index + 1,
+                hex(family.ramp()[step])
+            )
         })
         .collect()
 }
@@ -799,7 +845,10 @@ mod token_tests {
     #[test]
     fn kit_tokens_come_from_the_same_ramps() {
         let tokens = tokens_css();
-        assert!(tokens.contains(&hex(ramp(BLUE)[7])), "accent is not blue-700");
+        assert!(
+            tokens.contains(&hex(ramp(BLUE)[7])),
+            "accent is not blue-700"
+        );
         assert!(tokens.contains(&hex(ramp(RED)[7])), "danger is not red-700");
         assert!(!tokens.contains("#2563eb"), "the invented accent survived");
         assert!(!tokens.contains("#18181b"), "the invented neutral survived");
@@ -829,7 +878,10 @@ mod token_tests {
 
         for (name, accent) in [("accent", blue[7]), ("danger", red[7])] {
             let ratio = contrast(0xFF_FF_FF, accent);
-            assert!(ratio >= 4.5, "light-mode {name} button text is {ratio:.2}:1");
+            assert!(
+                ratio >= 4.5,
+                "light-mode {name} button text is {ratio:.2}:1"
+            );
         }
         for (name, accent) in [("accent", blue[2]), ("danger", red[3])] {
             let ratio = contrast(neutral[10], accent);
@@ -873,7 +925,12 @@ mod token_tests {
                         (channel(*left) - channel(*right)).abs()
                     })
                     .sum();
-                assert!(difference > 60, "{} and {} are too close", hex(*left), hex(*right));
+                assert!(
+                    difference > 60,
+                    "{} and {} are too close",
+                    hex(*left),
+                    hex(*right)
+                );
             }
         }
     }
@@ -882,7 +939,11 @@ mod token_tests {
     #[test]
     fn charts_have_a_dark_variant() {
         let tokens = tokens_css();
-        assert_eq!(tokens.matches("--a-chart-1:").count(), 2, "no dark override");
+        assert_eq!(
+            tokens.matches("--a-chart-1:").count(),
+            2,
+            "no dark override"
+        );
         assert!(tokens.contains("--a-chart-8:"), "only five colours shipped");
     }
 
@@ -895,7 +956,9 @@ mod token_tests {
             .iter()
             .map(|step| {
                 let needle = format!("--a-text-{step}: ");
-                let start = tokens.find(&needle).unwrap_or_else(|| panic!("{step} missing"))
+                let start = tokens
+                    .find(&needle)
+                    .unwrap_or_else(|| panic!("{step} missing"))
                     + needle.len();
                 tokens[start..]
                     .split("px")
@@ -905,7 +968,10 @@ mod token_tests {
             })
             .collect();
 
-        assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]), "not ascending: {sizes:?}");
+        assert!(
+            sizes.windows(2).all(|pair| pair[0] < pair[1]),
+            "not ascending: {sizes:?}"
+        );
         // Adjacent steps have to be far enough apart to read as different. Two
         // sizes a pixel apart are a mistake, not a hierarchy.
         assert!(
@@ -923,15 +989,24 @@ mod token_tests {
     /// something a reduced-motion preference can turn off.
     #[test]
     fn motion_is_opt_out() {
-        assert!(BASE_CSS.contains("prefers-reduced-motion"), "no reduced-motion guard");
+        assert!(
+            BASE_CSS.contains("prefers-reduced-motion"),
+            "no reduced-motion guard"
+        );
         let animations = BASE_CSS.matches("@keyframes").count();
-        assert_eq!(animations, 1, "{animations} animations; the kit is meant to have one");
+        assert_eq!(
+            animations, 1,
+            "{animations} animations; the kit is meant to have one"
+        );
     }
 
     #[test]
     fn the_base_layer_defines_type_and_shape() {
         for expected in ["--a-font", "box-sizing", "h1 {", ":focus-visible"] {
-            assert!(BASE_CSS.contains(expected), "{expected} missing from the base layer");
+            assert!(
+                BASE_CSS.contains(expected),
+                "{expected} missing from the base layer"
+            );
         }
     }
 }

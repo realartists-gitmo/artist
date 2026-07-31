@@ -14,9 +14,12 @@
 //! never yields its own thread, and the platform differences stay in one place.
 
 use std::{
+    collections::HashMap,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 /// The hidden subcommand the child runs. Not in `--help`: it is an
@@ -26,18 +29,138 @@ pub const WINDOW_SUBCOMMAND: &str = "__canvas-window";
 /// How the child receives the URL, which contains the session key.
 pub const URL_VAR: &str = "ARTIST_CANVAS_URL";
 
-/// Launch a window showing `url`.
+/// Where the child reads and writes its size and position.
+pub const GEOMETRY_VAR: &str = "ARTIST_CANVAS_GEOMETRY";
+
+/// Where a canvas's window geometry is remembered.
 ///
-/// Returns the child so a caller can kill it; dropping the handle leaves the
-/// window open, which is what a user expects when the agent moves on.
-pub fn open(url: &str, title: &str) -> io::Result<Child> {
-    command(std::env::current_exe()?, url, title).spawn()
+/// Beside the canvas rather than in a global config: geometry is a property of
+/// this canvas in this project — a wide table wants a wide window, and it wants
+/// it again tomorrow.
+pub fn geometry_path(project: &Path, slug: &str) -> PathBuf {
+    project
+        .join(".artist/canvas")
+        .join(slug)
+        .join(".window.json")
 }
 
-/// The command `open` will spawn.
+/// What `Windows::open` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Opened {
+    /// A new window went up.
+    Spawned,
+    /// One was already showing this canvas, so nothing was spawned.
+    Already,
+}
+
+/// The windows this session put on screen.
+///
+/// Exists for two reasons, both of which were bugs. Without it `open` dropped
+/// the child handle, so windows outlived the session that promised to close
+/// them — artist quit and left a webview showing a canvas whose server was
+/// gone. And calling `open` twice put up two windows for the same canvas, which
+/// is never what anyone meant by "open it".
+#[derive(Default)]
+pub struct Windows {
+    live: Mutex<HashMap<String, Child>>,
+}
+
+impl Windows {
+    /// Show `slug`, unless it is already showing.
+    pub fn open(&self, project: &Path, slug: &str, url: &str, title: &str) -> io::Result<Opened> {
+        let mut live = self.live.lock().expect("window registry poisoned");
+
+        if let Some(child) = live.get_mut(slug) {
+            // `try_wait` is the only honest test: the user may have closed the
+            // window, and a stale entry would then refuse to reopen it.
+            match child.try_wait() {
+                Ok(None) => return Ok(Opened::Already),
+                _ => {
+                    live.remove(slug);
+                }
+            }
+        }
+
+        let mut child = command(
+            std::env::current_exe()?,
+            url,
+            title,
+            &geometry_path(project, slug),
+        )
+        .spawn()?;
+
+        // Spawning proves only that the binary exists. The child re-execs
+        // artist and dispatches on argv, so it can still die at once: a build
+        // without the `webview` feature bails on purpose, and a box without
+        // WebKitGTK fails to link before it reaches main. Reporting `Spawned`
+        // in either case told the user a window was up while they watched
+        // nothing happen — and with stderr discarded, silently.
+        //
+        // `available()` cannot cover this. It reads the environment, and the
+        // half that goes wrong here is compiled into the binary or installed
+        // on the system. Outliving the grace period is the only honest test.
+        if let Some(reason) = failed_to_start(&mut child) {
+            // A child that exited was reaped by the `try_wait` that saw it. One
+            // we failed to *check on* was not, and dropping the handle here
+            // would leave it defunct for the life of the session — the same
+            // leak `close_all` reaps for. Both calls are harmless on a child
+            // already collected.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(format!("the window {reason}")));
+        }
+
+        live.insert(slug.to_owned(), child);
+        Ok(Opened::Spawned)
+    }
+
+    /// Close one window, if it is ours and still up.
+    pub fn close(&self, slug: &str) -> bool {
+        let mut live = self.live.lock().expect("window registry poisoned");
+        match live.remove(slug) {
+            Some(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Close everything. Called when the session ends.
+    pub fn close_all(&self) {
+        let mut live = self.live.lock().expect("window registry poisoned");
+        for (_, mut child) in live.drain() {
+            let _ = child.kill();
+            // Reaped rather than left as a zombie: artist may be a long-lived
+            // process, and a session that opens canvases repeatedly would
+            // otherwise accumulate defunct children for its whole life.
+            let _ = child.wait();
+        }
+    }
+
+    /// Which canvases are on screen right now.
+    pub fn showing(&self) -> Vec<String> {
+        let mut live = self.live.lock().expect("window registry poisoned");
+        live.retain(|_, child| matches!(child.try_wait(), Ok(None)));
+        let mut slugs: Vec<_> = live.keys().cloned().collect();
+        slugs.sort();
+        slugs
+    }
+}
+
+/// Windows do not survive the session that opened them. The tool's own message
+/// says so, and before this that was simply untrue.
+impl Drop for Windows {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
+/// The command `Windows::open` will spawn.
 ///
 /// Separated so a test can inspect it without launching a window.
-fn command(executable: PathBuf, url: &str, title: &str) -> Command {
+fn command(executable: PathBuf, url: &str, title: &str, geometry: &Path) -> Command {
     let mut command = Command::new(executable);
     // The URL carries the session key, and an argument is world-readable in
     // `ps` and `/proc/<pid>/cmdline`. Another process's environment is not, so
@@ -46,12 +169,90 @@ fn command(executable: PathBuf, url: &str, title: &str) -> Command {
         .arg(WINDOW_SUBCOMMAND)
         .arg(title)
         .env(URL_VAR, url)
+        .env(GEOMETRY_VAR, geometry)
         // The child must not write to the terminal the TUI is drawing in.
-        // A stray line from a GTK warning would corrupt the viewport.
+        // A stray line from a GTK warning would corrupt the viewport. stderr
+        // is piped rather than discarded for the same reason it used to be
+        // discarded — it never reaches the terminal either way — but a pipe
+        // can be read back, which is what turns "it did not open" into a
+        // reason. `failed_to_start` owns that pipe from here.
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
+}
+
+/// How long a doomed child gets to prove it is doomed.
+///
+/// Nothing that is going to succeed finishes inside this — a webview takes far
+/// longer than a quarter second to put pixels up — and nothing that is going to
+/// fail takes anywhere near it: a bail or a link error lands in single-digit
+/// milliseconds. So the success path pays this in full and the failure path
+/// almost never does, which is the right way round for a window a user just
+/// asked for.
+const STARTUP_GRACE: Duration = Duration::from_millis(250);
+
+/// How often to look, so a failure is reported as soon as it happens rather
+/// than at the end of the grace period.
+const STARTUP_POLL: Duration = Duration::from_millis(10);
+
+/// Wait briefly for a child to prove it can run; describe the failure if it
+/// cannot.
+///
+/// `None` means the child outlived the grace period and a window is genuinely
+/// on its way.
+fn failed_to_start(child: &mut Child) -> Option<String> {
+    let deadline = Instant::now() + STARTUP_GRACE;
+    loop {
+        match child.try_wait() {
+            // Still running once the grace is up: as good as this gets without
+            // waiting on the window itself, which can take seconds.
+            Ok(None) if Instant::now() >= deadline => {
+                discard_stderr(child);
+                return None;
+            }
+            Ok(None) => std::thread::sleep(STARTUP_POLL),
+            Ok(Some(status)) => {
+                let reason = read_stderr(child)
+                    .filter(|text| !text.is_empty())
+                    // The child's own message is the useful one — "no webview
+                    // support", the dynamic linker naming the library it could
+                    // not find. The status is the fallback for a child that
+                    // died without saying anything.
+                    .unwrap_or_else(|| format!("exited with {status}"));
+                return Some(format!("closed immediately: {reason}"));
+            }
+            // A child that cannot be waited on is not one to report as open.
+            Err(error) => return Some(format!("could not be checked on: {error}")),
+        }
+    }
+}
+
+/// The child's last words, capped: this goes into a message for the model, and
+/// a webview that failed noisily can produce a great deal of GTK output.
+fn read_stderr(child: &mut Child) -> Option<String> {
+    use std::io::Read;
+
+    let mut stderr = child.stderr.take()?;
+    let mut buffer = Vec::new();
+    stderr.by_ref().take(2048).read_to_end(&mut buffer).ok()?;
+    Some(String::from_utf8_lossy(&buffer).trim().replace('\n', "; "))
+}
+
+/// Drain a surviving child's stderr into nowhere.
+///
+/// The pipe still has to be read. A webview logs GTK warnings for as long as it
+/// is up, and an undrained pipe fills its buffer and then blocks the child
+/// mid-write — a window that freezes an hour in, for the sake of output nobody
+/// wants. Reading and discarding costs one thread per window, and there is one
+/// window per canvas.
+fn discard_stderr(child: &mut Child) {
+    let Some(mut stderr) = child.stderr.take() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let _ = io::copy(&mut stderr, &mut io::sink());
+    });
 }
 
 /// Whether a windowing system is available at all.
@@ -82,9 +283,17 @@ mod tests {
     #[test]
     fn the_url_travels_out_of_band() {
         let url = "http://127.0.0.1:4242/c/supersecretkey/demo/";
-        let spawned = command(PathBuf::from("/usr/bin/artist"), url, "Demo");
+        let spawned = command(
+            PathBuf::from("/usr/bin/artist"),
+            url,
+            "Demo",
+            Path::new("/p/.artist/canvas/demo/.window.json"),
+        );
 
-        let args: Vec<_> = spawned.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<_> = spawned
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert!(
             !args.iter().any(|arg| arg.contains("supersecretkey")),
             "the key reached the command line: {args:?}"
@@ -97,6 +306,128 @@ mod tests {
             .and_then(|(_, value)| value)
             .expect("the child needs the url");
         assert_eq!(passed.to_string_lossy(), url);
+    }
+
+    /// A child that dies on the spot is not an open window, and saying it was
+    /// is the failure this whole check exists for: the user is told a window
+    /// went up, sees nothing, and has no URL to fall back to.
+    #[test]
+    fn a_child_that_dies_at_once_is_reported_as_a_failure() {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'no webview support' >&2; exit 1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+
+        let reason = failed_to_start(&mut child).expect("an immediate exit must be a failure");
+        // The child's own explanation has to survive: "could not open a window"
+        // alone leaves the user with nothing to act on.
+        assert!(reason.contains("no webview support"), "{reason}");
+    }
+
+    /// The opposite error is just as bad — refusing to report a window that is
+    /// coming up fine, because a webview is slow to appear.
+    #[test]
+    fn a_child_that_keeps_running_is_reported_as_started() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+
+        assert_eq!(failed_to_start(&mut child), None);
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// Geometry belongs to the canvas, not to the machine: a canvas showing a
+    /// wide table wants a wide window again tomorrow.
+    #[test]
+    fn geometry_is_remembered_per_canvas() {
+        let one = geometry_path(Path::new("/p"), "wide-table");
+        let two = geometry_path(Path::new("/p"), "narrow-form");
+        assert_ne!(one, two);
+        assert!(one.starts_with("/p/.artist/canvas/wide-table"), "{one:?}");
+        // A dotfile inside the canvas directory, so it does not read as
+        // something the model should be editing.
+        assert!(
+            one.file_name().unwrap().to_string_lossy().starts_with('.'),
+            "{one:?}"
+        );
+    }
+
+    /// Opening a canvas that is already on screen must not put a second window
+    /// up. "Open it" never meant "open another one".
+    #[test]
+    fn a_second_open_does_not_spawn_a_second_window() {
+        let windows = Windows::default();
+        let temporary = tempfile::tempdir().expect("tempdir");
+
+        // `true` stands in for the window child: it is spawnable everywhere and
+        // this is testing the registry, not the webview.
+        let mut live = windows.live.lock().expect("lock");
+        live.insert(
+            "demo".to_owned(),
+            Command::new("sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn"),
+        );
+        drop(live);
+
+        assert_eq!(
+            windows
+                .open(
+                    temporary.path(),
+                    "demo",
+                    "http://127.0.0.1/c/k/demo/",
+                    "Demo"
+                )
+                .expect("open"),
+            Opened::Already
+        );
+        assert_eq!(windows.showing(), ["demo"]);
+
+        assert!(windows.close("demo"), "close should report it closed one");
+        assert!(windows.showing().is_empty());
+        assert!(!windows.close("demo"), "closing twice is not closing two");
+    }
+
+    /// The tool tells the user the window closes when the session ends. Before
+    /// the registry that was simply false — the child handle was dropped.
+    #[test]
+    fn dropping_the_registry_closes_the_windows() {
+        let child = {
+            let windows = Windows::default();
+            let mut live = windows.live.lock().expect("lock");
+            let child = Command::new("sleep")
+                .arg("30")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn");
+            let pid = child.id();
+            live.insert("demo".to_owned(), child);
+            drop(live);
+            pid
+        };
+
+        // The process is gone, so signalling it finds nothing. `kill -0` is the
+        // portable existence check and does not itself terminate anything.
+        let alive = Command::new("kill")
+            .arg("-0")
+            .arg(child.to_string())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(!alive, "the window outlived the registry that owns it");
     }
 
     /// A headless session must fall back to printing a URL rather than

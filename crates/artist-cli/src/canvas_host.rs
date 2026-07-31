@@ -63,7 +63,11 @@ impl CanvasControl {
     ) {
         *self.inner.control.lock().expect("canvas control poisoned") = Some(control);
         *self.inner.ask.lock().expect("canvas ask poisoned") = Some(ask);
-        *self.inner.registry.lock().expect("canvas registry poisoned") = Some(registry);
+        *self
+            .inner
+            .registry
+            .lock()
+            .expect("canvas registry poisoned") = Some(registry);
     }
 
     /// The tools the model itself can call right now.
@@ -81,7 +85,12 @@ impl CanvasControl {
         self.inner.busy.store(busy, Ordering::Release);
     }
 
-    pub fn set_session(&self, model: Option<String>, profile: Option<String>, project: Option<String>) {
+    pub fn set_session(
+        &self,
+        model: Option<String>,
+        profile: Option<String>,
+        project: Option<String>,
+    ) {
         *self.inner.session.lock().expect("canvas session poisoned") = SessionInfo {
             model,
             profile,
@@ -201,7 +210,12 @@ impl CanvasHost for CanvasControl {
     }
 
     fn context(&self) -> serde_json::Value {
-        let session = self.inner.session.lock().expect("canvas session poisoned").clone();
+        let session = self
+            .inner
+            .session
+            .lock()
+            .expect("canvas session poisoned")
+            .clone();
         serde_json::json!({
             "attached": true,
             "busy": self.inner.busy.load(Ordering::Acquire),
@@ -236,9 +250,7 @@ mod tests {
             "echo",
             serde_json::json!({"type": "object"}),
             |arguments: serde_json::Value| {
-                Box::pin(async move {
-                    Ok(rig_core::tool::ToolOutput::text(arguments.to_string()))
-                })
+                Box::pin(async move { Ok(rig_core::tool::ToolOutput::text(arguments.to_string())) })
             },
         )
     }
@@ -310,7 +322,11 @@ mod tests {
     async fn steering_is_refused_when_there_is_no_turn_to_steer() {
         let extension = crate::extension_control::ExtensionControl::default();
         let canvas = CanvasControl::default();
-        canvas.attach(extension.clone(), AskRegistry::new(), ToolRegistryHandle::new());
+        canvas.attach(
+            extension.clone(),
+            AskRegistry::new(),
+            ToolRegistryHandle::new(),
+        );
 
         canvas.set_busy(false);
         assert_eq!(
@@ -321,10 +337,15 @@ mod tests {
 
         // Steering with nothing to steer is refused rather than swallowed.
         assert_eq!(
-            canvas.send("nothing to correct".into(), SendMode::Steer).await,
+            canvas
+                .send("nothing to correct".into(), SendMode::Steer)
+                .await,
             SendOutcome::NoTurnRunning
         );
-        assert!(extension.take_prompts().is_empty(), "it must not become a queued turn");
+        assert!(
+            extension.take_prompts().is_empty(),
+            "it must not become a queued turn"
+        );
 
         canvas.set_busy(true);
         assert_eq!(

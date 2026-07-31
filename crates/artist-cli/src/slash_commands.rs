@@ -100,8 +100,14 @@ pub(crate) enum ParsedCommand<'a> {
     Login,
     Quit,
     Skills,
-    /// List canvases, or show one canvas's URL.
+    /// List canvases, show one canvas's URL, or put one on screen.
+    ///
+    /// `open` matters more than it looks: before it, a canvas the agent built
+    /// last session could only be reopened by asking the agent to do it, which
+    /// costs a turn and the model's attention for something the user can
+    /// perfectly well decide themselves.
     Canvas {
+        action: Option<&'a str>,
         name: Option<&'a str>,
     },
     Tools,
@@ -217,8 +223,26 @@ pub(crate) fn parse(input: &str) -> Option<Result<ParsedCommand<'_>, ParseError<
             usage: "/mcp [status|start|stop|restart|refresh] [server]",
         }),
         ("/skills", []) => Ok(ParsedCommand::Skills),
-        ("/canvas", []) => Ok(ParsedCommand::Canvas { name: None }),
-        ("/canvas", [name]) => Ok(ParsedCommand::Canvas { name: Some(name) }),
+        ("/canvas", []) => Ok(ParsedCommand::Canvas {
+            action: None,
+            name: None,
+        }),
+        ("/canvas", [action @ ("open" | "close")]) => Ok(ParsedCommand::Canvas {
+            action: Some(action),
+            name: None,
+        }),
+        ("/canvas", [action @ ("open" | "close"), name]) => Ok(ParsedCommand::Canvas {
+            action: Some(action),
+            name: Some(name),
+        }),
+        ("/canvas", [name]) => Ok(ParsedCommand::Canvas {
+            action: None,
+            name: Some(name),
+        }),
+        ("/canvas", _) => Err(ParseError::InvalidUsage {
+            command,
+            usage: "/canvas [open|close] [name]",
+        }),
         ("/tools", []) => Ok(ParsedCommand::Tools),
         ("/statusbar", []) => Ok(ParsedCommand::StatusBar),
         ("/statusbar", _) => Err(ParseError::InvalidUsage {

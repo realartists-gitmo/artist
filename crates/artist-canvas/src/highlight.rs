@@ -128,7 +128,11 @@ mod tests {
             .map(|span| span.color.as_str())
             .collect();
         assert!(
-            colors.iter().collect::<std::collections::HashSet<_>>().len() > 1,
+            colors
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
             "everything came out one colour: {colors:?}"
         );
     }

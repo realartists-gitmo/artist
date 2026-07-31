@@ -26,8 +26,9 @@ use std::{
 };
 
 /// Editors that take over the terminal they are launched from.
-const TERMINAL_EDITORS: &[&str] =
-    &["vi", "vim", "nvim", "nano", "pico", "emacs", "helix", "hx", "kak", "micro", "ed"];
+const TERMINAL_EDITORS: &[&str] = &[
+    "vi", "vim", "nvim", "nano", "pico", "emacs", "helix", "hx", "kak", "micro", "ed",
+];
 
 /// Editors that can be told to land on a line, and how to tell them.
 ///
@@ -91,7 +92,9 @@ pub fn resolve(project: &Path, path: &str) -> Result<PathBuf, EditError> {
     let real = joined
         .canonicalize()
         .map_err(|_| EditError::Missing(path.to_owned()))?;
-    let root = project.canonicalize().unwrap_or_else(|_| project.to_owned());
+    let root = project
+        .canonicalize()
+        .unwrap_or_else(|_| project.to_owned());
     if !real.starts_with(&root) {
         return Err(EditError::Outside(path.to_owned()));
     }
@@ -101,19 +104,28 @@ pub fn resolve(project: &Path, path: &str) -> Result<PathBuf, EditError> {
 /// The program and arguments that would open `path`, if anything can.
 ///
 /// Split from the spawn so the choice is testable without launching a window.
-fn invocation(path: &Path, line: Option<u32>, env: &dyn Fn(&str) -> Option<String>) -> Option<Vec<OsString>> {
-    let configured = ["ARTIST_EDITOR", "VISUAL", "EDITOR"].into_iter().find_map(|name| {
-        let value = env(name)?;
-        let value = value.trim().to_owned();
-        if value.is_empty() {
-            return None;
-        }
-        // A terminal editor would draw over the TUI that is already using this
-        // terminal, so it is passed over rather than obeyed.
-        let program = value.split_whitespace().next()?;
-        let stem = Path::new(program).file_stem()?.to_string_lossy().into_owned();
-        (!(name == "EDITOR" && TERMINAL_EDITORS.contains(&stem.as_str()))).then_some(value)
-    });
+fn invocation(
+    path: &Path,
+    line: Option<u32>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<OsString>> {
+    let configured = ["ARTIST_EDITOR", "VISUAL", "EDITOR"]
+        .into_iter()
+        .find_map(|name| {
+            let value = env(name)?;
+            let value = value.trim().to_owned();
+            if value.is_empty() {
+                return None;
+            }
+            // A terminal editor would draw over the TUI that is already using this
+            // terminal, so it is passed over rather than obeyed.
+            let program = value.split_whitespace().next()?;
+            let stem = Path::new(program)
+                .file_stem()?
+                .to_string_lossy()
+                .into_owned();
+            (!(name == "EDITOR" && TERMINAL_EDITORS.contains(&stem.as_str()))).then_some(value)
+        });
 
     let display = path.display().to_string();
     if let Some(configured) = configured {
@@ -134,7 +146,9 @@ fn invocation(path: &Path, line: Option<u32>, env: &dyn Fn(&str) -> Option<Strin
                 words.push("--goto".into());
                 words.push(format!("{display}:{line}").into());
             }
-            (Some(LineSyntax::Suffix), Some(line)) => words.push(format!("{display}:{line}").into()),
+            (Some(LineSyntax::Suffix), Some(line)) => {
+                words.push(format!("{display}:{line}").into())
+            }
             (Some(LineSyntax::DashDashLine), Some(line)) => {
                 words.push("--line".into());
                 words.push(line.to_string().into());
@@ -164,8 +178,8 @@ fn invocation(path: &Path, line: Option<u32>, env: &dyn Fn(&str) -> Option<Strin
 /// Open `path` in the user's editor.
 pub fn open(project: &Path, path: &str, line: Option<u32>) -> Result<String, EditError> {
     let resolved = resolve(project, path)?;
-    let words = invocation(&resolved, line, &|name| std::env::var(name).ok())
-        .ok_or(EditError::NoEditor)?;
+    let words =
+        invocation(&resolved, line, &|name| std::env::var(name).ok()).ok_or(EditError::NoEditor)?;
 
     let program = words[0].to_string_lossy().into_owned();
     Command::new(&words[0])
@@ -195,7 +209,11 @@ mod tests {
         }
     }
 
-    fn words(path: &str, line: Option<u32>, pairs: &'static [(&'static str, &'static str)]) -> Vec<String> {
+    fn words(
+        path: &str,
+        line: Option<u32>,
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> Vec<String> {
         invocation(Path::new(path), line, &env(pairs))
             .expect("something should always open")
             .into_iter()
@@ -211,19 +229,31 @@ mod tests {
             words("/p/a.rs", Some(131), &[("VISUAL", "code")]),
             ["code", "--goto", "/p/a.rs:131"]
         );
-        assert_eq!(words("/p/a.rs", Some(131), &[("VISUAL", "zed")]), ["zed", "/p/a.rs:131"]);
+        assert_eq!(
+            words("/p/a.rs", Some(131), &[("VISUAL", "zed")]),
+            ["zed", "/p/a.rs:131"]
+        );
         assert_eq!(
             words("/p/a.rs", Some(131), &[("VISUAL", "idea")]),
             ["idea", "--line", "131", "/p/a.rs"]
         );
-        assert_eq!(words("/p/a.rs", Some(131), &[("VISUAL", "gvim")]), ["gvim", "+131", "/p/a.rs"]);
+        assert_eq!(
+            words("/p/a.rs", Some(131), &[("VISUAL", "gvim")]),
+            ["gvim", "+131", "/p/a.rs"]
+        );
     }
 
     /// An editor we do not know still opens the file, at the top.
     #[test]
     fn an_unknown_editor_gets_the_path_alone() {
-        assert_eq!(words("/p/a.rs", Some(9), &[("VISUAL", "myeditor")]), ["myeditor", "/p/a.rs"]);
-        assert_eq!(words("/p/a.rs", None, &[("VISUAL", "code")]), ["code", "/p/a.rs"]);
+        assert_eq!(
+            words("/p/a.rs", Some(9), &[("VISUAL", "myeditor")]),
+            ["myeditor", "/p/a.rs"]
+        );
+        assert_eq!(
+            words("/p/a.rs", None, &[("VISUAL", "code")]),
+            ["code", "/p/a.rs"]
+        );
     }
 
     /// People write `VISUAL="code -n"`, and the program is the first word.
@@ -248,7 +278,10 @@ mod tests {
 
         // $VISUAL means "opens its own window", so it is taken at its word even
         // when it names something we do not recognise.
-        assert_eq!(words("/p/a.rs", None, &[("VISUAL", "nvim-qt")])[0], "nvim-qt");
+        assert_eq!(
+            words("/p/a.rs", None, &[("VISUAL", "nvim-qt")])[0],
+            "nvim-qt"
+        );
         // A graphical $EDITOR is fine; only the terminal ones are skipped.
         assert_eq!(words("/p/a.rs", None, &[("EDITOR", "code")])[0], "code");
     }
@@ -256,12 +289,22 @@ mod tests {
     #[test]
     fn precedence_runs_artist_then_visual_then_editor() {
         assert_eq!(
-            words("/p/a.rs", None, &[("ARTIST_EDITOR", "a"), ("VISUAL", "b"), ("EDITOR", "c")])[0],
+            words(
+                "/p/a.rs",
+                None,
+                &[("ARTIST_EDITOR", "a"), ("VISUAL", "b"), ("EDITOR", "c")]
+            )[0],
             "a"
         );
-        assert_eq!(words("/p/a.rs", None, &[("VISUAL", "b"), ("EDITOR", "c")])[0], "b");
+        assert_eq!(
+            words("/p/a.rs", None, &[("VISUAL", "b"), ("EDITOR", "c")])[0],
+            "b"
+        );
         // An empty variable is not a choice.
-        assert_eq!(words("/p/a.rs", None, &[("VISUAL", "  "), ("EDITOR", "c")])[0], "c");
+        assert_eq!(
+            words("/p/a.rs", None, &[("VISUAL", "  "), ("EDITOR", "c")])[0],
+            "c"
+        );
     }
 
     /// The path arrives from a model-authored page, so this is otherwise
@@ -277,7 +320,11 @@ mod tests {
         assert!(resolve(project, "main.jsx").is_ok());
         assert!(resolve(project, "src/lib.rs").is_ok());
 
-        for outside in ["../../../etc/passwd", "/etc/passwd", "src/../../../etc/hosts"] {
+        for outside in [
+            "../../../etc/passwd",
+            "/etc/passwd",
+            "src/../../../etc/hosts",
+        ] {
             assert!(
                 matches!(
                     resolve(project, outside),
@@ -286,7 +333,10 @@ mod tests {
                 "{outside} was allowed"
             );
         }
-        assert!(matches!(resolve(project, "nope.rs"), Err(EditError::Missing(_))));
+        assert!(matches!(
+            resolve(project, "nope.rs"),
+            Err(EditError::Missing(_))
+        ));
     }
 
     /// A symlink planted inside the project must not become a way out of it,
@@ -297,6 +347,9 @@ mod tests {
         let temporary = tempfile::tempdir().expect("tempdir");
         let project = temporary.path();
         std::os::unix::fs::symlink("/etc/passwd", project.join("escape.rs")).expect("symlink");
-        assert!(matches!(resolve(project, "escape.rs"), Err(EditError::Outside(_))));
+        assert!(matches!(
+            resolve(project, "escape.rs"),
+            Err(EditError::Outside(_))
+        ));
     }
 }

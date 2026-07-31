@@ -27,6 +27,25 @@ pub struct Manifest {
     /// These need the network at page load; the vendored set does not.
     #[serde(default)]
     pub deps: BTreeMap<String, String>,
+    #[serde(default)]
+    pub limits: Limits,
+}
+
+/// Ceilings this canvas needs raised above the defaults.
+///
+/// The defaults exist because a canvas is model-written and nothing about it is
+/// rate-limited — a render loop that writes state grows a file in the user's
+/// repo until the disk is gone. They are set well past normal use, so meeting
+/// one usually means a bug rather than an ambitious canvas. A canvas that
+/// genuinely needs more says so here, where the user can see the claim in their
+/// own repo rather than discovering it from disk usage.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    /// Bytes of durable state this canvas may hold, overriding
+    /// `state::DEFAULT_MAX_BYTES`.
+    #[serde(default)]
+    pub state_bytes: Option<usize>,
 }
 
 /// Tools this canvas may invoke.
@@ -59,6 +78,7 @@ impl Default for Manifest {
             tailwind: default_true(),
             permissions: Permissions::default(),
             deps: BTreeMap::new(),
+            limits: Limits::default(),
         }
     }
 }
@@ -103,10 +123,29 @@ mod tests {
                 allow: vec!["read".into(), "grep".into()],
             },
             deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three".to_owned())]),
+            limits: Limits {
+                state_bytes: Some(8 * 1024 * 1024),
+            },
         };
 
         let reparsed = Manifest::parse(&manifest.render()).expect("round trip");
         assert_eq!(reparsed, manifest);
+    }
+
+    /// A canvas that says nothing about limits gets the defaults, and one that
+    /// raises a limit has to be taken at its word — that is the whole point of
+    /// the override.
+    #[test]
+    fn limits_default_to_absent_and_survive_being_declared() {
+        assert_eq!(
+            Manifest::parse("")
+                .expect("empty parses")
+                .limits
+                .state_bytes,
+            None
+        );
+        let raised = Manifest::parse("[limits]\nstate_bytes = 16777216\n").expect("parses");
+        assert_eq!(raised.limits.state_bytes, Some(16 * 1024 * 1024));
     }
 
     /// A misspelled key that silently did nothing would hand the model a canvas

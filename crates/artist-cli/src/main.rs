@@ -57,7 +57,10 @@ async fn run() -> Result<()> {
     // process exists only to own a webview's event loop, and it is spawned by
     // artist itself rather than typed by a user.
     let raw: Vec<String> = std::env::args().collect();
-    if raw.get(1).is_some_and(|arg| arg == artist_canvas::window::WINDOW_SUBCOMMAND) {
+    if raw
+        .get(1)
+        .is_some_and(|arg| arg == artist_canvas::window::WINDOW_SUBCOMMAND)
+    {
         // Out of band, because the URL carries the session key and arguments
         // are world-readable.
         let url = std::env::var(artist_canvas::window::URL_VAR)
@@ -217,14 +220,18 @@ async fn run() -> Result<()> {
             // One registry for the session: the agent loop republishes into it
             // each attempt, and the canvas bridge dispatches through it.
             let tool_registry = artist_agent::ToolRegistryHandle::new();
-            canvas_control.attach(extension_control.clone(), ask.clone(), tool_registry.clone());
-            let canvas = artist_canvas::server::Server::start_with_host(
+            canvas_control.attach(
+                extension_control.clone(),
+                ask.clone(),
+                tool_registry.clone(),
+            );
+            // Not started here. Most sessions never open a canvas, and binding
+            // a port plus standing up an RPC surface for those is a cost and an
+            // exposure with nothing on the other side of it.
+            let canvas = artist_canvas::server::Lazy::new(
                 project.clone(),
                 std::sync::Arc::new(canvas_control.clone()),
-            )
-            .await
-            .ok()
-            .map(std::sync::Arc::new);
+            );
             chat_ui::run(
                 terminal,
                 &mut store,
@@ -240,7 +247,7 @@ async fn run() -> Result<()> {
                     rules_engine: &rules_engine,
                     rules_handle: &rules_handle,
                     settings: &effective,
-                    canvas: canvas.as_ref(),
+                    canvas: Some(&canvas),
                     canvas_control: &canvas_control,
                     tool_registry: &tool_registry,
                 },
@@ -646,7 +653,11 @@ fn sessions_render(sessions: &SessionStore, id: &str) -> Result<()> {
 /// Reads the event log directly rather than a projection: the log is the record,
 /// and `computer.acted` carries exactly the `(anchor, action, expect)` triples a
 /// replayable macro would be distilled from.
-fn computer_log(sessions: &SessionStore, project: &std::path::Path, id: Option<&str>) -> Result<()> {
+fn computer_log(
+    sessions: &SessionStore,
+    project: &std::path::Path,
+    id: Option<&str>,
+) -> Result<()> {
     let id = match id {
         Some(id) => id.to_owned(),
         None => sessions
@@ -799,8 +810,12 @@ fn computer_distill(
                 // The payload is the step. Dropping it made every distilled
                 // macro a no-op that reported success: `key` replayed as an
                 // empty chord, `type` typed nothing.
-                text: (step.action == "type").then(|| step.payload.clone()).flatten(),
-                key: (step.action == "key").then(|| step.payload.clone()).flatten(),
+                text: (step.action == "type")
+                    .then(|| step.payload.clone())
+                    .flatten(),
+                key: (step.action == "key")
+                    .then(|| step.payload.clone())
+                    .flatten(),
             })
             .collect();
 
@@ -849,15 +864,29 @@ fn computer_frame(
             let bytes = std::fs::read(entry.path())?;
             let path = out.unwrap_or_else(|| std::path::PathBuf::from(format!("{name}.png")));
             std::fs::write(&path, &bytes)?;
-            println!("wrote {} ({})", path.display(), format_size(bytes.len() as u64));
+            println!(
+                "wrote {} ({})",
+                path.display(),
+                format_size(bytes.len() as u64)
+            );
             return Ok(());
         }
     }
     bail!("no attachment matching {digest} in this project's sessions")
 }
 
+/// The first few characters of a digest, for a log line.
+///
+/// By character, not by byte. Digests are hex today, but this also renders
+/// whatever an attachment id happens to be, and slicing a multi-byte character
+/// in half panics rather than printing a short string.
 fn short(digest: &str) -> &str {
-    &digest[..digest.len().min(12)]
+    let end = digest
+        .char_indices()
+        .nth(12)
+        .map(|(index, _)| index)
+        .unwrap_or(digest.len());
+    &digest[..end]
 }
 
 fn sessions_gc(
@@ -1175,8 +1204,8 @@ async fn memory_command(
             println!("{}", memory.project().export_json().await?);
         }
         MemoryCommand::Import { path } => {
-            let payload = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {path}"))?;
+            let payload =
+                std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
             memory.project().import_json(payload).await?;
             println!("Imported and reindexed.");
         }

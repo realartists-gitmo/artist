@@ -140,7 +140,10 @@ fn import_map(manifest: &Manifest, slug: &str, key: &str) -> String {
     let mut imports: BTreeMap<&str, String> = BARE
         .iter()
         .map(|(specifier, file)| (*specifier, format!("/@vendor/{file}")))
-        .chain(OURS.iter().map(|(specifier, path)| (*specifier, (*path).to_owned())))
+        .chain(
+            OURS.iter()
+                .map(|(specifier, path)| (*specifier, (*path).to_owned())),
+        )
         .collect();
     // Declared packages are proxied rather than linked directly: the canvas
     // then works offline after the first load, and the browser never talks to
@@ -156,7 +159,9 @@ fn import_map(manifest: &Manifest, slug: &str, key: &str) -> String {
     }
     let entries = imports
         .iter()
-        .map(|(specifier, target)| format!("    {}: {}", json_string(specifier), json_string(target)))
+        .map(|(specifier, target)| {
+            format!("    {}: {}", json_string(specifier), json_string(target))
+        })
         .collect::<Vec<_>>()
         .join(",\n");
     format!("{{\n  \"imports\": {{\n{entries}\n  }}\n}}")
@@ -184,6 +189,14 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- This page's own address contains the session key, and the referrer is
+         how an address reaches a third party: follow a link or load a remote
+         image and the browser says where you came from. Modern browsers already
+         withhold the path cross-origin, but that is their default, and the page
+         is model-written — a copied snippet setting a laxer policy would give
+         the key away. A canvas is a local tool with nothing to gain from
+         referrers, so it sends none. -->
+    <meta name="referrer" content="no-referrer" />
     <title>{title}</title>
     <link rel="stylesheet" href="/@vendor/uplot.css" />
     <style>
@@ -316,7 +329,10 @@ mod tests {
         };
         let map = import_map(&manifest, "demo", "k");
         assert!(map.contains("\"three\": \"/@dep/k/demo/three\""), "{map}");
-        assert!(!map.contains("esm.sh"), "the CDN URL leaked into the page: {map}");
+        assert!(
+            !map.contains("esm.sh"),
+            "the CDN URL leaked into the page: {map}"
+        );
         assert!(map.contains("\"react\""), "{map}");
     }
 
@@ -347,6 +363,24 @@ mod tests {
         let runtime = html.find("/@artist/client.js").expect("runtime");
         let entry = html.find("./app.tsx").expect("entry");
         assert!(runtime < entry, "runtime must precede the entry");
+    }
+
+    /// The page's own address carries the session key, and a referrer is how an
+    /// address reaches a third party. Browsers withhold the path cross-origin by
+    /// default now, but the page is model-written and can change that default,
+    /// so the policy is stated rather than assumed.
+    #[test]
+    fn the_shell_sends_no_referrer() {
+        let html = shell("perf", &Manifest::default(), "s3cret");
+        assert!(
+            html.contains(r#"<meta name="referrer" content="no-referrer" />"#),
+            "{html}"
+        );
+        // Before anything that could load a remote resource, or the first such
+        // load happens under whatever the browser defaulted to.
+        let policy = html.find("no-referrer").expect("policy");
+        let first_load = html.find("<link").or(html.find("<script")).expect("load");
+        assert!(policy < first_load, "the policy must precede any load");
     }
 
     #[test]

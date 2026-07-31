@@ -47,9 +47,25 @@ const UNIVERSAL: &[&str] = &["key", "ref", "children", "className", "style", "id
 const KIT: &[(&str, &[&str])] = &[
     ("AppShell", &["title", "subtitle", "actions", "sidebar"]),
     ("Card", &["title", "actions"]),
-    ("Button", &["variant", "tone", "size", "onClick", "disabled", "type", "title"]),
+    (
+        "Button",
+        &[
+            "variant", "tone", "size", "onClick", "disabled", "type", "title",
+        ],
+    ),
     ("Badge", &["variant", "tone"]),
-    ("Input", &["label", "hint", "value", "onChange", "placeholder", "type", "checked"]),
+    (
+        "Input",
+        &[
+            "label",
+            "hint",
+            "value",
+            "onChange",
+            "placeholder",
+            "type",
+            "checked",
+        ],
+    ),
     ("Select", &["label", "options", "value", "onChange"]),
     ("Checkbox", &["label", "checked", "onChange"]),
     ("Tabs", &["tabs", "value", "onChange"]),
@@ -57,14 +73,34 @@ const KIT: &[(&str, &[&str])] = &[
     ("Stack", &["gap", "horizontal"]),
     ("Split", &["initial", "min", "vertical"]),
     ("EmptyState", &["title", "hint", "action"]),
-    ("DataTable", &["rows", "columns", "onRowClick", "empty", "dense", "height", "filterable"]),
-    ("Plot", &["data", "series", "height", "title", "scales", "kind"]),
+    (
+        "DataTable",
+        &[
+            "rows",
+            "columns",
+            "onRowClick",
+            "empty",
+            "dense",
+            "height",
+            "filterable",
+        ],
+    ),
+    (
+        "Plot",
+        &["data", "series", "height", "title", "scales", "kind"],
+    ),
     ("Code", &["language", "showLines", "wrap"]),
     ("Diff", &["patch", "language"]),
-    ("SchemaForm", &["schema", "value", "onChange", "onSubmit", "submitLabel"]),
+    (
+        "SchemaForm",
+        &["schema", "value", "onChange", "onSubmit", "submitLabel"],
+    ),
     ("Transcript", &["events", "height"]),
     ("ToolLog", &["events", "limit"]),
-    ("Metric", &["label", "value", "variant", "tone", "hint", "trend"]),
+    (
+        "Metric",
+        &["label", "value", "variant", "tone", "hint", "trend"],
+    ),
     ("Alert", &["variant", "tone", "title"]),
     ("Markdown", &[]),
     ("FileLink", &["path", "line"]),
@@ -158,9 +194,7 @@ impl<'a> Visit<'a> for Scan<'a> {
             key.as_ref(),
             "color" | "background" | "backgroundColor" | "borderColor" | "fill" | "stroke"
         );
-        if styling
-            && let Expression::StringLiteral(value) = &property.value
-        {
+        if styling && let Expression::StringLiteral(value) = &property.value {
             let literal = value.value.as_str();
             let hard_coded = literal.starts_with('#')
                 || literal.starts_with("rgb")
@@ -205,7 +239,10 @@ pub fn describe(path: &str, drift: &[Drift]) -> String {
     if drift.is_empty() {
         return String::new();
     }
-    let mut out = format!("\n{} thing(s) in {path} that will not look right:\n", drift.len());
+    let mut out = format!(
+        "\n{} thing(s) in {path} that will not look right:\n",
+        drift.len()
+    );
     for item in drift.iter().take(10) {
         out.push_str(&format!(
             "  {path}:{} {} — {}\n",
@@ -232,15 +269,25 @@ mod tests {
         assert_eq!(drift[0].found, "<Card header=…>");
         assert_eq!(drift[0].line, 1);
 
-        assert!(found(r#"const a = <Button primary>Go</Button>;"#).contains(&"<Button primary=…>".to_owned()));
-        assert!(found(r#"const a = <Badge variant="error">1</Badge>;"#).is_empty(), "variant is accepted");
+        assert!(
+            found(r#"const a = <Button primary>Go</Button>;"#)
+                .contains(&"<Button primary=…>".to_owned())
+        );
+        assert!(
+            found(r#"const a = <Badge variant="error">1</Badge>;"#).is_empty(),
+            "variant is accepted"
+        );
     }
 
     #[test]
     fn props_the_kit_reads_are_not_reported() {
         assert!(found(r#"const a = <Card title="Results" actions={<X/>}>rows</Card>;"#).is_empty());
-        assert!(found(r#"const a = <Card className="p-4" style={{}} key="1">x</Card>;"#).is_empty());
-        assert!(found(r#"const a = <Card aria-label="results" data-test="x">y</Card>;"#).is_empty());
+        assert!(
+            found(r#"const a = <Card className="p-4" style={{}} key="1">x</Card>;"#).is_empty()
+        );
+        assert!(
+            found(r#"const a = <Card aria-label="results" data-test="x">y</Card>;"#).is_empty()
+        );
     }
 
     /// A component the table does not know is not checked. Better silent than
@@ -272,8 +319,14 @@ mod tests {
     /// Colour written into a style object still bypasses the theme.
     #[test]
     fn hard_coded_colour_in_a_style_object_is_reported() {
-        assert_eq!(found(r##"const a = <div style={{ color: "#ff0000" }} />;"##).len(), 1);
-        assert_eq!(found(r#"const a = <div style={{ backgroundColor: "rgb(1,2,3)" }} />;"#).len(), 1);
+        assert_eq!(
+            found(r##"const a = <div style={{ color: "#ff0000" }} />;"##).len(),
+            1
+        );
+        assert_eq!(
+            found(r#"const a = <div style={{ backgroundColor: "rgb(1,2,3)" }} />;"#).len(),
+            1
+        );
         // A token or a class is the correct form and says nothing.
         assert!(found(r#"const a = <div style={{ color: "var(--a-fg)" }} />;"#).is_empty());
         // A non-styling key with a hash value is not a colour.
@@ -300,7 +353,10 @@ mod tests {
 
     #[test]
     fn the_report_names_the_file_and_line() {
-        let text = describe("parts/Chart.jsx", &scan("\n\nconst a = <Card header=\"x\" />;"));
+        let text = describe(
+            "parts/Chart.jsx",
+            &scan("\n\nconst a = <Card header=\"x\" />;"),
+        );
         assert!(text.contains("parts/Chart.jsx:3"), "{text}");
         assert!(text.contains("header"), "{text}");
     }

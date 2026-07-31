@@ -308,7 +308,7 @@ struct SubmitContext<'a> {
     show_splash: bool,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
-    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Lazy>>,
     canvas_control: &'a crate::canvas_host::CanvasControl,
     /// Republished by the agent loop each attempt; the canvas bridge reads it.
     tool_registry: &'a artist_agent::ToolRegistryHandle,
@@ -454,7 +454,7 @@ struct ChatContext<'a> {
     rules_handle: &'a RulesHandle,
     /// Resolved layered settings: model/reasoning overrides and denied tools.
     settings: &'a crate::settings::EffectiveSettings,
-    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    canvas: Option<&'a std::sync::Arc<artist_canvas::server::Lazy>>,
     canvas_control: &'a crate::canvas_host::CanvasControl,
     tool_registry: &'a artist_agent::ToolRegistryHandle,
     /// Driveable surfaces for computer use, shared across every turn.
@@ -473,7 +473,7 @@ pub struct ChatResources<'a> {
     pub settings: &'a crate::settings::EffectiveSettings,
     /// The canvas server, when one started. A failed bind is not fatal: the
     /// session runs fine without canvases, and the tool is simply not offered.
-    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Lazy>>,
     pub canvas_control: &'a crate::canvas_host::CanvasControl,
     pub tool_registry: &'a artist_agent::ToolRegistryHandle,
 }
@@ -607,7 +607,13 @@ pub async fn run(
                     canvas: resources.canvas,
                     canvas_control: resources.canvas_control,
                     tool_registry: resources.tool_registry,
-                    computer: artist_computer::SurfaceRegistry::new(),
+                    // Adapters are discovered per project and the screen size
+                    // comes from `[computer] screen`; both were previously
+                    // resolved and then never reached the registry.
+                    computer: artist_computer::SurfaceRegistry::for_project(
+                        project,
+                        resources.settings.computer.screen,
+                    ),
                 },
                 resumed,
                 initial_prompt,
@@ -701,17 +707,32 @@ fn skill_completions<'a>(
 /// A one-line summary of canvas activity for the status bar, or `None` when
 /// there is nothing worth a segment.
 fn canvas_status_value(
-    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+    canvas: Option<&std::sync::Arc<artist_canvas::server::Lazy>>,
 ) -> Option<String> {
-    let server = server?;
-    let registry = artist_canvas::registry::Registry::discover(server.project());
+    let canvas = canvas?;
+    let registry = artist_canvas::registry::Registry::discover(canvas.project());
     if registry.canvases.is_empty() {
         return None;
+    }
+    // What is on screen is the more useful number when there is one: "3
+    // canvases" says what the project holds, "1 open" says what the user is
+    // looking at. `running` never starts a server — a status bar must report
+    // on the world, not change it.
+    let showing = canvas
+        .running()
+        .map(|server| server.showing().len())
+        .unwrap_or(0);
+    if showing > 0 {
+        return Some(format!("{showing} open"));
     }
     Some(format!(
         "{} canvas{}",
         registry.canvases.len(),
-        if registry.canvases.len() == 1 { "" } else { "es" }
+        if registry.canvases.len() == 1 {
+            ""
+        } else {
+            "es"
+        }
     ))
 }
 
@@ -720,10 +741,10 @@ fn canvas_status_value(
 /// Canvases are not extensions, but they publish the same shape, so reusing
 /// the declaration list keeps one segment mechanism rather than two.
 fn canvas_status_declarations(
-    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+    canvas: Option<&std::sync::Arc<artist_canvas::server::Lazy>>,
     mut declarations: Vec<artist_extensions::StatusDeclaration>,
 ) -> Vec<artist_extensions::StatusDeclaration> {
-    if server.is_some() {
+    if canvas.is_some() {
         declarations.insert(
             0,
             artist_extensions::StatusDeclaration {
@@ -736,36 +757,102 @@ fn canvas_status_declarations(
     declarations
 }
 
-/// What `/canvas` prints.
+/// What `/canvas` prints, and what `/canvas open` does.
 ///
-/// Lists what exists with URLs, because the URL carries the session key and is
-/// otherwise only obtainable by asking the agent to open the canvas again.
-fn canvas_panel(
-    server: Option<&std::sync::Arc<artist_canvas::server::Server>>,
+/// The listing carries URLs because the URL carries the session key and is
+/// otherwise only obtainable by asking the agent to open the canvas again —
+/// which is a turn spent on something the user can decide for themselves.
+async fn canvas_panel(
+    canvas: Option<&std::sync::Arc<artist_canvas::server::Lazy>>,
+    action: Option<&str>,
     name: Option<&str>,
 ) -> Vec<String> {
-    let Some(server) = server else {
-        return vec!["Canvases are unavailable: the local server did not start.".to_owned()];
+    let Some(canvas) = canvas else {
+        return vec!["Canvases are not available in this session.".to_owned()];
     };
-    let registry = artist_canvas::registry::Registry::discover(server.project());
+    let registry = artist_canvas::registry::Registry::discover(canvas.project());
     if registry.canvases.is_empty() {
         return vec!["No canvases yet. Ask the agent to build one.".to_owned()];
     }
+
     let wanted = name.map(artist_canvas::registry::slugify);
-    let mut lines = Vec::new();
-    for canvas in &registry.canvases {
-        if wanted.as_deref().is_some_and(|slug| slug != canvas.slug) {
-            continue;
+    let only_one = registry.canvases.len() == 1;
+    let target = wanted.clone().or_else(|| {
+        // With one canvas in the project, naming it is ceremony.
+        only_one.then(|| registry.canvases[0].slug.clone())
+    });
+
+    match (action, target) {
+        (Some("open"), Some(slug)) => {
+            let Some(found) = registry.get(&slug) else {
+                return vec![format!("No canvas named `{slug}`.")];
+            };
+            // The first `/canvas open` of a session is what starts the server.
+            let server = match canvas.server().await {
+                Ok(server) => server,
+                Err(error) => return vec![format!("Could not start the canvas server: {error}")],
+            };
+            let title = if found.manifest.title.trim().is_empty() {
+                slug.clone()
+            } else {
+                found.manifest.title.clone()
+            };
+            match server.show(&slug, &title) {
+                Ok(artist_canvas::window::Opened::Spawned) => vec![format!("Opened {slug}.")],
+                Ok(artist_canvas::window::Opened::Already) => {
+                    vec![format!("{slug} is already open.")]
+                }
+                Err(error) => vec![
+                    format!("Could not open a window: {error}"),
+                    server.url(&slug),
+                ],
+            }
         }
-        lines.push(format!("{}  {}", canvas.slug, server.url(&canvas.slug)));
+        (Some("close"), Some(slug)) => match canvas.running() {
+            Some(server) if server.hide(&slug) => vec![format!("Closed {slug}.")],
+            _ => vec![format!("{slug} is not open.")],
+        },
+        (Some(action), None) => vec![format!("Which canvas? Try `/canvas {action} <name>`.")],
+        _ => {
+            let server = canvas.running();
+            let showing = server
+                .as_ref()
+                .map(|server| server.showing())
+                .unwrap_or_default();
+            let mut lines = Vec::new();
+            for found in &registry.canvases {
+                if wanted.as_deref().is_some_and(|slug| slug != found.slug) {
+                    continue;
+                }
+                let mark = if showing.contains(&found.slug) {
+                    "● "
+                } else {
+                    "  "
+                };
+                match server.as_ref() {
+                    Some(server) => {
+                        lines.push(format!("{mark}{}  {}", found.slug, server.url(&found.slug)));
+                    }
+                    // No server yet, so no URL exists to print. Saying how to
+                    // get one beats printing a dead link.
+                    None => lines.push(format!("{mark}{}", found.slug)),
+                }
+            }
+            for diagnostic in &registry.diagnostics {
+                lines.push(format!(
+                    "  {}  broken: {}",
+                    diagnostic.slug, diagnostic.message
+                ));
+            }
+            if lines.is_empty() {
+                lines.push(format!("No canvas named `{}`.", name.unwrap_or_default()));
+            } else if server.is_none() {
+                lines.push(String::new());
+                lines.push("`/canvas open <name>` to put one on screen.".to_owned());
+            }
+            lines
+        }
     }
-    for diagnostic in &registry.diagnostics {
-        lines.push(format!("{}  broken: {}", diagnostic.slug, diagnostic.message));
-    }
-    if lines.is_empty() {
-        lines.push(format!("No canvas named `{}`.", name.unwrap_or_default()));
-    }
-    lines
 }
 
 /// Move prompts queued from outside the input box — extensions today, canvases
@@ -1138,8 +1225,8 @@ async fn run_loop(
                         handle_sessions(context.sessions, context.project, &active)
                             .unwrap_or_else(|error| vec![format!("Error: {error:#}")])
                     }
-                    Ok(slash_commands::ParsedCommand::Canvas { name }) => {
-                        command_panel = canvas_panel(context.canvas, name);
+                    Ok(slash_commands::ParsedCommand::Canvas { action, name }) => {
+                        command_panel = canvas_panel(context.canvas, action, name).await;
                         continue;
                     }
                     Ok(slash_commands::ParsedCommand::New) => {
@@ -1359,11 +1446,7 @@ async fn run_loop(
                 queued_prompts.extend(result.queued);
                 viewport_floor = 3;
             }
-            stage_queued_prompt(
-                context.extension_control,
-                &mut queued_prompts,
-                &mut pending,
-            );
+            stage_queued_prompt(context.extension_control, &mut queued_prompts, &mut pending);
             status.refresh(&context.store.status_bar, context.project);
             continue;
         }
@@ -1382,11 +1465,7 @@ async fn run_loop(
         // anything that queues a prompt without the user typing (an extension,
         // or a canvas the user is clicking in another window) stalled until
         // they did. Drain here too, before parking on the poll below.
-        if stage_queued_prompt(
-            context.extension_control,
-            &mut queued_prompts,
-            &mut pending,
-        ) {
+        if stage_queued_prompt(context.extension_control, &mut queued_prompts, &mut pending) {
             continue;
         }
         if !event::poll(std::time::Duration::from_millis(120))? {
@@ -2177,7 +2256,8 @@ async fn submit(
     // Decay first: reclaimed observation context counts toward the compaction
     // threshold below, and dropping a few stale screenshots is far cheaper than
     // summarizing the conversation.
-    match crate::compaction::decay(active, context.provider, context.computer_settings).await {
+    match crate::compaction::decay(active, context.provider, context.computer_settings.clone()).await
+    {
         Ok(Some(decayed)) => *history = decayed,
         Ok(None) => {}
         Err(error) => insert_status(terminal, &format!("  observation decay failed: {error:#}"))?,
@@ -2268,12 +2348,17 @@ async fn submit(
     context
         .extension_control
         .set_steering(Some(steering_handle.clone()));
-    // `auto` sends steer while a turn is running and queue when it is not, so
-    // the bridge has to know which state we are in.
+    // `steer` is refused when no turn is running, so the bridge has to know
+    // which state we are in to answer a canvas honestly.
     context.canvas_control.set_busy(true);
     // A canvas renders the same questions the TUI does, so it has to be told
-    // when the set changes rather than polling for it.
-    if let (Some(server), Some(ask)) = (context.canvas, context.canvas_control.ask_registry()) {
+    // when the set changes rather than polling for it. `running` rather than
+    // `server`: with nothing serving there is nobody to tell, and announcing
+    // into an empty room is not worth binding a port for.
+    if let (Some(server), Some(ask)) = (
+        context.canvas.and_then(|canvas| canvas.running()),
+        context.canvas_control.ask_registry(),
+    ) {
         server.publish_questions(ask.pending());
     }
     context.canvas_control.set_session(
@@ -2325,7 +2410,13 @@ async fn submit(
         providers: context.providers.clone(),
         todos: context.todos.clone(),
         durable_memory: context.durable_memory.clone(),
-        computer: Some(task_computer),
+        // `enabled = false` means the tool is not offered at all, rather than
+        // offered and failing: a mode the model discovers by trying it is worse
+        // than one that was never there.
+        computer: context
+            .computer_settings
+            .enabled
+            .then_some(task_computer),
         handoff_depth: context.handoff_depth,
         tools: context.tool_registry.clone(),
     };
@@ -2346,7 +2437,7 @@ async fn submit(
                 crate::publish_prompt_event(&event_extensions, &event);
                 // A canvas watching the agent needs the same stream the TUI
                 // renders; <Transcript> and <ToolLog> are built on it.
-                if let Some(server) = task_canvas.as_ref() {
+                if let Some(server) = task_canvas.as_ref().and_then(|canvas| canvas.running()) {
                     if let Ok(payload) = serde_json::to_value(&event) {
                         server.publish_agent_event(payload);
                     }
@@ -3678,7 +3769,10 @@ mod tests {
         control.prompt_after("run the tests".into()).await;
 
         assert!(stage_queued_prompt(&control, &mut queued, &mut pending));
-        assert_eq!(pending.as_ref().map(|p| p.content.as_str()), Some("run the tests"));
+        assert_eq!(
+            pending.as_ref().map(|p| p.content.as_str()),
+            Some("run the tests")
+        );
     }
 
     /// The one that matters most: a canvas is model-authored, so text it pushes
@@ -3699,7 +3793,10 @@ mod tests {
                 !staged.typed,
                 "`{dangerous}` was staged as typed input and would dispatch as a command"
             );
-            assert_eq!(staged.content, dangerous, "content must reach the model verbatim");
+            assert_eq!(
+                staged.content, dangerous,
+                "content must reach the model verbatim"
+            );
         }
     }
 
@@ -3709,7 +3806,11 @@ mod tests {
     #[test]
     fn injected_text_is_attributed_on_screen_but_not_to_the_model() {
         let injected = SubmittedPrompt::injected("look at the failing suite".to_owned());
-        assert!(injected.display.starts_with("↩ from canvas"), "{}", injected.display);
+        assert!(
+            injected.display.starts_with("↩ from canvas"),
+            "{}",
+            injected.display
+        );
         assert_eq!(
             injected.content, "look at the failing suite",
             "the marker must not reach the model"

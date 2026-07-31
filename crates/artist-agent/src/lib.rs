@@ -341,9 +341,10 @@ pub struct ToolContext<'a> {
     pub mcp: &'a mcp::McpManager,
     pub extensions: Option<&'a artist_extensions::Manager>,
     pub disabled: &'a [String],
-    /// The canvas server, when one is running. Absent in one-shot and headless
-    /// paths, where the tool is simply not registered.
-    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Server>>,
+    /// The canvas server's handle. It has not necessarily bound anything: the
+    /// server starts on the first call that needs one. Absent in one-shot and
+    /// headless paths, where the tool is simply not registered.
+    pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Lazy>>,
 }
 
 /// Sends the small completion used by provider health checks through the same
@@ -695,12 +696,10 @@ where
     // Observes the model's own output: schedules recall on a stated decision,
     // injects what has landed on the next completion call, and captures a fact
     // when a commit succeeds. Inert when memory is disabled.
-    let memory_writer = handles.durable_memory.as_ref().map(|handle| {
-        handle.writer(
-            handles.recorder.clone(),
-            handles.conversation_id.clone(),
-        )
-    });
+    let memory_writer = handles
+        .durable_memory
+        .as_ref()
+        .map(|handle| handle.writer(handles.recorder.clone(), handles.conversation_id.clone()));
     let memory_hook = memory::MemoryHook::new(memory_writer.clone(), true);
     // Write trigger 1. A correction is the highest-signal moment for memory —
     // a durable preference stated out loud — so the user's own words are stored
@@ -808,9 +807,17 @@ where
         // Only offered when a surface registry exists. A computer tool with no
         // way to reach a display would be a mode the model discovers by
         // failing, which is worse than the tool simply not being there.
-        if let Some(surfaces) = handles.computer.as_ref().filter(|_| profile.permits("computer")) {
+        if let Some(surfaces) = handles
+            .computer
+            .as_ref()
+            .filter(|_| profile.permits("computer"))
+        {
             registered.push(tool_prompt::dynamic(
-                artist_computer::ComputerTool::new(surfaces.clone()),
+                artist_computer::ComputerTool::with_recorder(
+                    surfaces.clone(),
+                    handles.recorder.clone(),
+                    handles.attachments.clone(),
+                ),
             ));
         }
         if profile.permits("handoff") && profiles.names().len() > 1 {
@@ -820,12 +827,13 @@ where
                 profile.name.clone(),
             )));
         }
-        // Only offered when a server is actually running: a canvas tool that
-        // cannot serve a page would be a mode the model discovers by failing.
-        if let Some(server) = tool_context.canvas.filter(|_| profile.permits("canvas")) {
+        // Offered wherever a session could serve one. The server itself does
+        // not exist until the model asks for something that needs it, so the
+        // common case — a session that never touches a canvas — binds no port.
+        if let Some(canvas) = tool_context.canvas.filter(|_| profile.permits("canvas")) {
             registered.push(tool_prompt::dynamic(canvas::CanvasTool::new(
                 tools.project_root().to_path_buf(),
-                std::sync::Arc::clone(server),
+                std::sync::Arc::clone(canvas),
                 handles.recorder.clone(),
             )));
         }

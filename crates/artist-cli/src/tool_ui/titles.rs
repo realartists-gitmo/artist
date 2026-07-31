@@ -56,7 +56,11 @@ pub(super) fn title(name: &str, arguments: &Value) -> ToolTitle {
 fn canvas_title(arguments: &Value) -> ToolTitle {
     let name = string(arguments, "name");
     let mode = string(arguments, "mode");
-    let mode = if mode.is_empty() { "status".to_owned() } else { mode };
+    let mode = if mode.is_empty() {
+        "status".to_owned()
+    } else {
+        mode
+    };
     match mode.as_str() {
         "create" => composed([prose("Built canvas "), input(name)]),
         "open" => composed([prose("Opened canvas "), input(name)]),
@@ -87,35 +91,69 @@ fn computer_title(arguments: &Value) -> ToolTitle {
     match string(arguments, "mode").as_str() {
         "observe" => composed([prose("Observed "), input(surface)]),
         "screenshot" => composed([prose("Captured "), input(surface)]),
-        "launch" => composed([prose("Launched "), input(string(arguments, "program"))]),
-        "open" => plain("Opened a stage"),
-        "close" => plain("Closed the stage"),
-        "list" | "surfaces" => plain("Listed computer surfaces"),
+        // `command`, not `program`: `program` is what the *action* fields
+        // flatten under, so reading it here rendered every launch with an empty
+        // target — the one word that says what was started.
+        "launch" => composed([prose("Launched "), input(string(arguments, "command"))]),
+        "close" => composed([prose("Closed "), input(surface)]),
+        "surfaces" => plain("Listed computer surfaces"),
         _ => match steps.map(Vec::as_slice) {
-            // One step reads better named than counted.
-            Some([step]) => {
-                let action = step
-                    .as_object()
-                    .and_then(|map| map.keys().next().cloned())
-                    .unwrap_or_else(|| "acted".to_owned());
-                let label = step
-                    .as_object()
-                    .and_then(|map| map.values().next())
-                    .map(|value| string(value, "label"))
-                    .unwrap_or_default();
-                if label.is_empty() {
-                    composed([prose(humanize(&action)), prose(" on "), input(surface)])
-                } else {
-                    composed([prose(humanize(&action)), prose(" "), input(label)])
+            Some([]) | None => plain(humanize("computer")),
+            // Name what is being touched, however many steps there are. A bare
+            // "Ran 3 steps on tab:7" hides exactly what a watching human would
+            // want to interrupt — and the guardrail matches on labels the human
+            // was never shown.
+            Some(steps) => {
+                let named: Vec<String> = steps.iter().filter_map(step_summary).collect();
+                match named.as_slice() {
+                    [] => composed([
+                        prose(format!("Ran {} steps on ", steps.len())),
+                        input(surface),
+                    ]),
+                    [only] => composed([prose("Ran "), input(only.clone())]),
+                    many => composed([
+                        prose("Ran "),
+                        input(many.join(", ")),
+                        prose(" on "),
+                        input(surface),
+                    ]),
                 }
             }
-            Some(steps) => composed([
-                prose(format!("Ran {} steps on ", steps.len())),
-                input(surface),
-            ]),
-            None => plain(humanize("computer")),
         },
     }
+}
+
+/// One step as a few words: the verb, and what it names.
+///
+/// Truncated per step rather than by total, so a long label cannot crowd the
+/// later steps out of a row the user is reading to decide whether to intervene.
+fn step_summary(step: &Value) -> Option<String> {
+    let (action, body) = step.as_object()?.iter().next()?;
+    let verb = action.as_str();
+    let detail = match verb {
+        "key" => match body {
+            // Both wire forms: a bare chord, or a chord that names its target.
+            Value::String(chord) => chord.clone(),
+            _ => {
+                let chord = string(body, "chord");
+                let label = string(body, "label");
+                if label.is_empty() {
+                    chord
+                } else {
+                    format!("{chord} on {label}")
+                }
+            }
+        },
+        "navigate" => string(body, "url"),
+        "scroll" | "back" | "forward" => String::new(),
+        _ => string(body, "label"),
+    };
+    let detail: String = detail.chars().take(40).collect();
+    Some(if detail.is_empty() {
+        verb.to_owned()
+    } else {
+        format!("{verb} {detail}")
+    })
 }
 
 fn skill_title(arguments: &Value) -> ToolTitle {
@@ -266,13 +304,19 @@ mod tests {
     #[test]
     fn canvas_titles_name_the_mode_and_the_canvas() {
         assert_eq!(
-            title("canvas", &serde_json::json!({"mode":"create","name":"test-dashboard"}))
-                .plain_text(),
+            title(
+                "canvas",
+                &serde_json::json!({"mode":"create","name":"test-dashboard"})
+            )
+            .plain_text(),
             "Built canvas test-dashboard"
         );
         assert_eq!(
-            title("canvas", &serde_json::json!({"mode":"open","name":"test-dashboard"}))
-                .plain_text(),
+            title(
+                "canvas",
+                &serde_json::json!({"mode":"open","name":"test-dashboard"})
+            )
+            .plain_text(),
             "Opened canvas test-dashboard"
         );
         // status is the default, and the commonest call.

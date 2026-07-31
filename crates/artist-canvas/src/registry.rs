@@ -271,7 +271,11 @@ mod tests {
         assert!(matches!(error, ScaffoldError::Exists { .. }));
         // The original survives untouched.
         assert_eq!(
-            Registry::discover(&project).get("perf").expect("still there").manifest.title,
+            Registry::discover(&project)
+                .get("perf")
+                .expect("still there")
+                .manifest
+                .title,
             "First"
         );
     }
