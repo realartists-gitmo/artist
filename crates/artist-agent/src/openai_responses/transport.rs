@@ -621,7 +621,48 @@ fn reconcile_inputs(
     // A diverged history is intentionally appended from its divergence point. In the
     // normal growing-history case this adds only genuinely new framework items.
     merged.extend(fresh.into_iter().skip(common));
-    merged
+    answer_orphaned_calls(merged)
+}
+
+/// Answer any `function_call` in the assembled input that has no
+/// `function_call_output`.
+///
+/// The Responses API requires the pairing, and rejects the whole request with
+/// `No tool output found for function call <id>` when it is missing. A turn
+/// that ends between the two — the process dying, a cancellation, a panic
+/// inside the tool — leaves the call unanswered in the canonical items, and
+/// because those items are persisted, every later request on that conversation
+/// is rejected the same way. The session is then permanently unusable.
+///
+/// Enforcing the pairing here makes it a property of what we send rather than
+/// of how the previous turn happened to end, and repairs conversations already
+/// carrying an unanswered call.
+fn answer_orphaned_calls(input: Vec<Value>) -> Vec<Value> {
+    let answered = input
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call_output"))
+        .filter_map(|item| item.get("call_id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut repaired = Vec::with_capacity(input.len());
+    for item in input {
+        let orphan = (item.get("type").and_then(Value::as_str) == Some("function_call"))
+            .then(|| item.get("call_id").and_then(Value::as_str))
+            .flatten()
+            .filter(|call_id| !answered.contains(*call_id))
+            .map(str::to_owned);
+        repaired.push(item);
+        if let Some(call_id) = orphan {
+            repaired.push(json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": "The tool did not run to completion and produced no output.",
+                "status": "completed"
+            }));
+        }
+    }
+    repaired
 }
 
 fn context_management_unsupported(status: u16, body: &str) -> bool {
@@ -1054,5 +1095,48 @@ mod transport_tests {
         assert!(sent.contains("chatgpt-account-id: acct"));
         assert!(sent.contains("originator: artist"));
         assert!(sent.contains("\"stream\":true"));
+    }
+
+    /// A turn that dies between a tool call and its result leaves the call
+    /// unanswered in the persisted canonical items. Every later request is then
+    /// rejected with "No tool output found for function call", permanently.
+    #[test]
+    fn an_unanswered_tool_call_is_answered_before_sending() {
+        let call = json!({"type":"function_call","id":"fc1","call_id":"call_ra8","name":"edit","arguments":"{}"});
+        let merged = reconcile_inputs(vec![call.clone()], &[], Vec::new(), &[]);
+
+        assert_eq!(merged.len(), 2, "the orphaned call must be answered");
+        assert_eq!(merged[0], call);
+        assert_eq!(merged[1]["type"], "function_call_output");
+        assert_eq!(merged[1]["call_id"], "call_ra8");
+    }
+
+    #[test]
+    fn an_already_answered_call_is_left_alone() {
+        let call = json!({"type":"function_call","id":"fc1","call_id":"c","name":"edit","arguments":"{}"});
+        let output = json!({"type":"function_call_output","call_id":"c","output":"ok"});
+        let merged = reconcile_inputs(vec![call.clone(), output.clone()], &[], Vec::new(), &[]);
+        assert_eq!(merged, vec![call, output]);
+    }
+
+    /// Parallel tool calls answered out of order still count as answered.
+    #[test]
+    fn each_call_is_matched_by_call_id_not_position() {
+        let first = json!({"type":"function_call","id":"fc1","call_id":"a","name":"read","arguments":"{}"});
+        let second = json!({"type":"function_call","id":"fc2","call_id":"b","name":"read","arguments":"{}"});
+        let answer_b = json!({"type":"function_call_output","call_id":"b","output":"ok"});
+        let merged = reconcile_inputs(
+            vec![first, second, answer_b],
+            &[],
+            Vec::new(),
+            &[],
+        );
+
+        let outputs: Vec<&str> = merged
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .map(|item| item["call_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(outputs, ["a", "b"], "only the unanswered call gains an output");
     }
 }
