@@ -1,6 +1,8 @@
 mod command;
 mod context;
 mod integration;
+#[cfg(test)]
+mod integration_tests;
 mod state;
 
 pub use context::{AGENT, HerdrContext, LIFECYCLE_SOURCE};

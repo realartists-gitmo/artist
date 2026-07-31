@@ -69,7 +69,7 @@ impl HerdrIntegration {
         Self::start_with_runner(CommandRunner::new(context))
     }
 
-    fn start_with_runner(runner: CommandRunner) -> Self {
+    pub(crate) fn start_with_runner(runner: CommandRunner) -> Self {
         let (updates, receiver) = mpsc::channel(64);
         let (release, release_receiver) = watch::channel(false);
         let state_updates = updates.clone();
