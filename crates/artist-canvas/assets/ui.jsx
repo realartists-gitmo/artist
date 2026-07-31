@@ -14,44 +14,11 @@ import { artist } from "@artist/canvas";
 import { useAsk } from "@artist/react";
 
 // ------------------------------------------------------------------- theming
-
-const TOKENS = `
-:root {
-  --a-bg: #ffffff; --a-fg: #18181b; --a-muted: #71717a; --a-subtle: #f4f4f5;
-  --a-border: #e4e4e7; --a-accent: #2563eb; --a-accent-fg: #ffffff;
-  --a-danger: #dc2626; --a-ok: #16a34a; --a-warn: #d97706;
-  --a-radius: 8px; --a-sp: 4px;
-  --a-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --a-mono: ui-monospace, SFMono-Regular, Menlo, "Cascadia Code", monospace;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --a-bg: #0b0b0e; --a-fg: #ededf0; --a-muted: #a1a1aa; --a-subtle: #18181b;
-    --a-border: #27272a; --a-accent: #3b82f6; --a-accent-fg: #ffffff;
-    --a-danger: #ef4444; --a-ok: #22c55e; --a-warn: #f59e0b;
-  }
-}
-:root[data-theme="light"] {
-  --a-bg: #ffffff; --a-fg: #18181b; --a-muted: #71717a; --a-subtle: #f4f4f5;
-  --a-border: #e4e4e7; --a-accent: #2563eb;
-}
-:root[data-theme="dark"] {
-  --a-bg: #0b0b0e; --a-fg: #ededf0; --a-muted: #a1a1aa; --a-subtle: #18181b;
-  --a-border: #27272a; --a-accent: #3b82f6;
-}
-body { margin: 0; background: var(--a-bg); color: var(--a-fg); font-family: var(--a-font); }
-.a-focus:focus-visible { outline: 2px solid var(--a-accent); outline-offset: 2px; }
-`;
-
-let tokensInstalled = false;
-function installTokens() {
-  if (tokensInstalled || typeof document === "undefined") return;
-  tokensInstalled = true;
-  const style = document.createElement("style");
-  style.textContent = TOKENS;
-  document.head.appendChild(style);
-}
-installTokens();
+//
+// Tokens and the base layer are injected by the server from
+// `artist_canvas::palette`, generated from the same six colours the TUI uses.
+// Nothing is defined here: two palettes would drift, and the utilities a model
+// types would stop matching the components it composes.
 
 const sp = (n) => `calc(var(--a-sp) * ${n})`;
 const cx = (...parts) => parts.filter(Boolean).join(" ");

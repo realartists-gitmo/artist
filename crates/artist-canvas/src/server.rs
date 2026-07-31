@@ -402,10 +402,23 @@ async fn serve_module(
             refresh: true,
         },
     ) {
-        Ok(output) => raw(
-            "text/javascript; charset=utf-8",
-            assets::scope_refresh(&label.display().to_string(), &output.code).into_bytes(),
-        ),
+        Ok(output) => {
+            // Reported, not prevented: the model corrects on its next `status`
+            // through the loop that already carries compile errors.
+            let drift = crate::drift::scan(&source);
+            if !drift.is_empty() {
+                inner.push_report(Report {
+                    slug: slug.clone(),
+                    level: "style".into(),
+                    message: crate::drift::describe(&label.display().to_string(), &drift),
+                    detail: None,
+                });
+            }
+            raw(
+                "text/javascript; charset=utf-8",
+                assets::scope_refresh(&label.display().to_string(), &output.code).into_bytes(),
+            )
+        }
         Err(error) => {
             let first = error.diagnostics.first();
             let detail = serde_json::json!({

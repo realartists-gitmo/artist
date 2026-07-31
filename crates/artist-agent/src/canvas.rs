@@ -122,8 +122,11 @@ fn description_text() -> String {
              Files live in .artist/canvas/<name>/ and persist across sessions, so prefer growing \
              an existing canvas over creating a new one.\n\n\
              Available imports (no other packages resolve): react, react-dom/client, uplot, \
-             @tanstack/react-table, and Tailwind classes. Plus the kit — prefer it over writing \
-             your own:\n\
+             @tanstack/react-table, and Tailwind classes. Tailwind's palette is remapped to \
+             artist's own colours, so ordinary classes like `bg-blue-100` or `text-red-700` are \
+             already on-theme — use them, and avoid hard-coded hex, rgb() and named colours, \
+             which bypass the theme and are reported back to you by `status`. Plus the kit — \
+             prefer it over writing your own:\n\
              • @artist/ui — AppShell, Toolbar, Stack, Split, Card, EmptyState, Skeleton, Button, \
              Input, Select, Checkbox, Badge, Tabs, Dialog, Toaster/toast, ErrorBoundary, \
              DataTable, Plot, Code, Diff, SchemaForm, Transcript, ToolLog, AskDock, Approve\n\
@@ -287,9 +290,14 @@ impl CanvasTool {
         out.push_str(&format!("url: {}\n", self.server.url(slug)));
 
         let reports = self.server.take_reports(Some(slug));
-        let (problems, chatter): (Vec<_>, Vec<_>) = reports
+        let (problems, rest): (Vec<_>, Vec<_>) = reports
             .iter()
             .partition(|report| matches!(report.level.as_str(), "error" | "build-error"));
+        // Style drift is neither an error nor console noise; grouping it with
+        // either would get it skimmed past.
+        let (style, chatter): (Vec<&artist_canvas::server::Report>, Vec<_>) = rest
+            .into_iter()
+            .partition(|report| report.level == "style");
 
         if problems.is_empty() {
             out.push_str("\nNo errors reported since the last check.\n");
@@ -304,6 +312,13 @@ impl CanvasTool {
                         }
                     }
                 }
+            }
+        }
+
+        if !style.is_empty() {
+            out.push_str("\nOff-palette values (these bypass the canvas theme):\n");
+            for report in &style {
+                out.push_str(&report.message.trim_start_matches('\n').to_string());
             }
         }
 

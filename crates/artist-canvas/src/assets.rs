@@ -166,6 +166,12 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{title}</title>
     <link rel="stylesheet" href="/@vendor/uplot.css" />
+    <style>
+{tokens}{base}    </style>
+    <!-- Tailwind reads its palette from here, so a utility the model writes
+         without thinking resolves to artist's colours rather than stock ones. -->
+    <style type="text/tailwindcss">
+{theme}    </style>
     <script type="importmap">
 {map}
     </script>
@@ -182,6 +188,9 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
 </html>
 "#,
         title = escape_html(title),
+        tokens = crate::palette::tokens_css(),
+        base = crate::palette::BASE_CSS,
+        theme = crate::palette::theme_css(),
         map = import_map(manifest),
         slug_json = json_string(slug),
         key_json = json_string(key),
