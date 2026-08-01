@@ -428,16 +428,27 @@ impl Server {
                     .filter_map(|path| {
                         let slug = slug_of(&base, path)?;
                         let entry = entries.get(&slug).map(|c| c.manifest.entry.clone());
-                        let module = module_path(&base, &slug, path, entry.as_deref());
-                        Some((slug, module))
+                        match module_path(&base, &slug, path, entry.as_deref()) {
+                            // Swappable in place.
+                            Some(module) => Some((slug, Some(module))),
+                            // Not swappable: the entry, something the page is
+                            // built from, or a writer's leavings. Only the
+                            // first two are worth rebuilding for.
+                            None if is_entry_module(&base, &slug, path, entry.as_deref())
+                                || rebuilds_page(path) =>
+                            {
+                                Some((slug, None))
+                            }
+                            None => None,
+                        }
                     })
                     .collect();
                 changed.sort();
                 changed.dedup();
                 for (slug, module) in changed {
-                    // A module can be swapped in place. Anything else — the
-                    // manifest, a stylesheet, an asset — changes the page
-                    // itself, so the page has to be rebuilt.
+                    // A module can be swapped in place. The manifest, a
+                    // stylesheet or an asset changes the page itself, so the
+                    // page has to be rebuilt.
                     let _ = match module {
                         Some(path) => signals.send(Signal::Update { slug, path }),
                         None => signals.send(Signal::Reload { slug }),
@@ -479,6 +490,57 @@ fn is_harness_written(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name == crate::state::STATE_FILE || name.ends_with(".tmp"))
+}
+
+/// Is this the module the page mounts from?
+///
+/// `module_path` returns `None` for it, because re-importing it would call
+/// `createRoot` a second time and throw the live tree away. That makes it look
+/// like a non-module to the caller, so it needs naming separately — otherwise
+/// the allowlist below, which knows nothing about `.jsx`, would discard an edit
+/// to the entry as though it were a writer's temporary.
+fn is_entry_module(base: &Path, slug: &str, path: &Path, entry: Option<&str>) -> bool {
+    let Ok(relative) = path.strip_prefix(base.join(slug)) else {
+        return false;
+    };
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    entry.is_some_and(|entry| entry.trim_start_matches("./") == relative)
+}
+
+/// Does changing this file change the *page*, as opposed to a module the page
+/// can swap in place?
+///
+/// An allowlist, and that is the point. Treating every unrecognised file as
+/// page-affecting meant a writer's temporary file forced a full reload — and
+/// almost nothing writes a file in place. `sed -i` leaves a `sedXXXXXX`
+/// beside the target; artist's own `edit` tool writes through
+/// `NamedTempFile`, whose names *begin* with `.tmp` rather than ending with
+/// it, so the suffix check above never caught them. The reload then landed
+/// just after the hot swap and destroyed the state the swap had preserved,
+/// which is the entire thing this machinery exists to protect.
+///
+/// Erring towards ignoring is deliberate: a missed reload costs the reader one
+/// refresh, and a spurious one costs them whatever they had typed.
+fn rebuilds_page(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if name == crate::registry::MANIFEST_FILE {
+        return true;
+    }
+    // Editors and tools scatter dotfiles: `.swp`, `.tmpXXXX`, `.goutputstream-*`.
+    // None of them are the page.
+    if name.starts_with('.') {
+        return false;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "css" | "html" | "png" | "jpg" | "jpeg" | "svg" | "webp" | "gif" | "woff" | "woff2"
+            )
+        })
 }
 
 /// The canvas-relative module path for a change, or `None` if it is not a
@@ -1113,6 +1175,72 @@ mod tests {
         assert!(!is_harness_written(&base.join("main.jsx")));
         assert!(!is_harness_written(&base.join("canvas.toml")));
         assert!(!is_harness_written(&base.join("data.json")));
+    }
+
+    /// The bug this whole hot-reload path existed to avoid, arriving by the
+    /// back door.
+    ///
+    /// Almost nothing writes a file in place. `sed -i` leaves a `sedXXXXXX`
+    /// beside the target, and artist's own `edit` writes through
+    /// `NamedTempFile`, whose names *begin* with `.tmp` rather than ending
+    /// with it. Treating an unrecognised file as page-affecting meant every
+    /// one of those forced a reload — which landed just after the hot swap and
+    /// destroyed the state the swap had preserved. Verified live: state reset
+    /// on every edit before this, and survives after.
+    #[test]
+    fn a_writers_temporary_file_does_not_rebuild_the_page() {
+        let base = Path::new("/p/.artist/canvas/demo");
+        // `sed -i`.
+        assert!(!rebuilds_page(&base.join("sedM4vCtq")));
+        // `tempfile::NamedTempFile`, which is what `edit` uses.
+        assert!(!rebuilds_page(&base.join(".tmpA1b2C3")));
+        // Editors of various habits.
+        assert!(!rebuilds_page(&base.join(".App.jsx.swp")));
+        assert!(!rebuilds_page(&base.join("App.jsx~")));
+        assert!(!rebuilds_page(&base.join(".goutputstream-XYZ12")));
+        assert!(!rebuilds_page(&base.join("4913")));
+    }
+
+    /// The other half: things that genuinely are the page still rebuild it.
+    /// An allowlist that admits nothing would trade one silent failure for
+    /// another.
+    #[test]
+    fn the_page_itself_still_rebuilds() {
+        let base = Path::new("/p/.artist/canvas/demo");
+        assert!(rebuilds_page(&base.join("canvas.toml")));
+        assert!(rebuilds_page(&base.join("theme.css")));
+        assert!(rebuilds_page(&base.join("logo.svg")));
+        assert!(rebuilds_page(&base.join("hero.png")));
+        assert!(rebuilds_page(&base.join("Inter.woff2")));
+    }
+
+    /// The entry is a `.jsx`, so the asset allowlist alone would discard it as
+    /// though it were a temporary — but re-importing it would call
+    /// `createRoot` twice, so it has to rebuild rather than swap.
+    #[test]
+    fn the_entry_module_still_rebuilds_the_page() {
+        let base = Path::new("/p/.artist/canvas");
+        let entry = Some("main.jsx");
+        assert!(is_entry_module(
+            base,
+            "demo",
+            &base.join("demo/main.jsx"),
+            entry
+        ));
+        // A component beside it is swappable, not a rebuild.
+        assert!(!is_entry_module(
+            base,
+            "demo",
+            &base.join("demo/App.jsx"),
+            entry
+        ));
+        // And the manifest's `./` prefix must not defeat the comparison.
+        assert!(is_entry_module(
+            base,
+            "demo",
+            &base.join("demo/main.jsx"),
+            Some("./main.jsx")
+        ));
     }
 
     /// Serving a module reads it, and a read is an access plus an atime bump.
