@@ -434,3 +434,221 @@ async fn the_rpc_endpoint_only_accepts_the_key_as_a_header() {
         .expect("post");
     assert_eq!(wrong.status(), reqwest::StatusCode::NOT_FOUND);
 }
+
+// ----------------------------------------------------------------- the bridge
+//
+// Everything above runs against `DetachedHost`, which refuses every call by
+// design — so it proves the RPC layer's *validation* (a mode is required, the
+// key is checked, a slug cannot escape) and nothing about what the bridge
+// actually hands the agent. These run against a host that records, which is
+// the only way to see whether `canvas.send` arrives as the mode the page asked
+// for, and whether a tool call carries the permissions of the canvas that made
+// it rather than a sibling's.
+
+use artist_canvas::bridge::{CanvasHost, Denied, HostFuture, SendMode, SendOutcome};
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct Recorded {
+    sent: Vec<(String, SendMode)>,
+    called: Vec<(String, serde_json::Value, Vec<String>)>,
+    answered: Vec<(String, String)>,
+}
+
+#[derive(Clone, Default)]
+struct RecordingHost(Arc<Mutex<Recorded>>);
+
+impl CanvasHost for RecordingHost {
+    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
+        self.0.lock().expect("recorder").sent.push((text, mode));
+        Box::pin(async move {
+            match mode {
+                SendMode::Steer => SendOutcome::Steered,
+                SendMode::Queue => SendOutcome::Queued,
+            }
+        })
+    }
+
+    fn call_tool(
+        &self,
+        tool: String,
+        arguments: serde_json::Value,
+        allowed: Vec<String>,
+    ) -> HostFuture<'_, Result<String, Denied>> {
+        self.0
+            .lock()
+            .expect("recorder")
+            .called
+            .push((tool.clone(), arguments, allowed.clone()));
+        Box::pin(async move {
+            if allowed.iter().any(|name| *name == tool) {
+                Ok(format!("ran {tool}"))
+            } else {
+                Err(Denied::NotDeclared { tool })
+            }
+        })
+    }
+
+    fn state_changed(&self, _slug: &str, _keys: Vec<String>) {}
+
+    fn pending_questions(&self) -> Vec<artist_session::ask::Question> {
+        Vec::new()
+    }
+
+    fn answer_question(&self, answer: artist_session::ask::Answer, surface: &str) -> bool {
+        self.0
+            .lock()
+            .expect("recorder")
+            .answered
+            .push((answer.question_id, surface.to_owned()));
+        true
+    }
+
+    fn context(&self) -> serde_json::Value {
+        serde_json::json!({"attached": true})
+    }
+}
+
+/// Stand up a server whose host records, and hand back the pieces a request
+/// needs.
+async fn recording(
+    name: &str,
+    manifest: &str,
+) -> (Project, Server, RecordingHost, String, String, String) {
+    let project = Project::new(name);
+    project.canvas("demo", manifest, ENTRY);
+    let host = RecordingHost::default();
+    let server = Server::start_with_host(project.root.clone(), Arc::new(host.clone()))
+        .await
+        .expect("server starts");
+    let url = server.url("demo");
+    let key = url[url.find("/c/").unwrap() + 3..url.rfind("/demo/").unwrap()].to_owned();
+    let endpoint = format!("http://{}/_artist/rpc", server.addr());
+    let origin = format!("http://{}", server.addr());
+    (project, server, host, key, endpoint, origin)
+}
+
+async fn rpc(
+    endpoint: &str,
+    origin: &str,
+    key: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let response = reqwest::Client::new()
+        .post(format!("{endpoint}?slug=demo"))
+        .header("origin", origin)
+        .header("x-artist-key", key)
+        .json(&serde_json::json!({"method": method, "params": params}))
+        .send()
+        .await
+        .expect("post");
+    let status = response.status();
+    let body = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// The mode is the whole point of `send` — `steer` corrects the turn that is
+/// running, `queue` starts another. Passing the wrong one silently would make
+/// a button interrupt the agent when the author meant to schedule work.
+#[tokio::test]
+async fn a_send_reaches_the_agent_as_the_mode_the_page_asked_for() {
+    let (_project, _server, host, key, endpoint, origin) = recording("bridge-send", "").await;
+
+    let (status, body) = rpc(
+        &endpoint,
+        &origin,
+        &key,
+        "canvas.send",
+        serde_json::json!({"text": "steer me", "mode": "steer"}),
+    )
+    .await;
+    assert!(status.is_success(), "{status:?}");
+    assert_eq!(body["outcome"], "steered");
+
+    let (status, body) = rpc(
+        &endpoint,
+        &origin,
+        &key,
+        "canvas.send",
+        serde_json::json!({"text": "queue me", "mode": "queue"}),
+    )
+    .await;
+    assert!(status.is_success(), "{status:?}");
+    assert_eq!(body["outcome"], "queued");
+
+    let sent = &host.0.lock().expect("recorder").sent;
+    assert_eq!(
+        sent.as_slice(),
+        &[
+            ("steer me".to_owned(), SendMode::Steer),
+            ("queue me".to_owned(), SendMode::Queue),
+        ]
+    );
+}
+
+/// A tool call must carry the permissions of the canvas that made it. The
+/// server takes them from the canvas the request resolved to rather than from
+/// anything the page said, so a page cannot name a more permissive sibling and
+/// borrow its grants.
+#[tokio::test]
+async fn a_tool_call_carries_the_declaring_canvas_permissions() {
+    let (_project, _server, host, key, endpoint, origin) = recording(
+        "bridge-call",
+        "[permissions]\nallow = [\"read\", \"grep\"]\n",
+    )
+    .await;
+
+    let (status, body) = rpc(
+        &endpoint,
+        &origin,
+        &key,
+        "canvas.call",
+        serde_json::json!({"tool": "read", "arguments": {"path": "x"}}),
+    )
+    .await;
+    assert!(status.is_success(), "{status:?}");
+    assert_eq!(body["output"], "ran read");
+
+    // Undeclared: the host is still consulted, and still refuses — the
+    // decision belongs to the layer that owns the profile.
+    let (status, _) = rpc(
+        &endpoint,
+        &origin,
+        &key,
+        "canvas.call",
+        serde_json::json!({"tool": "bash", "arguments": {}}),
+    )
+    .await;
+    assert!(!status.is_success(), "an undeclared tool was allowed");
+
+    let called = &host.0.lock().expect("recorder").called;
+    assert_eq!(called.len(), 2);
+    for (_, _, allowed) in called {
+        assert_eq!(allowed.as_slice(), &["read".to_owned(), "grep".to_owned()]);
+    }
+    assert_eq!(called[0].1["path"], "x", "arguments were not forwarded");
+}
+
+/// An answer has to say where it came from: the same question is showing in
+/// the TUI, and whoever gets there first retires it in both.
+#[tokio::test]
+async fn an_answer_reaches_the_registry_tagged_with_its_surface() {
+    let (_project, _server, host, key, endpoint, origin) = recording("bridge-ask", "").await;
+
+    let (status, _) = rpc(
+        &endpoint,
+        &origin,
+        &key,
+        "canvas.ask.answer",
+        serde_json::json!({"question_id": "q1", "selected": ["yes"]}),
+    )
+    .await;
+    assert!(status.is_success(), "{status:?}");
+
+    let answered = &host.0.lock().expect("recorder").answered;
+    assert_eq!(
+        answered.as_slice(),
+        &[("q1".to_owned(), "canvas:demo".to_owned())]
+    );
+}
