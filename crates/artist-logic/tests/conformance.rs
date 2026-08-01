@@ -160,6 +160,18 @@ fn row_implies() {
     }
 
     // …and the tautologous case, which needs no store at all.
+    //
+    // This survived a change of logic underneath it, and the reason is worth
+    // recording. It used to hold because `→` was decided by a *Boolean* truth
+    // table — which a soundness property test showed certifies tautologies *and*
+    // contradictions the model leaves open, since the committed semantics is
+    // Belnap's FOUR (docs/semantics.md §3). Reading `→` materially there makes
+    // `P → P` at `N` equal `N`, and the tautology set empties.
+    //
+    // It holds now for a better reason: `→` is Arieli–Avron's strong
+    // implication, and validity is *always designated* rather than always `T`.
+    // Excluded middle is still not valid — `P ∨ ¬P` at `N` is `N` — so the
+    // vague-predicate protection is untouched. See `round6.rs`.
     let identity = g.apply(wk::IMPLIES, vec![unknown, unknown]);
     assert_eq!(
         eval(&mut g, identity, &s),

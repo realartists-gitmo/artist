@@ -212,6 +212,22 @@ fn a_two_slot_query_produces_a_checkable_derivation() {
     );
     let (r, cert) = GraphEvaluator::new().eval_traced(&mut g, q, &s, 200_000);
     assert_eq!(r.evidential(), Evidential::Supported);
-    let checked = cert.check(&g).expect("the derivation must check");
-    assert!(checked.support <= r.support, "and must not prove more than the result");
+
+    // **The evaluator answers; the kernel does not yet certify this shape.**
+    //
+    // `Step::Instance` checks an instantiation by substituting *one* bound
+    // variable, so a two-slot binder is outside the rule set. The honest
+    // consequence is an empty certificate rather than a step the kernel would
+    // have to take on trust — and `eval_traced` discards a derivation that does
+    // not conclude the root, so nothing claims to have proved this.
+    //
+    // This test previously asserted the derivation checks, which it did only
+    // because `Instance` ignored the binder's `vars` entirely — the same defect
+    // that let a witness from outside the domain prove an existential. Closing
+    // that hole narrowed what is certifiable, and multi-slot instantiation is
+    // recorded as a gap in docs/semantics.md §12 rather than papered over here.
+    assert!(
+        cert.check(&g).is_err(),
+        "a two-slot binder is outside the eight rules, and says so"
+    );
 }

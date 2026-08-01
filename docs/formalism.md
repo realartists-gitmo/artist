@@ -209,7 +209,7 @@ as text.
 
 ## 4. The well-known vocabulary
 
-100 operators, ids fixed below 4096. **This is the closed part of the language**;
+101 operators, ids fixed below 4096. **This is the closed part of the language**;
 every domain predicate and entity is open. The evaluator privileges these; the
 representation does not.
 
@@ -792,7 +792,7 @@ domain size are parameters we chose, not ceilings the design imposes.
 
 ## 9. Writing facts in it
 
-Closed above and open below: **the 100 operators are fixed, the predicates and
+Closed above and open below: **the 101 operators are fixed, the predicates and
 entities are yours.**
 
 **A qualifier that varies is an argument, not part of the name.** Not

@@ -341,6 +341,7 @@ pub mod wk {
         BY_EXHAUSTIVE = 168, "by-exhaustive"; BY_RULE = 169, "by-rule";
         BY_CONFLICT = 170, "by-conflict"; BY_UNGROUNDED = 171, "by-ungrounded";
         BY_UNESTABLISHED = 172, "by-unestablished";
+        BY_DEFEASIBLE = 173, "by-defeasible";
     }
 
     /// First id available to callers. Everything below is reserved, so the

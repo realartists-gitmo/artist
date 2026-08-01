@@ -538,6 +538,99 @@ pub struct BoundRelation {
     pub complete: bool,
 }
 
+/// Belnap's FOUR, for deciding validity in the logic this system actually has.
+///
+/// Kept here beside [`Skeleton`] rather than in `evidence.rs` because it is the
+/// *semantic* four-valued algebra — `Evidential` is the evaluator's report of it,
+/// and conflating the two is how the connective tables drifted from the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Four {
+    N,
+    T,
+    F,
+    B,
+}
+
+impl Four {
+    fn from_digit(d: u64) -> Four {
+        match d {
+            1 => Four::T,
+            2 => Four::F,
+            3 => Four::B,
+            _ => Four::N,
+        }
+    }
+
+    fn not(self) -> Four {
+        match self {
+            Four::T => Four::F,
+            Four::F => Four::T,
+            v => v,
+        }
+    }
+
+    /// Meet in the truth order `F <_t N <_t T`, `F <_t B <_t T`. `N` and `B` are
+    /// truth-incomparable, so their meet is `F`.
+    fn and(self, other: Four) -> Four {
+        use Four::*;
+        match (self, other) {
+            (F, _) | (_, F) => F,
+            (T, v) | (v, T) => v,
+            (N, B) | (B, N) => F,
+            (v, _) => v,
+        }
+    }
+
+    /// Join in the truth order.
+    fn or(self, other: Four) -> Four {
+        use Four::*;
+        match (self, other) {
+            (T, _) | (_, T) => T,
+            (F, v) | (v, F) => v,
+            (N, B) | (B, N) => T,
+            (v, _) => v,
+        }
+    }
+
+    /// **Designated** — established, in the sense validity quantifies over.
+    ///
+    /// `T` is told-true and `B` is told-both; both are cases where the store has
+    /// asserted the proposition. Validity means *always designated*, not always
+    /// `T`, and that distinction is what makes the tautology set non-empty in a
+    /// logic that admits `B` at all.
+    fn designated(self) -> bool {
+        matches!(self, Four::T | Four::B)
+    }
+
+    /// Anti-designated: the mirror, and what a `refutation: Certain` bound
+    /// asserts (semantics §7.2).
+    fn anti(self) -> bool {
+        matches!(self, Four::F | Four::B)
+    }
+
+    /// **Arieli–Avron's strong implication.** `a ⊃ b = b` when `a` is designated,
+    /// and `T` otherwise.
+    ///
+    /// Material implication — `¬a ∨ b` — leaves `P → P` at `N` equal to `N`, so
+    /// FOUR has essentially no valid formulas and the entire "logical truths need
+    /// no evidence" capability disappears. That is a real loss, not a tidy-up:
+    /// a rule language whose implication has no deduction theorem cannot express
+    /// rules.
+    ///
+    /// The strong reading fixes it without weakening anything that matters.
+    /// `P ⊃ P` is designated everywhere. Modus ponens stays sound: if `a ⊃ b` and
+    /// `a` are both designated then `a ⊃ b` *is* `b`, so `b` is designated.
+    /// Excluded middle stays **invalid** — `P ∨ ¬P` at `N` is still `N` — which is
+    /// exactly the property the vague-predicate tests exist to protect, and the
+    /// reason this is not simply "going back to classical".
+    ///
+    /// Material implication remains expressible as `(or (not a) b)`, so nothing
+    /// is lost by making the primitive the useful one.
+    fn implies(self, other: Four) -> Four {
+        if self.designated() { other } else { Four::T }
+    }
+}
+
 /// A propositional skeleton over opaque atoms, indexed by position.
 #[derive(Clone, Debug)]
 pub(crate) enum Skeleton {
@@ -569,6 +662,39 @@ impl Skeleton {
     /// established.
     pub(crate) fn intuitionistic(&self) -> bool {
         prove(&[], self, 0)
+    }
+
+    /// Evaluate over **Belnap's FOUR** rather than the Booleans.
+    ///
+    /// `digits` packs one base-4 value per atom: `0 = N`, `1 = T`, `2 = F`,
+    /// `3 = B`. This exists because [`Self::eval`] answers a question about a
+    /// *different logic* from the one this system commits to (semantics §3), and
+    /// a soundness property test caught the difference in both polarities:
+    /// `P ∨ ¬P` at `N` is `N ∨ N = N`, not `T`, and `P ∧ ¬P` at `N` is `N`, not
+    /// `F`. Enumerating Boolean masks therefore certified a tautology as
+    /// `Supported` and a contradiction as `Refuted` where the model says neither.
+    ///
+    /// Almost nothing is FOUR-valid, which is the honest consequence of a logic
+    /// whose store can hold both and neither: the shortcut survives only for
+    /// formulas built over `⊤`/`⊥`, and everything else falls through to ordinary
+    /// evaluation against real facts — where it belonged.
+    pub(crate) fn eval4(&self, digits: u64) -> Four {
+        match self {
+            Skeleton::Const(b) => {
+                if *b {
+                    Four::T
+                } else {
+                    Four::F
+                }
+            }
+            Skeleton::Atom(i) => Four::from_digit((digits >> (2 * *i as u64)) & 0b11),
+            Skeleton::Not(x) => x.eval4(digits).not(),
+            Skeleton::And(xs) => {
+                xs.iter().map(|x| x.eval4(digits)).fold(Four::T, Four::and)
+            }
+            Skeleton::Or(xs) => xs.iter().map(|x| x.eval4(digits)).fold(Four::F, Four::or),
+            Skeleton::Imp(a, b) => a.eval4(digits).implies(b.eval4(digits)),
+        }
     }
 
     pub(crate) fn eval(&self, mask: u32) -> bool {
@@ -1164,8 +1290,15 @@ impl GraphEvaluator {
         // A derivation must conclude with the thing that was asked. Where the
         // last step is about something else — an operator that emits nothing —
         // say so rather than handing back a certificate for a sub-question.
+        // A derivation that does not conclude the root establishes nothing about
+        // the root, so it is discarded rather than capped with a placeholder.
+        // The old `Unestablished` step made the certificate *look* total — it
+        // checked, and returned a `Checked` with empty `authorities` and empty
+        // `assumed`, which is the shape of a proof resting on nothing at all.
+        // Every dated query went out that way, silently dropping the sources its
+        // own inner steps had recorded.
         if cert.conclusion() != Some(root) {
-            cert.push(Step::Unestablished { node: root });
+            cert.steps.clear();
         }
         (r, cert)
     }
@@ -1415,10 +1548,16 @@ impl State<'_> {
             };
             r.residual = Some(resolved);
             r.snapshot = self.snapshot;
-            self.emit(Step::Ungrounded {
-                node: resolved,
-                oscillating: r.grounding == Grounding::Oscillatory,
-            });
+            // Emitted only when the kernel can *verify* ungroundedness, which it
+            // can do exactly for loops through the single-operand reference
+            // operators. Anywhere else — a cycle running through a branching
+            // connective — the kernel refuses, because a reachable cycle is not
+            // ungroundedness: `P ↔ P ∨ ⊤` loops and grounds to true in one step
+            // of the fixpoint. The evaluator may still *report* the axis; what it
+            // may not do is claim a proof of it.
+            if crate::certificate::loop_parity(self.g, resolved).is_some() {
+                self.emit(Step::Ungrounded { node: resolved });
+            }
             // Through the same channel as every other result: an early return
             // is exactly where an axis gets lost.
             self.axes.absorb(&r);
@@ -1465,6 +1604,62 @@ impl State<'_> {
         if atoms.is_empty() || atoms.len() > 8 {
             return None;
         }
+        // **Validity in FOUR, not in the Booleans.** This enumerated `2^n`
+        // Boolean masks, which decides validity in a *different logic* from the
+        // one §3 commits to. A soundness property test caught it in both
+        // polarities: `P ∨ ¬P` at `N` is `N ∨ N = N` and `P ∧ ¬P` at `N` is `N`,
+        // so the Boolean reading certified a tautology as `Supported` and a
+        // contradiction as `Refuted` about a sentence the model leaves `Open`.
+        // That is the manufacture-a-verdict-from-absence defect arriving through
+        // the one path that never consults the store.
+        //
+        // The honest consequence is that this shortcut now fires rarely —
+        // essentially only for structure over `⊤`/`⊥` — because a logic whose
+        // store can hold both and neither has almost no valid formulas. What used
+        // to be "recognised" now goes to ordinary evaluation against real facts,
+        // which is where an answer that depends on the facts belongs.
+        if atoms.len() > 8 {
+            return None;
+        }
+        // Validity is **always designated**, and refutation is always
+        // anti-designated — which is exactly what §7.2 says a `Certain` bound
+        // asserts (`support ⟹ ⟦n⟧ ∈ {T,B}`, `refutation ⟹ ⟦n⟧ ∈ {F,B}`). Reading
+        // validity as "always `T`" instead is what emptied the tautology set.
+        // **Two tiers, and the difference between them is what is presumed.**
+        //
+        // FOUR-validity is unconditional: true in every structure this semantics
+        // admits, including ones that hold *both* or *neither*. Classical
+        // validity is true in every **bivalent** structure, which is a strictly
+        // stronger assumption and one the store may not satisfy.
+        //
+        // Collapsing the two was the bug a property test caught: reading only the
+        // Boolean table certified `P ∨ ¬P` as `Supported` and `P ∧ ¬P` as
+        // `Refuted` with nothing recording that bivalence had been assumed.
+        // Deleting the classical tier outright was the over-correction — it is
+        // sound *relative to a recorded presumption*, which is precisely the
+        // conditional judgment §7.1 is built around, and the determinacy gate
+        // below is what records it.
+        let mut all_true = true;
+        let mut all_false = true;
+        for digits in 0u64..4u64.pow(atoms.len() as u32) {
+            let v = shape.eval4(digits);
+            all_true &= v.designated();
+            all_false &= v.anti();
+            if !all_true && !all_false {
+                break;
+            }
+        }
+        // Unconditional: no presumption to record, so no gate to pass, and the
+        // totality is *derived* rather than declared or presumed.
+        if all_true || all_false {
+            let mut r = EvaluationResult::certain(all_true);
+            r.determinacy = Determinacy::Total;
+            r.determinacy_basis = DeterminacyBasis::Derived;
+            r.snapshot = self.snapshot;
+            return Some(r);
+        }
+        // Otherwise fall back to the classical table, whose answers are
+        // conditional on bivalence and gated accordingly.
         let mut all_true = true;
         let mut all_false = true;
         for mask in 0u32..(1u32 << atoms.len()) {
@@ -1505,11 +1700,30 @@ impl State<'_> {
             return None;
         }
         let mut r = EvaluationResult::certain(all_true);
-        r.determinacy = if constructive { Determinacy::Total } else { worst };
-        // A constructive validity establishes its own totality — it is true
-        // whatever the atoms mean, so nothing needs to have been declared.
-        if constructive {
-            r.determinacy_basis = DeterminacyBasis::Derived;
+        // **Constructive is not unconditional here.** This branch used to set
+        // `Total`/`Derived` for anything G4ip proves, on the reasoning that a
+        // constructive validity is true whatever the atoms mean. That holds in
+        // an intuitionistic setting and fails in this one: `¬(P ∧ ¬P)` is
+        // intuitionistically provable, and in FOUR at `N` it is `N ∧ N = N`,
+        // whose negation is `N` — not designated. A soundness property test
+        // found exactly that formula.
+        //
+        // So only the FOUR tier above is unconditional. Everything reaching here
+        // presumes something — bivalence for the classical table, and at minimum
+        // that no atom is `both` for the constructive one — and says so.
+        // `constructive` survives solely to pick which presumption the `Certify`
+        // gate below demands, never to claim there is none.
+        r.determinacy = worst;
+        {
+            // **Bivalence was presumed, and the presumption is now on the
+            // record.** This tier reads the *classical* table, so its answers
+            // hold only in structures where every atom is `T` or `F` — which a
+            // Belnap store need not be. Leaving the basis at its default made a
+            // conditional judgment indistinguishable from an unconditional one,
+            // and a soundness property test read it as the latter and found the
+            // contradiction. Marking it `Presumed` is what lets a reader — or a
+            // test — apply the condition the answer actually carries.
+            r.determinacy_basis = DeterminacyBasis::Presumed;
         }
         r.snapshot = self.snapshot;
         Some(r)
@@ -1594,14 +1808,14 @@ impl State<'_> {
                 if matches!(op, wk::NOT | wk::AND | wk::OR | wk::IMPLIES)
                     && let Some(r) = self.valid(resolved, env)
                 {
-                    self.emit(Step::Tautology {
-                        node: resolved,
-                        holds: r.support.is_certain(),
-                        // Derived means constructively valid — it earned its
-                        // totality. Anything else assumed bivalence and the
-                        // certificate must say so.
-                        constructive: r.determinacy_basis == DeterminacyBasis::Derived,
-                    });
+                    // **No step is emitted.** `valid` decides on the *classical*
+                    // skeleton, and this logic is Belnap's: `P ∨ ¬P` at `N` is
+                    // `N`, and even `P → P` at `N` is `N` (semantics §3), so a
+                    // classical validity is not a validity here. The evaluator
+                    // may still answer — its own semantics for `valid` is a
+                    // separate question — but there is no kernel rule that
+                    // licenses it, and emitting one would be certifying a
+                    // formula the model does not validate.
                     return r;
                 }
                 let outer = std::mem::take(&mut self.axes);
@@ -1694,11 +1908,11 @@ impl State<'_> {
                     if scan.step(&r, self.snapshot) {
                         let holds = op != wk::AND;
                         if let Some(k) = self.cite(*a) {
-                            self.emit(Step::Connective {
-                                node,
-                                premises: vec![k],
-                                holds,
-                            });
+                            // The operand *slot*, not just the node: under
+                            // content addressing `(implies P P)` repeats an id,
+                            // and a premise identified by node alone can be
+                            // read into the wrong position.
+                            self.emit(Step::Connective { node, premises: vec![(k, i)], holds });
                         }
                         return scan.decided(holds, self.snapshot);
                     }
@@ -2538,17 +2752,21 @@ impl State<'_> {
                             // itself and the asserting agent sitting in the
                             // store went unasked-for.
                             let sources = self.s.attribution(inst);
-                            let step = match answer {
-                                Knowledge::Conflicted => {
-                                    Step::Conflict { node: inst, sources }
-                                }
-                                _ => Step::Told {
+                            // A conflict is `aff ≠ ∅ ∧ den ≠ ∅` under semantics
+                            // §8.2 — two pieces of testimony, not a primitive.
+                            // The old `Conflict` step minted `Certain` on *both*
+                            // sides for an arbitrary id with no lookup at all,
+                            // making it a second undeclared trust point and a
+                            // valid premise for every other rule. There is no
+                            // rule for it now, so nothing is emitted and the
+                            // certificate simply does not conclude this node.
+                            if answer != Knowledge::Conflicted {
+                                self.emit(Step::Told {
                                     node: inst,
                                     holds: r.support.is_certain(),
                                     sources,
-                                },
-                            };
-                            self.emit(step);
+                                });
+                            }
                         }
                         r
                     }
@@ -2714,14 +2932,18 @@ impl State<'_> {
             self.rule_depth -= 1;
 
             if r.support.is_certain() {
-                if let Some(k) = self.cite(antecedent) {
-                    self.emit(Step::Rule {
-                        node,
-                        rule,
-                        premises: vec![k],
-                        defeasible: m.defeasible,
-                    });
-                }
+                // **No step is emitted, and this is a known gap rather than a
+                // decision.** `ModusPonens` needs a premise establishing the
+                // *instantiated* implication `A → C`, and reaching one from the
+                // stored `∀x⃗. A → C` requires universal instantiation — the
+                // converse direction of `Step::Instance`, which goes instance to
+                // binder. That rule is sound in FOUR (a meet over the extension
+                // is `≤_t` each instance) and cheap, but it is not among the
+                // eight, so emitting anything here would be certifying with a
+                // rule the spec does not contain. Recorded in semantics §12.
+                //
+                // Defeasible firings are a separate matter and are not
+                // certifiable at all until §12's fixpoint theorem exists.
                 return m.conclude(self.snapshot, node);
             }
             // A refuted antecedent says nothing: the rule simply does not

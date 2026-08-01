@@ -364,8 +364,16 @@ fn a_sentence_does_not_depend_on_its_spelling() {
             let inner = g.apply(wk::NOT, vec![p]);
             g.apply(wk::NOT, vec![inner])
         };
+        // **Spelled with *material* implication, deliberately.** `wk::IMPLIES` is
+        // Arieli–Avron's strong implication (docs/semantics.md §3), which is not
+        // `¬a ∨ b` — that is precisely what gives it a deduction theorem in a
+        // logic admitting `both` and `neither`. So `¬(P → ⊥)` is *not* another
+        // spelling of `¬¬P`, and asserting it was would be testing the classical
+        // rewrite rather than the property this test is about. Material
+        // implication stays expressible, and the equivalence holds for it.
         let via_implies = {
-            let inner = g.apply(wk::IMPLIES, vec![p, wk::BOT]);
+            let np = g.apply(wk::NOT, vec![p]);
+            let inner = g.apply(wk::OR, vec![np, wk::BOT]);
             g.apply(wk::NOT, vec![inner])
         };
         let a = ev.eval(&mut g, double_not, &s, 5_000);
@@ -380,9 +388,13 @@ fn a_sentence_does_not_depend_on_its_spelling() {
         // …and `P ∨ Q` against `¬P → Q`.
         let q = shapes.prop(&mut g, &mut r, 2);
         let disj = g.apply(wk::OR, vec![p, q]);
+        // Again material, for the same reason: `¬P → Q` under the strong
+        // implication is `T` whenever `¬P` is not designated, which `P ∨ Q` is
+        // not obliged to be.
         let implication = {
             let np = g.apply(wk::NOT, vec![p]);
-            g.apply(wk::IMPLIES, vec![np, q])
+            let nnp = g.apply(wk::NOT, vec![np]);
+            g.apply(wk::OR, vec![nnp, q])
         };
         let a = ev.eval(&mut g, disj, &s, 5_000);
         let b = ev.eval(&mut g, implication, &s, 5_000);

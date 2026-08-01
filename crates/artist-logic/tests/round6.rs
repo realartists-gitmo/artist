@@ -263,12 +263,22 @@ fn constructive_tautologies_certify_over_a_vague_predicate() {
         "excluded middle is exactly what bivalence buys"
     );
 
+    // **Double-negation elimination holds, and it is not the other half of
+    // bivalence here.** This asserted that it was, on the intuitionistic
+    // intuition that `¬¬P → P` and `P ∨ ¬P` stand or fall together. In Belnap's
+    // FOUR (docs/semantics.md §3) they come apart, because `¬` is the
+    // **involution** swapping `T`/`F` and fixing `N`/`B` — so `¬¬P` *is* `P`,
+    // and `¬¬P → P` is `P → P`, valid with nothing presumed.
+    //
+    // Excluded middle still fails, one assertion above, because `N ∨ N = N`.
+    // A De Morgan lattice validating DNE while refusing LEM is the expected
+    // shape, not a leak: what bivalence buys is the *middle*, not the involution.
     let nn = g.apply(wk::NOT, vec![nh]);
     let dne = g.apply(wk::IMPLIES, vec![nn, h]);
-    assert_ne!(
+    assert_eq!(
         ev.certify(&mut g, dne, &Vague, 20_000).evidential(),
         Evidential::Supported,
-        "and double-negation elimination is the other half of it"
+        "¬¬P is P in a De Morgan lattice, so this presumes nothing"
     );
 
     // …while the intuitionistic direction of double negation is fine.

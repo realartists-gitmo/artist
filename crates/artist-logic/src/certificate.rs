@@ -29,7 +29,6 @@
 //! were as complicated as evaluating there would be no reason to prefer it.
 
 use crate::evidence::{Bound, Derivation, Determinacy, EvaluationResult, Grounding};
-use crate::graph_eval::Skeleton;
 use crate::object::{CoreNode, LiteralValue, ObjectGraph, ObjectId, wk};
 
 /// One inference, naming its conclusion and what it rests on.
@@ -56,23 +55,49 @@ pub enum Step {
     /// impossible.** A structure that vouches for something and names nobody has
     /// told the reader precisely that, and the checker records it under
     /// [`Checked::assumed`] rather than inventing a name to fill the slot.
-    Told { node: ObjectId, holds: bool, sources: Vec<ObjectId> },
-    /// A truth atom. `#true` is supported, `#false` refuted, in every structure.
-    Axiom { node: ObjectId, holds: bool },
-    /// True on its propositional skeleton alone, whatever the atoms mean.
     ///
-    /// `constructive` distinguishes the two cases the determinacy axis exists to
-    /// keep apart. A constructively valid formula — `P → P`, `¬(P ∧ ¬P)` — owes
-    /// nothing to anybody and its totality is *derived*. One valid only under
-    /// the classical truth table needs bivalence, which the checker has no store
-    /// to verify, so its totality is an **assumption** and is recorded as an
-    /// authority rather than returned as a finding.
-    Tautology { node: ObjectId, holds: bool, constructive: bool },
+    /// **Soundness.** `R_t(n)` is derived from live testimony (semantics §2), so
+    /// a `Told` step asserts that the structure's testimony decides `n`. The
+    /// kernel cannot see `T`, which is precisely why this is the trust point;
+    /// what it *can* do is refuse to let the trust go unrecorded. Per §8, a
+    /// source counts only if it names an object the graph actually holds —
+    /// otherwise `assumed` is not "nobody vouched" but "the vector was
+    /// non-empty", which any producer satisfies with one arbitrary integer.
+    Told { node: ObjectId, holds: bool, sources: Vec<ObjectId> },
+    /// A truth atom. `⟦⊤⟧ = T` and `⟦⊥⟧ = F` in every structure, so this is the
+    /// only rule that contributes nothing to `Γ` and the only source of an
+    /// **unconditional** judgment (semantics §7.1, §10).
+    ///
+    /// It replaces the `Tautology` rule, which enumerated *Boolean* valuations
+    /// under a semantics that is Belnap's. A classical tautology need not be `T`
+    /// in FOUR: `P ∨ ¬P` at `N` is `N ∨ N = N`, and even `P → P` at `N` is
+    /// `¬N ∨ N = N`. The old rule therefore certified formulas this logic does
+    /// not validate. A tautology rule for FOUR would have to enumerate FOUR
+    /// valuations, and the set it could license is nearly empty — so the rule is
+    /// withdrawn rather than narrowed, and its `constructive` flag with it: that
+    /// flag distinguished two *classical* notions inside a logic where neither
+    /// applies.
+    Axiom { node: ObjectId, holds: bool },
     /// `(not P)` from `P`, with the bounds swapped.
     Negation { node: ObjectId, premise: usize },
     /// A conjunct decides a conjunction false; a disjunct decides a disjunction
     /// true. Records which.
-    Connective { node: ObjectId, premises: Vec<usize>, holds: bool },
+    ///
+    /// Each premise names the **operand position** it covers, not merely a node.
+    /// Under content addressing `(implies P P)` has one id in both positions, so
+    /// identifying an operand by its node let a single premise occupy the
+    /// antecedent *and* the consequent at the antecedent's polarity — and
+    /// `P → P`, a classical validity, certified as refuted. Position is what the
+    /// rule quantifies over, so position is what the step must carry. This is the
+    /// same repair as [`Step::Instance`]'s `instance` field: not a missing check,
+    /// missing *information*, without which no check was possible.
+    ///
+    /// **Soundness.** `∧` and `∨` are meet and join in FOUR's truth order
+    /// (semantics §3), so: one operand at `F` puts a conjunction at `≤_t F`; one
+    /// at `T` puts a disjunction at `≥_t T`; and all operands agreeing decides
+    /// the other direction. `implies` is `∨` with operand 0 negated, and
+    /// negation is the involution swapping `T`/`F`.
+    Connective { node: ObjectId, premises: Vec<(usize, usize)>, holds: bool },
     /// One member settled a scan — the witness of an existential or the
     /// counterexample to a universal.
     ///
@@ -91,29 +116,97 @@ pub enum Step {
         holds: bool,
     },
     /// Every member of an enumerated domain agreed, and the enumeration was
-    /// **complete**. The completeness claim is part of the step and is exactly
-    /// what a reader should be sceptical about.
+    /// complete.
+    ///
+    /// Completeness is **derived from the binder's domain node**, never asserted
+    /// by the step. It used to be a `bool` the kernel read and believed, which is
+    /// the one thing a kernel may not do: flipping it certified a universal from
+    /// one member of a two-member domain. The fact is `S(σ).complete` in the
+    /// semantics (§2) and `(set …)` versus `(set-partial …)` in the graph — it
+    /// was sitting in the node the kernel already held.
     ///
     /// Each premise is paired with the member it is about, and each must be the
     /// binder's body under that member — same reason as [`Step::Instance`].
-    Exhaustive {
-        node: ObjectId,
-        premises: Vec<(usize, ObjectId, ObjectId)>,
-        holds: bool,
-        complete: bool,
-    },
+    ///
+    /// **Soundness.** A universal over a complete, finite domain is the meet of
+    /// its instances and an existential is their join (semantics §4). Given every
+    /// member covered and every instance certain, the meet or join is decided.
+    Exhaustive { node: ObjectId, premises: Vec<(usize, ObjectId, ObjectId)>, holds: bool },
     /// A stored rule fired. Defeasible rules mark it, so a reader can see that
     /// the conclusion holds absent a defeater rather than outright.
-    Rule { node: ObjectId, rule: ObjectId, premises: Vec<usize>, defeasible: bool },
-    /// The store holds both directions. The sources on *either* side, since a
-    /// conflict is exactly the case where a reader wants to go and read them.
-    Conflict { node: ObjectId, sources: Vec<ObjectId> },
+    ///
+    /// **Modus ponens, and it needs no rule base.** The structure has none: no
+    /// defeat relation, no priorities, no applicability order. It does not need
+    /// them, because a stored rule is an ordinary universally quantified
+    /// implication. `implication` is a premise establishing `⟦A → C⟧ ≥_t T`;
+    /// `antecedent` is a premise establishing `A`; the conclusion is `C`. That is
+    /// sound by §3 alone — `→` is `¬a ∨ b` — and it puts the rule's own truth
+    /// into `Γ`, so a reader who rejects the rule rejects the conclusion.
+    ///
+    /// Defeasible rules are **not** representable here. Capping them at
+    /// `Bound::Partial` was not a fix: by §7.2 `Partial` asserts nothing about
+    /// the structure, so a "defeasible conclusion" would carry no information
+    /// while looking as though it did. Certifying defeat needs the combined
+    /// grounding/argumentation fixpoint, which §12 records as undefined. Without
+    /// it, a "defeasible conclusion" is not certifiable at all, and saying so is
+    /// the honest position.
+    ///
+    /// **Soundness.** `→` is Arieli–Avron's strong implication (semantics §3),
+    /// so `A ⊃ C = C` whenever `A` is designated. A `support: Certain` bound
+    /// asserts exactly designation — `⟦·⟧ ∈ {T,B}` (§7.2) — so from both premises
+    /// designated, `⟦A ⊃ C⟧ = ⟦C⟧`, hence `C` is designated. Under
+    /// `Γ = Γ_impl ∪ Γ_ante`.
+    ///
+    /// Read **materially** this rule is unsound, and the counterexample is
+    /// small: `A = B`, `C = F` gives `¬B ∨ F = B ∨ F = B`, so the implication and
+    /// the antecedent are both designated while the consequent is not. That the
+    /// bounds cannot separate `T` from `B` does not matter here, because the
+    /// strong implication treats them identically — which is the point of using
+    /// it rather than patching detachment with a side condition the judgment
+    /// type cannot express.
+    ModusPonens { node: ObjectId, implication: usize, antecedent: usize },
     /// The sentence has no stable value — its own truth is among its premises.
-    Ungrounded { node: ObjectId, oscillating: bool },
-    /// Establishes nothing. Present so a certificate can be *total* over the
-    /// query even where evaluation was not, which is the difference between an
-    /// anytime certificate and a proof.
-    Unestablished { node: ObjectId },
+    ///
+    /// Whether it **oscillates** used to be a `bool` the kernel copied into its
+    /// answer. It is now derived: the kernel walks the reference chain from
+    /// `node` — through `not`, `holds` and `quote`, the single-operand ways a
+    /// sentence mentions another — and requires that it return to `node`. The
+    /// verdict is then the parity of the negations around that loop,
+    /// which is exactly semantics §4's criterion for the restricted shape this
+    /// rule admits — an odd number forces `v(n) = ¬v(n)`, so no fixpoint gives it
+    /// a classical value (the liar); an even number leaves classical fixpoints
+    /// available (the truth-teller). Loops running through branching connectives
+    /// are **refused** rather than guessed at, because parity is not a complete
+    /// criterion for them and a kernel may not approximate.
+    Ungrounded { node: ObjectId },
+    /// A default survived. `node` is `(unless E P)`: `P`, defeated when `E`.
+    ///
+    /// **A kernel cannot compute a fixpoint, and does not have to.** Semantics
+    /// §11 pairs Kripke's valuation operator with Dung's characteristic function
+    /// and takes the least fixpoint of the product; the second component is the
+    /// grounded extension. Membership in it has a *local* witness — an argument
+    /// is accepted exactly when every attacker is answered — so the checking
+    /// problem is not the computing problem.
+    ///
+    /// The attackers are read **off the node**: `(unless E P)` names `E`, and
+    /// nothing else attacks the argument it builds, so the attacker set is
+    /// complete by construction rather than by assertion. That is the whole
+    /// reason this rule can exist while the general case cannot. A step carrying
+    /// its own list of attackers would be `Exhaustive`'s `complete` flag again,
+    /// and the repair is the same: read what the graph already holds.
+    ///
+    /// **Soundness.** With `body` establishing `P` designated and `defeater`
+    /// establishing `E` anti-designated, `E`'s attack fails, so the argument for
+    /// `P` is in the grounded extension and `(unless E P)` is designated. The
+    /// conclusion's derivation axis is `Default` — never `Observed`, never
+    /// `Derived` — because it holds *absent a defeater*, and a reader must be
+    /// able to see which kind of claim they were handed.
+    ///
+    /// What is **not** claimed: soundness is relative to `Γ`, which here carries
+    /// everything both premises rest on. A defeasible conclusion is conditional
+    /// on nobody having a defeater you did not record, and naming `E`
+    /// syntactically is what makes that condition checkable rather than a hope.
+    Defeasible { node: ObjectId, body: usize, defeater: usize },
 }
 
 impl Step {
@@ -121,15 +214,13 @@ impl Step {
         match self {
             Step::Told { node, .. }
             | Step::Axiom { node, .. }
-            | Step::Tautology { node, .. }
             | Step::Negation { node, .. }
             | Step::Connective { node, .. }
             | Step::Instance { node, .. }
             | Step::Exhaustive { node, .. }
-            | Step::Rule { node, .. }
-            | Step::Conflict { node, .. }
+            | Step::ModusPonens { node, .. }
             | Step::Ungrounded { node, .. }
-            | Step::Unestablished { node } => *node,
+            | Step::Defeasible { node, .. } => *node,
         }
     }
 }
@@ -168,6 +259,20 @@ pub struct Checked {
     /// bivalence marker used to do — made "on nobody's authority" indexable as
     /// though it were somebody's.
     pub assumed: Vec<ObjectId>,
+    /// **Γ** — the testimony leaves this derivation actually used.
+    ///
+    /// A certificate proves a *conditional* judgment (semantics §7.1): its bounds
+    /// hold in every structure satisfying these hypotheses, and in no others. A
+    /// kernel with a trust point cannot claim more, and revision 1 of the spec
+    /// claimed unconditional soundness while `Told` accepted testimony it could
+    /// not verify — recording an assumption does not make it true.
+    ///
+    /// Carrying Γ explicitly is also what makes §8.5's provenance report an
+    /// *equality* rather than a subset relation. Under `authorities ⊆ att(n)`
+    /// alone, a derivation resting entirely on verified testimony could name
+    /// nobody and still pass. Now `authorities` and `assumed` partition Γ, so
+    /// **both empty means `Γ` is empty**, which only [`Step::Axiom`] can produce.
+    pub hypotheses: Vec<ObjectId>,
 }
 
 /// Why a certificate was rejected.
@@ -214,56 +319,56 @@ impl Certificate {
                 out.get(k).ok_or(Invalid::BadReference { step: i })
             };
             let checked = match step {
-                Step::Told { node, holds, sources } => Checked {
-                    node: *node,
-                    support: if *holds { Bound::Certain } else { Bound::None },
-                    refutation: if *holds { Bound::None } else { Bound::Certain },
-                    grounding: Grounding::Grounded,
-                    derivation: Derivation::Observed,
-                    determinacy: Determinacy::Unknown,
-                    authorities: sources.clone(),
-                    // Vouched for by nobody in particular. Said outright rather
-                    // than papered over with the predicate's own name.
-                    assumed: if sources.is_empty() { vec![*node] } else { Vec::new() },
-                },
+                Step::Told { node, holds, sources } => {
+                    // An authority must name something the graph actually holds.
+                    // `assumed` means *no source was verified* — not *the vector
+                    // was non-empty*, which was satisfiable with one arbitrary
+                    // integer, and which made an unattributed claim
+                    // indistinguishable from an attributed one to every reader.
+                    let named: Vec<ObjectId> =
+                        sources.iter().copied().filter(|s| g.get(*s).is_some()).collect();
+                    Checked {
+                        node: *node,
+                        support: if *holds { Bound::Certain } else { Bound::None },
+                        refutation: if *holds { Bound::None } else { Bound::Certain },
+                        grounding: Grounding::Grounded,
+                        derivation: Derivation::Observed,
+                        determinacy: Determinacy::Unknown,
+                        assumed: if named.is_empty() { vec![*node] } else { Vec::new() },
+                        authorities: named,
+                        // This testimony is a hypothesis of everything downstream.
+                        hypotheses: vec![*node],
+                    }
+                }
                 Step::Axiom { node, holds } => {
                     let expected = if *holds { wk::TOP } else { wk::BOT };
                     if *node != expected {
                         return Err(Invalid::Mismatched { step: i });
                     }
+                    // Γ empty: the only unconditional judgment in the system.
                     base(*node, *holds, Determinacy::Total)
                 }
-                Step::Tautology { node, holds, constructive } => {
-                    // Re-decide the skeleton. This is the one place the checker
-                    // computes rather than compares — decidable, bounded by the
-                    // term, and needing no store.
-                    let Some((shape, atoms)) = shape_of(g, *node) else {
-                        return Err(Invalid::Unlicensed { step: i });
-                    };
-                    if atoms > 8 || !(0u32..(1u32 << atoms)).all(|m| shape.eval(m) == *holds) {
-                        return Err(Invalid::Unlicensed { step: i });
+                Step::ModusPonens { node, implication, antecedent } => {
+                    let imp = premise(*implication)?;
+                    let ante = premise(*antecedent)?;
+                    // The implication premise must *be* `A → node`, with `A` the
+                    // antecedent premise. Nothing is taken on the step's word.
+                    match g.get(imp.node) {
+                        Some(CoreNode::Apply { operator, operands })
+                            if *operator == wk::IMPLIES
+                                && operands.len() == 2
+                                && operands[0] == ante.node
+                                && operands[1] == *node => {}
+                        _ => return Err(Invalid::Mismatched { step: i }),
                     }
-                    // The claim to be *constructively* valid is checked, not
-                    // taken: `P → P` earns its totality, `P ∨ ¬P` assumes it.
-                    let target = if *holds {
-                        shape
-                    } else {
-                        Skeleton::Not(Box::new(shape))
-                    };
-                    if *constructive && !target.intuitionistic() {
+                    if imp.support != Bound::Certain || ante.support != Bound::Certain {
                         return Err(Invalid::Unlicensed { step: i });
                     }
-                    let mut c = base(*node, *holds, Determinacy::Total);
-                    if !*constructive {
-                        // Bivalence, which the kernel cannot verify. Named as an
-                        // assumption so a reader can refuse it — otherwise
-                        // excluded middle over a vague predicate validates as
-                        // "established total, on nobody's authority", which is
-                        // exactly the laundering the determinacy axis exists to
-                        // stop, arriving through the kernel.
-                        c.assumed.push(*node);
-                    }
-                    c
+                    let mut acc = decided(*node, true);
+                    acc.derivation = Derivation::Derived;
+                    absorb(&mut acc, imp);
+                    absorb(&mut acc, ante);
+                    acc
                 }
                 Step::Negation { node, premise: k } => {
                     let p = premise(*k)?;
@@ -296,6 +401,18 @@ impl Certificate {
                     if !disjunctive && !conjunctive {
                         return Err(Invalid::Mismatched { step: i });
                     }
+                    // Arity, before anything reads a position. `(implies)` with
+                    // no operands made the coverage loop vacuous and certified
+                    // `refutation: Certain` from an empty premise list —
+                    // certainty out of nothing, with no authority and no
+                    // assumption recorded.
+                    let arity_ok = match op {
+                        wk::IMPLIES => operands.len() == 2,
+                        _ => !operands.is_empty(),
+                    };
+                    if !arity_ok {
+                        return Err(Invalid::Mismatched { step: i });
+                    }
                     // **Every premise points the way the conclusion does.** A
                     // conjunction is true because its conjuncts are true and
                     // false because one is false; a disjunction is the mirror.
@@ -307,50 +424,56 @@ impl Certificate {
                     // could not be represented at all.
                     let one_decides = (conjunctive && !*holds) || (disjunctive && *holds);
                     let mut acc = decided(*node, *holds);
-                    let mut covered: Vec<ObjectId> = Vec::new();
-                    for k in premises {
+                    // Coverage is by **position**, so a repeated operand is two
+                    // distinct obligations. `(implies P P)` has one node in both
+                    // slots; tracking nodes let one premise discharge both, at
+                    // the antecedent's polarity, and certified `P → P` false.
+                    let mut covered = vec![false; operands.len()];
+                    for (k, pos) in premises {
                         let p = premise(*k)?;
-                        if !operands.contains(&p.node) {
+                        if *pos >= operands.len() || operands[*pos] != p.node {
                             return Err(Invalid::Mismatched { step: i });
                         }
-                        // `implies` negates its antecedent, so a premise in
-                        // position zero points the other way.
-                        let negated = op == wk::IMPLIES && operands.first() == Some(&p.node);
+                        // `implies` negates its antecedent, so position zero
+                        // points the other way — a fact about the *slot*, which
+                        // is why it can only be read once slots are tracked.
+                        let negated = op == wk::IMPLIES && *pos == 0;
                         let want = if *holds != negated { p.support } else { p.refutation };
                         if want != Bound::Certain {
                             return Err(Invalid::Unlicensed { step: i });
                         }
-                        if !covered.contains(&p.node) {
-                            covered.push(p.node);
-                        }
+                        covered[*pos] = true;
                         absorb(&mut acc, p);
                     }
-                    // **Coverage, not arity.** Counting premises let the same
-                    // index be cited twice to satisfy a two-operand
-                    // requirement, so one refuted disjunct proved a disjunction
-                    // false. What is needed is that every operand is actually
-                    // accounted for.
                     if one_decides {
-                        if covered.is_empty() {
+                        if !covered.iter().any(|c| *c) {
                             return Err(Invalid::Unlicensed { step: i });
                         }
-                    } else if operands.iter().any(|o| !covered.contains(o)) {
+                    } else if covered.iter().any(|c| !*c) {
                         return Err(Invalid::Unlicensed { step: i });
                     }
                     acc
                 }
                 Step::Instance { node, premise: k, value, instance, holds } => {
                     let p = premise(*k)?;
-                    let (binder, body) = match g.get(*node) {
-                        Some(CoreNode::Bind { binder, bodies, .. }) => {
-                            (*binder, *bodies.first().ok_or(Invalid::Mismatched { step: i })?)
-                        }
-                        _ => return Err(Invalid::Mismatched { step: i }),
-                    };
+                    let (binder, body, dom) = binder_parts(g, *node)
+                        .ok_or(Invalid::Mismatched { step: i })?;
                     // A witness settles an existential true; a counterexample
                     // settles a universal false. The other two combinations are
                     // not licensed by a single member.
                     if !matches!((binder, holds), (wk::EXISTS, true) | (wk::FORALL, false)) {
+                        return Err(Invalid::Unlicensed { step: i });
+                    }
+                    // **The member must be in the domain.** The binder's `vars`
+                    // were destructured and thrown away, so `∃x ∈ {a,b}. P(x)`
+                    // was certified from `P(c)` — a witness from outside the set
+                    // it quantifies over. Membership is a side condition of the
+                    // rule, and the domain is in the node the kernel holds. A
+                    // domain it cannot enumerate is refused rather than assumed:
+                    // a kernel that cannot check must not pass.
+                    let (members, _) =
+                        domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
+                    if !members.contains(value) {
                         return Err(Invalid::Unlicensed { step: i });
                     }
                     // The premise must be about *this* member of *this* body.
@@ -365,22 +488,20 @@ impl Certificate {
                     absorb(&mut acc, p);
                     acc
                 }
-                Step::Exhaustive { node, premises, holds, complete } => {
-                    // The whole content of this step is the completeness claim.
-                    // Without it, agreement among the members you happened to
-                    // see licenses nothing.
-                    if !*complete {
-                        return Err(Invalid::Unlicensed { step: i });
+                Step::Exhaustive { node, premises, holds } => {
+                    let (binder, body, dom) = binder_parts(g, *node)
+                        .ok_or(Invalid::Mismatched { step: i })?;
+                    if !matches!(binder, wk::FORALL | wk::EXISTS) {
+                        return Err(Invalid::Mismatched { step: i });
                     }
-                    let body = match g.get(*node) {
-                        Some(CoreNode::Bind { binder, bodies, .. })
-                            if matches!(*binder, wk::FORALL | wk::EXISTS) =>
-                        {
-                            *bodies.first().ok_or(Invalid::Mismatched { step: i })?
-                        }
-                        _ => return Err(Invalid::Mismatched { step: i }),
-                    };
-                    if premises.is_empty() {
+                    // **Completeness is read, not accepted.** This was a `bool`
+                    // on the step; flipping it certified a universal from one
+                    // member of a two-member domain, and the fact was in the
+                    // domain node all along — `(set …)` is complete by
+                    // construction, `(set-partial …)` is not.
+                    let (members, complete) =
+                        domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
+                    if !complete || members.is_empty() || premises.is_empty() {
                         return Err(Invalid::Unlicensed { step: i });
                     }
                     let mut acc = decided(*node, *holds);
@@ -394,6 +515,9 @@ impl Certificate {
                             // Citing one member twice is not a second member.
                             return Err(Invalid::Unlicensed { step: i });
                         }
+                        if !members.contains(value) {
+                            return Err(Invalid::Unlicensed { step: i });
+                        }
                         seen.push(*value);
                         let want = if *holds { p.support } else { p.refutation };
                         if want != Bound::Certain {
@@ -401,70 +525,67 @@ impl Certificate {
                         }
                         absorb(&mut acc, p);
                     }
+                    // Agreement among the members you happened to cite licenses
+                    // nothing. Every member of the domain must be covered.
+                    if members.iter().any(|m| !seen.contains(m)) {
+                        return Err(Invalid::Unlicensed { step: i });
+                    }
                     acc
                 }
-                Step::Rule { node, rule, premises, defeasible } => {
-                    // A rule that rests on nothing concludes nothing. With an
-                    // empty premise list the loop below was empty and *any*
-                    // node — including one absent from the graph — came back
-                    // `Certain`, which made this a second undeclared trust
-                    // point stronger than `Told`.
-                    if premises.is_empty() || g.get(*node).is_none() {
+                Step::Defeasible { node, body, defeater } => {
+                    // The attackers come from the node, never from the step.
+                    let (exception, inner) = match g.get(*node) {
+                        Some(CoreNode::Apply { operator, operands })
+                            if *operator == wk::UNLESS && operands.len() == 2 =>
+                        {
+                            (operands[0], operands[1])
+                        }
+                        _ => return Err(Invalid::Mismatched { step: i }),
+                    };
+                    let p = premise(*body)?;
+                    let d = premise(*defeater)?;
+                    if p.node != inner || d.node != exception {
+                        return Err(Invalid::Mismatched { step: i });
+                    }
+                    // The default must hold, and its one attacker must fail.
+                    // `defeater` not *established false* is not good enough: an
+                    // exception nobody has ruled out is exactly the case where a
+                    // default should not be certified, and accepting an `Open`
+                    // defeater here would make every default unconditional.
+                    if p.support != Bound::Certain || d.refutation != Bound::Certain {
                         return Err(Invalid::Unlicensed { step: i });
                     }
                     let mut acc = decided(*node, true);
-                    acc.derivation =
-                        if *defeasible { Derivation::Default } else { Derivation::Derived };
-                    for k in premises {
-                        let p = premise(*k)?;
-                        if p.support != Bound::Certain {
-                            return Err(Invalid::Unlicensed { step: i });
-                        }
-                        absorb(&mut acc, p);
-                    }
-                    // The rule itself is an authority: a reader who does not
-                    // accept the rule does not accept the conclusion.
-                    if !acc.authorities.contains(rule) {
-                        acc.authorities.push(*rule);
-                    }
-                    acc.derivation =
-                        if *defeasible { Derivation::Default } else { acc.derivation };
+                    absorb(&mut acc, p);
+                    absorb(&mut acc, d);
+                    // Set *after* absorbing: `merge` would let a premise's
+                    // `Observed` pull the conclusion back to observed, and a
+                    // default is a default however ordinary its premises.
+                    acc.derivation = Derivation::Default;
                     acc
                 }
-                Step::Conflict { node, sources } => Checked {
-                    node: *node,
-                    support: Bound::Certain,
-                    refutation: Bound::Certain,
-                    grounding: Grounding::Grounded,
-                    derivation: Derivation::Observed,
-                    determinacy: Determinacy::Unknown,
-                    authorities: sources.clone(),
-                    assumed: if sources.is_empty() { vec![*node] } else { Vec::new() },
-                },
-                Step::Ungrounded { node, oscillating } => Checked {
-                    node: *node,
-                    support: Bound::None,
-                    refutation: Bound::None,
-                    grounding: if *oscillating {
-                        Grounding::Oscillatory
-                    } else {
-                        Grounding::StableLoop
-                    },
-                    derivation: Derivation::Observed,
-                    determinacy: Determinacy::Unknown,
-                    authorities: Vec::new(),
-                    assumed: Vec::new(),
-                },
-                Step::Unestablished { node } => Checked {
-                    node: *node,
-                    support: Bound::None,
-                    refutation: Bound::None,
-                    grounding: Grounding::Grounded,
-                    derivation: Derivation::Observed,
-                    determinacy: Determinacy::Unknown,
-                    authorities: Vec::new(),
-                    assumed: Vec::new(),
-                },
+                Step::Ungrounded { node } => {
+                    // Parity of the reference loop, walked rather than believed.
+                    let oscillating =
+                        loop_parity(g, *node).ok_or(Invalid::Unlicensed { step: i })?;
+                    Checked {
+                        node: *node,
+                        support: Bound::None,
+                        refutation: Bound::None,
+                        grounding: if oscillating {
+                            Grounding::Oscillatory
+                        } else {
+                            Grounding::StableLoop
+                        },
+                        derivation: Derivation::Observed,
+                        determinacy: Determinacy::Unknown,
+                        authorities: Vec::new(),
+                        assumed: Vec::new(),
+                        // Ungroundedness is a fact about the *sentence*, decided
+                        // by the graph alone, so it is conditional on nothing.
+                        hypotheses: Vec::new(),
+                    }
+                }
             };
             out.push(checked);
         }
@@ -567,24 +688,30 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
             let h = g.boolean(*holds);
             parts.extend([wk::BY_AXIOM, *node, h]);
         }
-        Step::Tautology { node, holds, constructive } => {
-            let (h, c) = (g.boolean(*holds), g.boolean(*constructive));
-            parts.extend([wk::BY_TAUTOLOGY, *node, h, c]);
-        }
         Step::Negation { node, premise } => {
             let p = g.int(*premise as i64);
             parts.extend([wk::BY_NEGATION, *node, p]);
         }
         Step::Connective { node, premises, holds } => {
-            let ps: Vec<ObjectId> = premises.iter().map(|k| g.int(*k as i64)).collect();
-            let (ps, h) = (seq_of(g, &ps), g.boolean(*holds));
+            // Premise and operand position stay paired, for the same reason
+            // `Exhaustive`'s triples do: flattening makes the grouping
+            // recoverable only by arithmetic, and a mis-grouped decode yields a
+            // valid-looking certificate for a different claim.
+            let pairs: Vec<ObjectId> = premises
+                .iter()
+                .map(|(k, pos)| {
+                    let (k, pos) = (g.int(*k as i64), g.int(*pos as i64));
+                    seq_of(g, &[k, pos])
+                })
+                .collect();
+            let (ps, h) = (seq_of(g, &pairs), g.boolean(*holds));
             parts.extend([wk::BY_CONNECTIVE, *node, ps, h]);
         }
         Step::Instance { node, premise, value, instance, holds } => {
             let (p, h) = (g.int(*premise as i64), g.boolean(*holds));
             parts.extend([wk::BY_INSTANCE, *node, p, *value, *instance, h]);
         }
-        Step::Exhaustive { node, premises, holds, complete } => {
+        Step::Exhaustive { node, premises, holds } => {
             // Each premise is a triple, and it stays a triple: flattening them
             // into one list would make `(k, value, instance)` recoverable only
             // by arithmetic on the length, and a mis-grouped decode produces a
@@ -596,23 +723,18 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
                     seq_of(g, &[k, *v, *i])
                 })
                 .collect();
-            let (ps, h, c) = (seq_of(g, &triples), g.boolean(*holds), g.boolean(*complete));
-            parts.extend([wk::BY_EXHAUSTIVE, *node, ps, h, c]);
+            let (ps, h) = (seq_of(g, &triples), g.boolean(*holds));
+            parts.extend([wk::BY_EXHAUSTIVE, *node, ps, h]);
         }
-        Step::Rule { node, rule, premises, defeasible } => {
-            let ps: Vec<ObjectId> = premises.iter().map(|k| g.int(*k as i64)).collect();
-            let (ps, d) = (seq_of(g, &ps), g.boolean(*defeasible));
-            parts.extend([wk::BY_RULE, *node, *rule, ps, d]);
+        Step::ModusPonens { node, implication, antecedent } => {
+            let (imp, ante) = (g.int(*implication as i64), g.int(*antecedent as i64));
+            parts.extend([wk::BY_RULE, *node, imp, ante]);
         }
-        Step::Conflict { node, sources } => {
-            let src = seq_of(g, sources);
-            parts.extend([wk::BY_CONFLICT, *node, src]);
+        Step::Ungrounded { node } => parts.extend([wk::BY_UNGROUNDED, *node]),
+        Step::Defeasible { node, body, defeater } => {
+            let (b, d) = (g.int(*body as i64), g.int(*defeater as i64));
+            parts.extend([wk::BY_DEFEASIBLE, *node, b, d]);
         }
-        Step::Ungrounded { node, oscillating } => {
-            let o = g.boolean(*oscillating);
-            parts.extend([wk::BY_UNGROUNDED, *node, o]);
-        }
-        Step::Unestablished { node } => parts.extend([wk::BY_UNESTABLISHED, *node]),
     }
     g.apply(wk::STEP, parts)
 }
@@ -634,22 +756,22 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
         [k, node, holds] if *k == wk::BY_AXIOM => {
             Some(Step::Axiom { node: *node, holds: read_bool(g, *holds)? })
         }
-        [k, node, holds, constructive] if *k == wk::BY_TAUTOLOGY => Some(Step::Tautology {
-            node: *node,
-            holds: read_bool(g, *holds)?,
-            constructive: read_bool(g, *constructive)?,
-        }),
         [k, node, premise] if *k == wk::BY_NEGATION => {
             Some(Step::Negation { node: *node, premise: read_index(g, *premise)? })
         }
-        [k, node, premises, holds] if *k == wk::BY_CONNECTIVE => Some(Step::Connective {
-            node: *node,
-            premises: read_seq(g, *premises)?
-                .iter()
-                .map(|p| read_index(g, *p))
-                .collect::<Option<Vec<_>>>()?,
-            holds: read_bool(g, *holds)?,
-        }),
+        [k, node, premises, holds] if *k == wk::BY_CONNECTIVE => {
+            let mut ps = Vec::new();
+            for t in read_seq(g, *premises)? {
+                // Exactly two, enforced by the pattern: a pair that decoded from
+                // a longer or shorter list would silently re-associate premises
+                // with the wrong operand slots.
+                let [idx, pos] = read_seq(g, t)?[..] else {
+                    return None;
+                };
+                ps.push((read_index(g, idx)?, read_index(g, pos)?));
+            }
+            Some(Step::Connective { node: *node, premises: ps, holds: read_bool(g, *holds)? })
+        }
         [k, node, premise, value, instance, holds] if *k == wk::BY_INSTANCE => {
             Some(Step::Instance {
                 node: *node,
@@ -659,7 +781,7 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
                 holds: read_bool(g, *holds)?,
             })
         }
-        [k, node, premises, holds, complete] if *k == wk::BY_EXHAUSTIVE => {
+        [k, node, premises, holds] if *k == wk::BY_EXHAUSTIVE => {
             let mut ps = Vec::new();
             for t in read_seq(g, *premises)? {
                 let [idx, value, instance] = read_seq(g, t)?[..] else {
@@ -667,29 +789,19 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
                 };
                 ps.push((read_index(g, idx)?, value, instance));
             }
-            Some(Step::Exhaustive {
-                node: *node,
-                premises: ps,
-                holds: read_bool(g, *holds)?,
-                complete: read_bool(g, *complete)?,
-            })
+            Some(Step::Exhaustive { node: *node, premises: ps, holds: read_bool(g, *holds)? })
         }
-        [k, node, rule, premises, defeasible] if *k == wk::BY_RULE => Some(Step::Rule {
+        [k, node, imp, ante] if *k == wk::BY_RULE => Some(Step::ModusPonens {
             node: *node,
-            rule: *rule,
-            premises: read_seq(g, *premises)?
-                .iter()
-                .map(|p| read_index(g, *p))
-                .collect::<Option<Vec<_>>>()?,
-            defeasible: read_bool(g, *defeasible)?,
+            implication: read_index(g, *imp)?,
+            antecedent: read_index(g, *ante)?,
         }),
-        [k, node, sources] if *k == wk::BY_CONFLICT => {
-            Some(Step::Conflict { node: *node, sources: read_seq(g, *sources)? })
-        }
-        [k, node, oscillating] if *k == wk::BY_UNGROUNDED => {
-            Some(Step::Ungrounded { node: *node, oscillating: read_bool(g, *oscillating)? })
-        }
-        [k, node] if *k == wk::BY_UNESTABLISHED => Some(Step::Unestablished { node: *node }),
+        [k, node] if *k == wk::BY_UNGROUNDED => Some(Step::Ungrounded { node: *node }),
+        [k, node, body, defeater] if *k == wk::BY_DEFEASIBLE => Some(Step::Defeasible {
+            node: *node,
+            body: read_index(g, *body)?,
+            defeater: read_index(g, *defeater)?,
+        }),
         _ => None,
     }
 }
@@ -744,6 +856,70 @@ pub(crate) fn instantiates(
     }
 }
 
+/// A binder's shape: its kind, its first body, and its first slot's domain.
+///
+/// The old arms destructured `Bind { binder, bodies, .. }` and dropped `vars` —
+/// and with it every domain, which is why a witness from outside the quantified
+/// set proved an existential. Returning the domain here is what lets the rules
+/// state membership as a side condition instead of omitting it.
+fn binder_parts(g: &ObjectGraph, node: ObjectId) -> Option<(ObjectId, ObjectId, ObjectId)> {
+    match g.get(node) {
+        Some(CoreNode::Bind { binder, vars, bodies }) if vars.len() == 1 => {
+            Some((*binder, *bodies.first()?, vars[0].domain?))
+        }
+        _ => None,
+    }
+}
+
+/// Members of an enumerated domain, and whether the enumeration is complete.
+///
+/// `(set …)` is complete by construction; `(set-partial …)` is explicitly not.
+/// Anything else is not enumerable by inspection, and the kernel returns `None`
+/// so the caller refuses — the alternative is assuming a completeness it cannot
+/// see, which is the defect this function exists to remove.
+fn domain_of(g: &ObjectGraph, dom: ObjectId) -> Option<(Vec<ObjectId>, bool)> {
+    match g.get(dom) {
+        Some(CoreNode::Apply { operator, operands }) if *operator == wk::SET_DOMAIN => {
+            Some((operands.clone(), true))
+        }
+        Some(CoreNode::Apply { operator, operands }) if *operator == wk::SET_PARTIAL => {
+            Some((operands.clone(), false))
+        }
+        _ => None,
+    }
+}
+
+/// Walk the reference loop from `node` and report whether it oscillates.
+///
+/// `Some(true)` for an odd number of negations around the loop — `v(n) = ¬v(n)`,
+/// which no classical fixpoint satisfies, so the sentence is `Oscillatory`.
+/// `Some(false)` for an even number: classical fixpoints exist and the sentence
+/// is a `StableLoop`. `None` if the chain leaves `node`'s reference cycle, runs
+/// through a branching connective, or exceeds its bound — parity decides nothing
+/// there, and a kernel that guesses is a kernel that is sometimes wrong.
+pub(crate) fn loop_parity(g: &ObjectGraph, node: ObjectId) -> Option<bool> {
+    let mut at = node;
+    let mut negations = 0usize;
+    for _ in 0..64 {
+        let (op, operands) = match g.get(at) {
+            Some(CoreNode::Apply { operator, operands }) => (*operator, operands),
+            _ => return None,
+        };
+        // Exactly the single-operand ways one sentence mentions another.
+        if !matches!(op, wk::NOT | wk::HOLDS | wk::QUOTE) || operands.len() != 1 {
+            return None;
+        }
+        if op == wk::NOT {
+            negations += 1;
+        }
+        at = operands[0];
+        if at == node {
+            return Some(negations % 2 == 1);
+        }
+    }
+    None
+}
+
 fn base(node: ObjectId, holds: bool, determinacy: Determinacy) -> Checked {
     Checked {
         node,
@@ -754,11 +930,20 @@ fn base(node: ObjectId, holds: bool, determinacy: Determinacy) -> Checked {
         determinacy,
         authorities: Vec::new(),
         assumed: Vec::new(),
+        hypotheses: Vec::new(),
     }
 }
 
+/// A step that decided its node, claiming **nothing** about totality.
+///
+/// This used to seed `Determinacy::Total`, which is a field the kernel cannot
+/// check: totality is `Δ`'s business (semantics §5) and the kernel has no `Δ`.
+/// Every connective, instance and exhaustive step therefore asserted a sharp
+/// condition it had never seen — the same "believed field" defect as
+/// `Exhaustive`'s old `complete` flag, hiding in a helper. `Unknown` is the
+/// honest floor; only `Tautology` earns `Total`, from a truth table it computes.
 fn decided(node: ObjectId, holds: bool) -> Checked {
-    base(node, holds, Determinacy::Total)
+    base(node, holds, Determinacy::Unknown)
 }
 
 /// The axes travel through a checked step exactly as they do through an
@@ -778,60 +963,12 @@ fn absorb(acc: &mut Checked, p: &Checked) {
             acc.assumed.push(*a);
         }
     }
-}
-
-/// The propositional skeleton of `node`, and how many distinct atoms it has.
-///
-/// Shared with the evaluator rather than duplicated. The de Bruijn principle is
-/// that the checker must not call *evaluation* — a pure decision procedure over
-/// syntax is a different thing, and one implementation both parties agree on is
-/// better than two that might not.
-fn shape_of(g: &ObjectGraph, node: ObjectId) -> Option<(Skeleton, usize)> {
-    let mut atoms = Vec::new();
-    let shape = skeleton(g, node, &mut atoms, 0)?;
-    Some((shape, atoms.len()))
-}
-
-fn skeleton(
-    g: &ObjectGraph,
-    node: ObjectId,
-    atoms: &mut Vec<ObjectId>,
-    depth: u32,
-) -> Option<Skeleton> {
-    if depth > 32 {
-        return None;
-    }
-    if node == wk::TOP {
-        return Some(Skeleton::Const(true));
-    }
-    if node == wk::BOT {
-        return Some(Skeleton::Const(false));
-    }
-    if let Some(CoreNode::Apply { operator, operands }) = g.get(node) {
-        let parts = |atoms: &mut Vec<ObjectId>| -> Option<Vec<Skeleton>> {
-            operands.iter().map(|o| skeleton(g, *o, atoms, depth + 1)).collect()
-        };
-        match *operator {
-            wk::NOT if operands.len() == 1 => {
-                return Some(Skeleton::Not(Box::new(parts(atoms)?.remove(0))));
-            }
-            wk::AND => return Some(Skeleton::And(parts(atoms)?)),
-            wk::OR => return Some(Skeleton::Or(parts(atoms)?)),
-            wk::IMPLIES if operands.len() == 2 => {
-                let mut p = parts(atoms)?;
-                let conseq = p.remove(1);
-                let ante = p.remove(0);
-                return Some(Skeleton::Imp(Box::new(ante), Box::new(conseq)));
-            }
-            _ => {}
+    // Γ accumulates: a conclusion is conditional on every hypothesis anything
+    // beneath it leaned on. Dropping one here would let a derivation quietly
+    // become unconditional, which is the strongest claim in the system.
+    for h in &p.hypotheses {
+        if !acc.hypotheses.contains(h) {
+            acc.hypotheses.push(*h);
         }
     }
-    let idx = match atoms.iter().position(|a| *a == node) {
-        Some(i) => i,
-        None => {
-            atoms.push(node);
-            atoms.len() - 1
-        }
-    };
-    Some(Skeleton::Atom(idx))
 }
