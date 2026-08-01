@@ -9,6 +9,10 @@ import { artist } from "@artist/canvas";
 
 export { artist };
 
+/// Event types that carry only more of the same text. `PromptEvent` is tagged
+/// `type` in snake_case, so these are the wire names.
+const DELTAS = new Set(["text_delta", "reasoning_summary_delta"]);
+
 /**
  * Shared, durable state — the same key seen by every open tab, by the model,
  * and by tomorrow's session.
@@ -60,12 +64,19 @@ export function useAgent({ history = 200 } = {}) {
 
   useEffect(() => {
     let live = true;
-    artist.context().then((value) => live && setContext(value)).catch(() => {});
+    const refresh = () =>
+      artist.context().then((value) => live && setContext(value)).catch(() => {});
+    refresh();
     const stop = artist.events.subscribe((event) => {
       // Bounded: a long session would otherwise grow this array without limit
       // and take the tab down with it.
       setEvents((previous) => [...previous, event].slice(-history));
-      artist.context().then((value) => live && setContext(value)).catch(() => {});
+      // Not on every event. The stream carries one delta per token while the
+      // model writes, and refreshing on each of those meant an RPC round trip
+      // per token — hundreds per response, for a value that cannot have
+      // changed. Deltas are the model still saying the same thing; everything
+      // else can move `busy`, the model, or the profile.
+      if (!DELTAS.has(event?.type)) refresh();
     });
     return () => {
       live = false;
@@ -85,13 +96,21 @@ export function useAgent({ history = 200 } = {}) {
 /** Just the agent event stream, for a canvas that only wants to watch. */
 export function useAgentEvents({ history = 200, filter } = {}) {
   const [events, setEvents] = useState([]);
+  // Read through a ref so the subscription does not depend on it. `filter` is
+  // almost always written inline — `useAgentEvents({filter: e => …})` — which
+  // is a new function every render, and depending on it tore the subscription
+  // down and rebuilt it on each one, dropping whatever arrived in between.
+  const current = useRef(filter);
+  current.current = filter;
+
   useEffect(
     () =>
       artist.events.subscribe((event) => {
-        if (filter && !filter(event)) return;
+        const keep = current.current;
+        if (keep && !keep(event)) return;
         setEvents((previous) => [...previous, event].slice(-history));
       }),
-    [history, filter],
+    [history],
   );
   return events;
 }

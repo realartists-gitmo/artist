@@ -278,12 +278,34 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn temp(name: &str) -> PathBuf {
-        let base =
-            std::env::temp_dir().join(format!("artist-canvas-state-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("temp dir");
-        base
+    /// A temp directory that removes itself when the test ends.
+    ///
+    /// Derefs to `Path` so a caller can keep using it as one. The owning bind
+    /// is what matters: hold it for as long as the thing under test needs the
+    /// directory, because dropping it takes the directory with it.
+    struct Temp(tempfile::TempDir);
+
+    impl std::ops::Deref for Temp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    /// Named after the test, so a failure leaves an identifiable directory
+    /// behind while it is being debugged — but only until the process ends.
+    ///
+    /// This used to build a path from the pid and clean it at the *start* of
+    /// the next run, which meant every run left its directories behind. That
+    /// was invisible while `/tmp` was a tmpfs that emptied on reboot; on
+    /// disk-backed storage it accumulates forever.
+    fn temp(name: &str) -> Temp {
+        Temp(
+            tempfile::Builder::new()
+                .prefix(&format!("artist-canvas-state-{name}-"))
+                .tempdir()
+                .expect("temp dir"),
+        )
     }
 
     /// A refused write must leave the canvas exactly as it was. Truncating, or
@@ -337,13 +359,15 @@ mod tests {
     /// Nothing declared means the default, not "no limit".
     #[test]
     fn a_canvas_without_a_manifest_still_has_a_ceiling() {
-        let store = StateStore::open(&temp("default-limit"));
+        let root = temp("default-limit");
+        let store = StateStore::open(&root);
         assert_eq!(store.limit(), DEFAULT_MAX_BYTES);
     }
 
     #[test]
     fn writes_are_revision_stamped_so_a_client_can_order_them() {
-        let store = StateStore::open(&temp("rev"));
+        let root = temp("rev");
+        let store = StateStore::open(&root);
 
         let first = store.set("rows", json!([1, 2])).expect("within the limit");
         let second = store.set("selected", json!(1)).expect("within the limit");
@@ -476,7 +500,8 @@ mod tests {
     /// A page applying a merge must never see half of it.
     #[test]
     fn a_merge_lands_under_one_revision() {
-        let store = StateStore::open(&temp("merge"));
+        let root = temp("merge");
+        let store = StateStore::open(&root);
         store
             .set("untouched", json!(true))
             .expect("within the limit");
@@ -530,7 +555,8 @@ mod tests {
 
     #[test]
     fn removing_a_missing_key_does_not_bump_the_revision() {
-        let store = StateStore::open(&temp("remove"));
+        let root = temp("remove");
+        let store = StateStore::open(&root);
         store.set("a", json!(1)).expect("within the limit");
 
         assert!(!store.remove("nope"));

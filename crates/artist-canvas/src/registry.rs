@@ -184,20 +184,34 @@ mod tests {
         std::fs::write(directory.join(MANIFEST_FILE), manifest).expect("write manifest");
     }
 
-    fn temp() -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "artist-canvas-registry-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("temp dir");
-        base
+    /// A temp directory that removes itself when the test ends. Derefs to
+    /// `Path`, so the owning bind is the only thing callers must keep.
+    ///
+    /// Previously a pid-and-thread-named path cleaned at the *start* of the
+    /// next run, so every run left its directories behind — invisible on a
+    /// tmpfs that empties at reboot, permanent on disk.
+    struct Temp(tempfile::TempDir);
+
+    impl std::ops::Deref for Temp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn temp() -> Temp {
+        Temp(
+            tempfile::Builder::new()
+                .prefix("artist-canvas-registry-")
+                .tempdir()
+                .expect("temp dir"),
+        )
     }
 
     #[test]
     fn a_project_without_canvases_is_empty_not_an_error() {
-        let registry = Registry::discover(&temp());
+        let project = temp();
+        let registry = Registry::discover(&project);
         assert!(registry.canvases.is_empty());
         assert!(registry.diagnostics.is_empty());
     }
