@@ -375,18 +375,25 @@ Only the **propositional skeleton** is decided: full higher-order validity is
 undecidable, the boolean structure over opaque atoms is not, and at these sizes
 it is free. Quantified validity keeps going to the budget.
 
-**Constructive and classical validity are separated, and only the second is
-gated.** `P → P`, `¬(P ∧ ¬P)`, `P ∧ ⊤ → P` and `P → ¬¬P` hold intuitionistically
-— no bivalence, no sharpness, no classical logic — so refusing to certify them
-over a borderline predicate would be a bug rather than caution. They are decided
-by G4ip, Dyckhoff's contraction-free sequent calculus, which terminates without
-loop checking, and they certify unconditionally. Only what genuinely needs
-bivalence is gated on `Total`: excluded middle, double-negation elimination,
-reductio, and anything else the truth table proves and G4ip cannot.
+**Validity is decided in three tiers, and only the first is unconditional.**
+This section previously described two — intuitionistic and classical — and
+credited the first with certifying unconditionally. That is false in this logic
+and `docs/semantics.md` §10 is the authority: `¬(P ∧ ¬P)` is provable in G4ip,
+and at `N` it is `N ∧ N = N` whose negation is `N`, which is not designated. A
+soundness property test found exactly that formula.
 
-Implication is therefore kept as itself in the skeleton rather than desugared to
-`¬A ∨ B` — that rewrite is classically sound and constructively wrong, and it
-would erase the distinction this exists to draw.
+1. **FOUR-validity** — designated under every Belnap valuation. Unconditional,
+   and the only tier that is. `⊤`, `⊥` and structure over them.
+2. **Intuitionistic** (G4ip, Dyckhoff's contraction-free calculus) — presumes no
+   atom is `both`. Recorded as `DeterminacyBasis::Presumed`.
+3. **Classical truth table** — presumes bivalence. Also `Presumed`, and gated on
+   `Total` in `Certify` mode.
+
+Implication is kept as itself in the skeleton rather than desugared, because
+`→` **is not** `¬A ∨ B`. It is Arieli–Avron's strong implication (semantics §3):
+`a ⊃ b = b` when `a` is designated, `T` otherwise. Read materially, `P → P` at
+`N` is `N` and the logic has essentially no valid formulas — fatal for a
+language meant to carry rules.
 
 ### Conflicted is about evidence, not about truth
 
@@ -471,9 +478,16 @@ short-circuiting on whichever side the operator happens to consult first.
 ### 5.3 Self-reference, and what the liar actually gets
 
 Evaluation tracks the path of nodes currently being evaluated together with the
-parity of `not` above each. Re-entering a node already on the path *is*
-ungroundedness. If the parity differs between the two visits the expression
-oscillates; if it matches, it is stably ungrounded.
+parity of `not` above each, and reports ungroundedness on re-entry, classifying
+by parity: differing parity oscillates, matching parity is a stable loop.
+
+**This is the evaluator's heuristic, not the definition.** `docs/semantics.md`
+§4.3 is the authority, and there a cycle is *not* ungroundedness: `P ↔ P ∨ ⊤`
+re-enters and grounds to `T` in one step of the fixpoint. Deciding it in general
+needs a closed unfounded set. The kernel therefore certifies ungroundedness only
+for loops through the single-operand reference operators, where parity is a
+proof; everywhere else the evaluator may *report* the axis and no certificate
+claims it.
 
 ```
 L = (not (holds (quote L)))    parity flips    →  Open, Exact, Oscillatory
@@ -508,6 +522,17 @@ and the anti-drift artifact did not catch it: `conformance.rs`'s row test
 asserted `Bound::Certain` — the *opposite* of the table row it is named for —
 under a doc comment still reading "enters `may` without entering `must`". A test
 that pins the code is not a test that pins the prose to the code.
+
+**And where prose and code disagree about *meaning*, the prose wins.** This
+document's convention has been that the code is normative — which is right for
+syntax, where the graph is the artifact, and exactly wrong for semantics. A
+kernel is proved against a fixed semantics; a semantics that loses whenever the
+code disagrees cannot be the thing anything is proved against, and every drift
+this file records was resolved in the code's favour by default. So:
+`docs/semantics.md` is normative for what expressions **mean** — the logic, the
+axes, validity, groundedness, provenance. This file and the code are normative
+for how they are **written and stored**. A disagreement in the first category is
+a bug in the code.
 
 **"Nothing downstream can promote it" is a claim about eight scan sites, and
 seven of them broke it.** Every scan classified a case by whether each side was

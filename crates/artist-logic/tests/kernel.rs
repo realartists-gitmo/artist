@@ -342,7 +342,6 @@ fn every_step_shape_round_trips() {
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
     let all = g.bind(wk::FORALL, vec![Binding { var: v, domain: Some(dom) }], vec![body]);
-    let hedged = g.apply(wk::UNLESS, vec![pb, pa]);
 
     let original = cert(vec![
         Step::Told { node: pa, holds: true, sources: vec![adam] },
@@ -354,7 +353,6 @@ fn every_step_shape_round_trips() {
         Step::Exhaustive { node: all, premises: vec![(0, a, pa), (1, b, pb)], holds: true },
         Step::ModusPonens { node: pb, implication: 4, antecedent: 0 },
         Step::Ungrounded { node: pa },
-        Step::Defeasible { node: hedged, body: 0, defeater: 1 },
     ]);
 
     let term = original.to_term(&mut g);
@@ -386,69 +384,7 @@ fn malformed_terms_decode_to_nothing() {
     assert!(Certificate::from_term(&g, proof).is_none(), "a negative index is not an index");
 }
 
-/// **A default survives only when its defeater is ruled out.**
-///
-/// `(unless E P)` is *P, defeated when E*. Semantics §11 pairs Kripke's operator
-/// with Dung's characteristic function; the grounded extension is the second
-/// component of the least fixpoint, and an argument is in it exactly when every
-/// attacker is answered. A kernel cannot compute that fixpoint — it does not have
-/// to, because membership has a local witness.
-#[test]
-fn a_default_needs_its_defeater_refuted() {
-    let mut g = ObjectGraph::new();
-    let (p, e, a, adam) = (g.atom("p"), g.atom("e"), g.atom("a"), g.atom("adam"));
-    let (pa, ea) = (g.apply(p, vec![a]), g.apply(e, vec![a]));
-    let hedged = g.apply(wk::UNLESS, vec![ea, pa]);
 
-    // The exception is established false: the attack fails, the default holds.
-    let ok = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Told { node: ea, holds: false, sources: vec![adam] },
-        Step::Defeasible { node: hedged, body: 0, defeater: 1 },
-    ])
-    .check(&g)
-    .expect("valid");
-    assert_eq!(ok.support, Bound::Certain);
-    assert_eq!(
-        ok.derivation,
-        artist_logic::evidence::Derivation::Default,
-        "and it is visibly a default, not an observation"
-    );
-
-    // The exception is merely *unheard of*. An attacker nobody has ruled out is
-    // exactly the case where a default must not be certified — accepting it
-    // would make every default unconditional, which is the whole failure mode
-    // defeasible reasoning exists to avoid.
-    let open_defeater = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Told { node: ea, holds: true, sources: vec![adam] },
-        Step::Defeasible { node: hedged, body: 0, defeater: 1 },
-    ]);
-    assert!(open_defeater.check(&g).is_err(), "an exception that holds defeats");
-}
-
-/// The attacker is read **off the node**, so a step cannot nominate a convenient
-/// one. Pointing the defeater premise at something that is not the `unless`
-/// node's exception is a mismatch, not a weaker proof.
-#[test]
-fn a_default_cannot_choose_its_own_attacker() {
-    let mut g = ObjectGraph::new();
-    let (p, e, other, a, adam) =
-        (g.atom("p"), g.atom("e"), g.atom("other"), g.atom("a"), g.atom("adam"));
-    let (pa, ea, oa) =
-        (g.apply(p, vec![a]), g.apply(e, vec![a]), g.apply(other, vec![a]));
-    let hedged = g.apply(wk::UNLESS, vec![ea, pa]);
-
-    // `other` is refuted, `e` is not even mentioned. If the step could name its
-    // own attacker set this would certify — the same defect as `Exhaustive`'s
-    // old `complete` flag, one rule along.
-    let attack = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Told { node: oa, holds: false, sources: vec![adam] },
-        Step::Defeasible { node: hedged, body: 0, defeater: 1 },
-    ]);
-    assert!(attack.check(&g).is_err(), "the exception is `e`, and the graph says so");
-}
 
 /// **The operator count in the spec is a claim, so it is tested.**
 ///
@@ -464,4 +400,76 @@ fn the_reserved_vocabulary_is_the_size_the_spec_says() {
         101,
         "docs/formalism.md §4 and §9 state this number; change both together"
     );
+}
+
+/// **Universal instantiation, which is what makes a stored rule certifiable.**
+///
+/// `ModusPonens` needs the *instantiated* implication; a stored rule is
+/// `∀x⃗. A → C`. Without this step nothing bridged the two, so a conclusion drawn
+/// from a stored rule produced a certificate that could not conclude its own
+/// root — and rules are most of what an agent's memory holds.
+///
+/// Sound over **partial** domains, unlike `Exhaustive`: a designated meet forces
+/// every instance designated, and `enum ⊆ ext`.
+#[test]
+fn a_stored_rule_can_be_instantiated_then_detached() {
+    use artist_logic::object::Binding;
+    let mut g = ObjectGraph::new();
+    let (p, q, a, b, adam) =
+        (g.atom("p"), g.atom("q"), g.atom("a"), g.atom("b"), g.atom("adam"));
+    let dom = g.apply(wk::SET_PARTIAL, vec![a, b]);
+    let v = g.fresh();
+    let rule = {
+        let (pv, qv) = (g.apply(p, vec![v]), g.apply(q, vec![v]));
+        let imp = g.apply(wk::IMPLIES, vec![pv, qv]);
+        g.bind(wk::FORALL, vec![Binding { var: v, domain: Some(dom) }], vec![imp])
+    };
+    let (pa, qa) = (g.apply(p, vec![a]), g.apply(q, vec![a]));
+    let imp_a = g.apply(wk::IMPLIES, vec![pa, qa]);
+
+    let c = cert(vec![
+        Step::Told { node: rule, holds: true, sources: vec![adam] },
+        Step::Instantiate { node: imp_a, premise: 0, value: a },
+        Step::Told { node: pa, holds: true, sources: vec![adam] },
+        Step::ModusPonens { node: qa, implication: 1, antecedent: 2 },
+    ])
+    .check(&g)
+    .expect("valid");
+    assert_eq!(c.node, qa);
+    assert_eq!(c.support, Bound::Certain);
+    assert!(c.hypotheses.contains(&rule), "the rule's own truth is a hypothesis");
+
+    // A value outside the domain instantiates nothing.
+    let out = g.atom("c");
+    let (pc, qc) = (g.apply(p, vec![out]), g.apply(q, vec![out]));
+    let imp_c = g.apply(wk::IMPLIES, vec![pc, qc]);
+    let attack = cert(vec![
+        Step::Told { node: rule, holds: true, sources: vec![adam] },
+        Step::Instantiate { node: imp_c, premise: 0, value: out },
+    ]);
+    assert!(attack.check(&g).is_err(), "c is not in the domain");
+}
+
+/// **The kernel has no defeasible rule, and that is load-bearing.**
+///
+/// `Step::Defeasible` shipped for one commit on the strength of a fixpoint proof
+/// that does not hold (semantics §11.3), with two further holes: `(unless E P)`
+/// is not the complete attacker set, and `refutation: Certain` admits `E = B`,
+/// which is *designated* — a conflicted exception holds and would have counted
+/// as defeated. Until §13's three requirements land together, a default is not
+/// certifiable, and `unless` must reach the kernel as an ordinary opaque node.
+#[test]
+fn a_default_is_not_certifiable() {
+    let mut g = ObjectGraph::new();
+    let (p, e, a, adam) = (g.atom("p"), g.atom("e"), g.atom("a"), g.atom("adam"));
+    let (pa, ea) = (g.apply(p, vec![a]), g.apply(e, vec![a]));
+    let hedged = g.apply(wk::UNLESS, vec![ea, pa]);
+
+    // No rule concludes an `unless` node, so nothing derives it. A `Connective`
+    // step is the closest shape available and `unless` is not a connective.
+    let attempt = cert(vec![
+        Step::Told { node: pa, holds: true, sources: vec![adam] },
+        Step::Connective { node: hedged, premises: vec![(0, 1)], holds: true },
+    ]);
+    assert!(attempt.check(&g).is_err(), "`unless` has no rule, and none is faked");
 }

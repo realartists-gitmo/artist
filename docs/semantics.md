@@ -29,11 +29,11 @@ and denotes something distinct from a claim graded `[0,1]`.
 **The fragment is stated, because the alternative is a false totality claim.**
 Covered: the connectives, quantifiers over sorts, testimony and provenance,
 modality over `W`/`A`, determinacy over `P`, credence over `C`, quotation and the
-truth predicate. Also covered, since §11: the defeasible operators `usually`/`unless`/`prefer`,
-over the rule base `R` and preference order `≺`.
-
-**Not covered, and therefore not part of the semantic language:**
-`if-counterfactually`. `M` contains no similarity ordering over worlds, so it has
+truth predicate. **Not covered, and therefore not part of the semantic language:**
+`if-counterfactually`, and the defeasible operators `usually`/`unless`/`prefer`.
+§11 gives `M` a rule base `R` and preference order `≺`, and then fails to
+interpret them: no fixpoint theorem is available for the combined operator
+(§11.3), so there is no valuation to point at. `M` contains no similarity ordering over worlds, so it has
 no denotation here — and `Unsupported` is an *evaluation result*, not one. It
 remains in the vocabulary and remains evaluable; what it lacks is a
 model-theoretic meaning, which is why no kernel rule mentions it (§13).
@@ -404,8 +404,9 @@ preserve correctness. No field is believed — including the axis fields.
 | `Connective` | premises' | §3, meet and join **by position** |
 | `Instance` | premise's | §4.2, over `ext`, one-sided only |
 | `Exhaustive` | premises' | §4.2, needs `complete` |
-| `ModusPonens` | premises' | §3, `→` is `¬a ∨ b` |
-| `Ungrounded` | `∅` | §4.2, reference fragment only |
+| `ModusPonens` | premises' | §3, `→` is the strong implication |
+| `Instantiate` | premise's | §4.3, a designated meet forces every instance |
+| `Ungrounded` | `∅` | §4.3, reference fragment only |
 
 **`Axiom` is restored and is not a special case of `Tautology`.** Revision 1
 subsumed it, having enumerated *Boolean* valuations — but this semantics is
@@ -481,81 +482,44 @@ its conclusion. Following ASPIC+, `b` **attacks** `a` when:
 `Att ⊆ Args × Args` is the resulting relation. This is `defeated_by` given a
 definition: the set the evaluator already computes is `{Conc(b) : b Att a}`.
 
-### 11.3 The combined operator is antitone, so the fixpoint is alternating
+### 11.3 There is no fixpoint theorem for the combined operator
 
-**The obvious construction does not work, and revision 4 claimed it did.** It
-paired `Φ_M^S` with Dung's `F_M^v` on a product and asserted componentwise
-monotonicity. Both halves are false:
+Two revisions have now claimed one, and both were wrong. The claims and their
+refutations, because the pattern is the point:
 
-- **`F_M^v` is antitone in `v`, not monotone.** At `v` an argument may have no
-  *established* attackers and be accepted; extend to `v'` where an attacker
-  becomes established and it is rejected unless answered. More information
-  shrinks acceptance. Revision 4's proof observed that `⊑` only adds established
-  values and then drew the opposite conclusion from it.
-- **`Φ_M^S` is not `⊑`-monotone in `S`.** If `S` licenses support for `P` the
-  output assigns `T`; enlarging `S` with a refuting argument makes it `B`. `⊑`
-  requires assigned values to stay *identical*, and `T → B` is not an extension.
+- **Revision 4** paired `Φ_M^S` with Dung's `F_M^v` and asserted componentwise
+  monotonicity. `F_M^v` is not monotone in `v`: an argument with no *established*
+  attackers is accepted, and extending `v` so an attacker becomes established
+  rejects it. More information shrinks acceptance.
+- **Revision 5** relabelled that as *antitone* and invoked "the square of an
+  antitone operator is monotone". **That was word substitution, not
+  mathematics.** `Φ_M^S` maps a `T` to a `B` when `S` grows a refuter, and `T`
+  and `B` are **incomparable** under `⊑` — neither above nor below. An operator
+  whose outputs are incomparable is not order-reversing, so the alternating
+  fixpoint theorem does not apply to this `Ψ`.
 
-Non-monotonicity under added information is the defining feature of defeasible
-reasoning, so this is not a repair to be patched — it is the thing itself, and it
-has a standard treatment. **Van Gelder's alternating fixpoint**: an antitone
-operator has no least fixpoint, but its *square* is monotone and does.
+Van Gelder's construction works because its operator is genuinely antitone on a
+lattice where the relevant values are comparable. Ours is not, and no
+reformulation attempted so far makes it so: the difficulty is that `⊑` orders
+*how much is known* while defeat needs to **withdraw** what was known, and `⊑`
+has no room for withdrawal by construction.
 
-Let `Ψ_M(v, S) = ⟨Φ_M^S(v), F_M^v(S)⟩` as before, now with both components
-understood as antitone in the other's argument. Then `Ψ_M` is antitone on the
-product, `Ψ_M²` is monotone, and
+**Consequence, stated rather than worked around: `usually`, `unless` and `prefer`
+have no denotation.** `R` and `≺` are in `M` and no clause interprets them. This
+is the honest state, and §13 carries it as the open problem it is.
 
-```
-lfp(Ψ_M²)  — the well-founded model, sceptical
-```
+**No kernel rule may mention them.** Revision 5 shipped a `Step::Defeasible` for
+`(unless E P)` on the strength of §11.3's invalid proof; it has been removed. It
+had two further holes worth recording so a future attempt does not repeat them:
 
-exists by ordinal iteration from `⟨∅, ∅⟩`. This is exactly the construction the
-well-founded semantics of logic programs with negation uses, and Dung 1995's
-correspondence identifies its argument component with the grounded extension —
-which is why the two theories agree rather than needing to be reconciled.
-
-The pairs where the two iterations of `Ψ_M` disagree are the *undecided* ones:
-propositions a defeasible cycle leaves genuinely open. They land undefined, which
-is the same discipline `⊥` versus `N` enforces one level down — a contested
-default is not resolved by fiat.
-
-### 11.4 What the kernel can check
-
-A kernel cannot compute a fixpoint. **Nor is there a local certificate for
-grounded-extension membership in general** — revision 4 claimed there was, and
-the two-cycle refutes it: with `a` and `b` attacking each other, `{a}` "defends"
-`a` by the local test while Dung's grounded extension is empty. Circular defence
-is exactly what the grounded extension excludes, so a witness has to *descend*:
-each accepted argument needs a rank, its defenders strictly lower rank, bottoming
-out at arguments nobody attacks.
-
-**What the implemented rule does instead is rank 1, and needs no stratification.**
-`(unless E P)` is certified only when `E` is *refuted* — established false by a
-premise that bottoms out in testimony. That is a defeater defeated outright, not
-a defeater answered by something whose own acceptance is in question, so no cycle
-can arise and no rank needs recording. It is a strict fragment of the general
-case, and it is the fragment stored preferences and defaults actually live in.
-
-The general rule, when it comes, must carry
-
-```
-Defeasible { node, rule, instance, premises, attackers, answers }
-```
-
-plus a **rank** per accepted argument, checked to descend strictly to unattacked
-arguments. Without that it is unsound, and with a self-reported attacker list it
-is `Exhaustive`'s `complete` flag again.
-
-Two obligations follow, and neither is optional. The conclusion's `derivation`
-axis is `Default`, never `Observed` or `Derived`. And soundness is relative to
-`Γ` extended with the rule base and the completeness of the attacker set — a
-defeasible conclusion is *conditional on nobody having a defeater you did not
-record*, which is the honest form of the claim and the one a reader can attack.
-
-**Implemented, for the rank-1 fragment.** `Step::Defeasible` reads its attacker
-off the node — `(unless E P)` names `E`, and nothing else attacks the argument it
-builds — so the attacker set is complete by construction rather than assertion.
-The general rule, with ranks, is not implemented and is recorded in §13.
+- **The named exception is not the attacker set.** §11.2 admits rebutters of `P`
+  and underminers of `P`'s premises, so reading `E` off the node and calling the
+  set complete was the `Exhaustive` `complete`-flag defect wearing a new hat.
+- **"`E` is refuted" is not "`E` fails".** `refutation: Certain` asserts
+  `⟦E⟧ ∈ {F,B}` (§7.2), and `B` is *designated* — a conflicted exception holds,
+  and would have been treated as defeated. Certifying a default needs
+  `⟦E⟧ ∈ {N,F}`, which the two-bound judgment cannot express at all. That is a
+  judgment-type problem, not a missing check.
 
 ## 12. What this buys
 
@@ -578,10 +542,6 @@ property test rather than another table of examples.
 
 ## 13. Open
 
-- **Defeasibility.** `M` has no rule base, defeat relation or priority order, and
-  the combined grounding/argumentation operator is not defined, let alone shown
-  monotone. **No kernel rule may depend on it.** This is the remaining research
-  problem, and the kernel is scoped around it rather than over it.
 - **General ungroundedness.** Needs a closed-unfounded-set witness and a closure
   checker. Tractable; not written.
 - **Multi-slot instantiation.** `Instance` and `Exhaustive` substitute one bound
@@ -589,10 +549,9 @@ property test rather than another table of examples.
   not certifiable. Extending it means substituting a tuple and checking each
   slot's domain membership; the shape is the same and the de Bruijn bookkeeping
   is the only new part.
-- **Universal instantiation.** `ModusPonens` needs the *instantiated* implication,
-  and reaching one from a stored `∀x⃗. A → C` is the converse of `Instance`. Sound
-  in FOUR (a meet over the extension is `≤_t` each instance) and cheap, but not
-  among the eight — so stored rules currently fire without being certifiable.
+- **Multi-slot instantiation** remains the binder gap: `Instantiate` and
+  `Instance` substitute one variable, so `∃x,y ∈ σ. R(x,y)` is evaluable and not
+  certifiable.
 - **Counterfactuals.** No settled similarity ordering. Pick one and name it here,
   or return `Unsupported`.
 - **Credence under quantifiers.** §6 defines the compound's credal set; the

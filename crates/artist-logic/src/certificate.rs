@@ -179,34 +179,24 @@ pub enum Step {
     /// are **refused** rather than guessed at, because parity is not a complete
     /// criterion for them and a kernel may not approximate.
     Ungrounded { node: ObjectId },
-    /// A default survived. `node` is `(unless E P)`: `P`, defeated when `E`.
+    /// Universal instantiation: from `∀x ∈ σ. φ`, conclude `φ[value/x]`.
     ///
-    /// **A kernel cannot compute a fixpoint, and does not have to.** Semantics
-    /// §11 pairs Kripke's valuation operator with Dung's characteristic function
-    /// and takes the least fixpoint of the product; the second component is the
-    /// grounded extension. Membership in it has a *local* witness — an argument
-    /// is accepted exactly when every attacker is answered — so the checking
-    /// problem is not the computing problem.
+    /// The converse direction of [`Step::Instance`], which goes instance to
+    /// binder. Without it a stored rule `∀x⃗. A → C` could fire in the evaluator
+    /// and never be certified, because [`Step::ModusPonens`] needs the
+    /// *instantiated* implication and nothing produced one — so every conclusion
+    /// drawn from a stored rule left the certificate unable to conclude its own
+    /// root, and `eval_traced` discarded it. Rules are most of what an agent's
+    /// memory holds, so that gap mattered more than its size suggested.
     ///
-    /// The attackers are read **off the node**: `(unless E P)` names `E`, and
-    /// nothing else attacks the argument it builds, so the attacker set is
-    /// complete by construction rather than by assertion. That is the whole
-    /// reason this rule can exist while the general case cannot. A step carrying
-    /// its own list of attackers would be `Exhaustive`'s `complete` flag again,
-    /// and the repair is the same: read what the graph already holds.
-    ///
-    /// **Soundness.** With `body` establishing `P` designated and `defeater`
-    /// establishing `E` anti-designated, `E`'s attack fails, so the argument for
-    /// `P` is in the grounded extension and `(unless E P)` is designated. The
-    /// conclusion's derivation axis is `Default` — never `Observed`, never
-    /// `Derived` — because it holds *absent a defeater*, and a reader must be
-    /// able to see which kind of claim they were handed.
-    ///
-    /// What is **not** claimed: soundness is relative to `Γ`, which here carries
-    /// everything both premises rest on. A defeasible conclusion is conditional
-    /// on nobody having a defeater you did not record, and naming `E`
-    /// syntactically is what makes that condition checkable rather than a hope.
-    Defeasible { node: ObjectId, body: usize, defeater: usize },
+    /// **Soundness.** `∀x ∈ σ. φ` denotes the meet of its instances over `ext`
+    /// (semantics §2, §4.3), and a designated meet forces every instance
+    /// designated: `F ∧ x = F` and `N ∧ T = N` are both undesignated, so a single
+    /// undesignated instance would drag the meet below. Membership is checked
+    /// against `enum`, and `enum ⊆ ext`, so this holds over **partially**
+    /// enumerable domains too — unlike [`Step::Exhaustive`], which needs
+    /// `enum = ext` because it reasons in the other direction.
+    Instantiate { node: ObjectId, premise: usize, value: ObjectId },
 }
 
 impl Step {
@@ -220,7 +210,7 @@ impl Step {
             | Step::Exhaustive { node, .. }
             | Step::ModusPonens { node, .. }
             | Step::Ungrounded { node, .. }
-            | Step::Defeasible { node, .. } => *node,
+            | Step::Instantiate { node, .. } => *node,
         }
     }
 }
@@ -532,36 +522,28 @@ impl Certificate {
                     }
                     acc
                 }
-                Step::Defeasible { node, body, defeater } => {
-                    // The attackers come from the node, never from the step.
-                    let (exception, inner) = match g.get(*node) {
-                        Some(CoreNode::Apply { operator, operands })
-                            if *operator == wk::UNLESS && operands.len() == 2 =>
-                        {
-                            (operands[0], operands[1])
-                        }
-                        _ => return Err(Invalid::Mismatched { step: i }),
-                    };
-                    let p = premise(*body)?;
-                    let d = premise(*defeater)?;
-                    if p.node != inner || d.node != exception {
+                Step::Instantiate { node, premise: k, value } => {
+                    let p = premise(*k)?;
+                    let (binder, body, dom) = binder_parts(g, p.node)
+                        .ok_or(Invalid::Mismatched { step: i })?;
+                    if binder != wk::FORALL {
                         return Err(Invalid::Mismatched { step: i });
                     }
-                    // The default must hold, and its one attacker must fail.
-                    // `defeater` not *established false* is not good enough: an
-                    // exception nobody has ruled out is exactly the case where a
-                    // default should not be certified, and accepting an `Open`
-                    // defeater here would make every default unconditional.
-                    if p.support != Bound::Certain || d.refutation != Bound::Certain {
+                    // `node` must be exactly the body under `value` — the same
+                    // information `Instance` carries for the same reason: without
+                    // it, nothing ties the conclusion to the premise.
+                    if !instantiates(g, body, *value, *node, 0) {
+                        return Err(Invalid::Mismatched { step: i });
+                    }
+                    // `enum ⊆ ext`, so an enumerated member is a real member and
+                    // completeness is irrelevant here.
+                    let (members, _) =
+                        domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
+                    if !members.contains(value) || p.support != Bound::Certain {
                         return Err(Invalid::Unlicensed { step: i });
                     }
                     let mut acc = decided(*node, true);
                     absorb(&mut acc, p);
-                    absorb(&mut acc, d);
-                    // Set *after* absorbing: `merge` would let a premise's
-                    // `Observed` pull the conclusion back to observed, and a
-                    // default is a default however ordinary its premises.
-                    acc.derivation = Derivation::Default;
                     acc
                 }
                 Step::Ungrounded { node } => {
@@ -731,9 +713,9 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
             parts.extend([wk::BY_RULE, *node, imp, ante]);
         }
         Step::Ungrounded { node } => parts.extend([wk::BY_UNGROUNDED, *node]),
-        Step::Defeasible { node, body, defeater } => {
-            let (b, d) = (g.int(*body as i64), g.int(*defeater as i64));
-            parts.extend([wk::BY_DEFEASIBLE, *node, b, d]);
+        Step::Instantiate { node, premise, value } => {
+            let k = g.int(*premise as i64);
+            parts.extend([wk::BY_INSTANTIATE, *node, k, *value]);
         }
     }
     g.apply(wk::STEP, parts)
@@ -797,10 +779,10 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
             antecedent: read_index(g, *ante)?,
         }),
         [k, node] if *k == wk::BY_UNGROUNDED => Some(Step::Ungrounded { node: *node }),
-        [k, node, body, defeater] if *k == wk::BY_DEFEASIBLE => Some(Step::Defeasible {
+        [k, node, premise, value] if *k == wk::BY_INSTANTIATE => Some(Step::Instantiate {
             node: *node,
-            body: read_index(g, *body)?,
-            defeater: read_index(g, *defeater)?,
+            premise: read_index(g, *premise)?,
+            value: *value,
         }),
         _ => None,
     }
