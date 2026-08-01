@@ -20,6 +20,7 @@ pub mod highlight;
 pub mod manifest;
 pub mod markdown;
 pub mod palette;
+pub mod peer;
 pub mod registry;
 pub mod server;
 pub mod state;

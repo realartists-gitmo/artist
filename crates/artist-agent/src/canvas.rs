@@ -32,6 +32,13 @@ pub struct CanvasTool {
     /// matching benefit. The server appears on the first call that needs one.
     canvas: Arc<Lazy>,
     recorder: Recorder,
+    /// Canvases this session is sharing with peers.
+    ///
+    /// Held here rather than in the server because sharing needs no HTTP: a
+    /// peer renders the canvas in their own artist, so the host is only ever
+    /// sending files and state. Making `share` bind a loopback port would undo
+    /// what `Lazy` is for.
+    shared: Arc<std::sync::Mutex<BTreeMap<String, artist_canvas::peer::Share>>>,
 }
 
 impl CanvasTool {
@@ -40,6 +47,7 @@ impl CanvasTool {
             project,
             canvas,
             recorder,
+            shared: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -68,6 +76,8 @@ pub struct CanvasArgs {
     entries: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default)]
+    ticket: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +120,12 @@ impl PortableTool for CanvasTool {
             return self.export_project();
         }
 
+        // `join` is told which canvas by the ticket, not by a name — the
+        // canvas does not exist on this machine yet.
+        if mode == "join" {
+            return self.join(args.ticket.as_deref().unwrap_or_default()).await;
+        }
+
         if raw.trim().is_empty() {
             return Err(CanvasError(format!("mode={mode} needs a `name`")));
         }
@@ -123,6 +139,7 @@ impl PortableTool for CanvasTool {
             // to flatten a canvas would bind a port for a task that never
             // touches the network.
             "export" => self.export(&slug),
+            "share" => self.share(&slug).await,
             // The only mode whose whole purpose is to serve something, and so
             // the only one that may bring a server into being.
             "open" => self.open(&*self.server().await?, &slug),
@@ -219,7 +236,7 @@ fn schema() -> Value {
                 "mode": {
                     "enum": [
                         "create", "open", "close", "status", "state", "docs", "list", "export",
-                        "eject"
+                        "share", "join", "eject"
                     ],
                     "default": "status",
                     "description":
@@ -235,6 +252,9 @@ fn schema() -> Value {
                          works with no server and no artist — for sending to someone, opening on \
                          a phone, or keeping as a version. The agent is not in the copy: anything \
                          that called the harness is dropped and everything it was showing stays. \
+                         share: put a canvas on the wire for someone else, returning a ticket — \
+                         they get it live, with their own agent, while this session runs. join: \
+                         open a canvas someone shared, using their `ticket`. \
                          eject: convert to a standalone Vite project when \
                          a canvas outgrows the built-in dependency set — after which Artist stops \
                          serving it."
@@ -270,6 +290,12 @@ fn schema() -> Value {
                     "description":
                         "For mode=docs: a component or hook name (e.g. `Plot`, `useCanvasState`). \
                          Omit for the full reference."
+                },
+                "ticket": {
+                    "type": "string",
+                    "description":
+                        "For mode=join: the `artist:…` line the other person got from mode=share. \
+                         It names one canvas on one machine and opens nothing else."
                 }
         },
         "additionalProperties": false
@@ -406,6 +432,7 @@ impl CanvasTool {
 
         let mut out = format!("canvas `{slug}` — {}\n", canvas.manifest.title);
         out.push_str(&format!("url: {}\n", server.url(slug)));
+        out.push_str(&self.presence(slug));
 
         // Read before the drain, which closes the window it describes.
         let (since, seen) = server.report_window(slug);
@@ -589,6 +616,99 @@ impl CanvasTool {
                 Ok(format!("Wrote {keys} to `{slug}` (rev {rev}). {rendered}"))
             }
         }
+    }
+
+    /// Who else is in this canvas.
+    ///
+    /// Worth a line in `status` because it changes what the model should do:
+    /// state it writes is landing on someone else's screen, and a rewrite that
+    /// would be routine alone is something a second person is watching happen.
+    fn presence(&self, slug: &str) -> String {
+        let shared = self.shared.lock().expect("share registry poisoned");
+        let Some(share) = shared.get(slug) else {
+            return String::new();
+        };
+        let peers = share.peers();
+        if peers.is_empty() {
+            return format!(
+                "shared: yes, nobody has joined yet — ticket {}\n",
+                share.ticket
+            );
+        }
+        // Short ids: the full key is 52 characters and this is prose. It is
+        // enough to tell one peer from another, which is all presence needs.
+        let who: Vec<String> = peers
+            .iter()
+            .map(|peer| peer.chars().take(8).collect())
+            .collect();
+        format!(
+            "shared: {} peer(s) connected right now ({}) — they see what you write\n",
+            peers.len(),
+            who.join(", ")
+        )
+    }
+
+    /// Put a canvas on the wire for someone else to open.
+    ///
+    /// The other kind of sharing, and the one an export cannot be: both people
+    /// are live, both have their own agent, and the canvas is the surface they
+    /// meet on. Only possible while this session runs — a ticket is answered by
+    /// a process, so closing artist closes the share.
+    async fn share(&self, slug: &str) -> Result<String, CanvasError> {
+        if let Some(existing) = self
+            .shared
+            .lock()
+            .expect("share registry poisoned")
+            .get(slug)
+        {
+            return Ok(format!(
+                "`{slug}` is already shared. Same ticket as before:\n{}",
+                existing.ticket
+            ));
+        }
+
+        let share = artist_canvas::peer::Share::start(self.project.clone(), slug.to_owned())
+            .await
+            .map_err(|error| CanvasError(error.to_string()))?;
+        let ticket = share.ticket.to_string();
+        self.shared
+            .lock()
+            .expect("share registry poisoned")
+            .insert(slug.to_owned(), share);
+
+        Ok(format!(
+            "Sharing `{slug}`. Give the other person this ticket:\n{ticket}\n\n\
+             They open it with canvas mode=join. They get the canvas and its state, and their \
+             edits to state come back — but the files stay yours, and they cannot reach anything \
+             else here: a ticket opens one canvas and carries no way to call a tool.\n\n\
+             It works while this session runs. For a copy that outlives it, use mode=export."
+        ))
+    }
+
+    /// Open a canvas someone else is sharing.
+    async fn join(&self, ticket: &str) -> Result<String, CanvasError> {
+        if ticket.trim().is_empty() {
+            return Err(CanvasError(
+                "mode=join needs a `ticket` — the `artist:…` line the other person got from \
+                 mode=share"
+                    .into(),
+            ));
+        }
+        let parsed: artist_canvas::peer::Ticket = ticket
+            .trim()
+            .parse()
+            .map_err(|error: artist_canvas::peer::PeerError| CanvasError(error.to_string()))?;
+
+        let local = artist_canvas::peer::join(&self.project, &parsed)
+            .await
+            .map_err(|error| CanvasError(error.to_string()))?;
+
+        Ok(format!(
+            "Joined `{}` — it is here as `{local}`.\n\n\
+             It is a copy of what they have now, under a name that says where it came from so it \
+             cannot overwrite one of yours. Open it with mode=open like any other canvas.",
+            parsed.slug
+        ))
     }
 
     /// Every canvas in the project, in one file, with a lobby.

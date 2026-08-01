@@ -153,6 +153,17 @@ pub enum ScaffoldError {
 ///
 /// The result becomes a path segment and a URL segment, so it is restricted to
 /// characters that need no escaping in either.
+/// Is this already a slug, rather than something that would become one?
+///
+/// For input that arrives from somewhere other than the model — a ticket
+/// pasted from a chat message — where the right move is to refuse rather than
+/// to coerce. `slugify` would happily turn `../../etc` into `etc` and hand back
+/// something that looks fine, which is exactly the wrong shape of helpful when
+/// the value is about to become a path segment.
+pub fn is_slug(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 64 && value == slugify(value)
+}
+
 pub fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut hyphen_pending = false;

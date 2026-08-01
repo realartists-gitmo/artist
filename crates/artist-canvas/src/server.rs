@@ -1309,7 +1309,7 @@ fn session_key(rng: &mut ThreadRng) -> String {
 }
 
 /// Resolve a request path inside a canvas, refusing anything that climbs out.
-fn resolve_within(root: &Path, requested: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_within(root: &Path, requested: &str) -> Option<PathBuf> {
     let mut resolved = root.to_path_buf();
     for segment in requested.split('/') {
         match segment {

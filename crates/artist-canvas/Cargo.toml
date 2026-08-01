@@ -23,6 +23,11 @@ dashmap = "6"
 dirs = "6"
 futures = "0.3"
 include_dir = "0.7"
+# Peer-to-peer for shared canvases. Native only and deliberately so: the
+# browser build of iroh relays every connection because a sandbox cannot send
+# UDP, and the whole reason this works is that artist does the traversal
+# natively while the page stays on loopback.
+iroh = "1.0"
 notify = { version = "8", default-features = false, features = [
     "macos_fsevent",
 ] }
