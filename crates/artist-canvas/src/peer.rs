@@ -156,9 +156,13 @@ pub enum Message {
         files: Vec<(String, String)>,
     },
     /// Either direction: shared state moved.
+    ///
+    /// Whole entries, not values. Each carries the revision and the writer it
+    /// was stamped with, which is what lets the far side order it against its
+    /// own history — send bare values and the receiver has to invent an
+    /// ordering, which is where writes get lost.
     State {
-        rev: u64,
-        entries: serde_json::Value,
+        entries: std::collections::BTreeMap<String, crate::state::Entry>,
     },
     /// Host to peer, when the ticket names something that is not there.
     Refused { reason: String },
@@ -343,7 +347,15 @@ impl Share {
 
 impl Drop for Share {
     fn drop(&mut self) {
-        self.endpoint.close();
+        // `close` is a future, and a future dropped un-awaited does nothing —
+        // the share would have stayed answering until the process exited. It
+        // gets its own task because `Drop` cannot await, and closing politely
+        // is worth a task: it tells connected peers the share is over instead
+        // of leaving them on a socket that has stopped replying.
+        let endpoint = self.endpoint.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { endpoint.close().await });
+        }
     }
 }
 
@@ -379,26 +391,26 @@ async fn serve_peer(
 
     write_message(&mut send, &shareable(project, slug)?).await?;
 
-    let state =
-        crate::StateStore::open(&project.join(crate::registry::CANVAS_DIR).join(slug)).snapshot();
+    let store = crate::StateStore::open(&project.join(crate::registry::CANVAS_DIR).join(slug));
     write_message(
         &mut send,
         &Message::State {
-            rev: state.rev,
-            entries: serde_json::to_value(state.plain()).unwrap_or_default(),
+            entries: store.snapshot().entries,
         },
     )
     .await?;
 
     // State flows both ways from here. Code does not: nothing in this loop
-    // writes a file, so a peer cannot edit the host's source.
-    while let Ok(Message::State { rev, entries }) = read_message(&mut recv).await {
-        let store = crate::StateStore::open(&project.join(crate::registry::CANVAS_DIR).join(slug));
-        if store.snapshot().rev < rev
-            && let Some(map) = entries.as_object()
-        {
-            let _ = store.merge(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-        }
+    // writes a file inside the canvas, so a peer cannot edit the host's source.
+    //
+    // `absorb` rather than `merge`: these entries were stamped on the peer's
+    // machine and keep their own revision and writer, so each is ordered per
+    // key against what is already here rather than restamped as a local write.
+    // The previous version compared the peer's document revision against this
+    // one's and dropped the whole update if it was behind — two unrelated
+    // counters, so whichever side had written less quietly lost everything.
+    while let Ok(Message::State { entries }) = read_message(&mut recv).await {
+        let _ = store.absorb(entries);
     }
     Ok(())
 }
@@ -477,15 +489,19 @@ async fn join_inner(
         _ => return Err(PeerError::Protocol("expected the canvas".into())),
     };
 
-    if let Ok(Message::State { entries, .. }) = read_message(&mut recv).await
-        && let Some(map) = entries.as_object()
-    {
+    // Absorbed with the host's stamps intact. Restamping them as local writes
+    // would make this machine claim authorship of every key it received, and
+    // the next exchange would then look like the peer had overwritten the host.
+    if let Ok(Message::State { entries }) = read_message(&mut recv).await {
         let store =
             crate::StateStore::open(&project.join(crate::registry::CANVAS_DIR).join(&local));
-        let _ = store.merge(map.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+        let _ = store.absorb(entries);
     }
 
-    endpoint.close();
+    // Awaited, unlike the version of this line that sat here doing nothing:
+    // `close` is a future, and a joiner that returns without closing leaves the
+    // host holding a connection to a peer that has stopped listening.
+    endpoint.close().await;
     Ok(local)
 }
 
@@ -495,8 +511,6 @@ async fn write_message(
     send: &mut iroh::endpoint::SendStream,
     message: &Message,
 ) -> Result<(), PeerError> {
-    use tokio::io::AsyncWriteExt as _;
-
     let mut line =
         serde_json::to_vec(message).map_err(|error| PeerError::Protocol(error.to_string()))?;
     line.push(b'\n');
@@ -507,8 +521,6 @@ async fn write_message(
 }
 
 async fn read_message(recv: &mut iroh::endpoint::RecvStream) -> Result<Message, PeerError> {
-    use tokio::io::AsyncReadExt as _;
-
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
     while line.len() < MAX_FILES * MAX_FILE_BYTES {

@@ -18,11 +18,31 @@ use serde::{Deserialize, Serialize};
 
 pub const STATE_FILE: &str = "state.json";
 
-/// One key's value plus the revision it was written at.
+/// One key's value, the revision it was written at, and who wrote it.
+///
+/// The writer is what makes two machines' revisions comparable. A revision on
+/// its own is a count of writes *on one machine*, so comparing yours to a
+/// peer's is comparing two unrelated clocks — which silently drops whichever
+/// side happens to have written less. With a writer to break ties, `(rev,
+/// writer)` is a total order every participant computes the same way, and
+/// merging becomes order-independent: the same set of writes converges to the
+/// same state no matter what sequence they arrive in.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Entry {
     pub value: serde_json::Value,
     pub rev: u64,
+    /// Absent in state written before canvases could be shared, which is the
+    /// common case on disk today. Empty sorts below any real writer, so an old
+    /// entry loses a tie to a new one rather than winning it arbitrarily.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub writer: String,
+}
+
+impl Entry {
+    /// How two writes to the same key are ordered, by everyone, identically.
+    fn wins_over(&self, other: &Entry) -> bool {
+        (self.rev, self.writer.as_str()) > (other.rev, other.writer.as_str())
+    }
 }
 
 /// The durable form. A map rather than a bare value so two parts of a canvas
@@ -42,6 +62,23 @@ impl Snapshot {
             .map(|(key, entry)| (key.clone(), entry.value.clone()))
             .collect()
     }
+}
+
+/// This machine's short name for tie-breaking.
+///
+/// Derived from the sharing identity so it is stable across restarts — a
+/// writer id that changed per process would make a machine lose ties to its
+/// own earlier writes. Falls back to a per-process value when there is no
+/// identity yet, which is correct for the case that fallback covers: a machine
+/// that has never shared anything has nobody to tie with.
+fn writer_id() -> String {
+    use std::sync::OnceLock;
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| match crate::peer::identity() {
+        Ok(key) => key.public().to_string().chars().take(16).collect(),
+        Err(_) => format!("local-{}", std::process::id()),
+    })
+    .clone()
 }
 
 /// What the mutex guards: the state, and how fresh we believe it to be.
@@ -88,6 +125,10 @@ pub struct StateStore {
     /// `canvas.toml` and try again, and a cached limit would make that retry
     /// fail for no visible reason until the session restarted.
     manifest: PathBuf,
+    /// Who this machine is, stamped on every local write so a peer can order
+    /// it against their own. Short and stable rather than the full key: it is
+    /// only ever compared for equality and to break ties.
+    writer: String,
     held: Mutex<Held>,
 }
 
@@ -100,6 +141,7 @@ impl StateStore {
         let store = StateStore {
             path,
             manifest: canvas_root.join(crate::registry::MANIFEST_FILE),
+            writer: writer_id(),
             held: Mutex::new(Held::default()),
         };
         let mut held = store.held.lock().expect("state lock poisoned");
@@ -179,6 +221,7 @@ impl StateStore {
         let entry = Entry {
             value,
             rev: held.snapshot.rev,
+            writer: self.writer.clone(),
         };
         held.snapshot.entries.insert(key.to_owned(), entry.clone());
         self.commit(&mut held, restore)?;
@@ -197,7 +240,58 @@ impl StateStore {
         held.snapshot.rev += 1;
         let rev = held.snapshot.rev;
         for (key, value) in values {
-            held.snapshot.entries.insert(key, Entry { value, rev });
+            held.snapshot.entries.insert(
+                key,
+                Entry {
+                    value,
+                    rev,
+                    writer: self.writer.clone(),
+                },
+            );
+        }
+        self.commit(&mut held, restore)?;
+        Ok(held.snapshot.clone())
+    }
+
+    /// Take in state written somewhere else.
+    ///
+    /// This is the one that has to be right, because it is the only place two
+    /// independent histories meet. It compares per key rather than per
+    /// document: a document revision counts writes on one machine, so gating a
+    /// peer's whole update on "is your counter ahead of mine" silently drops
+    /// every edit from whichever side has written less — which is not a merge,
+    /// it is a coin toss weighted by activity.
+    ///
+    /// Per key with `(rev, writer)` as the order, the result does not depend on
+    /// arrival sequence, on which side initiated, or on how many times either
+    /// has written. Two peers who exchange the same edits in any order end up
+    /// holding the same state.
+    ///
+    /// A losing write is dropped rather than merged, so this is last-writer-
+    /// wins per key and not a merge of concurrent edits *to the same key*.
+    /// Different keys never conflict, which is what makes it enough here: a
+    /// canvas's keys are owned by the parts of the UI that write them.
+    pub fn absorb(&self, incoming: BTreeMap<String, Entry>) -> Result<Snapshot, OverLimit> {
+        let mut held = self.held.lock().expect("state lock poisoned");
+        self.refresh(&mut held);
+        let restore = held.snapshot.clone();
+
+        let mut changed = false;
+        for (key, entry) in incoming {
+            match held.snapshot.entries.get(&key) {
+                Some(mine) if !entry.wins_over(mine) => {}
+                _ => {
+                    // The document revision tracks the highest write this
+                    // canvas has seen from anywhere, so a later local write
+                    // cannot be handed a revision a peer has already used.
+                    held.snapshot.rev = held.snapshot.rev.max(entry.rev);
+                    held.snapshot.entries.insert(key, entry);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            return Ok(held.snapshot.clone());
         }
         self.commit(&mut held, restore)?;
         Ok(held.snapshot.clone())
@@ -270,6 +364,160 @@ impl StateStore {
                 .and_then(|meta| meta.modified())
                 .ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod merging {
+    use super::*;
+
+    fn entry(value: u64, rev: u64, writer: &str) -> Entry {
+        Entry {
+            value: serde_json::json!(value),
+            rev,
+            writer: writer.to_owned(),
+        }
+    }
+
+    fn store(at: &Path) -> StateStore {
+        StateStore::open(at)
+    }
+
+    /// The bug this exists for: the old code compared the *document* revision
+    /// of one machine against another's and dropped the whole update if it was
+    /// behind. Two counters over two histories, so the side that had written
+    /// less silently lost everything it sent.
+    #[test]
+    fn a_peer_that_has_written_less_does_not_lose_its_writes() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        // This machine is busy: ten writes, so its document revision is ten.
+        for index in 0..10 {
+            mine.set("mine", serde_json::json!(index)).expect("write");
+        }
+        assert_eq!(mine.snapshot().rev, 10);
+
+        // A peer sends a key it wrote on its second-ever write.
+        mine.absorb([("theirs".to_owned(), entry(7, 2, "peer"))].into())
+            .expect("absorb");
+
+        assert_eq!(
+            mine.snapshot().plain().get("theirs"),
+            Some(&serde_json::json!(7)),
+            "a quieter peer's write was dropped"
+        );
+    }
+
+    /// Order-independence is the property that makes this a merge rather than
+    /// a race: the same writes, applied in any sequence, converge.
+    #[test]
+    fn the_same_writes_converge_whatever_order_they_arrive_in() {
+        let one = tempfile::tempdir().expect("tempdir");
+        let two = tempfile::tempdir().expect("tempdir");
+
+        let older = entry(1, 4, "alice");
+        let newer = entry(2, 9, "bob");
+
+        let forwards = store(one.path());
+        forwards
+            .absorb([("k".to_owned(), older.clone())].into())
+            .expect("absorb");
+        forwards
+            .absorb([("k".to_owned(), newer.clone())].into())
+            .expect("absorb");
+
+        let backwards = store(two.path());
+        backwards
+            .absorb([("k".to_owned(), newer)].into())
+            .expect("absorb");
+        backwards
+            .absorb([("k".to_owned(), older)].into())
+            .expect("absorb");
+
+        assert_eq!(forwards.snapshot().entries, backwards.snapshot().entries);
+        assert_eq!(
+            forwards.snapshot().plain().get("k"),
+            Some(&serde_json::json!(2)),
+            "the later write should win regardless of arrival order"
+        );
+    }
+
+    /// Equal revisions on two machines are not a paradox, they are the normal
+    /// case — both wrote once. The writer breaks it, the same way on both.
+    #[test]
+    fn an_equal_revision_is_broken_by_the_writer_not_by_luck() {
+        let one = tempfile::tempdir().expect("tempdir");
+        let two = tempfile::tempdir().expect("tempdir");
+
+        let alice = entry(1, 3, "alice");
+        let bob = entry(2, 3, "bob");
+
+        let a = store(one.path());
+        a.absorb([("k".to_owned(), alice.clone())].into())
+            .expect("absorb");
+        a.absorb([("k".to_owned(), bob.clone())].into())
+            .expect("absorb");
+
+        let b = store(two.path());
+        b.absorb([("k".to_owned(), bob)].into()).expect("absorb");
+        b.absorb([("k".to_owned(), alice)].into()).expect("absorb");
+
+        assert_eq!(
+            a.snapshot().plain().get("k"),
+            b.snapshot().plain().get("k"),
+            "a tie resolved differently on two machines is a permanent split"
+        );
+    }
+
+    /// State written before canvases could be shared has no writer. It must
+    /// lose a tie rather than win one arbitrarily, and it must not be dropped.
+    #[test]
+    fn state_from_before_sharing_still_merges() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        let legacy = Entry {
+            value: serde_json::json!("old"),
+            rev: 3,
+            writer: String::new(),
+        };
+        mine.absorb([("k".to_owned(), legacy)].into())
+            .expect("absorb");
+        assert_eq!(
+            mine.snapshot().plain().get("k"),
+            Some(&serde_json::json!("old"))
+        );
+
+        mine.absorb([("k".to_owned(), entry(5, 3, "peer"))].into())
+            .expect("absorb");
+        assert_eq!(
+            mine.snapshot().plain().get("k"),
+            Some(&serde_json::json!(5)),
+            "an unwritered entry should lose a tie, not win it"
+        );
+    }
+
+    /// A local write after absorbing must not be handed a revision a peer has
+    /// already used, or it would lose to the write it came after.
+    #[test]
+    fn a_local_write_after_a_peers_takes_a_higher_revision() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        mine.absorb([("k".to_owned(), entry(1, 50, "peer"))].into())
+            .expect("absorb");
+        let written = mine.set("k", serde_json::json!("mine")).expect("write");
+
+        assert!(
+            written.rev > 50,
+            "a local write took revision {} after a peer's 50",
+            written.rev
+        );
+        assert_eq!(
+            mine.snapshot().plain().get("k"),
+            Some(&serde_json::json!("mine"))
+        );
     }
 }
 
@@ -402,6 +650,7 @@ mod tests {
                         Entry {
                             value: json!("theirs"),
                             rev: 1,
+                            writer: String::new(),
                         },
                     ),
                     (
@@ -409,6 +658,7 @@ mod tests {
                         Entry {
                             value: json!(7),
                             rev: 1,
+                            writer: String::new(),
                         },
                     ),
                 ]),
@@ -459,6 +709,7 @@ mod tests {
                     Entry {
                         value: json!("old"),
                         rev: 1,
+                        writer: String::new(),
                     },
                 )]),
             })
