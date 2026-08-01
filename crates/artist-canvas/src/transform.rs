@@ -135,6 +135,85 @@ pub fn specifiers(path: &Path, source: &str) -> Vec<Specifier> {
     collect.found
 }
 
+/// Where a module reaches the harness directly, rather than through the kit.
+///
+/// Answered from the syntax rather than by searching for the text `artist.call`,
+/// because the binding is whatever the module chose to call it. The name is
+/// read from the import — `import { artist as a }` makes `a.call` the thing to
+/// find — which a textual scan cannot do and which a canvas has every right to
+/// write. Returns the reaches found, positioned, so a caller can name the line.
+///
+/// Only `@artist/canvas` counts as the source. Reaching the same capability
+/// through `@artist/react`'s `useTool` is fine: that is a kit module, and the
+/// export substitutes it.
+pub fn harness_reaches(path: &Path, source: &str) -> Vec<(String, u32)> {
+    use oxc::{
+        ast::ast,
+        ast_visit::{Visit, walk},
+    };
+
+    /// The capabilities an export cannot provide, and so cannot substitute.
+    const UNAVAILABLE: &[&str] = &["call", "send"];
+
+    #[derive(Default)]
+    struct Find {
+        /// Local names the runtime was imported under.
+        bindings: Vec<String>,
+        found: Vec<(String, u32)>,
+    }
+
+    impl<'a> Visit<'a> for Find {
+        fn visit_import_declaration(&mut self, it: &ast::ImportDeclaration<'a>) {
+            if it.source.value != "@artist/canvas" {
+                return;
+            }
+            for specifier in it.specifiers.iter().flatten() {
+                match specifier {
+                    // `import { artist } from …` and `import { artist as a }`.
+                    ast::ImportDeclarationSpecifier::ImportSpecifier(named) => {
+                        self.bindings.push(named.local.name.to_string());
+                    }
+                    // `import * as runtime from …` — `runtime.artist.call`
+                    // reads as a member of a member, and the outer name is
+                    // enough to notice it.
+                    ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) => {
+                        self.bindings.push(namespace.local.name.to_string());
+                    }
+                    ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(default) => {
+                        self.bindings.push(default.local.name.to_string());
+                    }
+                }
+            }
+        }
+
+        fn visit_static_member_expression(&mut self, it: &ast::StaticMemberExpression<'a>) {
+            if UNAVAILABLE.contains(&it.property.name.as_str())
+                && let ast::Expression::Identifier(object) = &it.object
+                && self
+                    .bindings
+                    .iter()
+                    .any(|bound| bound == object.name.as_str())
+            {
+                self.found.push((
+                    format!("{}.{}", object.name, it.property.name),
+                    it.span.start,
+                ));
+            }
+            walk::walk_static_member_expression(self, it);
+        }
+    }
+
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::jsx());
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+
+    let mut find = Find::default();
+    find.visit_program(&parsed.program);
+    find.found.sort_by_key(|(_, at)| *at);
+    find.found.dedup();
+    find.found
+}
+
 /// Compile one module. `path` is used to pick the dialect (`.tsx` implies both
 /// TypeScript and JSX) and to label diagnostics.
 pub fn transform(

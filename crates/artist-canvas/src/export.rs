@@ -163,9 +163,7 @@ async fn flatten(
             source,
         })?;
 
-        for reach in reaches_past_the_kit(&source) {
-            wont_travel.push(format!("{module} uses {reach}"));
-        }
+        wont_travel.extend(reaches_past_the_kit(&module, &source));
 
         // Rewrite on the source, not the output: spans are only meaningful
         // against the text they were parsed from.
@@ -664,22 +662,21 @@ fn prefixed(path: &str) -> String {
 /// moves the import. What it can be is *caught*, here, at the one moment when
 /// the question "will this survive the trip?" is both askable and answerable.
 ///
-/// Deliberately textual and deliberately conservative. `artist` is the name the
-/// runtime is imported under everywhere in the docs and every template; a
-/// canvas that renames it defeats this, and the cost of that is a warning not
-/// shown rather than a wrong one shown.
-fn reaches_past_the_kit(source: &str) -> Vec<&'static str> {
-    let mut found = Vec::new();
-    for (needle, name) in [
-        ("artist.call", "artist.call"),
-        ("artist.send", "artist.send"),
-        ("artist.ask.answer", "artist.ask.answer"),
-    ] {
-        if source.contains(needle) {
-            found.push(name);
-        }
-    }
-    found
+/// Read from the syntax, not from the text. An earlier version searched for the
+/// string `artist.call`, which found it only when the module happened to have
+/// named the import `artist` — true of every template and every doc, and not
+/// something a canvas is obliged to do. `import { artist as a }` made the check
+/// silently stop working, which is the worst property a warning can have.
+fn reaches_past_the_kit(module: &str, source: &str) -> Vec<String> {
+    transform::harness_reaches(Path::new(module), source)
+        .into_iter()
+        .map(|(what, at)| {
+            // A byte offset means nothing to the reader; the line it falls on
+            // is what they will go and look at.
+            let line = source[..at as usize].matches('\n').count() + 1;
+            format!("{module}:{line} uses {what}")
+        })
+        .collect()
 }
 
 /// Is this a specifier the exporter has to resolve on disk?

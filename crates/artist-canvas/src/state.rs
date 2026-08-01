@@ -46,6 +46,21 @@ pub struct Entry {
     /// revisions are per-machine counters and their proximity means nothing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub parent: u64,
+    /// The value this write replaced, when that value was an object.
+    ///
+    /// The common ancestor, and without it a field-by-field merge is not
+    /// possible — only a comparison. Both sides send a whole object, so a field
+    /// one of them never touched still differs from the other's change, and
+    /// nothing in the two values alone says which of those happened. With the
+    /// ancestor it is decidable: a field that matches it on one side was
+    /// changed by the other, and only a field that differs from it on *both*
+    /// sides is a real clash.
+    ///
+    /// Objects only. Two concurrent writes to a scalar are a clash however you
+    /// look at them, so keeping the old one would double the file to answer a
+    /// question with one possible answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<serde_json::Value>>,
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -57,6 +72,80 @@ impl Entry {
     fn wins_over(&self, other: &Entry) -> bool {
         (self.rev, self.writer.as_str()) > (other.rev, other.writer.as_str())
     }
+}
+
+/// Combine two concurrent values, keeping everything that does not actually
+/// disagree.
+///
+/// Last-writer-wins on a whole value throws away far more than it has to. A
+/// canvas keeps a key like `filters` or `row-42` holding an object, and two
+/// people who touch *different fields of it* have not conflicted in any sense
+/// that matters — but a whole-value comparison cannot see that, so one of them
+/// loses a change to a field the other never went near.
+///
+/// So objects merge field by field, recursively, and the ordering that decides
+/// a genuine clash is the one the entries already carry. What is left after
+/// that is two people editing the same leaf, which is the only case where
+/// something really must be discarded — and the caller reports those.
+///
+/// Arrays are treated as leaves on purpose. Merging them needs to know whether
+/// a list is a set, a sequence, or a queue, and guessing wrong reorders or
+/// duplicates a user's data, which is worse than losing a write you are told
+/// about.
+fn reconcile(
+    base: Option<&serde_json::Value>,
+    winner: &serde_json::Value,
+    loser: &serde_json::Value,
+    into: &mut Vec<String>,
+    at: &str,
+) -> serde_json::Value {
+    let (
+        Some(serde_json::Value::Object(was)),
+        serde_json::Value::Object(win),
+        serde_json::Value::Object(lose),
+    ) = (base, winner, loser)
+    else {
+        // No ancestor, or not all objects: there is nothing to be clever with.
+        // The winner stands and the loser is named at its path.
+        if winner != loser {
+            into.push(at.to_owned());
+        }
+        return winner.clone();
+    };
+
+    let mut merged = win.clone();
+    for (field, theirs) in lose {
+        let path = if at.is_empty() {
+            field.clone()
+        } else {
+            format!("{at}.{field}")
+        };
+        let ancestor = was.get(field);
+        match win.get(field) {
+            // Only the loser has it at all: they added it, nobody contested it.
+            None => {
+                merged.insert(field.clone(), theirs.clone());
+            }
+            Some(ours) if ours == theirs => {}
+            // The winner left this field as it was, so the change is the
+            // loser's and there is nothing to lose.
+            Some(ours) if ancestor == Some(ours) => {
+                merged.insert(field.clone(), theirs.clone());
+            }
+            // The loser left it as it was: the winner's change stands, and the
+            // loser never had an opinion to discard.
+            Some(_) if ancestor == Some(theirs) => {}
+            // Both moved it. Recurse — nested objects get the same treatment —
+            // and anything that is not an object is a real clash.
+            Some(ours) => {
+                merged.insert(
+                    field.clone(),
+                    reconcile(ancestor, ours, theirs, into, &path),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(merged)
 }
 
 /// The durable form. A map rather than a bare value so two parts of a canvas
@@ -93,6 +182,21 @@ fn writer_id() -> String {
         Err(_) => format!("local-{}", std::process::id()),
     })
     .clone()
+}
+
+/// Follow a dotted path into a value, for reporting what was dropped at it.
+fn at_path<'a>(value: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+    let mut at = value;
+    if path.is_empty() {
+        return at;
+    }
+    for step in path.split('.') {
+        match at.get(step) {
+            Some(next) => at = next,
+            None => return at,
+        }
+    }
+    at
 }
 
 /// A write that lost, and to whom.
@@ -248,18 +352,20 @@ impl StateStore {
         let mut held = self.held.lock().expect("state lock poisoned");
         self.refresh(&mut held);
         let restore = held.snapshot.clone();
-        let parent = held
-            .snapshot
-            .entries
-            .get(key)
-            .map(|previous| previous.rev)
-            .unwrap_or(0);
+        let previous = held.snapshot.entries.get(key);
+        let parent = previous.map(|entry| entry.rev).unwrap_or(0);
+        // Only for objects: see `Entry::base`.
+        let base = previous
+            .map(|entry| entry.value.clone())
+            .filter(|value| value.is_object())
+            .map(Box::new);
         held.snapshot.rev += 1;
         let entry = Entry {
             value,
             rev: held.snapshot.rev,
             writer: self.writer.clone(),
             parent,
+            base,
         };
         held.snapshot.entries.insert(key.to_owned(), entry.clone());
         self.commit(&mut held, restore)?;
@@ -278,12 +384,12 @@ impl StateStore {
         held.snapshot.rev += 1;
         let rev = held.snapshot.rev;
         for (key, value) in values {
-            let parent = held
-                .snapshot
-                .entries
-                .get(&key)
-                .map(|previous| previous.rev)
-                .unwrap_or(0);
+            let previous = held.snapshot.entries.get(&key);
+            let parent = previous.map(|entry| entry.rev).unwrap_or(0);
+            let base = previous
+                .map(|entry| entry.value.clone())
+                .filter(|value| value.is_object())
+                .map(Box::new);
             held.snapshot.entries.insert(
                 key,
                 Entry {
@@ -291,6 +397,7 @@ impl StateStore {
                     rev,
                     writer: self.writer.clone(),
                     parent,
+                    base,
                 },
             );
         }
@@ -351,23 +458,59 @@ impl StateStore {
             // held now. If it *is*, the writer saw this value and chose to
             // replace it, which is an ordinary sequential edit and no conflict
             // at all.
-            if let Some(mine) = held.snapshot.entries.get(&key)
-                && mine.writer != entry.writer
-                && mine.value != entry.value
-                && entry.parent != mine.rev
-            {
+            let concurrent = held.snapshot.entries.get(&key).is_some_and(|mine| {
+                mine.writer != entry.writer && mine.value != entry.value && entry.parent != mine.rev
+            });
+
+            if concurrent {
+                let mine = held.snapshot.entries.get(&key).expect("just checked");
                 let (winner, loser) = if entry.wins_over(mine) {
                     (&entry, mine)
                 } else {
                     (mine, &entry)
                 };
-                lost.push(Superseded {
-                    key: key.clone(),
-                    kept: winner.writer.clone(),
-                    dropped: loser.writer.clone(),
-                    value: loser.value.clone(),
-                });
+
+                // Reconciled rather than replaced. Two people who touched
+                // different fields of one object both keep their work; only a
+                // clash on the same leaf discards anything, and every one that
+                // does is named with its path.
+                let mut clashes = Vec::new();
+                // Either side's ancestor will do — they replaced the same
+                // value, which is what made them concurrent.
+                let ancestor = winner.base.as_deref().or(loser.base.as_deref()).cloned();
+                let merged = reconcile(
+                    ancestor.as_ref(),
+                    &winner.value,
+                    &loser.value,
+                    &mut clashes,
+                    "",
+                );
+                for path in &clashes {
+                    lost.push(Superseded {
+                        key: if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{key}.{path}")
+                        },
+                        kept: winner.writer.clone(),
+                        dropped: loser.writer.clone(),
+                        value: at_path(&loser.value, path).clone(),
+                    });
+                }
+
+                let resolved = Entry {
+                    value: merged,
+                    rev: held.snapshot.rev.max(entry.rev).max(winner.rev),
+                    writer: winner.writer.clone(),
+                    parent: winner.rev,
+                    base: ancestor.filter(|value| value.is_object()).map(Box::new),
+                };
+                held.snapshot.rev = held.snapshot.rev.max(resolved.rev);
+                held.snapshot.entries.insert(key, resolved);
+                changed = true;
+                continue;
             }
+
             match held.snapshot.entries.get(&key) {
                 Some(mine) if !entry.wins_over(mine) => {}
                 _ => {
@@ -469,6 +612,7 @@ mod merging {
             // Replaced nothing, which is what an entry arriving from a peer
             // this canvas has never heard from looks like.
             parent: 0,
+            base: None,
         }
     }
 
@@ -524,6 +668,7 @@ mod merging {
                         rev: held.rev + 1,
                         writer: "peer".to_owned(),
                         parent: held.rev,
+                        base: None,
                     },
                 )]
                 .into(),
@@ -548,6 +693,7 @@ mod merging {
                         rev: newer.rev,
                         writer: "peer".to_owned(),
                         parent: held.rev,
+                        base: None,
                     },
                 )]
                 .into(),
@@ -563,6 +709,106 @@ mod merging {
             "the report does not carry what was dropped: {:?}",
             lost[0]
         );
+    }
+
+    /// The common shape of a real conflict is not a conflict: two people
+    /// touching different fields of one object. Whole-value last-writer-wins
+    /// cannot see that, and throws away a change to a field the winner never
+    /// went near.
+    #[test]
+    fn concurrent_edits_to_different_fields_both_survive() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        let base = mine
+            .set(
+                "filters",
+                serde_json::json!({"since": "monday", "team": "ops"}),
+            )
+            .expect("write");
+        // I narrow the team; they change the date. Neither saw the other.
+        let held = mine
+            .set(
+                "filters",
+                serde_json::json!({"since": "monday", "team": "platform"}),
+            )
+            .expect("write");
+
+        let (_, lost) = mine
+            .absorb_reporting(
+                [(
+                    "filters".to_owned(),
+                    Entry {
+                        value: serde_json::json!({"since": "friday", "team": "ops"}),
+                        rev: held.rev + 1,
+                        writer: "peer".to_owned(),
+                        parent: base.rev,
+                        // The ancestor both sides replaced, which is what makes
+                        // a field-by-field merge decidable rather than a guess.
+                        base: Some(Box::new(
+                            serde_json::json!({"since": "monday", "team": "ops"}),
+                        )),
+                    },
+                )]
+                .into(),
+            )
+            .expect("absorb");
+
+        let merged = mine.get("filters").expect("filters");
+        assert_eq!(
+            merged,
+            serde_json::json!({"since": "friday", "team": "platform"}),
+            "both edits should survive: {merged}"
+        );
+        assert!(
+            lost.is_empty(),
+            "different fields are not a conflict: {lost:?}"
+        );
+    }
+
+    /// And when they do touch the same field, the report says which one — not
+    /// just which key.
+    #[test]
+    fn a_clash_is_reported_at_the_field_that_clashed() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        let base = mine
+            .set(
+                "filters",
+                serde_json::json!({"since": "monday", "team": "ops"}),
+            )
+            .expect("write");
+        let held = mine
+            .set(
+                "filters",
+                serde_json::json!({"since": "tuesday", "team": "ops"}),
+            )
+            .expect("write");
+
+        let (_, lost) = mine
+            .absorb_reporting(
+                [(
+                    "filters".to_owned(),
+                    Entry {
+                        value: serde_json::json!({"since": "friday", "team": "ops"}),
+                        rev: held.rev + 1,
+                        writer: "peer".to_owned(),
+                        parent: base.rev,
+                        // The ancestor both sides replaced, which is what makes
+                        // a field-by-field merge decidable rather than a guess.
+                        base: Some(Box::new(
+                            serde_json::json!({"since": "monday", "team": "ops"}),
+                        )),
+                    },
+                )]
+                .into(),
+            )
+            .expect("absorb");
+
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert_eq!(lost[0].key, "filters.since");
+        assert_eq!(lost[0].value, serde_json::json!("tuesday"));
     }
 
     /// Order-independence is the property that makes this a merge rather than
@@ -638,6 +884,7 @@ mod merging {
             rev: 3,
             writer: String::new(),
             parent: 0,
+            base: None,
         };
         mine.absorb([("k".to_owned(), legacy)].into())
             .expect("absorb");
@@ -809,6 +1056,7 @@ mod tests {
                             rev: 1,
                             writer: String::new(),
                             parent: 0,
+                            base: None,
                         },
                     ),
                     (
@@ -818,6 +1066,7 @@ mod tests {
                             rev: 1,
                             writer: String::new(),
                             parent: 0,
+                            base: None,
                         },
                     ),
                 ]),
@@ -870,6 +1119,7 @@ mod tests {
                         rev: 1,
                         writer: String::new(),
                         parent: 0,
+                        base: None,
                     },
                 )]),
             })
