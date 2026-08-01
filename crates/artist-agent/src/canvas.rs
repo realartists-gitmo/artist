@@ -628,12 +628,21 @@ impl CanvasTool {
         let Some(share) = shared.get(slug) else {
             return String::new();
         };
+        // Drained here because this is where the model reads. A write of
+        // someone's that lost a race is the thing it most needs to be told
+        // about and has no other way to learn.
+        let mut out = String::new();
+        for notice in share.notices() {
+            out.push_str(&format!("shared canvas: {notice}\n"));
+        }
+
         let peers = share.peers();
         if peers.is_empty() {
-            return format!(
+            out.push_str(&format!(
                 "shared: yes, nobody has joined yet — ticket {}\n",
                 share.ticket
-            );
+            ));
+            return out;
         }
         // Short ids: the full key is 52 characters and this is prose. It is
         // enough to tell one peer from another, which is all presence needs.
@@ -641,11 +650,12 @@ impl CanvasTool {
             .iter()
             .map(|peer| peer.chars().take(8).collect())
             .collect();
-        format!(
+        out.push_str(&format!(
             "shared: {} peer(s) connected right now ({}) — they see what you write\n",
             peers.len(),
             who.join(", ")
-        )
+        ));
+        out
     }
 
     /// Put a canvas on the wire for someone else to open.
@@ -792,6 +802,18 @@ impl CanvasTool {
                 flattened.dependencies.join(", ")
             ));
         }
+        // The one thing an export cannot make degrade, named with the file, at
+        // the moment it can still be changed — rather than becoming a button
+        // that rejects on somebody else's machine with no way to tell you.
+        if !flattened.wont_travel.is_empty() {
+            out.push_str(&format!(
+                "\n\nThese will not work in the copy: {}. Route them through <Action tool=…> or \
+                 <Action send=…>, which the export replaces with their label — or guard them with \
+                 artist.static if the canvas is meant to be live-only.",
+                flattened.wont_travel.join(", ")
+            ));
+        }
+
         out.push_str(
             "\n\nThe agent is not in there. Anything that reached the harness is gone from the \
              copy — buttons that call tools, Approve, the editor link — while everything those \

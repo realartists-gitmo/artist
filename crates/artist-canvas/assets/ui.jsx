@@ -695,6 +695,39 @@ export function AskDock() {
   );
 }
 
+/**
+ * A button that does something in the harness.
+ *
+ * Use this rather than an onClick calling `artist.call` or `artist.send`
+ * yourself. Not style — it is the only way to write a canvas that is good both
+ * live and exported. An export substitutes this whole module for one where
+ * `Action` renders its label without the button, so a canvas built from it
+ * degrades correctly with nothing in it checking which world it is in. A raw
+ * `artist.call` in your own handler cannot be substituted, so it becomes a
+ * button that rejects, and you are left branching on `artist.static`.
+ *
+ * Give it either `tool` (with `args`) or `send` (with `mode`).
+ */
+export function Action({ tool, args, send, mode = "queue", children, ...rest }) {
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      if (tool) await artist.call(tool, args ?? {});
+      else if (send) await artist.send(send, { mode });
+    } catch (error) {
+      toast(String(error?.message ?? error), { variant: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button onClick={run} disabled={busy} {...rest}>
+      {busy ? <Pending /> : children}
+    </Button>
+  );
+}
+
 /** Approve or reject one thing, answered straight into the agent's turn. */
 export function Approve({ questionId, label = "Approve?", children }) {
   const { answer } = useAsk();

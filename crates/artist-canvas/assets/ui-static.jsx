@@ -52,6 +52,19 @@ export function CanvasLink({ to, children }) {
 }
 
 /**
+ * What the button said, without the button.
+ *
+ * This is the component that makes `artist.static` unnecessary for anything
+ * built out of the kit: a canvas whose agent actions all go through `Action`
+ * degrades here, correctly, with nothing in it having asked which world it is
+ * in. The label is content — it tells the reader what this canvas could do —
+ * and only the acting is gone.
+ */
+export function Action({ children }) {
+  return <span style={{ font: "13px var(--a-sans)", color: "var(--a-muted)" }}>{children}</span>;
+}
+
+/**
  * Nothing. No agent has asked anything, and none can.
  *
  * Rendered as an empty fragment rather than omitted, so a canvas that mounts

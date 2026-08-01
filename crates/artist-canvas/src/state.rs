@@ -36,6 +36,20 @@ pub struct Entry {
     /// entry loses a tie to a new one rather than winning it arbitrarily.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub writer: String,
+    /// The revision this write replaced.
+    ///
+    /// One field, and it turns "were these concurrent?" from a guess into a
+    /// fact. Two writes are concurrent exactly when the incoming one replaced
+    /// something the receiver has already moved past — its parent is not the
+    /// revision currently held. Comparing how *close* two revisions are, which
+    /// is what this replaced, answers a different and much vaguer question:
+    /// revisions are per-machine counters and their proximity means nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub parent: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Entry {
@@ -79,6 +93,23 @@ fn writer_id() -> String {
         Err(_) => format!("local-{}", std::process::id()),
     })
     .clone()
+}
+
+/// A write that lost, and to whom.
+///
+/// Reported rather than merged. Two people editing one key concurrently is a
+/// real thing that happens, and last-writer-wins is a real answer to it — but
+/// only if the person whose write vanished can find out. Silence is what makes
+/// it feel like the tool ate something.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Superseded {
+    pub key: String,
+    /// The writer whose value is now in the canvas.
+    pub kept: String,
+    /// The writer whose value was discarded.
+    pub dropped: String,
+    /// What was discarded, so it is recoverable from the report alone.
+    pub value: serde_json::Value,
 }
 
 /// What the mutex guards: the state, and how fresh we believe it to be.
@@ -217,11 +248,18 @@ impl StateStore {
         let mut held = self.held.lock().expect("state lock poisoned");
         self.refresh(&mut held);
         let restore = held.snapshot.clone();
+        let parent = held
+            .snapshot
+            .entries
+            .get(key)
+            .map(|previous| previous.rev)
+            .unwrap_or(0);
         held.snapshot.rev += 1;
         let entry = Entry {
             value,
             rev: held.snapshot.rev,
             writer: self.writer.clone(),
+            parent,
         };
         held.snapshot.entries.insert(key.to_owned(), entry.clone());
         self.commit(&mut held, restore)?;
@@ -240,12 +278,19 @@ impl StateStore {
         held.snapshot.rev += 1;
         let rev = held.snapshot.rev;
         for (key, value) in values {
+            let parent = held
+                .snapshot
+                .entries
+                .get(&key)
+                .map(|previous| previous.rev)
+                .unwrap_or(0);
             held.snapshot.entries.insert(
                 key,
                 Entry {
                     value,
                     rev,
                     writer: self.writer.clone(),
+                    parent,
                 },
             );
         }
@@ -272,12 +317,57 @@ impl StateStore {
     /// Different keys never conflict, which is what makes it enough here: a
     /// canvas's keys are owned by the parts of the UI that write them.
     pub fn absorb(&self, incoming: BTreeMap<String, Entry>) -> Result<Snapshot, OverLimit> {
+        self.absorb_reporting(incoming)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// As [`absorb`](Self::absorb), and says what was lost.
+    ///
+    /// Last-writer-wins per key means a losing write is *discarded*, and a
+    /// discarded write with nobody told about it is the failure mode people
+    /// mean when they say a collaborative editor ate their work. The merge is
+    /// still LWW — resolving two concurrent edits to one key needs a data
+    /// structure this is not — but which key, and whose write, is knowable, so
+    /// it gets reported rather than swallowed.
+    ///
+    /// Concurrency is inferred rather than tracked: two different writers with
+    /// different values at revisions close enough that neither could have seen
+    /// the other. Version vectors would make it exact; they would also mean a
+    /// vector per key on disk, and being approximately right about "you two
+    /// both edited this" is worth far more than being exactly right.
+    pub fn absorb_reporting(
+        &self,
+        incoming: BTreeMap<String, Entry>,
+    ) -> Result<(Snapshot, Vec<Superseded>), OverLimit> {
         let mut held = self.held.lock().expect("state lock poisoned");
         self.refresh(&mut held);
         let restore = held.snapshot.clone();
+        let mut lost = Vec::new();
 
         let mut changed = false;
         for (key, entry) in incoming {
+            // Concurrent exactly when the incoming write replaced something
+            // this canvas has already moved past: its parent is not what is
+            // held now. If it *is*, the writer saw this value and chose to
+            // replace it, which is an ordinary sequential edit and no conflict
+            // at all.
+            if let Some(mine) = held.snapshot.entries.get(&key)
+                && mine.writer != entry.writer
+                && mine.value != entry.value
+                && entry.parent != mine.rev
+            {
+                let (winner, loser) = if entry.wins_over(mine) {
+                    (&entry, mine)
+                } else {
+                    (mine, &entry)
+                };
+                lost.push(Superseded {
+                    key: key.clone(),
+                    kept: winner.writer.clone(),
+                    dropped: loser.writer.clone(),
+                    value: loser.value.clone(),
+                });
+            }
             match held.snapshot.entries.get(&key) {
                 Some(mine) if !entry.wins_over(mine) => {}
                 _ => {
@@ -291,10 +381,10 @@ impl StateStore {
             }
         }
         if !changed {
-            return Ok(held.snapshot.clone());
+            return Ok((held.snapshot.clone(), lost));
         }
         self.commit(&mut held, restore)?;
-        Ok(held.snapshot.clone())
+        Ok((held.snapshot.clone(), lost))
     }
 
     /// Persist a mutation, or undo it if it would breach the ceiling.
@@ -376,6 +466,9 @@ mod merging {
             value: serde_json::json!(value),
             rev,
             writer: writer.to_owned(),
+            // Replaced nothing, which is what an entry arriving from a peer
+            // this canvas has never heard from looks like.
+            parent: 0,
         }
     }
 
@@ -406,6 +499,69 @@ mod merging {
             mine.snapshot().plain().get("theirs"),
             Some(&serde_json::json!(7)),
             "a quieter peer's write was dropped"
+        );
+    }
+
+    /// A sequential edit and a concurrent one can look identical in revision
+    /// numbers and differ completely in meaning. Only what each write replaced
+    /// tells them apart.
+    #[test]
+    fn a_write_that_saw_mine_is_not_a_conflict_and_one_that_did_not_is() {
+        let canvas = tempfile::tempdir().expect("tempdir");
+        let mine = store(canvas.path());
+
+        let held = mine.set("k", serde_json::json!("mine")).expect("write");
+
+        // They received my value, then replaced it. Same key, different writer,
+        // different value — and no conflict, because they were looking at what
+        // I had when they wrote.
+        let (_, lost) = mine
+            .absorb_reporting(
+                [(
+                    "k".to_owned(),
+                    Entry {
+                        value: serde_json::json!("theirs"),
+                        rev: held.rev + 1,
+                        writer: "peer".to_owned(),
+                        parent: held.rev,
+                    },
+                )]
+                .into(),
+            )
+            .expect("absorb");
+        assert!(
+            lost.is_empty(),
+            "an edit that saw mine was reported as a conflict: {lost:?}"
+        );
+
+        // Now I write again, so what is held has moved on...
+        let newer = mine
+            .set("k", serde_json::json!("mine again"))
+            .expect("write");
+        // ...and they send something that replaced the value from *before* it.
+        let (_, lost) = mine
+            .absorb_reporting(
+                [(
+                    "k".to_owned(),
+                    Entry {
+                        value: serde_json::json!("theirs too"),
+                        rev: newer.rev,
+                        writer: "peer".to_owned(),
+                        parent: held.rev,
+                    },
+                )]
+                .into(),
+            )
+            .expect("absorb");
+        assert_eq!(lost.len(), 1, "a genuine conflict went unreported");
+        assert_eq!(lost[0].key, "k");
+        // The discarded value rides along, so the report alone is enough to
+        // put it back.
+        assert!(
+            lost[0].value == serde_json::json!("theirs too")
+                || lost[0].value == serde_json::json!("mine again"),
+            "the report does not carry what was dropped: {:?}",
+            lost[0]
         );
     }
 
@@ -481,6 +637,7 @@ mod merging {
             value: serde_json::json!("old"),
             rev: 3,
             writer: String::new(),
+            parent: 0,
         };
         mine.absorb([("k".to_owned(), legacy)].into())
             .expect("absorb");
@@ -651,6 +808,7 @@ mod tests {
                             value: json!("theirs"),
                             rev: 1,
                             writer: String::new(),
+                            parent: 0,
                         },
                     ),
                     (
@@ -659,6 +817,7 @@ mod tests {
                             value: json!(7),
                             rev: 1,
                             writer: String::new(),
+                            parent: 0,
                         },
                     ),
                 ]),
@@ -710,6 +869,7 @@ mod tests {
                         value: json!("old"),
                         rev: 1,
                         writer: String::new(),
+                        parent: 0,
                     },
                 )]),
             })

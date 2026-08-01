@@ -71,6 +71,9 @@ pub struct Exported {
     /// each pulled in. Reported because it is the one part of an export that
     /// needed the network to *build*, even though it needs none to open.
     pub dependencies: Vec<String>,
+    /// Places the canvas reaches the harness directly rather than through the
+    /// kit, which is the one thing an export cannot make degrade gracefully.
+    pub wont_travel: Vec<String>,
 }
 
 impl std::fmt::Debug for Exported {
@@ -79,6 +82,7 @@ impl std::fmt::Debug for Exported {
             .field("bytes", &self.html.len())
             .field("modules", &self.modules)
             .field("dependencies", &self.dependencies)
+            .field("wont_travel", &self.wont_travel)
             .finish()
     }
 }
@@ -90,6 +94,7 @@ struct Flattened {
     entry: String,
     modules: Vec<String>,
     dependencies: Vec<String>,
+    wont_travel: Vec<String>,
 }
 
 /// Flatten `slug` into a single self-contained page.
@@ -126,6 +131,7 @@ pub async fn export(project: &Path, slug: &str) -> Result<Exported, ExportError>
         html,
         modules: flat.modules,
         dependencies: flat.dependencies,
+        wont_travel: flat.wont_travel,
     })
 }
 
@@ -145,6 +151,7 @@ async fn flatten(
     let mut order: Vec<String> = Vec::new();
     let mut queue: Vec<String> = vec![entry.clone()];
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut wont_travel: Vec<String> = Vec::new();
 
     while let Some(module) = queue.pop() {
         if !seen.insert(module.clone()) {
@@ -155,6 +162,10 @@ async fn flatten(
             path: module.clone(),
             source,
         })?;
+
+        for reach in reaches_past_the_kit(&source) {
+            wont_travel.push(format!("{module} uses {reach}"));
+        }
 
         // Rewrite on the source, not the output: spans are only meaningful
         // against the text they were parsed from.
@@ -236,6 +247,7 @@ async fn flatten(
         entry: format!("{prefix}{entry}"),
         modules: order,
         dependencies,
+        wont_travel,
     })
 }
 
@@ -261,6 +273,7 @@ pub async fn export_project(project: &Path) -> Result<ExportedSet, ExportError> 
         .map(|(specifier, code)| (specifier, data_url(&code)))
         .collect();
     let mut dependencies = Vec::new();
+    let mut wont_travel = Vec::new();
     let mut pages = Vec::new();
 
     for canvas in &registry.canvases {
@@ -281,6 +294,7 @@ pub async fn export_project(project: &Path) -> Result<ExportedSet, ExportError> 
 
         let flat = flatten(canvas, &prefix, &boot).await?;
         dependencies.extend(flat.dependencies.iter().cloned());
+        wont_travel.extend(flat.wont_travel.iter().cloned());
         imports.extend(flat.imports);
 
         let title = if canvas.manifest.title.trim().is_empty() {
@@ -298,6 +312,7 @@ pub async fn export_project(project: &Path) -> Result<ExportedSet, ExportError> 
         html,
         canvases: pages.into_iter().map(|(slug, _, _)| slug).collect(),
         dependencies,
+        wont_travel,
     })
 }
 
@@ -306,6 +321,7 @@ pub struct ExportedSet {
     pub html: String,
     pub canvases: Vec<String>,
     pub dependencies: Vec<String>,
+    pub wont_travel: Vec<String>,
 }
 
 /// The document holding every canvas.
@@ -632,6 +648,38 @@ fn absolutise(base: &str, specifier: &str) -> Option<String> {
 /// `normalise` drops the leading slash; a URL path needs it back.
 fn prefixed(path: &str) -> String {
     format!("/{path}")
+}
+
+/// Reaching past the kit to the harness, which an export cannot substitute.
+///
+/// `<Action>` and the kit's other agent-facing components are swapped for
+/// content-only versions when a canvas is exported, so a canvas built from them
+/// degrades correctly with nothing in it checking which world it is in. A raw
+/// `artist.call` in the model's own handler cannot be swapped for anything — it
+/// becomes a button that rejects on somebody else's machine, with no way for
+/// them to tell you.
+///
+/// ESM has no access control, so this cannot be prevented: every specifier in
+/// the map is reachable and hiding the capability behind another module just
+/// moves the import. What it can be is *caught*, here, at the one moment when
+/// the question "will this survive the trip?" is both askable and answerable.
+///
+/// Deliberately textual and deliberately conservative. `artist` is the name the
+/// runtime is imported under everywhere in the docs and every template; a
+/// canvas that renames it defeats this, and the cost of that is a warning not
+/// shown rather than a wrong one shown.
+fn reaches_past_the_kit(source: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for (needle, name) in [
+        ("artist.call", "artist.call"),
+        ("artist.send", "artist.send"),
+        ("artist.ask.answer", "artist.ask.answer"),
+    ] {
+        if source.contains(needle) {
+            found.push(name);
+        }
+    }
+    found
 }
 
 /// Is this a specifier the exporter has to resolve on disk?

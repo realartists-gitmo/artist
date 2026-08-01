@@ -50,6 +50,78 @@ const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 /// How many files one canvas may share.
 const MAX_FILES: usize = 256;
 
+/// How often a host looks for edits worth sending on.
+///
+/// The thing being noticed is a person saving a file, so this is fast enough to
+/// feel immediate and slow enough that a directory scan per connected peer is
+/// nothing.
+const RESEND_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Where a shared canvas says something the model needs to read.
+///
+/// Kept on the `Share` and drained by `canvas status`, because that is where
+/// the model looks. The first version of this printed to stderr on the reasoning
+/// that artist collects it — which it does not, for a canvas peer. Losing a
+/// write silently was the whole problem this reports on, so reporting it to a
+/// channel nobody reads would have been the same problem wearing a hat, and
+/// that sentence was in the comment above the line that did it.
+type Notices = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn note(notices: &Notices, message: String) {
+    let mut held = notices.lock().expect("notice lock poisoned");
+    // Bounded: this ends up in the model's context, and a canvas two people are
+    // both editing could otherwise produce an unbounded stream of them.
+    if held.len() < 64 {
+        held.push(message);
+    }
+}
+
+/// Enough of an endpoint id to tell two peers apart in prose.
+fn short(writer: &str) -> String {
+    writer.chars().take(8).collect()
+}
+
+fn canvas_root(project: &Path, slug: &str) -> PathBuf {
+    project.join(crate::registry::CANVAS_DIR).join(slug)
+}
+
+/// A cheap stand-in for "has this canvas changed".
+///
+/// Modification times and sizes rather than content hashes: the question is
+/// whether to re-send a few kilobytes of source, and being wrong costs one
+/// redundant send. Reading every file to answer it would cost more than the
+/// answer is worth.
+fn fingerprint(root: &Path) -> Vec<(String, u64, u64)> {
+    let mut seen = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "exports" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_millis() as u64)
+                .unwrap_or(0);
+            seen.push((path.to_string_lossy().into_owned(), meta.len(), modified));
+        }
+    }
+    seen.sort();
+    seen
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PeerError {
     #[error("no canvas named `{0}`")]
@@ -275,6 +347,8 @@ pub struct Share {
     pub ticket: Ticket,
     /// Peers currently connected, for presence.
     joined: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Things that happened on the wire the model needs to know about.
+    notices: Notices,
 }
 
 impl Share {
@@ -297,21 +371,24 @@ impl Share {
             slug: slug.clone(),
         };
         let joined = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let notices: Notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let accepting = endpoint.clone();
         let present = std::sync::Arc::clone(&joined);
+        let telling = std::sync::Arc::clone(&notices);
         tokio::spawn(async move {
             while let Some(incoming) = accepting.accept().await {
                 let project = project.clone();
                 let slug = slug.clone();
                 let present = std::sync::Arc::clone(&present);
+                let notices = std::sync::Arc::clone(&telling);
                 // One task per peer: a peer that stalls mid-transfer must not
                 // stop anyone else joining.
                 tokio::spawn(async move {
                     if let Ok(connection) = incoming.await {
                         let who = connection.remote_id().to_string();
                         present.lock().expect("presence lock").push(who.clone());
-                        let _ = serve_peer(&project, &slug, &connection).await;
+                        let _ = serve_peer(&project, &slug, &connection, &notices).await;
                         present
                             .lock()
                             .expect("presence lock")
@@ -325,12 +402,22 @@ impl Share {
             endpoint,
             ticket,
             joined,
+            notices,
         })
     }
 
     /// Who is looking at this canvas right now.
     pub fn peers(&self) -> Vec<String> {
         self.joined.lock().expect("presence lock").clone()
+    }
+
+    /// Anything the wire has to say, taken once.
+    ///
+    /// Drained, like the server's reports: the model reads these in `canvas
+    /// status`, and a notice it has already been told about would otherwise be
+    /// repeated on every check until the share ended.
+    pub fn notices(&self) -> Vec<String> {
+        std::mem::take(&mut *self.notices.lock().expect("notice lock poisoned"))
     }
 
     /// This share's endpoint including the addresses it is reachable at.
@@ -364,6 +451,7 @@ async fn serve_peer(
     project: &Path,
     slug: &str,
     connection: &iroh::endpoint::Connection,
+    notices: &Notices,
 ) -> Result<(), PeerError> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -400,19 +488,56 @@ async fn serve_peer(
     )
     .await?;
 
-    // State flows both ways from here. Code does not: nothing in this loop
-    // writes a file inside the canvas, so a peer cannot edit the host's source.
+    // From here, state flows both ways and code keeps flowing outward.
     //
-    // `absorb` rather than `merge`: these entries were stamped on the peer's
-    // machine and keep their own revision and writer, so each is ordered per
-    // key against what is already here rather than restamped as a local write.
-    // The previous version compared the peer's document revision against this
-    // one's and dropped the whole update if it was behind — two unrelated
-    // counters, so whichever side had written less quietly lost everything.
-    while let Ok(Message::State { entries }) = read_message(&mut recv).await {
-        let _ = store.absorb(entries);
+    // "Code flows one way" used to mean it was sent once, at join, which is a
+    // different and much worse thing: the moment the host's model edited
+    // anything the peer was looking at a photograph with a live data feed
+    // pointed at it. One way means one *direction*, not one time.
+    //
+    // `absorb` rather than `merge` for what comes back: those entries were
+    // stamped on the peer's machine and keep their own revision and writer, so
+    // each is ordered per key against what is here rather than restamped as a
+    // local write.
+    let mut sent = fingerprint(&canvas_root(project, slug));
+    loop {
+        tokio::select! {
+            incoming = read_message(&mut recv) => match incoming {
+                Ok(Message::State { entries }) => {
+                    // A write that lost is worth saying out loud. The model is
+                    // the one that can act on it — re-apply it, ask, or leave
+                    // it — and it has no other way to know it happened.
+                    if let Ok((_, lost)) = store.absorb_reporting(entries) {
+                        for gone in lost {
+                            note(
+                                notices,
+                                format!(
+                                    "a concurrent edit to `{}` was superseded: {} kept, {} \
+                                     dropped (dropped value: {})",
+                                    gone.key,
+                                    short(&gone.kept),
+                                    short(&gone.dropped),
+                                    gone.value,
+                                ),
+                            );
+                        }
+                    }
+                }
+                // Anything else, including the peer hanging up.
+                _ => return Ok(()),
+            },
+            // Polled rather than watched. `notify` would mean a watcher per
+            // connected peer over a directory the server is already watching,
+            // and the thing being detected is a person saving a file.
+            _ = tokio::time::sleep(RESEND_INTERVAL) => {
+                let now = fingerprint(&canvas_root(project, slug));
+                if now != sent {
+                    sent = now;
+                    write_message(&mut send, &shareable(project, slug)?).await?;
+                }
+            }
+        }
     }
-    Ok(())
 }
 
 /// Join a shared canvas by ticket, finding the host through discovery.
@@ -492,16 +617,39 @@ async fn join_inner(
     // Absorbed with the host's stamps intact. Restamping them as local writes
     // would make this machine claim authorship of every key it received, and
     // the next exchange would then look like the peer had overwritten the host.
+    let store = crate::StateStore::open(&canvas_root(project, &local));
     if let Ok(Message::State { entries }) = read_message(&mut recv).await {
-        let store =
-            crate::StateStore::open(&project.join(crate::registry::CANVAS_DIR).join(&local));
         let _ = store.absorb(entries);
     }
 
-    // Awaited, unlike the version of this line that sat here doing nothing:
-    // `close` is a future, and a joiner that returns without closing leaves the
-    // host holding a connection to a peer that has stopped listening.
-    endpoint.close().await;
+    // The connection outlives this call, because a shared canvas is not a
+    // download. The host re-sends its source whenever it changes and keeps
+    // pushing state, and a joiner that hung up after the first exchange would
+    // hold a copy that silently aged. `join` returns once there is something to
+    // open; staying current happens here.
+    //
+    // The peer's own server is watching these files, so a canvas re-received
+    // while someone is looking at it reloads in front of them.
+    let project = project.to_owned();
+    let local_slug = local.clone();
+    tokio::spawn(async move {
+        // Moved in, so it lives as long as the connection rather than being
+        // closed out from under it.
+        let _endpoint = endpoint;
+        while let Ok(message) = read_message(&mut recv).await {
+            match message {
+                Message::Canvas { .. } => {
+                    let _ = receive(&project, &message);
+                }
+                Message::State { entries } => {
+                    let _ = store.absorb(entries);
+                }
+                _ => break,
+            }
+        }
+        let _ = local_slug;
+    });
+
     Ok(local)
 }
 
