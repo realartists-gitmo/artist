@@ -4,7 +4,7 @@
 // idiomatic. Everything here is built on useSyncExternalStore so a canvas gets
 // correct behaviour under concurrent rendering without thinking about it.
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { artist } from "@artist/canvas";
 
 export { artist };
@@ -53,6 +53,24 @@ export function useCanvasState(key, initial) {
 /** Everything the canvas knows, as one object. */
 export function useCanvasStateAll() {
   return useSyncExternalStore(artist.state.subscribe, artist.state.all, () => ({}));
+}
+
+/**
+ * Another canvas's shared state, live.
+ *
+ * For the case the lobby made possible: a form writes a decision and a
+ * dashboard shows it, without either knowing the other exists beyond a line in
+ * `canvas.toml`. Read-only — the canvas that owns a key is the one that writes
+ * it, which is what keeps two surfaces from fighting over one store.
+ *
+ * The mirror is memoised per slug so a component re-rendering does not start a
+ * second subscription, and `useSyncExternalStore` gets the stable references it
+ * requires either way.
+ */
+export function useCanvasStateOf(slug, key) {
+  const mirror = useMemo(() => artist.state.of(slug), [slug]);
+  const entries = useSyncExternalStore(mirror.subscribe, mirror.get, () => ({}));
+  return key === undefined ? entries : entries[key];
 }
 
 /**

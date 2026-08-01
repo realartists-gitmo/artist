@@ -57,6 +57,20 @@ pub struct Limits {
 pub struct Permissions {
     #[serde(default)]
     pub allow: Vec<String>,
+    /// Other canvases in this project whose shared state this one may read.
+    ///
+    /// Declared rather than open for the same reason `allow` is. Canvases in a
+    /// project are one trust domain, but they are also independent surfaces the
+    /// model wrote at different times, and a form quietly reading a dashboard's
+    /// state is a coupling nobody chose. Naming it makes it a decision, and
+    /// makes it visible in the file the user can read.
+    ///
+    /// Read-only on purpose: a canvas writing into another's state would give
+    /// two surfaces a shared mutable store with no arbiter, and the interesting
+    /// case — a form whose decision a dashboard reflects — is served by the
+    /// dashboard reading the form.
+    #[serde(default)]
+    pub canvases: Vec<String>,
 }
 
 fn default_entry() -> String {
@@ -121,6 +135,7 @@ mod tests {
             tailwind: false,
             permissions: Permissions {
                 allow: vec!["read".into(), "grep".into()],
+                canvases: vec!["dashboard".into()],
             },
             deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three".to_owned())]),
             limits: Limits {

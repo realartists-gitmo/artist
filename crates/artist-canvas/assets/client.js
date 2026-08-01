@@ -124,7 +124,31 @@ const agentChannel = channel();
 let stateRev = 0;
 let stateEntries = {};
 
+// One mirror per sibling canvas this one declared, kept apart from its own so a
+// key called `rows` in two canvases stays two different things.
+const siblings = new Map();
+
+function sibling(slug) {
+  if (!siblings.has(slug)) {
+    siblings.set(slug, { entries: {}, rev: -1, channel: channel() });
+  }
+  return siblings.get(slug);
+}
+
 function applyState(payload) {
+  // A state signal for a canvas this one is only watching updates that mirror
+  // and nothing else — in particular it must not move this canvas's own
+  // revision, or the next write here would look stale and be dropped.
+  if (payload.slug && payload.slug !== boot.slug) {
+    const other = sibling(payload.slug);
+    if (payload.rev < other.rev) return;
+    other.rev = payload.rev;
+    other.entries = payload.entries
+      ? payload.entries
+      : { ...other.entries, ...(payload.changed ?? {}) };
+    other.channel.emit(other.entries);
+    return;
+  }
   if (payload.rev < stateRev) return;
   stateRev = payload.rev;
   // `entries` is a full seed (the initial fetch); `changed` is a delta. Merging
@@ -413,6 +437,32 @@ export const artist = {
       return rpc("canvas.state.set", { entries, notify });
     },
     subscribe: stateChannel.subscribe,
+
+    /**
+     * Read another canvas's shared state, live.
+     *
+     * Only canvases named in this one's `[permissions] canvases` — the server
+     * refuses the rest, and refuses them by name rather than returning an empty
+     * object, so a missing declaration reads as a missing declaration.
+     *
+     * Returns `{get, subscribe}` rather than a promise: the server pushes
+     * changes for declared canvases down the same stream, so this is a live
+     * mirror and not a fetch someone has to remember to repeat.
+     */
+    of(slug) {
+      const other = sibling(slug);
+      if (other.rev < 0) {
+        other.rev = 0;
+        rpc("canvas.state.get", { from: slug })
+          .then((body) => {
+            other.entries = body.entries ?? {};
+            other.rev = body.rev ?? 0;
+            other.channel.emit(other.entries);
+          })
+          .catch((error) => report("error", `cannot read canvas ${slug}: ${error.message}`));
+      }
+      return { get: () => other.entries, subscribe: other.channel.subscribe };
+    },
   },
 
   ask: {

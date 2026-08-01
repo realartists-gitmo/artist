@@ -29,6 +29,36 @@ pub const HOOKS: &str = include_str!("../assets/hooks.js");
 /// Fast Refresh bootstrap, loaded ahead of every canvas module.
 pub const REFRESH: &str = include_str!("../assets/refresh.js");
 
+/// `client.js`'s stand-in for a canvas that has been exported to a file.
+pub const EXPORT: &str = include_str!("../assets/export.js");
+
+/// Every module an exported canvas needs inlined, as (specifier, JavaScript).
+///
+/// The knowledge of what is vendored lives here rather than in the exporter,
+/// so adding a package to the kit cannot silently produce exports that fail on
+/// an unresolved import.
+///
+/// Two deliberate differences from what the server hands a live page.
+/// `@artist/canvas` resolves to [`EXPORT`] rather than the client, because
+/// there is no server to talk to. And `@artist/refresh` is absent: Fast Refresh
+/// swaps modules the file watcher noticed changing, and an exported file has
+/// neither, so shipping the runtime would be dead weight in something whose
+/// whole job is to travel.
+pub fn inlinable() -> Vec<(&'static str, String)> {
+    let mut modules: Vec<(&'static str, String)> = BARE
+        .iter()
+        .filter_map(|(specifier, file)| {
+            let bytes = vendored(file)?;
+            Some((*specifier, String::from_utf8_lossy(bytes).into_owned()))
+        })
+        .collect();
+
+    modules.push(("@artist/canvas", compiled("export.js", EXPORT).to_owned()));
+    modules.push(("@artist/ui", compiled("ui.jsx", UI).to_owned()));
+    modules.push(("@artist/react", compiled("hooks.js", HOOKS).to_owned()));
+    modules
+}
+
 /// Wrap a compiled module so its Fast Refresh registrations are scoped to it.
 ///
 /// The transform emits bare `$RefreshReg$` / `$RefreshSig$` calls; without this
@@ -249,7 +279,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str, rev: u64) -> String {
     )
 }
 
-fn escape_html(value: &str) -> String {
+pub(crate) fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -257,7 +287,7 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("a string is always serializable")
 }
 

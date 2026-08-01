@@ -15,6 +15,43 @@ struct Entry {
 
 const ENTRIES: &[Entry] = &[
     Entry {
+        name: "CanvasLink",
+        signature: "<CanvasLink to=\"review\" params={{id}}>Review it</CanvasLink>",
+        body: "Link to another canvas in this project. Omit `to` to link to the lobby, which\n\
+               lists everything.\n\n\
+               Use this rather than building a URL: the session key lives in the path, so a\n\
+               hand-built href is both fiddly and a way to leak the key somewhere it should\n\
+               not go.\n\n\
+               In an exported file there are no sibling canvases to reach unless the whole\n\
+               project was exported together, so a link renders as plain text — the reader\n\
+               still sees what it pointed at.",
+    },
+    Entry {
+        name: "useCanvasStateOf",
+        signature: "const entries = useCanvasStateOf(slug, key?)",
+        body: "Another canvas's shared state, live — for a dashboard that reflects a decision\n\
+               a form recorded, without either canvas knowing more about the other than its\n\
+               name.\n\n\
+               Requires a declaration in this canvas's canvas.toml:\n\n\
+                 [permissions]\n\
+                 canvases = [\"form\"]\n\n\
+               Without it the read is refused by name rather than returning empty, so a\n\
+               missing declaration reads as a missing declaration and not as no data.\n\n\
+               Read-only. The canvas that owns a key writes it; that is what stops two\n\
+               surfaces fighting over one store.",
+    },
+    Entry {
+        name: "artist.static",
+        signature: "if (artist.static) { … }",
+        body: "True in an exported canvas, absent in a live one.\n\n\
+               An export has no agent, so anything that reaches the harness is gone from it:\n\
+               send, call, answering a question, opening a file. Everything those surfaces\n\
+               were *showing* stays — the kit drops the buttons and keeps the content.\n\n\
+               Branch on this if a canvas has to be good both ways. A button you wrote that\n\
+               calls artist.call will reject in an export, so either guard it or accept that\n\
+               the exported copy is the read-only version of the canvas.",
+    },
+    Entry {
         name: "useCanvasState",
         signature: "const [value, setValue] = useCanvasState(key, initial)",
         body: "Shared, durable state. The same key is seen by every open tab, by you (via\n\

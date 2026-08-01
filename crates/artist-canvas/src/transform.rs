@@ -65,6 +65,76 @@ pub struct Options {
     pub development: bool,
 }
 
+/// Where a module specifier sits in the source it was written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Specifier {
+    pub value: String,
+    /// Byte offsets of the string literal, quotes included.
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Every module specifier in `source`, static and dynamic, in source order.
+///
+/// The exporter needs these because a module inlined as a `data:` URL has no
+/// base URL to resolve against — `./App.jsx` simply fails there, which was
+/// confirmed in a browser before any of this was built. So relative specifiers
+/// are rewritten to synthetic bare ones that the inline import map covers, and
+/// the rewrite happens on the *source*: spans only mean anything against the
+/// text they were parsed from, not against compiled output.
+pub fn specifiers(path: &Path, source: &str) -> Vec<Specifier> {
+    use oxc::{
+        ast::ast,
+        ast_visit::{Visit, walk},
+    };
+
+    #[derive(Default)]
+    struct Collect {
+        found: Vec<Specifier>,
+    }
+
+    impl Collect {
+        fn take(&mut self, literal: &ast::StringLiteral<'_>) {
+            self.found.push(Specifier {
+                value: literal.value.to_string(),
+                start: literal.span.start,
+                end: literal.span.end,
+            });
+        }
+    }
+
+    impl<'a> Visit<'a> for Collect {
+        fn visit_import_declaration(&mut self, it: &ast::ImportDeclaration<'a>) {
+            self.take(&it.source);
+        }
+        fn visit_export_all_declaration(&mut self, it: &ast::ExportAllDeclaration<'a>) {
+            self.take(&it.source);
+        }
+        fn visit_export_named_declaration(&mut self, it: &ast::ExportNamedDeclaration<'a>) {
+            if let Some(source) = &it.source {
+                self.take(source);
+            }
+        }
+        // `import()` counts: a canvas that lazy-loads a panel would otherwise
+        // export with a dangling reference and fail only once clicked.
+        fn visit_import_expression(&mut self, it: &ast::ImportExpression<'a>) {
+            if let ast::Expression::StringLiteral(literal) = &it.source {
+                self.take(literal);
+            }
+            walk::walk_import_expression(self, it);
+        }
+    }
+
+    let source_type = SourceType::from_path(path).unwrap_or_else(|_| SourceType::jsx());
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+
+    let mut collect = Collect::default();
+    collect.visit_program(&parsed.program);
+    collect.found.sort_by_key(|specifier| specifier.start);
+    collect.found
+}
+
 /// Compile one module. `path` is used to pick the dialect (`.tsx` implies both
 /// TypeScript and JSX) and to label diagnostics.
 pub fn transform(

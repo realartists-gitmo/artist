@@ -104,6 +104,14 @@ fn remember(window: &tao::window::Window, path: Option<&std::path::Path>) {
 fn stop_on_hangup(stop: impl Fn() + Send + 'static) {
     use std::io::Read;
 
+    // Only a pipe can hang up. Run this subcommand any other way — by hand, or
+    // from a shell that hands a background job `/dev/null` — and the first read
+    // returns EOF at once, which would be indistinguishable from artist asking
+    // for the window back. The window then vanished the instant it appeared.
+    if !stdin_is_a_pipe() {
+        return;
+    }
+
     std::thread::spawn(move || {
         // Nothing is ever written, so this blocks until the pipe closes. A
         // read that somehow returns data is not a hangup and must not be
@@ -112,6 +120,34 @@ fn stop_on_hangup(stop: impl Fn() + Send + 'static) {
         while let Ok(1) = std::io::stdin().read(&mut byte) {}
         stop();
     });
+}
+
+/// Is stdin something that can deliver a hangup?
+///
+/// `Windows::open` always gives the child a pipe, so in the shipping path this
+/// is true. It exists for every other path: a terminal, a redirect from a file,
+/// or the `/dev/null` a shell hands a background job all read EOF immediately
+/// or never, and neither means what the hangup watcher would take it to mean.
+#[cfg(all(unix, feature = "webview"))]
+fn stdin_is_a_pipe() -> bool {
+    use std::os::{fd::AsRawFd, unix::fs::FileTypeExt};
+
+    // SAFETY: fd 0 is valid for the life of the process, and `ManuallyDrop`
+    // keeps the borrowed handle from closing it — this only ever stats it.
+    let borrowed = std::mem::ManuallyDrop::new(unsafe {
+        <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(std::io::stdin().as_raw_fd())
+    });
+    borrowed
+        .metadata()
+        .map(|metadata| metadata.file_type().is_fifo())
+        .unwrap_or(false)
+}
+
+/// Windows has no `/dev/null`-shaped equivalent here, and the parent always
+/// supplies a pipe, so there is nothing to distinguish.
+#[cfg(all(not(unix), feature = "webview"))]
+fn stdin_is_a_pipe() -> bool {
+    true
 }
 
 /// Watch the parent's server, and stop when it stops.

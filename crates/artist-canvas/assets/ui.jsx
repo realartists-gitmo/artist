@@ -698,6 +698,13 @@ export function AskDock() {
 /** Approve or reject one thing, answered straight into the agent's turn. */
 export function Approve({ questionId, label = "Approve?", children }) {
   const { answer } = useAsk();
+  // Exported, there is no turn to answer into. The question and whatever it was
+  // asked about are content and stay; the buttons were the only part that
+  // needed an agent, so they are the only part that goes. A disabled button
+  // here would be a puzzle with no answer on the page.
+  if (artist.static) {
+    return <Card title={label}>{children}</Card>;
+  }
   return (
     <Card title={label}>
       {children}
@@ -1463,6 +1470,37 @@ export function Markdown({ children, style }) {
 }
 
 /**
+ * A link to another canvas in this project.
+ *
+ * Canvases used to be islands: each one a URL the model handed over separately,
+ * with no way to get from a row in a dashboard to the review tool for that row.
+ * The session key lives in the path, so building the URL by hand is both fiddly
+ * and a good way to leak it into somewhere it should not be — this is the only
+ * thing that should be constructing canvas URLs.
+ *
+ * `to` omitted links to the lobby, which is the way back to everything else.
+ */
+export function CanvasLink({ to, params, children, ...rest }) {
+  const key = globalThis.__ARTIST__?.key;
+  // Exported, there is no server and no sibling canvas to reach — but the
+  // reader should still see what it pointed at. Content, not affordance.
+  if (artist.static || !key) {
+    return <span style={{ color: "var(--a-muted)" }}>{children ?? to ?? "canvases"}</span>;
+  }
+  const query = params ? `?${new URLSearchParams(params)}` : "";
+  return (
+    <a
+      className="a-focus"
+      href={`/c/${key}/${to ? `${to}/` : ""}${query}`}
+      style={{ color: "var(--a-accent)", textDecoration: "underline", textUnderlineOffset: 2 }}
+      {...rest}
+    >
+      {children ?? to ?? "All canvases"}
+    </a>
+  );
+}
+
+/**
  * A path that opens where the user actually works.
  *
  * The kit's bar for inclusion is "it can only exist because Artist is
@@ -1470,6 +1508,16 @@ export function Markdown({ children, style }) {
  * `palette.rs:131` should be one click from the editor.
  */
 export function FileLink({ path, line, children }) {
+  // The path is the content; opening an editor is the affordance, and it means
+  // nothing on the machine an exported canvas ends up on. Rendered as text it
+  // still tells the reader exactly which file and line was meant.
+  if (artist.static) {
+    return (
+      <span style={{ font: "12px var(--a-mono)", color: "var(--a-muted)" }}>
+        {children ?? `${path}${line ? `:${line}` : ""}`}
+      </span>
+    );
+  }
   return (
     <button
       className="a-focus"

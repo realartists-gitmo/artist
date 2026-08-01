@@ -173,6 +173,102 @@ async fn the_page_can_report_its_own_errors_back_to_the_harness() {
     assert_eq!((fresh, none), (None, 0));
 }
 
+/// A project with six canvases used to be six URLs the model handed over one at
+/// a time, with no way to get from one to another.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_lobby_lists_the_project_and_is_gated_like_everything_else() {
+    let project = Project::new("lobby");
+    project.canvas("alpha", "title = \"Alpha\"", ENTRY);
+    project.canvas("beta", "title = \"Beta\"", ENTRY);
+
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
+    let url = server.url("alpha");
+    let lobby = url.trim_end_matches("alpha/");
+
+    let page = reqwest::get(lobby)
+        .await
+        .expect("lobby")
+        .text()
+        .await
+        .expect("body");
+    assert!(page.contains("Alpha") && page.contains("Beta"), "{page}");
+    // Relative, so the key stays in the path without ever being written out.
+    assert!(page.contains("./alpha/"), "{page}");
+
+    // The lobby names every canvas in the project, so it must be no easier to
+    // reach than the canvases themselves.
+    let forged = format!("http://{}/c/not-the-key/", server.addr());
+    assert_eq!(
+        reqwest::get(&forged).await.expect("forged").status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
+
+/// Cross-canvas reads are declared, so an undeclared one has to fail loudly
+/// rather than return an empty object a canvas would render as "no data yet".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_canvas_reads_another_only_when_it_said_so() {
+    let project = Project::new("crosscanvas");
+    project.canvas("form", "title = \"Form\"", ENTRY);
+    project.canvas(
+        "dashboard",
+        "title = \"Dashboard\"\n[permissions]\ncanvases = [\"form\"]",
+        ENTRY,
+    );
+    project.canvas("nosy", "title = \"Nosy\"", ENTRY);
+
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
+    server
+        .state("form")
+        .set("decision", serde_json::json!("ship"))
+        .expect("write");
+
+    let url = server.url("form");
+    let key = &url[url.find("/c/").unwrap() + 3..url.rfind("/form/").unwrap()];
+    let http = reqwest::Client::new();
+    let read = |slug: &'static str| {
+        let request = http
+            .post(format!("http://{}/_artist/rpc?slug={slug}", server.addr()))
+            .header("x-artist-key", key)
+            .json(&serde_json::json!({
+                "method": "canvas.state.get",
+                "params": {"from": "form"},
+            }));
+        async move { request.send().await.expect("rpc") }
+    };
+
+    let allowed: serde_json::Value = read("dashboard").await.json().await.expect("json");
+    assert_eq!(
+        allowed["entries"]["decision"],
+        serde_json::json!("ship"),
+        "a declared read should come back: {allowed}"
+    );
+
+    let refused = read("nosy").await;
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "an undeclared read was not refused"
+    );
+    let refused: serde_json::Value = refused.json().await.expect("json");
+    assert!(
+        refused["entries"].is_null(),
+        "an undeclared read returned data: {refused}"
+    );
+    // Named rather than empty: a canvas that got `{}` back would render its
+    // no-data-yet state, and the missing declaration would look like a missing
+    // write.
+    let message = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("permissions") && message.contains("form"),
+        "the refusal should name what is missing: {refused}"
+    );
+}
+
 /// The digest says what is on screen; without a build number on it, a page that
 /// has not applied the model's last edit is indistinguishable from proof that
 /// the edit changed nothing.

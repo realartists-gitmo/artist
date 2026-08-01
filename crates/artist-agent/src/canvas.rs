@@ -101,6 +101,15 @@ impl PortableTool for CanvasTool {
         }
 
         let raw = args.name.as_deref().unwrap_or_default();
+
+        // `export` with no name takes the whole project rather than refusing.
+        // A canvas that links to another exports alone into a document with a
+        // dead link in it, so "all of them" is the shape that keeps a project's
+        // surfaces working once they leave this machine.
+        if mode == "export" && raw.trim().is_empty() {
+            return self.export_project();
+        }
+
         if raw.trim().is_empty() {
             return Err(CanvasError(format!("mode={mode} needs a `name`")));
         }
@@ -110,6 +119,10 @@ impl PortableTool for CanvasTool {
             // `create` writes files; nothing is served until someone opens it.
             "create" => self.create(&slug, args),
             "eject" => self.eject(&slug),
+            // Needs no server: it reads files and writes a file. Starting one
+            // to flatten a canvas would bind a port for a task that never
+            // touches the network.
+            "export" => self.export(&slug),
             // The only mode whose whole purpose is to serve something, and so
             // the only one that may bring a server into being.
             "open" => self.open(&*self.server().await?, &slug),
@@ -204,7 +217,10 @@ fn schema() -> Value {
             "type": "object",
             "properties": {
                 "mode": {
-                    "enum": ["create", "open", "close", "status", "state", "docs", "list", "eject"],
+                    "enum": [
+                        "create", "open", "close", "status", "state", "docs", "list", "export",
+                        "eject"
+                    ],
                     "default": "status",
                     "description":
                         "create: scaffold a new canvas from a template. open: put it on screen in \
@@ -215,7 +231,11 @@ fn schema() -> Value {
                          write it by passing `entries`. status also describes what is on \
                          screen — the text, contrast failures, overflow — which is the only \
                          way you can see what you built. docs: component reference. list: every \
-                         canvas in this project. eject: convert to a standalone Vite project when \
+                         canvas in this project. export: flatten it into a single HTML file that \
+                         works with no server and no artist — for sending to someone, opening on \
+                         a phone, or keeping as a version. The agent is not in the copy: anything \
+                         that called the harness is dropped and everything it was showing stays. \
+                         eject: convert to a standalone Vite project when \
                          a canvas outgrows the built-in dependency set — after which Artist stops \
                          serving it."
                 },
@@ -569,6 +589,95 @@ impl CanvasTool {
                 Ok(format!("Wrote {keys} to `{slug}` (rev {rev}). {rendered}"))
             }
         }
+    }
+
+    /// Every canvas in the project, in one file, with a lobby.
+    fn export_project(&self) -> Result<String, CanvasError> {
+        let flattened = artist_canvas::export::export_project(&self.project)
+            .map_err(|error| CanvasError(error.to_string()))?;
+        if flattened.canvases.is_empty() {
+            return Err(CanvasError(
+                "no canvases in this project yet — create one with mode=create".into(),
+            ));
+        }
+
+        let directory = self
+            .project
+            .join(artist_canvas::registry::CANVAS_DIR)
+            .join("exports");
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            CanvasError(format!("could not make {}: {error}", directory.display()))
+        })?;
+        let path = directory.join(format!(
+            "canvases-{}.html",
+            artist_canvas::export::stamp(std::time::SystemTime::now())
+        ));
+        std::fs::write(&path, &flattened.html)
+            .map_err(|error| CanvasError(format!("could not write {}: {error}", path.display())))?;
+
+        Ok(format!(
+            "Exported {} canvases to {}\n  {}\n  {} KB, self-contained.\n\n\
+             One file with a lobby, so links between canvases still work once it leaves this \
+             machine. The agent is not in it: anything that called the harness is dropped and \
+             everything those surfaces were showing stays.",
+            flattened.canvases.len(),
+            path.display(),
+            flattened.canvases.join(", "),
+            flattened.html.len() / 1024,
+        ))
+    }
+
+    /// Flatten a canvas into one file that works with no artist at all.
+    ///
+    /// The other half of what a canvas is. A live canvas is excellent while it
+    /// is being made and gone when the session ends; this is the copy that
+    /// travels — to a phone, to someone else, to six months from now.
+    fn export(&self, slug: &str) -> Result<String, CanvasError> {
+        let flattened = artist_canvas::export::export(&self.project, slug)
+            .map_err(|error| CanvasError(error.to_string()))?;
+
+        let directory = self
+            .project
+            .join(artist_canvas::registry::CANVAS_DIR)
+            .join(slug)
+            .join("exports");
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            CanvasError(format!("could not make {}: {error}", directory.display()))
+        })?;
+
+        let name = format!(
+            "{slug}-{}.html",
+            artist_canvas::export::stamp(std::time::SystemTime::now())
+        );
+        let path = directory.join(&name);
+        std::fs::write(&path, &flattened.html)
+            .map_err(|error| CanvasError(format!("could not write {}: {error}", path.display())))?;
+
+        let mut out = format!(
+            "Exported `{slug}` to {}\n  {} modules, {} KB, self-contained.\n\n\
+             It opens with no server and no artist — send it, sync it, or keep it. \
+             Earlier exports are beside it, which is how a canvas has a history.",
+            path.display(),
+            flattened.modules.len(),
+            flattened.html.len() / 1024,
+        );
+
+        // The two things the model would otherwise have to discover by opening
+        // the file on another machine.
+        if !flattened.still_online.is_empty() {
+            out.push_str(&format!(
+                "\n\nNeeds a network: {} — a declared dependency lives on a CDN and there is \
+                 nothing to inline.",
+                flattened.still_online.join(", ")
+            ));
+        }
+        out.push_str(
+            "\n\nThe agent is not in there. Anything that reached the harness is gone from the \
+             copy — buttons that call tools, Approve, the editor link — while everything those \
+             surfaces were showing stays. Branch on `artist.static` if a canvas has to work both \
+             ways.",
+        );
+        Ok(out)
     }
 
     fn eject(&self, slug: &str) -> Result<String, CanvasError> {

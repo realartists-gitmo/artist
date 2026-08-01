@@ -15,6 +15,7 @@ pub mod deps;
 pub mod docs;
 pub mod drift;
 pub mod editor;
+pub mod export;
 pub mod highlight;
 pub mod manifest;
 pub mod markdown;

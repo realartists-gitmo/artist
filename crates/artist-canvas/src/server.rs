@@ -268,6 +268,7 @@ impl Server {
         });
 
         let router = Router::new()
+            .route("/c/{key}/", get(serve_lobby))
             .route("/c/{key}/{slug}/", get(serve_shell))
             .route("/c/{key}/{slug}/{*path}", get(serve_module))
             .route("/@artist/client.js", get(serve_client))
@@ -680,6 +681,84 @@ async fn serve_shell(
     html(assets::shell(&slug, &manifest, &inner.key, rev))
 }
 
+/// Everything this project has, in one place.
+///
+/// A project accumulates canvases — a dashboard, a review tool, a form — and
+/// without this they are separate URLs the user has to be handed one at a time
+/// by the model. A lobby makes the set a place you can be in, and gives
+/// `CanvasLink` somewhere to go back to.
+async fn serve_lobby(State(inner): Shared, UrlPath(key): UrlPath<String>) -> Response {
+    if key != inner.key {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let registry = Registry::discover(&inner.project);
+
+    let mut items = String::new();
+    for canvas in &registry.canvases {
+        let title = if canvas.manifest.title.trim().is_empty() {
+            canvas.slug.as_str()
+        } else {
+            canvas.manifest.title.trim()
+        };
+        items.push_str(&format!(
+            "      <li><a href=\"./{slug}/\"><strong>{title}</strong><span>{slug}</span></a></li>\n",
+            slug = assets::escape_html(&canvas.slug),
+            title = assets::escape_html(title),
+        ));
+    }
+    // A canvas that will not load is worth more to the user here than a tidy
+    // list: this is the one page that shows the whole project at once.
+    for diagnostic in &registry.diagnostics {
+        items.push_str(&format!(
+            "      <li class=\"broken\"><strong>{slug}</strong><span>{message}</span></li>\n",
+            slug = assets::escape_html(&diagnostic.slug),
+            message = assets::escape_html(&diagnostic.message),
+        ));
+    }
+    if registry.canvases.is_empty() && registry.diagnostics.is_empty() {
+        items.push_str("      <li class=\"empty\"><span>No canvases yet.</span></li>\n");
+    }
+
+    html(format!(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Canvases</title>
+    <style>
+{tokens}{base}
+      body {{ padding: 32px; }}
+      h1 {{ font: 600 18px/1.4 var(--a-sans); margin: 0 0 20px; }}
+      ul {{ list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; max-width: 560px; }}
+      li a {{
+        display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+        padding: 14px 16px; border: 1px solid var(--a-border); border-radius: 10px;
+        text-decoration: none; color: inherit; background: var(--a-surface);
+      }}
+      li a:hover {{ border-color: var(--a-accent); }}
+      li span {{ font: 12px var(--a-mono); color: var(--a-muted); }}
+      li.broken, li.empty {{
+        padding: 14px 16px; border: 1px dashed var(--a-border); border-radius: 10px;
+        display: flex; justify-content: space-between; gap: 16px;
+      }}
+      li.broken strong {{ color: var(--a-danger); }}
+    </style>
+  </head>
+  <body>
+    <h1>Canvases</h1>
+    <ul>
+{items}    </ul>
+  </body>
+</html>
+"#,
+        tokens = crate::palette::tokens_css(),
+        base = crate::palette::BASE_CSS,
+        items = items,
+    ))
+}
+
 async fn serve_module(
     State(inner): Shared,
     UrlPath((key, slug, path)): UrlPath<(String, String, String)>,
@@ -842,14 +921,34 @@ async fn serve_events(State(inner): Shared, Query(session): Query<Session>) -> R
         return StatusCode::NOT_FOUND.into_response();
     }
     let slug = session.slug;
+    // Resolved once, at subscribe: the manifest is the page's own declaration
+    // and re-reading it per signal would put a directory scan on the hot path
+    // of every state write in the project.
+    let watching: Vec<String> = Registry::discover(&inner.project)
+        .get(&slug)
+        .map(|canvas| canvas.manifest.permissions.canvases.clone())
+        .unwrap_or_default();
+
     let stream = tokio_stream::wrappers::BroadcastStream::new(inner.signals.subscribe())
         .filter_map(move |signal| {
             let slug = slug.clone();
+            let watching = watching.clone();
             async move {
                 let signal = signal.ok()?;
                 // A signal addressed to another canvas is not this page's
                 // business; an unaddressed one goes to everybody.
-                if signal.addressed_to().is_some_and(|target| target != slug) {
+                //
+                // Except state from a canvas this one declared: that is the
+                // whole point of the declaration, and without it a dashboard
+                // reading a form's state would have to poll to notice a change
+                // the server already knows about. Only `State` crosses — a
+                // reload or a hot update belongs to the page whose source
+                // changed, and forwarding those would reload the wrong canvas.
+                if signal.addressed_to().is_some_and(|target| {
+                    target != slug
+                        && !(matches!(signal, Signal::State { .. })
+                            && watching.iter().any(|named| named == target))
+                }) {
                     return None;
                 }
                 let data = serde_json::to_string(&signal).ok()?;
@@ -936,7 +1035,35 @@ async fn serve_rpc(
         }
 
         "canvas.state.get" => {
-            let snapshot = inner.state_for(&slug).snapshot();
+            // A canvas may read another's state, but only one it named in its
+            // manifest. Without the gate, the `from` parameter would let any
+            // page read every canvas in the project by guessing slugs — the
+            // same shape of hole the forged-slug check closes elsewhere.
+            let reading = match params.get("from").and_then(|value| value.as_str()) {
+                None => slug.clone(),
+                Some(other) if other == slug => slug.clone(),
+                Some(other) => {
+                    let declared =
+                        Registry::discover(&inner.project)
+                            .get(&slug)
+                            .is_some_and(|canvas| {
+                                canvas
+                                    .manifest
+                                    .permissions
+                                    .canvases
+                                    .iter()
+                                    .any(|named| named == other)
+                            });
+                    if !declared {
+                        return bad(&format!(
+                            "`{slug}` may not read `{other}` — add it to \
+                             [permissions] canvases in canvas.toml"
+                        ));
+                    }
+                    other.to_owned()
+                }
+            };
+            let snapshot = inner.state_for(&reading).snapshot();
             ok(serde_json::json!({"rev": snapshot.rev, "entries": snapshot.plain()}))
         }
 
