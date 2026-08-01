@@ -58,6 +58,27 @@ addEventListener("error", (event) => {
   });
 });
 
+// Resource failures never reach the handler above. An element that fails to
+// load fires `error` on itself, and element events only pass the window during
+// the capture phase — so a stylesheet, an image, or a declared dependency that
+// does not load was invisible, while being exactly the kind of failure that
+// leaves the page half-built and the reason unguessable.
+//
+// The canvas server reports its own missing modules, which it can name
+// precisely. This covers what it cannot see: anything loaded from somewhere
+// else, which since deps link at the CDN means every declared package.
+addEventListener(
+  "error",
+  (event) => {
+    const element = event.target;
+    if (!element || element === globalThis || !element.tagName) return;
+    const url = element.src || element.href;
+    if (!url) return;
+    report("error", `failed to load ${url}`, { element: element.tagName.toLowerCase() });
+  },
+  true,
+);
+
 addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
   report("error", `unhandled rejection: ${reason?.message ?? String(reason)}`, {

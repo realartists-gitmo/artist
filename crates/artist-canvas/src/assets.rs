@@ -136,7 +136,9 @@ pub fn content_type(name: &str) -> &'static str {
     }
 }
 
-fn import_map(manifest: &Manifest, slug: &str, key: &str) -> String {
+/// Takes no key or slug any more: those existed to address the dep proxy, and
+/// nothing is proxied now.
+fn import_map(manifest: &Manifest) -> String {
     let mut imports: BTreeMap<&str, String> = BARE
         .iter()
         .map(|(specifier, file)| (*specifier, format!("/@vendor/{file}")))
@@ -145,17 +147,25 @@ fn import_map(manifest: &Manifest, slug: &str, key: &str) -> String {
                 .map(|(specifier, path)| (*specifier, (*path).to_owned())),
         )
         .collect();
-    // Declared packages are proxied rather than linked directly: the canvas
-    // then works offline after the first load, and the browser never talks to
-    // a third-party host.
-    // Keyed and slugged: a module import cannot carry a header, so the proxy's
-    // only gate is the path — and naming the canvas is what stops one canvas
-    // resolving a specifier out of another's manifest.
-    for specifier in manifest.deps.keys() {
-        imports.insert(
-            specifier.as_str(),
-            format!("/@dep/{key}/{slug}/{}", urlencode(specifier)),
-        );
+    // Declared packages are linked at the CDN rather than proxied.
+    //
+    // Proxying looked safer and did not work. A CDN's entry point is a stub
+    // that re-exports from a root-relative path — esm.sh answers `nanoid` with
+    // `export * from "/nanoid@5.0.7/es2022/nanoid.mjs"` — and the browser
+    // resolves that against whatever origin served it. Behind the proxy that
+    // is the canvas server, which has no such path, so the import 404s and the
+    // canvas silently renders nothing.
+    //
+    // The allowlist is enforced here instead, which is the part that has to
+    // keep working: it used to run inside the fetch, and with nothing fetching
+    // server-side it would otherwise have stopped applying altogether. A
+    // specifier whose URL is not allowed is left out of the map entirely, so
+    // it fails as an unresolved import the model can see rather than as a
+    // silent request to somewhere it should not reach.
+    for (specifier, url) in &manifest.deps {
+        if crate::deps::check(url).is_ok() {
+            imports.insert(specifier.as_str(), url.clone());
+        }
     }
     let entries = imports
         .iter()
@@ -224,7 +234,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
         tokens = crate::palette::tokens_css(),
         base = crate::palette::BASE_CSS,
         theme = crate::palette::theme_css(),
-        map = import_map(manifest, slug, key),
+        map = import_map(manifest),
         slug_json = json_string(slug),
         key_json = json_string(key),
         tailwind = tailwind,
@@ -232,18 +242,6 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
     )
 }
 
-/// Percent-encode a specifier for use as one path segment.
-fn urlencode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
-}
 
 fn escape_html(value: &str) -> String {
     value
@@ -296,7 +294,7 @@ mod tests {
     /// fails to resolve it at load time with no useful message.
     #[test]
     fn the_kit_only_imports_what_the_map_resolves() {
-        let map = import_map(&Manifest::default(), "demo", "k");
+        let map = import_map(&Manifest::default());
         for source in [UI, HOOKS] {
             for line in source.lines().filter(|line| line.starts_with("import ")) {
                 let Some(start) = line.rfind(" from \"") else {
@@ -313,39 +311,59 @@ mod tests {
 
     #[test]
     fn react_resolves_for_the_bundles_that_import_it() {
-        let map = import_map(&Manifest::default(), "demo", "k");
+        let map = import_map(&Manifest::default());
         assert!(map.contains("\"react\": \"/@vendor/react.js\""), "{map}");
         assert!(map.contains("\"react/jsx-runtime\""), "{map}");
     }
 
-    /// Declared deps resolve through our proxy, not straight at the CDN: that
-    /// is what makes them cache locally and keeps the page off third-party
-    /// hosts. Pointing the import map at the raw URL would quietly undo both.
+    /// Declared deps link at the CDN. Proxying them was the intent, and it
+    /// silently broke every one of them: a CDN entry point re-exports from a
+    /// root-relative path, which resolves against whichever origin served the
+    /// stub, so behind the proxy it pointed back at the canvas server and 404d.
     #[test]
-    fn declared_deps_are_proxied_not_linked_directly() {
+    fn declared_deps_link_at_the_cdn() {
         let manifest = Manifest {
-            deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three".to_owned())]),
+            deps: BTreeMap::from([(
+                "three".to_owned(),
+                "https://esm.sh/three@0.170".to_owned(),
+            )]),
             ..Manifest::default()
         };
-        let map = import_map(&manifest, "demo", "k");
-        assert!(map.contains("\"three\": \"/@dep/k/demo/three\""), "{map}");
+        let map = import_map(&manifest);
         assert!(
-            !map.contains("esm.sh"),
-            "the CDN URL leaked into the page: {map}"
+            map.contains("\"three\": \"https://esm.sh/three@0.170\""),
+            "{map}"
         );
-        assert!(map.contains("\"react\""), "{map}");
+        // The vendored set still resolves locally; only declared deps go out.
+        assert!(map.contains("\"react\": \"/@vendor/react.js\""), "{map}");
     }
 
-    /// A specifier becomes one path segment, so a scoped package must not
-    /// split into two.
+    /// The allowlist used to be enforced inside the fetch. Nothing fetches
+    /// server-side any more, so if it did not move here it would have stopped
+    /// applying — and a canvas could name any host it liked.
     #[test]
-    fn scoped_specifiers_stay_a_single_path_segment() {
+    fn a_dep_outside_the_allowlist_never_reaches_the_page() {
         let manifest = Manifest {
-            deps: BTreeMap::from([("@scope/pkg".to_owned(), "https://esm.sh/x".to_owned())]),
+            deps: BTreeMap::from([
+                ("good".to_owned(), "https://esm.sh/ok".to_owned()),
+                ("evil".to_owned(), "https://evil.example/payload.js".to_owned()),
+                ("plain".to_owned(), "http://esm.sh/insecure".to_owned()),
+                (
+                    "sneaky".to_owned(),
+                    "https://esm.sh@evil.example/x".to_owned(),
+                ),
+            ]),
             ..Manifest::default()
         };
-        assert!(import_map(&manifest, "demo", "k").contains("/@dep/k/demo/%40scope%2Fpkg"));
-        assert_eq!(urlencode("@scope/pkg"), "%40scope%2Fpkg");
+        let map = import_map(&manifest);
+
+        assert!(map.contains("\"good\""), "{map}");
+        // Left out entirely rather than rewritten: an unresolved specifier is a
+        // failure the model can read, and nothing is requested meanwhile.
+        assert!(!map.contains("evil.example"), "{map}");
+        assert!(!map.contains("\"evil\""), "{map}");
+        assert!(!map.contains("insecure"), "{map}");
+        assert!(!map.contains("\"sneaky\""), "credentials trick admitted: {map}");
     }
 
     #[test]

@@ -2,26 +2,20 @@
 //!
 //! The in-binary dependencies cover what canvases actually reach for, but not
 //! everything. A canvas that genuinely needs `three` or `d3` declares it under
-//! `[deps]` in its manifest, and the URL is fetched once and cached on disk.
+//! `[deps]` in its manifest, and the browser loads it from there.
 //!
-//! Proxying rather than pointing the import map straight at the CDN buys three
-//! things: the canvas keeps working offline after the first load, the browser
-//! never talks to a third party, and what a canvas pulled in is auditable on
-//! disk instead of invisible in a page's network tab.
+//! The import map points at the CDN directly. Proxying was tried and silently
+//! broke every declared dep: a CDN entry point re-exports from a root-relative
+//! path, which the browser resolves against whichever origin served it, so
+//! behind the proxy it pointed back at the canvas server and 404d.
 //!
 //! # Why this is restrictive
 //!
-//! `canvas.toml` is model-written, and this fetches from the user's host. An
-//! unrestricted fetcher is an outbound-request primitive handed to the model:
-//! `https://10.0.0.1/admin` is a valid https URL. So the host must be one of a
-//! short list, the response is bounded, and the request times out.
-
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
-
-use sha2::{Digest, Sha256};
+//! `canvas.toml` is model-written, and a declared URL is one the user's browser
+//! will load. An unchecked one is an outbound-request primitive handed to the
+//! model: `https://10.0.0.1/admin` is a valid https URL. So the host must be
+//! one of a short list — and since nothing is fetched server-side any more,
+//! [`check`] at import-map construction is the only thing enforcing it.
 
 /// Hosts a canvas may pull a module from.
 ///
@@ -37,36 +31,6 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "ga.jspm.io",
 ];
 
-/// A dependency is a module, not a dataset.
-const MAX_BYTES: usize = 8 * 1024 * 1024;
-const TIMEOUT: Duration = Duration::from_secs(20);
-
-/// Where fetched packages live. Shared across projects — two canvases asking
-/// for the same pinned URL should not each pay for it.
-pub fn cache_root() -> PathBuf {
-    std::env::var_os("ARTIST_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::config_dir().map(|dir| dir.join("artist")))
-        .unwrap_or_else(|| PathBuf::from(".artist"))
-        .join("canvas-cache")
-}
-
-/// A URL's cache file name.
-///
-/// SHA-256 rather than a fast non-cryptographic hash. The cache is shared
-/// across every project on the machine, so its key crosses a trust boundary:
-/// with a preimageable hash, a canvas in one project could choose bytes that
-/// land on the entry another project's `react` reads. That makes it a security
-/// boundary whatever the intent was.
-fn cache_name(url: &str) -> String {
-    let digest = Sha256::digest(url.as_bytes());
-    let mut name = String::with_capacity(64 + 3);
-    for byte in digest {
-        name.push_str(&format!("{byte:02x}"));
-    }
-    name.push_str(".js");
-    name
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DepError {
@@ -77,20 +41,6 @@ pub enum DepError {
         ALLOWED_HOSTS.join(", ")
     )]
     HostNotAllowed { host: String },
-    #[error("{url} returned {size} bytes; the limit is {MAX_BYTES}")]
-    TooLarge { url: String, size: usize },
-    #[error(
-        "{url} redirected off the allowlist (stopped at {status}) — the chain has to stay \
-         within: {}",
-        ALLOWED_HOSTS.join(", ")
-    )]
-    RedirectRefused { url: String, status: u16 },
-    #[error("could not fetch {url}: {source}")]
-    Fetch {
-        url: String,
-        #[source]
-        source: reqwest::Error,
-    },
 }
 
 /// The host part of an https URL, lowercased and without a port.
@@ -117,147 +67,12 @@ pub fn check(url: &str) -> Result<(), DepError> {
     Ok(())
 }
 
-/// Fetch a declared dependency, from cache when possible.
-///
-/// `url` must come from the canvas's own manifest — never from the request —
-/// so a page cannot turn this into an open proxy.
-pub async fn fetch(url: &str) -> Result<Vec<u8>, DepError> {
-    check(url)?;
-
-    let root = cache_root();
-    let cached = root.join(cache_name(url));
-    if let Ok(bytes) = std::fs::read(&cached) {
-        return Ok(bytes);
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        // A redirect is how an allowed host would otherwise reach a disallowed
-        // one, so the allowlist has to hold for the whole chain.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            match check(attempt.url().as_str()) {
-                Ok(()) if attempt.previous().len() < 5 => attempt.follow(),
-                _ => attempt.stop(),
-            }
-        }))
-        .build()
-        .map_err(|source| DepError::Fetch {
-            url: url.to_owned(),
-            source,
-        })?;
-
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| DepError::Fetch {
-            url: url.to_owned(),
-            source,
-        })?;
-
-    // A refused redirect is not an error to reqwest: `Policy::stop` hands back
-    // the 3xx itself, and `error_for_status` only objects to 4xx and 5xx. Left
-    // alone, the redirect's own body — usually an empty or "Moved" page — was
-    // taken for the module and written to the cache, where the read at the top
-    // of this function returned it forever. A dep that once redirected off the
-    // allowlist stayed broken with no way to retry.
-    if response.status().is_redirection() {
-        return Err(DepError::RedirectRefused {
-            url: url.to_owned(),
-            status: response.status().as_u16(),
-        });
-    }
-
-    if let Some(length) = response.content_length()
-        && length as usize > MAX_BYTES
-    {
-        return Err(DepError::TooLarge {
-            url: url.to_owned(),
-            size: length as usize,
-        });
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|source| DepError::Fetch {
-            url: url.to_owned(),
-            source,
-        })?
-        .to_vec();
-
-    // Checked again: a server may omit content-length or lie about it.
-    if bytes.len() > MAX_BYTES {
-        return Err(DepError::TooLarge {
-            url: url.to_owned(),
-            size: bytes.len(),
-        });
-    }
-
-    // Cache write is best-effort: a canvas must still work on a read-only or
-    // full disk, just without the offline benefit.
-    let _ = std::fs::create_dir_all(&root);
-    let _ = write_atomically(&cached, &bytes);
-
-    Ok(bytes)
-}
-
-fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary = target.with_extension("tmp");
-    std::fs::write(&temporary, bytes)?;
-    std::fs::rename(temporary, target)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A stopped redirect comes back as a 3xx that `error_for_status` waves
-    /// through, so the status has to be rejected explicitly or the redirect's
-    /// body is cached as the module — permanently, since the cache is read
-    /// before anything else. The message has to name the allowlist, because
-    /// the fix is always either the dep URL or that list.
     #[test]
-    fn a_refused_redirect_explains_itself() {
-        let message = DepError::RedirectRefused {
-            url: "https://esm.sh/three".into(),
-            status: 302,
-        }
-        .to_string();
-        assert!(message.contains("esm.sh/three"), "{message}");
-        assert!(message.contains("302"), "{message}");
-        assert!(message.contains(ALLOWED_HOSTS[0]), "{message}");
-    }
-
-    #[test]
-    fn cache_names_are_stable_and_version_specific() {
-        let one = "https://esm.sh/three@0.170";
-        let two = "https://esm.sh/three@0.171";
-
-        assert_eq!(cache_name(one), cache_name(one), "not stable");
-        assert_ne!(cache_name(one), cache_name(two));
-        assert!(cache_name(one).ends_with(".js"));
-        // 64 hex characters plus the extension: a full SHA-256, not a truncation.
-        assert_eq!(cache_name(one).len(), 64 + 3);
-    }
-
-    /// The cache is shared across projects, so its key crosses a trust
-    /// boundary. A fast hash was preimageable in a few bytes.
-    #[test]
-    fn cache_names_are_safe_path_segments() {
-        for url in [
-            "https://esm.sh/../../etc/passwd",
-            "https://example.com/a/b/c?x=1&y=2#frag",
-        ] {
-            let name = cache_name(url);
-            assert!(!name.contains('/'), "{name}");
-            assert_eq!(Path::new(&name).components().count(), 1, "{name}");
-        }
-    }
-
-    #[tokio::test]
-    async fn plain_http_and_non_urls_are_refused() {
+    fn plain_http_and_non_urls_are_refused() {
         for url in [
             "http://esm.sh/x.js",
             "./local.js",
@@ -265,7 +80,7 @@ mod tests {
             "/@vendor/react.js",
         ] {
             assert!(
-                matches!(fetch(url).await, Err(DepError::NotHttps(_))),
+                matches!(check(url), Err(DepError::NotHttps(_))),
                 "{url} should be refused"
             );
         }

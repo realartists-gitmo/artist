@@ -252,7 +252,6 @@ impl Server {
             .route("/@artist/react.js", get(serve_hooks))
             .route("/@artist/refresh.js", get(serve_refresh))
             .route("/@vendor/{*path}", get(serve_vendor))
-            .route("/@dep/{key}/{slug}/{specifier}", get(serve_dep))
             .route("/_artist/events", get(serve_events))
             .route("/_artist/rpc", post(serve_rpc))
             .with_state(Arc::clone(&inner));
@@ -622,6 +621,24 @@ async fn serve_module(
     };
 
     let Ok(bytes) = tokio::fs::read(&target).await else {
+        // Told to the model, because nothing else will tell it. A module in the
+        // entry's graph that 404s takes the whole page down — nothing renders —
+        // and the browser reports it as a resource failure, which never reaches
+        // the window `error` handler the client installs. So the one failure
+        // that leaves a blank page was also the one that arrived as silence.
+        //
+        // A compile error already reports itself from the transform below; this
+        // is its counterpart for a file that is not there at all, which is what
+        // an unwritten import or a renamed component leaves behind.
+        inner.push_report(Report {
+            slug: slug.clone(),
+            level: "error".into(),
+            message: format!(
+                "`{path}` was imported but does not exist in canvas `{slug}` — the page cannot \
+                 render without it"
+            ),
+            detail: Some(serde_json::json!({"path": path})),
+        });
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -729,32 +746,6 @@ async fn serve_hooks() -> Response {
 ///
 /// The URL comes from the manifest on disk, never from the request, so this
 /// cannot be driven into fetching an arbitrary host.
-async fn serve_dep(
-    State(inner): Shared,
-    UrlPath((key, slug, specifier)): UrlPath<(String, String, String)>,
-) -> Response {
-    if key != inner.key {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    // Scoped to the canvas that asked. Searching every canvas meant directory
-    // order decided which version won when two pinned the same package, and a
-    // canvas could resolve a specifier it had never declared.
-    let declared = Registry::discover(&inner.project)
-        .get(&slug)
-        .and_then(|canvas| canvas.manifest.deps.get(&specifier).cloned());
-    let Some(url) = declared else {
-        return (
-            StatusCode::NOT_FOUND,
-            format!("`{specifier}` is not declared under [deps] in canvas `{slug}`"),
-        )
-            .into_response();
-    };
-    match crate::deps::fetch(&url).await {
-        Ok(bytes) => raw("text/javascript; charset=utf-8", bytes),
-        Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
-    }
-}
-
 async fn serve_vendor(UrlPath(path): UrlPath<String>) -> Response {
     match assets::vendored(&path) {
         Some(bytes) => raw(assets::content_type(&path), bytes.to_vec()),
