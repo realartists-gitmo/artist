@@ -119,7 +119,7 @@ async fn run() -> Result<()> {
                     keep,
                     older_than_days,
                     dry_run,
-                } => sessions_gc(&sessions, keep, older_than_days, dry_run)?,
+                } => sessions_gc(&sessions, config_root, keep, older_than_days, dry_run).await?,
             }
         }
         Some(Command::Profiles(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -889,8 +889,9 @@ fn short(digest: &str) -> &str {
     &digest[..end]
 }
 
-fn sessions_gc(
+async fn sessions_gc(
     sessions: &SessionStore,
+    config_root: &std::path::Path,
     keep: usize,
     older_than_days: u64,
     dry_run: bool,
@@ -927,6 +928,12 @@ fn sessions_gc(
                 );
             } else {
                 sessions.remove(&session.id)?;
+                // The conversation's anchor state and write attributions die
+                // with it. Retention would collect them eventually; doing it
+                // here means "delete this session" actually deletes it.
+                if let Ok(state_dir) = project_state_dir(config_root, &session.project) {
+                    artist_tools::forget_conversation(&state_dir, &session.id).await;
+                }
                 println!("deleted {}  {:>8}", session.id, format_size(size));
             }
         }

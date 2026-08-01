@@ -251,6 +251,117 @@ impl StateStore {
         Ok(result)
     }
 
+    /// Everything a session leaves behind, gone with the session.
+    ///
+    /// Exact rather than heuristic: the caller knows this conversation is over,
+    /// so nothing here is a guess about whether the state is still wanted. The
+    /// write attributions go too — they are keyed by path rather than by agent,
+    /// so nothing else would ever collect them.
+    pub async fn forget_agent(&self, agent_id: &str) -> Result<usize, HashlineError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let mut removed = transaction
+            .execute(
+                "DELETE FROM anchor_states WHERE agent_id=?1",
+                params![agent_id],
+            )
+            .map_err(sql_error)?;
+        removed += transaction
+            .execute(
+                "DELETE FROM file_writers WHERE agent_id=?1",
+                params![agent_id],
+            )
+            .map_err(sql_error)?;
+        removed += transaction
+            .execute("DELETE FROM agents WHERE agent_id=?1", params![agent_id])
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(removed)
+    }
+
+    /// Retire state for conversations nobody has touched in `days`.
+    ///
+    /// By agent rather than by row, deliberately. A half-retired session is
+    /// worse than a fully retired one: some of its anchors resolve and some do
+    /// not, and the model cannot tell which it is holding. Whole-session
+    /// eviction gives it a clean "re-read" instead of a confusing partial view.
+    ///
+    /// `agents.last_seen_at` is upserted on every read, write and edit, so it
+    /// tracks use rather than creation — an old conversation still in daily use
+    /// is not stale.
+    pub async fn retire_idle_agents(&self, days: u64) -> Result<usize, HashlineError> {
+        let cutoff = now_ms().saturating_sub(days.saturating_mul(24 * 60 * 60 * 1000) as i64);
+        let mut connection = self.connection.lock().await;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let removed = transaction
+            .execute(
+                "DELETE FROM anchor_states WHERE agent_id IN
+                 (SELECT agent_id FROM agents WHERE last_seen_at < ?1)",
+                params![cutoff],
+            )
+            .map_err(sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM agents WHERE last_seen_at < ?1",
+                params![cutoff],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(removed)
+    }
+
+    /// Keep only the `max` most recently used conversations' anchor state.
+    ///
+    /// A backstop, not a policy. If this ever removes anything, the age rule
+    /// was not doing its job — but unbounded growth in a file the user never
+    /// looks at is the kind of thing that is only noticed when a disk fills.
+    pub async fn cap_agents(&self, max: usize) -> Result<usize, HashlineError> {
+        let mut connection = self.connection.lock().await;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_error)?;
+        let removed = transaction
+            .execute(
+                "DELETE FROM anchor_states WHERE agent_id NOT IN
+                 (SELECT agent_id FROM agents ORDER BY last_seen_at DESC LIMIT ?1)",
+                params![max as i64],
+            )
+            .map_err(sql_error)?;
+        transaction
+            .execute(
+                "DELETE FROM agents WHERE agent_id NOT IN
+                 (SELECT agent_id FROM agents ORDER BY last_seen_at DESC LIMIT ?1)",
+                params![max as i64],
+            )
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
+        Ok(removed)
+    }
+
+    /// Forget who wrote what, past `days`.
+    ///
+    /// Much shorter than the anchor rules, because attribution is only useful
+    /// while a change is recent — nobody needs telling that another session
+    /// touched a file last month. A missing row degrades to unattributed, which
+    /// is the safe direction, so this can afford to be aggressive.
+    pub async fn forget_stale_writers(&self, days: u64) -> Result<usize, HashlineError> {
+        let cutoff = now_ms().saturating_sub(days.saturating_mul(24 * 60 * 60 * 1000) as i64);
+        let removed = self
+            .connection
+            .lock()
+            .await
+            .execute(
+                "DELETE FROM file_writers WHERE written_at < ?1",
+                params![cutoff],
+            )
+            .map_err(sql_error)?;
+        Ok(removed)
+    }
+
     /// Drop anchor state belonging to identities that cannot be a conversation.
     ///
     /// Anchor state is keyed by actor. Before that key was the conversation it

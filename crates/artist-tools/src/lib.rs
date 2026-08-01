@@ -22,7 +22,7 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use read::ReadTool;
 pub use short_id::short_id;
-pub use workspace::Workspace;
+pub use workspace::{Workspace, forget_conversation};
 pub use write::WriteTool;
 
 #[derive(Debug, thiserror::Error)]

@@ -22,6 +22,27 @@ use crate::{
     FileToolManager, HashlineError, HashlineErrorCode, ReadFileRequest, ReadFileResult, StateStore,
 };
 
+/// How long a conversation's anchor state outlives its last use.
+///
+/// Resuming a month-old session should still find the anchors it was given.
+/// Past that the state is almost certainly dead, and losing it costs a re-read
+/// rather than anything worse.
+pub const ANCHOR_RETENTION_DAYS: u64 = 30;
+
+/// How long a write stays attributable.
+///
+/// Far shorter than the anchor state it accompanies, because attribution is
+/// only actionable while the change is recent — "another session edited this
+/// last month" is not a coordination signal, it is trivia.
+pub const WRITER_RETENTION_DAYS: u64 = 7;
+
+/// The most conversations whose anchor state is kept, whatever their age.
+///
+/// A backstop for the case the age rule cannot reach: thousands of short-lived
+/// sessions inside the retention window. Set high enough that reaching it is
+/// itself the signal something is wrong.
+pub const MAX_RETAINED_AGENTS: usize = 2_000;
+
 /// Conditions for whole-file write (separate from line-level edit anchors).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum WriteCondition {
@@ -396,18 +417,32 @@ impl FileCoordinator {
         let _ = self.state.record_writer(path, &actor.id, hash).await;
     }
 
-    /// Drop anchor state left by identities that predate conversation scoping.
+    /// Retire state nobody needs any more.
     ///
     /// Runs once, lazily, on the first manager a coordinator hands out — rather
-    /// than at construction, which would put a database write in the path of
+    /// than at construction, which would put database writes in the path of
     /// every `Workspace::open` including those that never touch a file.
+    ///
+    /// Every rule here is safe to lose. Retiring anchor state costs a re-read;
+    /// retiring an attribution costs a change reported as unattributed. Neither
+    /// can cost a wrong edit, which is what makes the thresholds a matter of
+    /// taste rather than an argument about correctness.
     async fn tidy_once(&self) {
         let mut tidied = self.tidied.lock().await;
         if *tidied {
             return;
         }
         *tidied = true;
+        // Identities that cannot be a conversation: their rows are unreachable.
         let _ = self.state.forget_unowned_anchor_state().await;
+        // Conversations nobody has touched in a month. Long enough that
+        // resuming one still finds its anchors, short enough to bound growth.
+        let _ = self.state.retire_idle_agents(ANCHOR_RETENTION_DAYS).await;
+        // A smoke alarm for the above.
+        let _ = self.state.cap_agents(MAX_RETAINED_AGENTS).await;
+        // Attribution ages out far faster: nobody needs telling that another
+        // session touched a file last month.
+        let _ = self.state.forget_stale_writers(WRITER_RETENTION_DAYS).await;
     }
 
     async fn manager_for(&self, actor: &AgentIdentity) -> Result<Arc<Mutex<FileToolManager>>> {
@@ -782,6 +817,108 @@ mod tests {
                 .expect("load")
                 .is_empty(),
             "tidying took a real session's state with it"
+        );
+    }
+
+    /// Deleting a session has to actually delete it. Retention would collect
+    /// these eventually; leaving them until then means "delete" quietly meant
+    /// "delete most of".
+    #[tokio::test]
+    async fn forgetting_a_conversation_takes_its_anchors_and_attributions() {
+        let (files, root) = coordinator("forget-agent");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let doomed = agent("session-doomed");
+        let keeper = agent("session-keeper");
+        read(&files, &keeper, &path).await;
+        files
+            .write_file(
+                &doomed,
+                path.clone(),
+                "one\ntwo\n".to_owned(),
+                WriteCondition::Any,
+            )
+            .await
+            .expect("write");
+
+        let state = files.state.clone();
+        assert!(
+            !state
+                .writers_for(&[path.clone()])
+                .await
+                .expect("writers")
+                .is_empty(),
+            "the fixture recorded no attribution to forget"
+        );
+
+        state.forget_agent("session-doomed").await.expect("forget");
+
+        assert!(
+            state
+                .load_anchor_state(&doomed.id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "anchor state outlived its conversation"
+        );
+        assert!(
+            state
+                .writers_for(&[path.clone()])
+                .await
+                .expect("writers")
+                .is_empty(),
+            "attribution outlived its conversation"
+        );
+        // Path-keyed rows made it tempting to collect only by agent; the other
+        // session must be untouched either way.
+        assert!(
+            !state
+                .load_anchor_state(&keeper.id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "forgetting one conversation took another's state"
+        );
+    }
+
+    /// Retention is by agent, not by row. A half-retired session leaves some
+    /// anchors resolving and some not, and the model cannot tell which it
+    /// holds — a clean sweep gives it an honest "re-read" instead.
+    #[tokio::test]
+    async fn retiring_an_idle_conversation_takes_all_of_it() {
+        let (files, root) = coordinator("retire");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\ntwo\nthree\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let idle = agent("session-idle");
+        read(&files, &idle, &path).await;
+        let state = files.state.clone();
+
+        // Nothing is idle yet, so a sweep must leave it alone.
+        state.retire_idle_agents(30).await.expect("retire");
+        assert!(
+            !state
+                .load_anchor_state(&idle.id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "a live conversation was retired"
+        );
+
+        // Zero days makes everything already-idle, which is the same query the
+        // real threshold runs.
+        let removed = state.retire_idle_agents(0).await.expect("retire");
+        assert!(removed > 0, "nothing was retired");
+        assert!(
+            state
+                .load_anchor_state(&idle.id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "an idle conversation kept its anchors"
         );
     }
 

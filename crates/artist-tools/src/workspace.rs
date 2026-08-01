@@ -10,6 +10,31 @@ use std::{
     time::Duration,
 };
 
+/// Where a project's anchor state lives, inside its state directory.
+const ANCHOR_DB: &str = "hashlines.sqlite3";
+
+/// Forget everything a finished conversation left in a project's anchor store.
+///
+/// Anchor state and write attribution are both keyed by the conversation, so
+/// they die with it. Exact, rather than waiting for retention to notice: the
+/// session is gone and nothing will ever load them again.
+///
+/// Quiet and best effort. The session's own files are already deleted by the
+/// time this runs, so failing to tidy its rows must not turn a successful
+/// delete into an error — and retention collects anything missed, including
+/// the case where the project directory itself is gone and the state
+/// directory can no longer be located.
+pub async fn forget_conversation(state_dir: &Path, conversation_id: &str) -> usize {
+    let database = state_dir.join(ANCHOR_DB);
+    if !database.exists() {
+        return 0;
+    }
+    match hashline_tools::StateStore::open(&database) {
+        Ok(store) => store.forget_agent(conversation_id).await.unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
 #[derive(Clone)]
 pub struct Workspace {
     root: Arc<PathBuf>,
@@ -57,7 +82,7 @@ impl Workspace {
                 allow_outside_workspace: true,
                 follow_symlinks: false,
             },
-            state.join("hashlines.sqlite3"),
+            state.join(ANCHOR_DB),
             state.join("locks"),
         )?;
         let picker = SharedFilePicker::default();
