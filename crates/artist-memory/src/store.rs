@@ -6,7 +6,9 @@
 //! clone, so each task gets its own clone rather than sharing a lock.
 
 use crate::schema::{DIM, INDEXES, RELATIONS, SCHEMA_VERSION};
-use crate::types::{CodeHit, Fact, Hit, NewFact, Scope};
+use crate::identity::{join, split};
+use crate::types::{CodeHit, Fact, Hit, NewFact};
+use artist_logic::object::ObjectId;
 use anyhow::{Context, Result, anyhow};
 use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability, ScriptRunOptions};
 use std::collections::BTreeMap;
@@ -20,26 +22,34 @@ const READ_TIMEOUT_SECS: f64 = 5.0;
 /// Process-wide floor, including writes and index builds.
 const DEFAULT_TIMEOUT_SECS: f64 = 300.0;
 
+/// Parse a proposition id as written into the log: 32 hex digits.
+fn parse_id(hex: &str) -> Option<ObjectId> {
+    u128::from_str_radix(hex.trim(), 16).ok().map(ObjectId)
+}
+
 /// What `reconcile` changed, and what the caller still owes.
 #[derive(Debug, Default)]
 pub struct Reconciliation {
     /// Facts dropped because a rewind masked the event that created them.
-    pub removed: Vec<i64>,
-    /// Facts the log knows about that the store has lost. These need
-    /// re-embedding before they can be reinserted.
+    pub removed: Vec<ObjectId>,
+    /// Facts the log knows about that the store has lost, and whose vectors it
+    /// could **not** reuse — either the event predates carrying them or it
+    /// carries one from a different embedding space. Only these need a forward
+    /// pass; the rest are reinserted here.
     pub missing: Vec<artist_session::MemoryWritten>,
+    /// Facts reinserted directly from vectors the log already carried.
+    pub restored: usize,
 }
 
 impl Reconciliation {
     pub fn is_clean(&self) -> bool {
-        self.removed.is_empty() && self.missing.is_empty()
+        self.removed.is_empty() && self.missing.is_empty() && self.restored == 0
     }
 }
 
 #[derive(Clone)]
 pub struct MemoryStore {
     db: Arc<DbInstance>,
-    scope: Scope,
     next_fact_id: Arc<AtomicI64>,
     next_chunk_id: Arc<AtomicI64>,
 }
@@ -47,14 +57,14 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Open (creating if absent) the store at `path` and bring the schema up to
     /// date. Blocking work runs on a blocking thread.
-    pub async fn open(path: impl AsRef<Path>, scope: Scope) -> Result<Self> {
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        tokio::task::spawn_blocking(move || Self::open_blocking(&path, scope))
+        tokio::task::spawn_blocking(move || Self::open_blocking(&path))
             .await
             .map_err(|e| anyhow!("memory store open panicked: {e}"))?
     }
 
-    fn open_blocking(path: &Path, scope: Scope) -> Result<Self> {
+    fn open_blocking(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -63,19 +73,35 @@ impl MemoryStore {
             .map_err(|e| anyhow!("opening memory store at {}: {e:?}", path.display()))?;
         db.set_default_query_timeout(Some(DEFAULT_TIMEOUT_SECS));
 
+        // RocksDB commits without fsyncing its WAL by default, so a power cut
+        // or OS crash can lose writes the store already acknowledged. For a
+        // memory system that is the wrong default: losing the last few facts is
+        // indistinguishable from never having learned them, and the write rate
+        // here is a handful of facts per session, so the per-commit fsync costs
+        // nothing that matters.
+        //
+        // Note this covers *transactional* commits only. The bulk channels —
+        // `batch_put` and the SST `ingest_sorted` path used by code indexing —
+        // are non-transactional and are deliberately left unsynced: they are
+        // rebuildable from the working tree, and syncing them would put an
+        // fsync in the middle of a multi-hour index pass.
+        if !db.set_durable_writes(true) {
+            // Only reachable if the backend changes; every other engine either
+            // is already durable (sqlite) or has nothing to sync (mem).
+            eprintln!(
+                "warning: memory store at {} does not support durable writes",
+                path.display()
+            );
+        }
+
         let store = Self {
             db: Arc::new(db),
-            scope,
             next_fact_id: Arc::new(AtomicI64::new(0)),
             next_chunk_id: Arc::new(AtomicI64::new(0)),
         };
         store.apply_schema()?;
         store.seed_id_counters()?;
         Ok(store)
-    }
-
-    pub fn scope(&self) -> Scope {
-        self.scope
     }
 
     // ---- schema ---------------------------------------------------------
@@ -152,22 +178,69 @@ impl MemoryStore {
             .and_then(|s| s.parse().ok()))
     }
 
+    /// Seed the in-process id allocators from a **high-water mark** kept in
+    /// `meta`, not from `max(id)` over the live rows.
+    ///
+    /// Deriving the next id from `max(id)` reuses ids after a delete: `forget`
+    /// issues a `:rm`, so the next open reseeds below the ids already handed
+    /// out, and `:put` is an upsert rather than an insert — the reused id
+    /// silently overwrites nothing, but `superseded_by` still points at the old
+    /// number and now resolves to an unrelated fact. Fact ids are also
+    /// model-visible (rendered as `<fact id="N">`, quoted back as
+    /// `replaces: N`), so a reused id can be pointed at by the model too.
+    ///
+    /// The high-water mark only ever moves forward, so an id is never issued
+    /// twice for the life of the store, including across a `forget`.
     fn seed_id_counters(&self) -> Result<()> {
-        // Aggregations belong in the rule *head* in CozoScript; writing
-        // `m = max(x)` in the body fails with `eval::no_implementation`.
-        for (script, counter) in [
-            ("?[max(fact_id)] := *fact{fact_id}", &self.next_fact_id),
-            ("?[max(chunk_id)] := *chunk{chunk_id}", &self.next_chunk_id),
-        ] {
-            let rows = self.script_blocking(script, BTreeMap::new(), false)?;
-            let max = rows
-                .rows
-                .first()
-                .and_then(|r| r.first())
-                .and_then(|v| v.get_int())
-                .unwrap_or(-1);
-            counter.store(max + 1, Ordering::SeqCst);
+        for (kind, counter) in [("fact", &self.next_fact_id), ("chunk", &self.next_chunk_id)] {
+            let key = format!("next_{kind}_id");
+            let next = self.read_meta_int(&key)?.unwrap_or(0);
+            counter.store(next, Ordering::SeqCst);
+            self.write_meta_int(&key, next)?;
         }
+        Ok(())
+    }
+
+    fn read_meta_int(&self, key: &str) -> Result<Option<i64>> {
+        let mut params = BTreeMap::new();
+        params.insert("k".to_string(), DataValue::from(key));
+        let rows = self.script_blocking("?[value] := *meta{key: $k, value}", params, false)?;
+        Ok(rows
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|v| v.get_str())
+            .and_then(|s| s.parse().ok()))
+    }
+
+    fn write_meta_int(&self, key: &str, value: i64) -> Result<()> {
+        let mut params = BTreeMap::new();
+        params.insert("k".to_string(), DataValue::from(key));
+        params.insert("v".to_string(), DataValue::from(value.to_string()));
+        self.script_blocking(
+            "?[key, value] <- [[$k, $v]] :put meta {key => value}",
+            params,
+            true,
+        )?;
+        Ok(())
+    }
+
+    /// Advance the persisted high-water mark to `next`.
+    ///
+    /// Called *before* the rows that use those ids are written, so that a crash
+    /// in between leaves the mark ahead of reality rather than behind it. Ahead
+    /// costs a gap in the id sequence, which nothing depends on; behind hands
+    /// the same id out twice, which is the bug this exists to prevent.
+    async fn bump_id_mark(&self, kind: &str, next: i64) -> Result<()> {
+        let mut params = BTreeMap::new();
+        params.insert("k".to_string(), DataValue::from(format!("next_{kind}_id")));
+        params.insert("v".to_string(), DataValue::from(next.to_string()));
+        self.script(
+            "?[key, value] <- [[$k, $v]] :put meta {key => value}",
+            params,
+            true,
+        )
+        .await?;
         Ok(())
     }
 
@@ -197,7 +270,7 @@ impl MemoryStore {
     /// Run a script off the async runtime's worker threads.
     pub async fn script(
         &self,
-        script: &'static str,
+        script: &str,
         params: BTreeMap<String, DataValue>,
         mutable: bool,
     ) -> Result<NamedRows> {
@@ -208,7 +281,7 @@ impl MemoryStore {
             .map_err(|e| anyhow!("memory query panicked: {e}"))?
     }
 
-    async fn script_owned(
+    pub(crate) async fn script_owned(
         &self,
         script: String,
         params: BTreeMap<String, DataValue>,
@@ -222,14 +295,28 @@ impl MemoryStore {
 
     // ---- writes ----------------------------------------------------------
 
-    /// Insert facts, returning their allocated ids. Embeddings must already be
-    /// `DIM` wide; a mismatch is rejected here rather than by a Datalog error.
-    pub async fn put_facts(&self, facts: &[NewFact]) -> Result<Vec<i64>> {
+    /// Insert facts, returning their **proposition** ids.
+    ///
+    /// Two rows are written per fact, because a fact is two things:
+    ///
+    /// * the `fact` row, keyed by content, which **dedups on insert** — the
+    ///   guard `not *fact{prop_hi, prop_lo}` means re-learning a belief leaves
+    ///   the existing row alone rather than overwriting it. That matters beyond
+    ///   tidiness: an upsert would reset `live` and `superseded_*`, silently
+    ///   reviving a belief someone had retired. A uniqueness *constraint* would
+    ///   be worse still — during a rebuild from a merged log, two peers having
+    ///   recorded the same text is the normal case, and the rebuild would abort
+    ///   where it should converge.
+    /// * the `observation` row, which always inserts. Two peers recording the
+    ///   same belief is not duplication to be collapsed; it is two sources
+    ///   agreeing, which is evidence, and the only place that survives.
+    pub async fn put_facts(&self, facts: &[NewFact]) -> Result<Vec<ObjectId>> {
         if facts.is_empty() {
             return Ok(Vec::new());
         }
         let mut ids = Vec::with_capacity(facts.len());
-        let mut rows = Vec::with_capacity(facts.len());
+        let mut fact_rows = Vec::with_capacity(facts.len());
+        let mut obs_rows = Vec::with_capacity(facts.len());
         for fact in facts {
             if fact.embedding.len() != DIM {
                 return Err(anyhow!(
@@ -237,10 +324,12 @@ impl MemoryStore {
                     fact.embedding.len()
                 ));
             }
-            let id = self.next_fact_id.fetch_add(1, Ordering::SeqCst);
+            let id = crate::identity::proposition_id(&fact.text);
+            let (hi, lo) = crate::identity::split(id);
             ids.push(id);
-            rows.push(DataValue::List(vec![
-                DataValue::from(id),
+            fact_rows.push(DataValue::List(vec![
+                DataValue::from(hi),
+                DataValue::from(lo),
                 DataValue::from(fact.subject.as_str()),
                 DataValue::from(fact.predicate.as_str()),
                 DataValue::from(fact.object.as_str()),
@@ -251,26 +340,42 @@ impl MemoryStore {
                         .map(|f| DataValue::from(*f as f64))
                         .collect(),
                 ),
+                DataValue::from(fact.origin.as_str()),
+            ]));
+            obs_rows.push(DataValue::List(vec![
                 DataValue::from(fact.source_session.as_str()),
                 DataValue::from(fact.source_seq),
+                DataValue::from(hi),
+                DataValue::from(lo),
                 DataValue::from(fact.origin.as_str()),
             ]));
         }
 
         let mut params = BTreeMap::new();
-        params.insert("rows".to_string(), DataValue::List(rows));
+        params.insert("rows".to_string(), DataValue::List(fact_rows));
         // CozoScript has no bracket indexing, so destructure through a const rule.
         self.script(
             r#"
-            raw[fact_id, subject, predicate, object, text, raw_emb,
-                source_session, source_seq, origin] <- $rows
-            ?[fact_id, subject, predicate, object, text, emb,
-              source_session, source_seq, origin] :=
-                raw[fact_id, subject, predicate, object, text, raw_emb,
-                    source_session, source_seq, origin],
+            raw[prop_hi, prop_lo, subject, predicate, object, text, raw_emb, origin] <- $rows
+            ?[prop_hi, prop_lo, subject, predicate, object, text, emb, origin] :=
+                raw[prop_hi, prop_lo, subject, predicate, object, text, raw_emb, origin],
+                not *fact{prop_hi, prop_lo},
                 emb = vec(raw_emb)
-            :put fact {fact_id => subject, predicate, object, text, emb,
-                       source_session, source_seq, origin}
+            :put fact {prop_hi, prop_lo => subject, predicate, object, text, emb, origin}
+            "#,
+            params,
+            true,
+        )
+        .await?;
+
+        let mut params = BTreeMap::new();
+        params.insert("rows".to_string(), DataValue::List(obs_rows));
+        self.script(
+            r#"
+            raw[source_session, source_seq, prop_hi, prop_lo, origin] <- $rows
+            ?[source_session, source_seq, prop_hi, prop_lo, origin] :=
+                raw[source_session, source_seq, prop_hi, prop_lo, origin]
+            :put observation {source_session, source_seq => prop_hi, prop_lo, origin}
             "#,
             params,
             true,
@@ -286,15 +391,20 @@ impl MemoryStore {
     /// without any explicit index maintenance here. History is not written
     /// alongside: the `memory.written` event already records the supersession,
     /// with the session and sequence a copy of the row could not carry.
-    pub async fn supersede(&self, old: i64, new: i64) -> Result<()> {
+    pub async fn supersede(&self, old: ObjectId, new: ObjectId) -> Result<()> {
+        let (oh, ol) = crate::identity::split(old);
+        let (nh, nl) = crate::identity::split(new);
         let mut params = BTreeMap::new();
-        params.insert("old".to_string(), DataValue::from(old));
-        params.insert("new".to_string(), DataValue::from(new));
+        params.insert("oh".to_string(), DataValue::from(oh));
+        params.insert("ol".to_string(), DataValue::from(ol));
+        params.insert("nh".to_string(), DataValue::from(nh));
+        params.insert("nl".to_string(), DataValue::from(nl));
         self.script(
             r#"
-            ?[fact_id, live, superseded_by] := fact_id = $old, live = false,
-                                               superseded_by = $new
-            :update fact {fact_id => live, superseded_by}
+            ?[prop_hi, prop_lo, live, superseded_hi, superseded_lo] :=
+                prop_hi = $oh, prop_lo = $ol, live = false,
+                superseded_hi = $nh, superseded_lo = $nl
+            :update fact {prop_hi, prop_lo => live, superseded_hi, superseded_lo}
             "#,
             params,
             true,
@@ -304,11 +414,22 @@ impl MemoryStore {
     }
 
     /// Drop a fact outright. Used by `forget`, and by rewind reconciliation.
-    pub async fn forget(&self, id: i64) -> Result<()> {
+    ///
+    /// The observations stay: they record that a session *did* assert this, and
+    /// a rewind of the projection is not a claim that the assertion never
+    /// happened.
+    pub async fn forget(&self, id: ObjectId) -> Result<()> {
+        let (hi, lo) = crate::identity::split(id);
         let mut params = BTreeMap::new();
-        params.insert("id".to_string(), DataValue::from(id));
-        self.script("?[fact_id] := fact_id = $id :rm fact {fact_id}", params, true)
-            .await?;
+        params.insert("hi".to_string(), DataValue::from(hi));
+        params.insert("lo".to_string(), DataValue::from(lo));
+        self.script(
+            "?[prop_hi, prop_lo] := prop_hi = $hi, prop_lo = $lo \
+             :rm fact {prop_hi, prop_lo}",
+            params,
+            true,
+        )
+        .await?;
         Ok(())
     }
 
@@ -328,7 +449,7 @@ impl MemoryStore {
         text: &str,
         embedding: &[f32],
         k: usize,
-    ) -> Result<Vec<(i64, String)>> {
+    ) -> Result<Vec<(ObjectId, String)>> {
         Ok(self
             .search_facts(text, embedding, k)
             .await?
@@ -373,7 +494,12 @@ impl MemoryStore {
         let mut params = BTreeMap::new();
         params.insert(
             "qv".to_string(),
-            DataValue::List(query_vec.iter().map(|f| DataValue::from(*f as f64)).collect()),
+            DataValue::List(
+                query_vec
+                    .iter()
+                    .map(|f| DataValue::from(*f as f64))
+                    .collect(),
+            ),
         );
         params.insert(
             "qt".to_string(),
@@ -381,33 +507,43 @@ impl MemoryStore {
         );
 
         let semantic = format!(
-            "sem[id, score] := ~fact:emb_idx{{ fact_id: id | query: vec($qv), k: {leg_k}, \
-             ef: {ef}, bind_distance: __d }}, score = -__d"
+            "sem[hi, lo, score] := ~fact:emb_idx{{ prop_hi: hi, prop_lo: lo | \
+             query: vec($qv), k: {leg_k}, ef: {ef}, bind_distance: __d }}, score = -__d"
         );
         let lexical = format!(
-            "txt[id, score] := ~fact:text_fts{{ fact_id: id | query: $qt, k: {leg_k}, \
-             bind_score: score }}"
+            "txt[hi, lo, score] := ~fact:text_fts{{ prop_hi: hi, prop_lo: lo | \
+             query: $qt, k: {leg_k}, bind_score: score }}"
         );
+        // `ReciprocalRankFusion` is a fixed rule with a three-column shape —
+        // list id, item, score — so a two-column key cannot be passed through
+        // it directly. Pack the key into one value for the fusion and recover
+        // it afterwards by joining `keyed`, which costs nothing and keeps the
+        // fused relation the arity the rule expects.
         let ranking = match (has_vector, text_query.is_some()) {
             (true, true) => format!(
                 r#"
             {semantic}
             {lexical}
-            combined[__lid, id, score] := sem[id, score], __lid = 'semantic'
-            combined[__lid, id, score] := txt[id, score], __lid = 'text'
-            fused[id, score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: 60.0)
+            keyed[__key, hi, lo] := sem[hi, lo, _s], __key = [hi, lo]
+            keyed[__key, hi, lo] := txt[hi, lo, _s], __key = [hi, lo]
+            combined[__lid, __key, score] := sem[hi, lo, score], __key = [hi, lo],
+                                             __lid = 'semantic'
+            combined[__lid, __key, score] := txt[hi, lo, score], __key = [hi, lo],
+                                             __lid = 'text'
+            ranked[__key, score] <~ ReciprocalRankFusion(combined[__lid, __key, score], k: 60.0)
+            fused[hi, lo, score] := ranked[__key, score], keyed[__key, hi, lo]
             "#
             ),
             (true, false) => format!(
                 r#"
             {semantic}
-            fused[id, score] := sem[id, score]
+            fused[hi, lo, score] := sem[hi, lo, score]
             "#
             ),
             (false, true) => format!(
                 r#"
             {lexical}
-            fused[id, score] := txt[id, score]
+            fused[hi, lo, score] := txt[hi, lo, score]
             "#
             ),
             (false, false) => unreachable!("guarded above"),
@@ -415,9 +551,10 @@ impl MemoryStore {
 
         let script = format!(
             r#"{ranking}
-            ?[id, score, text, subject, predicate, object, origin, created_at] :=
-                fused[id, score],
-                *fact{{fact_id: id, text, subject, predicate, object, origin, created_at}}
+            ?[hi, lo, score, text, subject, predicate, object, origin, created_at] :=
+                fused[hi, lo, score],
+                *fact{{prop_hi: hi, prop_lo: lo, text, subject, predicate, object,
+                       origin, created_at}}
             :order -score
             :limit {k}
             "#
@@ -428,15 +565,14 @@ impl MemoryStore {
             .iter()
             .filter_map(|r| {
                 Some(Hit {
-                    id: r[0].get_int()?,
-                    score: r[1].get_float()?,
-                    text: r[2].get_str()?.to_owned(),
-                    subject: r[3].get_str().unwrap_or_default().to_owned(),
-                    predicate: r[4].get_str().unwrap_or_default().to_owned(),
-                    object: r[5].get_str().unwrap_or_default().to_owned(),
-                    origin: r[6].get_str().unwrap_or_default().to_owned(),
-                    created_at: r[7].get_float().unwrap_or_default(),
-                    scope: self.scope,
+                    id: join(r[0].get_int()?, r[1].get_int()?),
+                    score: r[2].get_float()?,
+                    text: r[3].get_str()?.to_owned(),
+                    subject: r[4].get_str().unwrap_or_default().to_owned(),
+                    predicate: r[5].get_str().unwrap_or_default().to_owned(),
+                    object: r[6].get_str().unwrap_or_default().to_owned(),
+                    origin: r[7].get_str().unwrap_or_default().to_owned(),
+                    created_at: r[8].get_float().unwrap_or_default(),
                 })
             })
             .collect())
@@ -446,9 +582,10 @@ impl MemoryStore {
     pub async fn live_facts(&self) -> Result<Vec<Fact>> {
         let rows = self
             .script(
-                r#"?[fact_id, subject, predicate, object, text, origin] :=
-                       *fact{fact_id, subject, predicate, object, text, origin, live: true}
-                   :order fact_id"#,
+                r#"?[prop_hi, prop_lo, subject, predicate, object, text, origin] :=
+                       *fact{prop_hi, prop_lo, subject, predicate, object, text,
+                             origin, live: true}
+                   :order prop_hi, prop_lo"#,
                 BTreeMap::new(),
                 false,
             )
@@ -458,12 +595,12 @@ impl MemoryStore {
             .iter()
             .filter_map(|r| {
                 Some(Fact {
-                    id: r[0].get_int()?,
-                    subject: r[1].get_str()?.to_owned(),
-                    predicate: r[2].get_str()?.to_owned(),
-                    object: r[3].get_str()?.to_owned(),
-                    text: r[4].get_str()?.to_owned(),
-                    origin: r[5].get_str().unwrap_or_default().to_owned(),
+                    id: join(r[0].get_int()?, r[1].get_int()?),
+                    subject: r[2].get_str()?.to_owned(),
+                    predicate: r[3].get_str()?.to_owned(),
+                    object: r[4].get_str()?.to_owned(),
+                    text: r[5].get_str()?.to_owned(),
+                    origin: r[6].get_str().unwrap_or_default().to_owned(),
                 })
             })
             .collect())
@@ -472,7 +609,7 @@ impl MemoryStore {
     pub async fn fact_count(&self) -> Result<usize> {
         let rows = self
             .script(
-                "?[count(fact_id)] := *fact{fact_id, live: true}",
+                "?[count(prop_hi)] := *fact{prop_hi, live: true}",
                 BTreeMap::new(),
                 false,
             )
@@ -486,53 +623,128 @@ impl MemoryStore {
     }
 
     /// Ids of every fact currently stored, live or retired.
-    pub async fn all_fact_ids(&self) -> Result<Vec<i64>> {
+    pub async fn all_fact_ids(&self) -> Result<Vec<ObjectId>> {
         let rows = self
-            .script("?[fact_id] := *fact{fact_id}", BTreeMap::new(), false)
+            .script(
+                "?[prop_hi, prop_lo] := *fact{prop_hi, prop_lo}",
+                BTreeMap::new(),
+                false,
+            )
             .await?;
-        Ok(rows.rows.iter().filter_map(|r| r[0].get_int()).collect())
+        Ok(rows
+            .rows
+            .iter()
+            .filter_map(|r| Some(join(r[0].get_int()?, r[1].get_int()?)))
+            .collect())
     }
 
-    /// Reconcile the store against the session log.
+    /// Which sessions observed each stored proposition.
+    ///
+    /// This is what makes reconciliation safe once logs replicate: a fact
+    /// asserted only by sessions the caller can see is the caller's to drop; a
+    /// fact carrying an observation from some *other* session is not, because
+    /// the absence of that session's events proves nothing about the fact.
+    async fn observers(&self) -> Result<std::collections::BTreeMap<ObjectId, Vec<String>>> {
+        let rows = self
+            .script(
+                "?[prop_hi, prop_lo, source_session] := \
+                 *observation{source_session, prop_hi, prop_lo}",
+                BTreeMap::new(),
+                false,
+            )
+            .await?;
+        let mut out: std::collections::BTreeMap<ObjectId, Vec<String>> = Default::default();
+        for r in &rows.rows {
+            if let (Some(hi), Some(lo), Some(sess)) =
+                (r[0].get_int(), r[1].get_int(), r[2].get_str())
+            {
+                out.entry(join(hi, lo)).or_default().push(sess.to_owned());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Reconcile the store against a set of logs.
     ///
     /// Replay runs over `visible_events`, so a rewind that masks a
     /// `memory.written` event makes the corresponding fact disappear here too —
-    /// the same property `TodoStore` gets, for the same reason. Facts present
-    /// in the store but absent from the visible log are dropped; facts in the
-    /// log but missing from the store are reported so the caller can re-embed
-    /// and reinsert them (embedding is not recorded in the event, since it is
-    /// derivable and would bloat the log by 3 KB per fact).
-    pub async fn reconcile(&self, events: &[artist_session::Envelope]) -> Result<Reconciliation> {
-        let mut expected: std::collections::BTreeMap<i64, artist_session::MemoryWritten> =
+    /// the same property `TodoStore` gets, for the same reason.
+    ///
+    /// **A fact is only dropped if every session that observed it is present in
+    /// `events`.** Without that guard the rule "delete what this log does not
+    /// mention" erases a peer's facts the moment logs replicate, because the
+    /// local log has never mentioned them and never will. The observation rows
+    /// are what make the distinction expressible: they record *who* asserted a
+    /// proposition, so silence about a session you can see means the fact was
+    /// rewound, while silence about one you cannot see means nothing at all.
+    /// `embedder` names the embedding space this store's index lives in. A
+    /// logged vector from any other space is discarded rather than indexed:
+    /// same width, different geometry, and mixing them degrades recall with no
+    /// error anywhere to notice.
+    pub async fn reconcile(
+        &self,
+        events: &[artist_session::Envelope],
+        embedder: &str,
+    ) -> Result<Reconciliation> {
+        let mut expected: std::collections::BTreeMap<ObjectId, artist_session::MemoryWritten> =
             Default::default();
-        let mut retired: std::collections::BTreeSet<i64> = Default::default();
+        let mut retired: std::collections::BTreeSet<ObjectId> = Default::default();
+        let mut seen_sessions: std::collections::BTreeSet<String> = Default::default();
 
         for envelope in artist_session::visible_events(events) {
+            seen_sessions.insert(envelope.session.clone());
             if let artist_session::SessionEvent::MemoryWritten(written) = envelope.event() {
-                if written.scope != self.scope.as_str() {
-                    continue;
-                }
-                if let Some(old) = written.superseded {
+                if let Some(old) = written.superseded.as_deref().and_then(parse_id) {
                     retired.insert(old);
                 }
-                expected.insert(written.fact_id, written);
+                if let Some(id) = parse_id(&written.fact_id) {
+                    expected.insert(id, written);
+                }
             }
         }
 
+        let observers = self.observers().await?;
         let mut removed = Vec::new();
         for id in self.all_fact_ids().await? {
-            if !expected.contains_key(&id) {
+            if expected.contains_key(&id) {
+                continue;
+            }
+            let ours = observers
+                .get(&id)
+                .is_some_and(|s| s.iter().all(|sess| seen_sessions.contains(sess)));
+            if ours {
                 self.forget(id).await?;
                 removed.push(id);
             }
         }
 
-        let present: std::collections::BTreeSet<i64> =
+        let present: std::collections::BTreeSet<ObjectId> =
             self.all_fact_ids().await?.into_iter().collect();
-        let missing = expected
-            .into_values()
-            .filter(|w| !present.contains(&w.fact_id))
-            .collect();
+
+        // Reinsert whatever the log can supply outright. At the measured 6-7
+        // sequences/sec, re-deriving a peer's vectors is the difference between
+        // an import that finishes and one that does not.
+        let mut restored = 0usize;
+        let mut missing = Vec::new();
+        for (_, w) in expected.iter().filter(|(id, _)| !present.contains(id)) {
+            let reusable = w.embedding.len() == DIM && w.embedder == embedder && !embedder.is_empty();
+            if !reusable {
+                missing.push(w.clone());
+                continue;
+            }
+            self.put_facts(&[NewFact {
+                subject: w.subject.clone(),
+                predicate: w.predicate.clone(),
+                object: w.object.clone(),
+                text: w.text.clone(),
+                embedding: w.embedding.clone(),
+                source_session: String::new(),
+                source_seq: 0,
+                origin: w.origin.clone(),
+            }])
+            .await?;
+            restored += 1;
+        }
 
         // Re-apply retirements: a rewind can restore a fact that a later
         // supersession had retired, and vice versa.
@@ -542,14 +754,21 @@ impl MemoryStore {
             }
         }
 
-        Ok(Reconciliation { removed, missing })
+        Ok(Reconciliation {
+            removed,
+            missing,
+            restored,
+        })
     }
 
-    async fn mark_retired(&self, id: i64) -> Result<()> {
+    async fn mark_retired(&self, id: ObjectId) -> Result<()> {
+        let (hi, lo) = split(id);
         let mut params = BTreeMap::new();
-        params.insert("id".to_string(), DataValue::from(id));
+        params.insert("hi".to_string(), DataValue::from(hi));
+        params.insert("lo".to_string(), DataValue::from(lo));
         self.script(
-            "?[fact_id, live] := fact_id = $id, live = false :update fact {fact_id => live}",
+            "?[prop_hi, prop_lo, live] := prop_hi = $hi, prop_lo = $lo, live = false \
+             :update fact {prop_hi, prop_lo => live}",
             params,
             true,
         )
@@ -557,64 +776,6 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Insert facts at ids chosen by the caller, used when replaying the log.
-    pub async fn put_facts_with_ids(&self, facts: &[(i64, NewFact)]) -> Result<()> {
-        if facts.is_empty() {
-            return Ok(());
-        }
-        let mut rows = Vec::with_capacity(facts.len());
-        for (id, fact) in facts {
-            if fact.embedding.len() != DIM {
-                return Err(anyhow!(
-                    "embedding width {} does not match schema DIM {DIM}",
-                    fact.embedding.len()
-                ));
-            }
-            rows.push(DataValue::List(vec![
-                DataValue::from(*id),
-                DataValue::from(fact.subject.as_str()),
-                DataValue::from(fact.predicate.as_str()),
-                DataValue::from(fact.object.as_str()),
-                DataValue::from(fact.text.as_str()),
-                DataValue::List(
-                    fact.embedding
-                        .iter()
-                        .map(|f| DataValue::from(*f as f64))
-                        .collect(),
-                ),
-                DataValue::from(fact.source_session.as_str()),
-                DataValue::from(fact.source_seq),
-                DataValue::from(fact.origin.as_str()),
-            ]));
-            self.next_fact_id.fetch_max(*id + 1, Ordering::SeqCst);
-        }
-        let mut params = BTreeMap::new();
-        params.insert("rows".to_string(), DataValue::List(rows));
-        self.script(
-            r#"
-            raw[fact_id, subject, predicate, object, text, raw_emb,
-                source_session, source_seq, origin] <- $rows
-            ?[fact_id, subject, predicate, object, text, emb,
-              source_session, source_seq, origin] :=
-                raw[fact_id, subject, predicate, object, text, raw_emb,
-                    source_session, source_seq, origin],
-                emb = vec(raw_emb)
-            :put fact {fact_id => subject, predicate, object, text, emb,
-                       source_session, source_seq, origin}
-            "#,
-            params,
-            true,
-        )
-        .await?;
-        Ok(())
-    }
-
-    // ---- code chunks -----------------------------------------------------
-
-    /// The content hashes currently indexed for `path`, so an incremental pass
-    /// can re-embed only what actually moved. A full 40k-chunk index takes
-    /// close to two hours, so this comparison is what makes indexing a
-    /// resumable background job rather than a startup stall.
     pub async fn chunk_hashes(&self, path: &str) -> Result<Vec<(i64, String)>> {
         let mut params = BTreeMap::new();
         params.insert("path".to_string(), DataValue::from(path));
@@ -656,12 +817,19 @@ impl MemoryStore {
                 DataValue::from(chunk.start_line as i64),
                 DataValue::from(chunk.end_line as i64),
                 DataValue::from(chunk.body.as_str()),
-                DataValue::List(embedding.iter().map(|f| DataValue::from(*f as f64)).collect()),
+                DataValue::List(
+                    embedding
+                        .iter()
+                        .map(|f| DataValue::from(*f as f64))
+                        .collect(),
+                ),
                 DataValue::from(chunk.content_hash.as_str()),
             ]));
         }
         let mut params = BTreeMap::new();
         params.insert("rows".to_string(), DataValue::List(rows));
+        self.bump_id_mark("chunk", self.next_chunk_id.load(Ordering::SeqCst))
+            .await?;
         self.script(
             r#"
             raw[chunk_id, path, lang, start_line, end_line, body, raw_emb, content_hash] <- $rows
@@ -684,14 +852,14 @@ impl MemoryStore {
         let mut params = BTreeMap::new();
         params.insert(
             "ids".to_string(),
-            DataValue::List(ids.iter().map(|i| DataValue::List(vec![DataValue::from(*i)])).collect()),
+            DataValue::List(
+                ids.iter()
+                    .map(|i| DataValue::List(vec![DataValue::from(*i)]))
+                    .collect(),
+            ),
         );
-        self.script(
-            "?[chunk_id] <- $ids :rm chunk {chunk_id}",
-            params,
-            true,
-        )
-        .await?;
+        self.script("?[chunk_id] <- $ids :rm chunk {chunk_id}", params, true)
+            .await?;
         Ok(())
     }
 
@@ -708,7 +876,11 @@ impl MemoryStore {
 
     pub async fn chunk_count(&self) -> Result<usize> {
         let rows = self
-            .script("?[count(chunk_id)] := *chunk{chunk_id}", BTreeMap::new(), false)
+            .script(
+                "?[count(chunk_id)] := *chunk{chunk_id}",
+                BTreeMap::new(),
+                false,
+            )
             .await?;
         Ok(rows
             .rows
@@ -730,7 +902,12 @@ impl MemoryStore {
         let mut params = BTreeMap::new();
         params.insert(
             "qv".to_string(),
-            DataValue::List(query_vec.iter().map(|f| DataValue::from(*f as f64)).collect()),
+            DataValue::List(
+                query_vec
+                    .iter()
+                    .map(|f| DataValue::from(*f as f64))
+                    .collect(),
+            ),
         );
         params.insert("qt".to_string(), DataValue::from(query_text));
         let script = format!(
@@ -739,9 +916,9 @@ impl MemoryStore {
                                                ef: {ef}, bind_distance: __d }}, score = -__d
             txt[id, score] := ~chunk:body_fts{{ chunk_id: id | query: $qt, k: {leg_k},
                                                 bind_score: score }}
-            combined[__lid, id, score] := sem[id, score], __lid = 'semantic'
-            combined[__lid, id, score] := txt[id, score], __lid = 'text'
-            fused[id, score] <~ ReciprocalRankFusion(combined[__lid, id, score], k: 60.0)
+            combined[__lid, hi, lo, score] := sem[hi, lo, score], __lid = 'semantic'
+            combined[__lid, hi, lo, score] := txt[hi, lo, score], __lid = 'text'
+            fused[hi, lo, score] <~ ReciprocalRankFusion(combined[__lid, hi, lo, score], k: 60.0)
             ?[id, score, path, lang, start_line, end_line, body] :=
                 fused[id, score],
                 *chunk{{chunk_id: id, path, lang, start_line, end_line, body}}
@@ -775,7 +952,10 @@ impl MemoryStore {
         let this = self.clone();
         let wrapped = tokio::task::spawn_blocking(move || {
             this.db
-                .export_relations_str(r#"{"relations":["fact","chunk","meta"]}"#)
+                // `observation` is not optional here: without it every
+                // restored fact has zero known observers, and `reconcile`
+                // cannot tell a rewound session from one it simply cannot see.
+                .export_relations_str(r#"{"relations":["fact","observation","chunk","meta"]}"#)
         })
         .await
         .map_err(|e| anyhow!("export panicked: {e}"))?;
@@ -866,6 +1046,13 @@ fn fts_query(text: &str) -> Option<String> {
     Some(terms.join(" OR "))
 }
 
+fn index_kind(index: &str) -> &'static str {
+    match index {
+        "emb_idx" => "hnsw",
+        _ => "fts",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::fts_query;
@@ -888,7 +1075,10 @@ mod tests {
 
     #[test]
     fn fts_query_drops_operator_words_and_empty_input() {
-        assert_eq!(fts_query("tabs AND spaces").as_deref(), Some("tabs OR spaces"));
+        assert_eq!(
+            fts_query("tabs AND spaces").as_deref(),
+            Some("tabs OR spaces")
+        );
         assert_eq!(fts_query("").as_deref(), None);
         assert_eq!(fts_query("   ?!  ").as_deref(), None);
         assert_eq!(fts_query("AND OR NOT").as_deref(), None);
@@ -897,12 +1087,5 @@ mod tests {
     #[test]
     fn fts_query_keeps_non_ascii_words() {
         assert_eq!(fts_query("café — naïve").as_deref(), Some("café OR naïve"));
-    }
-}
-
-fn index_kind(index: &str) -> &'static str {
-    match index {
-        "emb_idx" => "hnsw",
-        _ => "fts",
     }
 }

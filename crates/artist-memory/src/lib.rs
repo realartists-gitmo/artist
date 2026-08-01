@@ -3,24 +3,28 @@
 //! The store is a **projection**, not the system of record. Facts are recorded
 //! as session events (`artist_session::MemoryWritten`) and replayed on open, so
 //! memory is rewind-aware for the same reason the todo list is, and a corrupt
-//! or format-broken database is a rebuild rather than data loss. That matters
-//! here specifically: the RocksDB backend commits without syncing its WAL, and
-//! the durability opt-in does not exist in the pinned release.
+//! or format-broken database is a rebuild rather than data loss.
 //!
-//! Layout mirrors how project instructions already layer — a global store for
-//! preferences that follow the user, a per-project store beside the existing
-//! tool state:
+//! **One undivided store.** There was a global store and a per-project store,
+//! layered the way project instructions layer. That is gone, and not for
+//! performance: scope is *logically* implicit. The representation in
+//! `artist-logic` is strict enough that retrieving something genuinely out of
+//! scope is unlikely, while retrieving a **cross-project** memory that is in
+//! scope is the whole value — and a hard partition made exactly that
+//! impossible. Splitting also forced fusing two independent RRF runs whose
+//! scores were never comparable, so ranking across the boundary was guesswork.
 //!
 //! ```text
-//! <config_root>/memory/global.rocks
-//! <config_root>/tools/<project-hash>/memory.rocks
+//! <config_root>/memory/facts.rocks
 //! ```
 
 pub mod admission;
+pub mod assertion_store;
 pub mod candidates;
 pub mod chunk;
 pub mod embed;
 pub mod graph_store;
+pub mod identity;
 pub mod index;
 pub mod relational;
 pub mod schema;
@@ -28,82 +32,49 @@ pub mod store;
 pub mod types;
 
 pub use admission::{Admission, admit};
+pub use assertion_store::{assertions_about, record_assertion};
 pub use chunk::{Chunker, chunk_source};
 pub use embed::Embedder;
 pub use index::{IndexReport, Indexer};
 pub use graph_store::{load_expression, store_expression};
 pub use relational::RelationalView;
 pub use store::{MemoryStore, Reconciliation};
-pub use types::{Chunk, CodeHit, Fact, Hit, NewFact, Scope};
+pub use types::{Chunk, CodeHit, Fact, Hit, NewFact};
+
+/// Re-exported so consumers can name a proposition id without depending on
+/// `artist-logic` directly. Facts live in the object graph's content space by
+/// design, not by coincidence — see [`identity`].
+pub use artist_logic::object::ObjectId;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Both stores, queried together and merged.
+/// The store.
 #[derive(Clone)]
 pub struct Memory {
-    global: MemoryStore,
-    project: MemoryStore,
+    facts: MemoryStore,
 }
 
 impl Memory {
-    pub async fn open(config_root: &Path, project_state_dir: &Path) -> Result<Self> {
-        let global = MemoryStore::open(global_path(config_root), Scope::Global).await?;
-        let project =
-            MemoryStore::open(project_state_dir.join("memory.rocks"), Scope::Project).await?;
-        Ok(Self { global, project })
+    pub async fn open(config_root: &Path) -> Result<Self> {
+        Ok(Self {
+            facts: MemoryStore::open(facts_path(config_root)).await?,
+        })
     }
 
-    pub fn global(&self) -> &MemoryStore {
-        &self.global
+    pub fn store(&self) -> &MemoryStore {
+        &self.facts
     }
 
-    pub fn project(&self) -> &MemoryStore {
-        &self.project
-    }
-
-    pub fn store(&self, scope: Scope) -> &MemoryStore {
-        match scope {
-            Scope::Global => &self.global,
-            Scope::Project => &self.project,
-        }
-    }
-
-    /// Search both stores and merge. Scores come from independent RRF runs, so
-    /// they are only comparable within a store; ranking across the two is by
-    /// score with project facts winning ties, mirroring "closest file wins" for
-    /// project instructions.
+    /// Search. One store means one RRF run, so scores are comparable and the
+    /// ranking is just the ranking — no cross-store tie-break to invent.
     pub async fn search(&self, query_text: &str, query_vec: &[f32], k: usize) -> Result<Vec<Hit>> {
-        let (project, global) = tokio::join!(
-            self.project.search_facts(query_text, query_vec, k),
-            self.global.search_facts(query_text, query_vec, k),
-        );
-        let mut hits = project?;
-        hits.extend(global?);
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.scope.cmp_priority(b.scope))
-        });
-        hits.truncate(k);
-        Ok(hits)
+        self.facts.search_facts(query_text, query_vec, k).await
     }
 }
 
-impl Scope {
-    fn cmp_priority(self, other: Scope) -> std::cmp::Ordering {
-        // Project before global on a tie.
-        match (self, other) {
-            (Scope::Project, Scope::Global) => std::cmp::Ordering::Less,
-            (Scope::Global, Scope::Project) => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        }
-    }
-}
-
-pub fn global_path(config_root: &Path) -> PathBuf {
-    config_root.join("memory").join("global.rocks")
+pub fn facts_path(config_root: &Path) -> PathBuf {
+    config_root.join("memory").join("facts.rocks")
 }
 
 /// Render hits for injection. Wrapped in a `<memory>` element with provenance
@@ -126,9 +97,8 @@ pub fn render(hits: &[Hit]) -> String {
     );
     for hit in hits {
         out.push_str(&format!(
-            "  <fact id=\"{}\" scope=\"{}\" origin=\"{}\" recorded=\"{}\">{}</fact>\n",
-            hit.id,
-            hit.scope.as_str(),
+            "  <fact id=\"{}\" origin=\"{}\" recorded=\"{}\">{}</fact>\n",
+            identity::handle(hit.id),
             xml(&hit.origin),
             iso_date(hit.created_at),
             xml(&hit.text)
@@ -186,7 +156,7 @@ mod tests {
     #[test]
     fn render_carries_the_id_and_the_date() {
         let hit = Hit {
-            id: 42,
+            id: identity::proposition_id("Adam prefers tabs"),
             score: 1.0,
             text: "Adam prefers tabs".into(),
             subject: String::new(),
@@ -194,10 +164,10 @@ mod tests {
             object: String::new(),
             origin: "correction".into(),
             created_at: 1_753_920_000.0,
-            scope: Scope::Global,
         };
+        let expected = identity::handle(hit.id);
         let out = render(&[hit]);
-        assert!(out.contains("id=\"42\""), "{out}");
+        assert!(out.contains(&format!("id=\"{expected}\"")), "{out}");
         assert!(out.contains("recorded=\"2025-07-31\""), "{out}");
         // Without this the id has no purpose the model knows about.
         assert!(out.contains("mode=supersede"), "{out}");

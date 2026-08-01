@@ -35,16 +35,20 @@
 //!   over the unexamined tail, so re-asking makes progress rather than
 //!   restarting — and resuming is just evaluating it.
 //! - **Infinite domains stay decidable in practice.** A counterexample refutes a
-//!   universal over ℕ in finite time; failing that, an interval abstraction with
-//!   widening can close the unbounded tail.
+//!   universal over ℕ in finite time; failing that, the linear fragment decides
+//!   what the body does over the whole unexamined tail — all of it, none of it,
+//!   or both, which are three different answers and were once conflated into
+//!   two.
 //! - **Evidence is four-valued.** Nothing known, contradictory, out of budget
 //!   and no-semantics are four different answers. A memory that ingests claims
 //!   from many sessions genuinely holds support for `P` and for `¬P` at once.
 //! - **Self-reference is representable.** The liar is constructible, storable
-//!   and printable. Evaluation gives it Kripke semantics: grounded sentences get
-//!   classical values, ungrounded-but-stable stay open, and ungrounded
-//!   oscillators report a contradiction — which is what distinguishes the liar
-//!   from the truth-teller.
+//!   and printable. Grounded sentences get classical values; ungrounded ones
+//!   get no value at all and are reported on a **separate axis** —
+//!   `StableLoop` for the truth-teller, `Oscillatory` for the liar. That is
+//!   *revision-theoretic*, not a monotone least fixed point. It is deliberately
+//!   not `Conflicted`: contradictory evidence means two sources to go and read,
+//!   and the liar has none.
 //!
 //! The maximality claim, stated exactly: **every finite or cyclic expression
 //! graph over arbitrary first-class objects, types, binders, operators and
@@ -58,6 +62,7 @@
 //! over them collectively, defining the describable ones structurally,
 //! referencing externally supplied ones, and returning honest partial results.
 
+pub mod certificate;
 pub mod evidence;
 pub mod graph_eval;
 pub mod object;

@@ -7,7 +7,7 @@
 //! rather than deleting them.
 
 use artist_memory::schema::DIM;
-use artist_memory::{MemoryStore, NewFact, Scope};
+use artist_memory::{MemoryStore, NewFact};
 use artist_session::{EventLogReader, EventLogWriter, MAIN_LINEAGE, MemoryWritten, SessionEvent};
 
 fn append(writer: &mut EventLogWriter, event: MemoryWritten) -> u64 {
@@ -43,17 +43,70 @@ fn new_fact(text: &str, seed: u64) -> NewFact {
     }
 }
 
-fn written(fact_id: i64, text: &str) -> MemoryWritten {
+fn written(text: &str) -> MemoryWritten {
     MemoryWritten {
-        fact_id,
-        scope: "project".into(),
+        fact_id: format!("{:032x}", artist_memory::identity::proposition_id(text).0),
         subject: "artist".into(),
         predicate: "does".into(),
         object: text.into(),
         text: text.into(),
         origin: "test".into(),
         superseded: None,
+        embedding: Vec::new(),
+        embedder: String::new(),
     }
+}
+
+/// The same event, but carrying a vector from a named embedding space.
+fn written_with_vector(text: &str, seed: u64, embedder: &str) -> MemoryWritten {
+    let mut w = written(text);
+    w.embedding = vector(seed);
+    w.embedder = embedder.into();
+    w
+}
+
+/// A peer's log should reinsert without a forward pass — that is the whole
+/// reason the vector is carried.
+#[tokio::test]
+async fn a_logged_vector_is_reused_instead_of_re_embedded() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path().join("session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
+    append(&mut writer, written_with_vector("rten runs on the CPU", 4, "gemma-768"));
+    let events = EventLogReader::new(&session_dir).read_all().unwrap();
+
+    let store = MemoryStore::open(dir.path().join("memory.rocks"))
+        .await
+        .unwrap();
+    let report = store.reconcile(&events, "gemma-768").await.unwrap();
+
+    assert_eq!(report.restored, 1, "the logged vector should have been reused");
+    assert!(report.missing.is_empty(), "nothing should need re-embedding");
+    assert_eq!(store.fact_count().await.unwrap(), 1);
+}
+
+/// A vector from a *different* model is the dangerous case: same width, other
+/// geometry. It must be refused rather than indexed.
+#[tokio::test]
+async fn a_vector_from_another_embedder_is_not_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path().join("session");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
+    append(&mut writer, written_with_vector("rten runs on the CPU", 4, "coderank-768"));
+    let events = EventLogReader::new(&session_dir).read_all().unwrap();
+
+    let store = MemoryStore::open(dir.path().join("memory.rocks"))
+        .await
+        .unwrap();
+    let report = store.reconcile(&events, "gemma-768").await.unwrap();
+
+    assert_eq!(report.restored, 0, "a foreign vector must not be indexed");
+    assert_eq!(report.missing.len(), 1, "it must be reported for re-embedding");
+    assert_eq!(store.fact_count().await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -62,7 +115,7 @@ async fn rewinding_past_a_write_removes_the_fact() {
     let session_dir = dir.path().join("session");
     std::fs::create_dir_all(&session_dir).unwrap();
 
-    let store = MemoryStore::open(dir.path().join("memory.rocks"), Scope::Project)
+    let store = MemoryStore::open(dir.path().join("memory.rocks"))
         .await
         .unwrap();
 
@@ -70,33 +123,35 @@ async fn rewinding_past_a_write_removes_the_fact() {
         .put_facts(&[new_fact("prefers tabs over spaces", 1), new_fact("uses fish shell", 2)])
         .await
         .unwrap();
-    assert_eq!(ids, vec![0, 1]);
+    assert_eq!(ids.len(), 2);
 
     let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
-    let first_seq = append(&mut writer, written(0, "prefers tabs over spaces"));
-    append(&mut writer, written(1, "uses fish shell"));
+    let first_seq = append(&mut writer, written("prefers tabs over spaces"));
+    append(&mut writer, written("uses fish shell"));
 
     // Nothing masked yet: both facts are accounted for.
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
-    let report = store.reconcile(&events).await.unwrap();
+    let report = store.reconcile(&events, "test-embedder").await.unwrap();
     assert!(report.is_clean(), "expected a clean reconcile, got {report:?}");
     assert_eq!(store.fact_count().await.unwrap(), 2);
 
     // Masks every event after `first_seq`, i.e. the second write.
     writer.append_rewind(first_seq, "test", "test").unwrap();
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
-    let report = store.reconcile(&events).await.unwrap();
+    let report = store.reconcile(&events, "test-embedder").await.unwrap();
 
     assert_eq!(
         report.removed,
-        vec![1],
+        vec![artist_memory::identity::proposition_id("uses fish shell")],
         "the masked fact should have been dropped, got {report:?}"
     );
     assert_eq!(store.fact_count().await.unwrap(), 1);
 
     let hits = store.search_facts("fish shell", &vector(2), 5).await.unwrap();
     assert!(
-        !hits.iter().any(|h| h.id == 1),
+        !hits
+            .iter()
+            .any(|h| h.id == artist_memory::identity::proposition_id("uses fish shell")),
         "a rewound fact must not be recallable, got {hits:?}"
     );
 }
@@ -108,14 +163,14 @@ async fn a_lost_store_reports_what_the_log_still_knows() {
     std::fs::create_dir_all(&session_dir).unwrap();
 
     let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
-    append(&mut writer, written(0, "the provider is the codex proxy"));
+    append(&mut writer, written("the provider is the codex proxy"));
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
 
     // A fresh store stands in for one lost to an unsynced WAL or a format break.
-    let store = MemoryStore::open(dir.path().join("memory.rocks"), Scope::Project)
+    let store = MemoryStore::open(dir.path().join("memory.rocks"))
         .await
         .unwrap();
-    let report = store.reconcile(&events).await.unwrap();
+    let report = store.reconcile(&events, "test-embedder").await.unwrap();
 
     assert!(report.removed.is_empty());
     assert_eq!(
@@ -123,33 +178,12 @@ async fn a_lost_store_reports_what_the_log_still_knows() {
         1,
         "the log should surface the fact the store lost, got {report:?}"
     );
-    assert_eq!(report.missing[0].fact_id, 0);
-    assert_eq!(report.missing[0].text, "the provider is the codex proxy");
-}
-
-#[tokio::test]
-async fn other_scopes_are_ignored_during_reconcile() {
-    let dir = tempfile::tempdir().unwrap();
-    let session_dir = dir.path().join("session");
-    std::fs::create_dir_all(&session_dir).unwrap();
-
-    let store = MemoryStore::open(dir.path().join("memory.rocks"), Scope::Project)
-        .await
-        .unwrap();
-    store.put_facts(&[new_fact("project scoped", 1)]).await.unwrap();
-
-    let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
-    append(&mut writer, written(0, "project scoped"));
-    // A global-scope write must not make the project store drop its own facts.
-    let mut global = written(7, "global scoped");
-    global.scope = "global".into();
-    append(&mut writer, global);
-
-    let events = EventLogReader::new(&session_dir).read_all().unwrap();
-    let report = store.reconcile(&events).await.unwrap();
-    assert!(
-        report.is_clean(),
-        "a global write must not disturb the project store, got {report:?}"
+    assert_eq!(
+        report.missing[0].fact_id,
+        format!(
+            "{:032x}",
+            artist_memory::identity::proposition_id("the provider is the codex proxy").0
+        )
     );
-    assert_eq!(store.fact_count().await.unwrap(), 1);
+    assert_eq!(report.missing[0].text, "the provider is the codex proxy");
 }

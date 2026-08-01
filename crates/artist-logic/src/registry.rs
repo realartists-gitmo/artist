@@ -121,12 +121,24 @@ impl OperatorRegistry {
             let mut r = EvaluationResult::new(ComputeStatus::Unsupported);
             r.residual = Some(node);
             r.dependencies = operands.to_vec();
-            r.snapshot = snapshot;
+            // Left as the operator set it: overwriting here discarded the very
+            // field `compose_snapshot` exists to inspect, so the guard at the
+            // registry boundary — documented as the one place the version
+            // invariant is load-bearing — could never fire.
+            if r.snapshot == 0 {
+                r.snapshot = snapshot;
+            }
             return r;
         };
         let mut cx = OpContext { graph, operands, budget, snapshot };
         if let Some(mut r) = sem.evaluate_exact(&mut cx) {
-            r.snapshot = snapshot;
+            // Left as the operator set it: overwriting here discarded the very
+            // field `compose_snapshot` exists to inspect, so the guard at the
+            // registry boundary — documented as the one place the version
+            // invariant is load-bearing — could never fire.
+            if r.snapshot == 0 {
+                r.snapshot = snapshot;
+            }
             return r;
         }
         let lower = sem.evaluate_lower(&mut cx);
@@ -149,7 +161,13 @@ impl OperatorRegistry {
             budget: &mut 0,
             snapshot,
         });
-        r.snapshot = snapshot;
+        // Left as the operator set it: overwriting here discarded the very
+            // field `compose_snapshot` exists to inspect, so the guard at the
+            // registry boundary — documented as the one place the version
+            // invariant is load-bearing — could never fire.
+            if r.snapshot == 0 {
+                r.snapshot = snapshot;
+            }
         r
     }
 }

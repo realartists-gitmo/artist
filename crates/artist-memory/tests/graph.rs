@@ -8,13 +8,13 @@
 use artist_logic::object::{Binding, CoreNode, ExternalRef, LiteralValue, wk};
 use artist_logic::syntax::print;
 use artist_logic::{ObjectGraph, ObjectId};
-use artist_memory::{MemoryStore, Scope, load_expression, store_expression};
+use artist_memory::{MemoryStore, load_expression, store_expression};
 use num_bigint::BigInt;
 use tempfile::TempDir;
 
 async fn store() -> (TempDir, MemoryStore) {
     let dir = TempDir::new().expect("tempdir");
-    let s = MemoryStore::open(dir.path().join("t.rocks"), Scope::Project)
+    let s = MemoryStore::open(dir.path().join("t.rocks"))
         .await
         .expect("open");
     (dir, s)

@@ -34,6 +34,8 @@
 //! over the handful of candidates retrieval returns, which is both cheap and
 //! reproducible.
 
+use artist_logic::object::ObjectId;
+
 /// Above this Jaccard similarity, two facts are about the same thing.
 ///
 /// Measured rather than guessed, over a corpus of revision pairs and unrelated
@@ -53,10 +55,10 @@ pub enum Admission {
     Insert,
     /// It repeats a stored fact verbatim, modulo case, spacing and trailing
     /// punctuation. Discard it.
-    Restates(i64),
+    Restates(ObjectId),
     /// It says something different about the same subject. Insert, and retire
     /// the fact it revises.
-    Revises(i64),
+    Revises(ObjectId),
 }
 
 /// Decide, given whatever retrieval turned up for this text.
@@ -66,12 +68,12 @@ pub enum Admission {
 /// than one clears it the most similar is revised: the store self-prunes,
 /// since every revision retires what it revised, so a cluster is rare and
 /// picking the closest is the least surprising resolution.
-pub fn admit(text: &str, candidates: &[(i64, String)]) -> Admission {
+pub fn admit(text: &str, candidates: &[(ObjectId, String)]) -> Admission {
     let normalized = normalize(text);
     if normalized.is_empty() {
         return Admission::Insert;
     }
-    let mut best: Option<(i64, f64)> = None;
+    let mut best: Option<(ObjectId, f64)> = None;
     for (id, candidate) in candidates {
         let other = normalize(candidate);
         if other == normalized {
@@ -92,7 +94,7 @@ pub fn admit(text: &str, candidates: &[(i64, String)]) -> Admission {
 ///
 /// The point is that "Adam prefers tabs." and "adam prefers  tabs" are the
 /// same belief written twice, and should not produce two ids.
-fn normalize(text: &str) -> String {
+pub fn normalize(text: &str) -> String {
     let lowered = text.to_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed
@@ -125,6 +127,13 @@ fn shingles(text: &str) -> std::collections::BTreeSet<String> {
 mod tests {
     use super::*;
 
+    /// A stand-in proposition id; these tests are about the decision, not
+    /// about identity derivation.
+    fn id(n: u128) -> ObjectId {
+        ObjectId(n)
+    }
+
+
     #[test]
     fn nothing_stored_means_insert() {
         assert_eq!(admit("Adam prefers tabs", &[]), Admission::Insert);
@@ -132,10 +141,10 @@ mod tests {
 
     #[test]
     fn a_restatement_is_discarded() {
-        let stored = [(7, "Adam prefers tabs over spaces.".to_owned())];
+        let stored = [(id(7), "Adam prefers tabs over spaces.".to_owned())];
         assert_eq!(
             admit("adam prefers  tabs over spaces", &stored),
-            Admission::Restates(7)
+            Admission::Restates(id(7))
         );
     }
 
@@ -143,10 +152,10 @@ mod tests {
     /// suppressed is the one that reverses a stored belief.
     #[test]
     fn a_negation_revises_rather_than_duplicating() {
-        let stored = [(7, "always use tabs for indentation in this repo".to_owned())];
+        let stored = [(id(7), "always use tabs for indentation in this repo".to_owned())];
         assert_eq!(
             admit("never use tabs for indentation in this repo", &stored),
-            Admission::Revises(7)
+            Admission::Revises(id(7))
         );
     }
 
@@ -154,22 +163,22 @@ mod tests {
     /// negation word — which is why this is not a vocabulary test.
     #[test]
     fn a_changed_value_also_revises() {
-        let stored = [(3, "embeddings are produced by rten running CodeRankEmbed".to_owned())];
+        let stored = [(id(3), "embeddings are produced by rten running CodeRankEmbed".to_owned())];
         assert_eq!(
             admit("embeddings are produced by rten running bge-small", &stored),
-            Admission::Revises(3)
+            Admission::Revises(id(3))
         );
     }
 
     #[test]
     fn the_closest_candidate_is_the_one_revised() {
         let stored = [
-            (1, "the canvas server hot-reloads React apps".to_owned()),
-            (2, "always use tabs for indentation in this repo".to_owned()),
+            (id(1), "the canvas server hot-reloads React apps".to_owned()),
+            (id(2), "always use tabs for indentation in this repo".to_owned()),
         ];
         assert_eq!(
             admit("never use tabs for indentation in this repo", &stored),
-            Admission::Revises(2)
+            Admission::Revises(id(2))
         );
     }
 
@@ -178,12 +187,12 @@ mod tests {
     #[test]
     fn an_exact_match_beats_a_similar_one() {
         let stored = [
-            (1, "always use tabs for indentation".to_owned()),
-            (2, "Always use tabs for indentation in this repo.".to_owned()),
+            (id(1), "always use tabs for indentation".to_owned()),
+            (id(2), "Always use tabs for indentation in this repo.".to_owned()),
         ];
         assert_eq!(
             admit("always use tabs for indentation in this repo", &stored),
-            Admission::Restates(2)
+            Admission::Restates(id(2))
         );
     }
 
@@ -191,7 +200,7 @@ mod tests {
     /// is merely related and must survive untouched.
     #[test]
     fn a_related_but_different_fact_is_not_retired() {
-        let stored = [(1, "Adam prefers dark mode in the terminal".to_owned())];
+        let stored = [(id(1), "Adam prefers dark mode in the terminal".to_owned())];
         assert_eq!(
             admit("Adam prefers tabs over spaces", &stored),
             Admission::Insert
@@ -264,8 +273,8 @@ mod tests {
                 "{new:?} should revise {old:?}, scored {score:.3}"
             );
             assert_eq!(
-                admit(new, &[(1, (*old).to_owned())]),
-                Admission::Revises(1),
+                admit(new, &[(id(1), (*old).to_owned())]),
+                Admission::Revises(id(1)),
                 "{new:?} vs {old:?}"
             );
         }
@@ -275,7 +284,7 @@ mod tests {
                 score < REVISION_SIMILARITY,
                 "{a:?} and {b:?} are unrelated but scored {score:.3}"
             );
-            assert_eq!(admit(b, &[(1, (*a).to_owned())]), Admission::Insert);
+            assert_eq!(admit(b, &[(id(1), (*a).to_owned())]), Admission::Insert);
         }
     }
 }

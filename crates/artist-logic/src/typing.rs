@@ -151,8 +151,14 @@ fn apply_rule(
         | wk::EVENTUALLY | wk::SINCE | wk::COUNTERFACTUAL | wk::BEFORE | wk::DURING => {
             Typing::Known(wk::PROP_TYPE)
         }
+        // `World` and `Context` are sorts in their own right, not propositions.
+        // They fell to the catch-all below and were typed `Prop` — which is how
+        // §4's sentence claiming `typing.rs` interprets the type constructors
+        // covered them by assertion rather than by code. They were the last two
+        // `wk::` constants referenced nowhere outside their own declaration.
         wk::RELATION_TYPE | wk::FUNCTION_TYPE | wk::PRODUCT_TYPE | wk::SUM_TYPE
-        | wk::REFINEMENT_TYPE => {
+        | wk::REFINEMENT_TYPE | wk::WORLD_TYPE | wk::CONTEXT_TYPE | wk::PROP_TYPE
+        | wk::EXPR_TYPE => {
             // A type expression inhabits the next universe up.
             let zero = g.int(0);
             Typing::Known(g.apply(wk::UNIVERSE, vec![zero]))

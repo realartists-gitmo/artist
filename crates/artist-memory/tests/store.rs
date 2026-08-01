@@ -7,7 +7,7 @@
 //! removes it from vector recall.
 
 use artist_memory::schema::DIM;
-use artist_memory::{MemoryStore, NewFact, Scope};
+use artist_memory::{MemoryStore, NewFact};
 
 /// Deterministic unit-ish vector, distinct per seed.
 fn vector(seed: u64) -> Vec<f32> {
@@ -38,7 +38,7 @@ fn fact(text: &str, seed: u64) -> NewFact {
 }
 
 async fn store(dir: &tempfile::TempDir) -> MemoryStore {
-    MemoryStore::open(dir.path().join("memory.rocks"), Scope::Project)
+    MemoryStore::open(dir.path().join("memory.rocks"))
         .await
         .expect("open store")
 }
@@ -48,7 +48,7 @@ async fn schema_applies_and_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.rocks");
 
-    let first = MemoryStore::open(&path, Scope::Project).await.unwrap();
+    let first = MemoryStore::open(&path).await.unwrap();
     // The constant, not a literal — a legitimate DDL bump should not
     // require editing this assertion.
     assert_eq!(
@@ -58,7 +58,7 @@ async fn schema_applies_and_is_idempotent() {
     drop(first);
 
     // Re-opening must not attempt to recreate relations or indexes.
-    let second = MemoryStore::open(&path, Scope::Project).await.unwrap();
+    let second = MemoryStore::open(&path).await.unwrap();
     assert_eq!(
         second.schema_version().await.unwrap(),
         Some(artist_memory::schema::SCHEMA_VERSION)
@@ -77,7 +77,14 @@ async fn facts_round_trip_through_vector_and_text_search() {
         fact("the todo list survives a handoff verbatim", 3),
     ];
     let ids = store.put_facts(&facts).await.unwrap();
-    assert_eq!(ids, vec![0, 1, 2]);
+    // Ids are derived from content, not allocated, so they are exactly what
+    // any machine would derive for the same text — which is what makes two
+    // peers converge on one row instead of accumulating a copy each.
+    let expected: Vec<_> = facts
+        .iter()
+        .map(|f| artist_memory::identity::proposition_id(&f.text))
+        .collect();
+    assert_eq!(ids, expected);
     assert_eq!(store.fact_count().await.unwrap(), 3);
 
     // The lexical leg alone should find this by wording.
@@ -94,7 +101,9 @@ async fn facts_round_trip_through_vector_and_text_search() {
     let hits = store.search_facts("nothing lexical here", &vector(3), 5).await.unwrap();
     assert_eq!(
         hits.first().map(|h| h.id),
-        Some(2),
+        Some(artist_memory::identity::proposition_id(
+            "the todo list survives a handoff verbatim"
+        )),
         "expected the exact-vector match to rank first, got {hits:?}"
     );
 }
@@ -109,14 +118,17 @@ async fn superseding_removes_a_fact_from_vector_recall() {
         .await
         .unwrap();
 
-    let before = store.search_facts("model", &vector(1), 10).await.unwrap();
-    assert!(before.iter().any(|h| h.id == 0), "fact 0 should start visible");
+    let old = artist_memory::identity::proposition_id("the model is gpt-4");
+    let new = artist_memory::identity::proposition_id("the model is opus");
 
-    store.supersede(0, 1).await.unwrap();
+    let before = store.search_facts("model", &vector(1), 10).await.unwrap();
+    assert!(before.iter().any(|h| h.id == old), "the old fact should start visible");
+
+    store.supersede(old, new).await.unwrap();
 
     let after = store.search_facts("model", &vector(1), 10).await.unwrap();
     assert!(
-        !after.iter().any(|h| h.id == 0),
+        !after.iter().any(|h| h.id == old),
         "superseded fact must leave recall; the HNSW create-time `filter: live` \
          is what enforces this, so a regression here means the index lost its filter"
     );
@@ -146,7 +158,9 @@ async fn revision_candidates_surface_a_restatement() {
         .await
         .unwrap();
     assert!(
-        candidates.iter().any(|(id, _)| *id == 0),
+        candidates
+            .iter()
+            .any(|(id, _)| *id == artist_memory::identity::proposition_id(original)),
         "a near-identical restatement must be a candidate, got {candidates:?}"
     );
 
@@ -155,12 +169,25 @@ async fn revision_candidates_surface_a_restatement() {
     // than in the query.
     assert_eq!(
         artist_memory::admit(&restatement, &candidates),
-        artist_memory::Admission::Revises(0)
+        artist_memory::Admission::Revises(artist_memory::identity::proposition_id(original))
     );
     assert_eq!(
         artist_memory::admit("the terminal renders with ratatui and syntect", &candidates),
         artist_memory::Admission::Insert
     );
+}
+
+async fn observation_count(store: &MemoryStore) -> usize {
+    store
+        .script(
+            "?[source_session, source_seq] := *observation{source_session, source_seq}",
+            Default::default(),
+            false,
+        )
+        .await
+        .unwrap()
+        .rows
+        .len()
 }
 
 #[tokio::test]
@@ -179,6 +206,15 @@ async fn export_and_import_round_trips_through_a_fresh_store() {
     target.import_json(payload).await.unwrap();
 
     assert_eq!(target.fact_count().await.unwrap(), 2);
+    // A backup that drops the observation rows restores facts nobody is
+    // recorded as having asserted, which silently disarms the reconcile guard
+    // that keeps a peer's facts from being retired.
+    assert_eq!(observation_count(&source).await, 2, "one observation per write");
+    assert_eq!(
+        observation_count(&target).await,
+        2,
+        "restored store lost its observations"
+    );
     // import_json reindexes, so search must work on the restored store.
     let hits = target
         .search_facts("compaction", &vector(1), 5)

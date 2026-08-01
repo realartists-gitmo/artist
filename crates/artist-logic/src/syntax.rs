@@ -5,8 +5,14 @@
 //!
 //! * **Lossless round trip.** Print then parse yields a graph with the same
 //!   shape, including sharing and cycles.
-//! * **Explicit binder identity.** Variables are objects, so a printed form
-//!   carries their identity and reparsing cannot capture anything.
+//! * **Alpha-invariant binders.** Binders are stored as de Bruijn indices and
+//!   carry no variable identity at all — the printer *generates* `v0`, `v1` on
+//!   the way out. Two alpha-equivalent expressions therefore print identically
+//!   and hash identically, which is what a content-addressed store requires.
+//!   (This used to claim the opposite — "variables are objects, so a printed
+//!   form carries their identity" — describing the design that was replaced
+//!   precisely because a name in an unhashed field gave two alpha-equivalent
+//!   nodes one id and two encodings.)
 //! * **Cycles.** Datum labels — `#3=(...)` to define, `#3#` to refer — so a
 //!   self-referential proposition prints and reparses.
 //! * **Unknown-node preservation.** An `Opaque` node from a producer this build
@@ -18,14 +24,18 @@
 //! semantics.
 
 use crate::object::{
-    Binding, CoreNode, ExternalRef, LiteralValue, ObjectGraph, ObjectId, wk,
+    Binder, Binding, CoreNode, ExternalRef, LiteralValue, ObjectGraph, ObjectId, wk,
 };
 use num_bigint::BigInt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 /// Binary format version. Bump on any encoding change.
-pub const BINARY_VERSION: u8 = 1;
+///
+/// 2: stored binder slots lost their variable id. A slot is now a domain and
+/// nothing else, so a v1 encoding would be misread field-for-field rather than
+/// failing loudly.
+pub const BINARY_VERSION: u8 = 2;
 
 // ---- printing ----------------------------------------------------------
 
@@ -42,7 +52,8 @@ pub fn print(g: &ObjectGraph, root: ObjectId) -> String {
     }
     let mut emitted = BTreeSet::new();
     let mut out = String::new();
-    write_node(g, root, &labels, &mut emitted, &mut out);
+    let mut scope: Vec<String> = Vec::new();
+    write_node(g, root, &labels, &mut emitted, &mut scope, &mut out);
     out
 }
 
@@ -59,10 +70,12 @@ fn mark(
     }
     if !seen.insert(id) {
         // Only compound nodes are worth labelling; atoms print compactly.
-        if matches!(
-            g.get(id),
-            Some(CoreNode::Apply { .. }) | Some(CoreNode::Bind { .. })
-        ) {
+        if g.as_bvar(id).is_none()
+            && matches!(
+                g.get(id),
+                Some(CoreNode::Apply { .. }) | Some(CoreNode::Bind { .. })
+            )
+        {
             repeated.insert(id);
         }
         return;
@@ -79,6 +92,7 @@ fn write_node(
     id: ObjectId,
     labels: &BTreeMap<ObjectId, usize>,
     emitted: &mut BTreeSet<ObjectId>,
+    scope: &mut Vec<String>,
     out: &mut String,
 ) {
     if let Some(n) = labels.get(&id) {
@@ -95,6 +109,10 @@ fn write_node(
             let _ = write!(out, "{id}");
         }
         Some(CoreNode::Atom { name }) => match name {
+            // The truth atoms print with the sigil the reader expects, so they
+            // survive a round trip as themselves rather than as Bool literals.
+            _ if id == wk::TOP => out.push_str("#true"),
+            _ if id == wk::BOT => out.push_str("#false"),
             Some(n) => out.push_str(&escape_atom(n)),
             None => {
                 let _ = write!(out, "{id}");
@@ -102,55 +120,85 @@ fn write_node(
         },
         Some(CoreNode::Literal(v)) => out.push_str(&print_literal(v)),
         Some(CoreNode::Apply { operator, operands }) => {
+            // A bound occurrence prints as the name its binder was given, not
+            // as `(bvar k)`: the index is the storage form, the name is the
+            // reading form, and both denote the same slot.
+            if let Some(k) = g.as_bvar(id) {
+                match scope.len().checked_sub(k + 1).and_then(|i| scope.get(i)) {
+                    Some(name) => out.push_str(name),
+                    // Free of every enclosing binder — print the index, which
+                    // is the honest thing to say about an unbound occurrence.
+                    None => {
+                        let _ = write!(out, "(bvar {k})");
+                    }
+                }
+                return;
+            }
             out.push('(');
-            write_node(g, *operator, labels, emitted, out);
+            write_node(g, *operator, labels, emitted, scope, out);
             for o in operands {
                 out.push(' ');
-                write_node(g, *o, labels, emitted, out);
+                write_node(g, *o, labels, emitted, scope, out);
             }
             out.push(')');
         }
         Some(CoreNode::Bind { binder, vars, bodies }) => {
             out.push('(');
-            write_node(g, *binder, labels, emitted, out);
-            out.push_str(" (");
+            write_node(g, *binder, labels, emitted, scope, out);
+            out.push_str(" [");
+            // Slots carry no name, so the canonical printer generates one.
+            // Display names are deliberately not stored: a name inside the node
+            // that the hash ignored would give alpha-equivalent expressions one
+            // id and two different byte encodings, and `intern`'s
+            // first-writer-wins would pick between them by accident.
+            let outer = scope.len();
             for (i, b) in vars.iter().enumerate() {
                 if i > 0 {
                     out.push(' ');
                 }
-                out.push('(');
-                write_node(g, b.var, labels, emitted, out);
+                let name = format!("v{}", outer + i);
+                let _ = write!(out, "({name}");
                 if let Some(d) = b.domain {
                     out.push(' ');
-                    write_node(g, d, labels, emitted, out);
+                    // Telescoping: slot i's domain sees slots 0..i.
+                    scope.truncate(outer);
+                    for j in 0..i {
+                        scope.push(format!("v{}", outer + j));
+                    }
+                    write_node(g, d, labels, emitted, scope, out);
                 }
                 out.push(')');
             }
-            out.push(')');
+            out.push(']');
+            scope.truncate(outer);
+            for i in 0..vars.len() {
+                scope.push(format!("v{}", outer + i));
+            }
             for b in bodies {
                 out.push(' ');
-                write_node(g, *b, labels, emitted, out);
+                write_node(g, *b, labels, emitted, scope, out);
             }
+            scope.truncate(outer);
             out.push(')');
         }
         Some(CoreNode::External(r)) => {
-            let _ = write!(out, "(external {} {}", escape_atom(&r.namespace), hex(&r.locator));
+            let _ = write!(out, "(#external {} {}", escape_atom(&r.namespace), hex_field(&r.locator));
             match &r.version {
                 Some(v) => {
-                    let _ = write!(out, " {}", hex(v));
+                    let _ = write!(out, " {}", hex_field(v));
                 }
                 None => out.push_str(" -"),
             }
             match &r.digest {
                 Some(d) => {
-                    let _ = write!(out, " {}", hex(d));
+                    let _ = write!(out, " {}", hex_field(d));
                 }
                 None => out.push_str(" -"),
             }
             out.push(')');
         }
         Some(CoreNode::Opaque { tag, payload }) => {
-            let _ = write!(out, "(opaque {} {})", escape_atom(tag), hex(payload));
+            let _ = write!(out, "(#opaque {} {})", escape_atom(tag), hex_field(payload));
         }
     }
 }
@@ -166,9 +214,8 @@ fn print_literal(v: &LiteralValue) -> String {
 }
 
 fn escape_atom(s: &str) -> String {
-    if s.is_empty()
-        || s.chars().any(|c| c.is_whitespace() || "()\"#|".contains(c))
-        || s.parse::<BigInt>().is_ok()
+    if s.is_empty() || s.chars().any(|c| c.is_whitespace() || "()\"#|".contains(c))
+        || reads_as_literal(s)
     {
         format!("|{}|", s.replace('|', "\\|"))
     } else {
@@ -176,12 +223,66 @@ fn escape_atom(s: &str) -> String {
     }
 }
 
+/// Would this bare token be read back as a **literal** rather than an atom?
+///
+/// The guard used to be `s.parse::<BigInt>().is_ok()` alone, which covers
+/// exactly one of the four literal syntaxes the reader recognises. So an atom
+/// named `1d2` printed bare and reparsed as `Decimal { mantissa: 1, scale: 2 }`,
+/// `0xff` as `Bytes([255])`, and `true` as a `Bool` — the round-trip property
+/// held on the *text* every time while the meaning changed underneath it.
+///
+/// That is the same bug as `wk::TOP` printing as `true`, in the section of the
+/// spec that describes that bug as fixed. Text equality was too weak to catch
+/// it then and is too weak now, which is why `tests/properties.rs` compares
+/// *evaluated results* over generated names.
+///
+/// This mirrors `Reader::atom_or_literal` and has to keep mirroring it: a new
+/// literal syntax without a matching case here reintroduces the whole class.
+fn reads_as_literal(s: &str) -> bool {
+    if s == "true" || s == "false" {
+        return true;
+    }
+    if let Some(h) = s.strip_prefix("0x") {
+        return unhex(h).is_some();
+    }
+    if let Some((m, scale)) = s.split_once('d')
+        && m.parse::<BigInt>().is_ok()
+        && scale.parse::<i32>().is_ok()
+    {
+        return true;
+    }
+    s.parse::<BigInt>().is_ok()
+}
+
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// A byte field, where **empty is a value and needs a glyph**.
+///
+/// `hex(&[])` is zero characters wide, so an `Opaque` with an empty payload
+/// printed as `(#opaque e )` and the reader failed on the missing token. Empty
+/// also cannot borrow `-`, which already means *absent* for the optional
+/// version and digest — `Some(vec![])` and `None` are different facts.
+fn hex_field(b: &[u8]) -> String {
+    if b.is_empty() {
+        ".".to_string()
+    } else {
+        hex(b)
+    }
+}
+
+/// Inverse of [`hex_field`]; `None` here means the field was malformed, not
+/// that it was absent — absence is the caller's `-` check.
+fn unhex_field(s: &str) -> Option<Vec<u8>> {
+    if s == "." {
+        return Some(Vec::new());
+    }
+    unhex(s)
+}
+
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -219,10 +320,47 @@ impl<'a> Parser<'a> {
         self.s.get(self.i).copied()
     }
 
+    /// Consume `kw` when it appears as a whole head token.
+    ///
+    /// The delimiter check is what makes this safe: without it `#opaque` would
+    /// also match a hypothetical `#opaquer`, and a head that merely *starts*
+    /// with the keyword would be silently rewritten into a node shape.
+    fn eat_head(&mut self, kw: &[u8]) -> bool {
+        if !self.s[self.i..].starts_with(kw) {
+            return false;
+        }
+        match self.s.get(self.i + kw.len()) {
+            // End of input ends the token too: `#true` may be the whole
+            // expression, not only a head inside a list.
+            None => {
+                self.i += kw.len();
+                true
+            }
+            Some(c)
+                if (*c as char).is_whitespace()
+                    || *c == b'('
+                    || *c == b')'
+                    || *c == b'[' =>
+            {
+                self.i += kw.len();
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
     fn expr(&mut self, g: &mut ObjectGraph) -> Result<ObjectId, String> {
         self.ws();
         // Datum label: #N=... defines, #N# refers, #<hex> is a raw id.
         if self.peek() == Some(b'#') {
+            // The truth *atoms*, before the raw-id reader gets to them: `#true`
+            // is not hex and would otherwise fail as "bad object id".
+            if self.eat_head(b"#true") {
+                return Ok(wk::TOP);
+            }
+            if self.eat_head(b"#false") {
+                return Ok(wk::BOT);
+            }
             let start = self.i;
             self.i += 1;
             let digits = self.take_while(|c| c.is_ascii_digit());
@@ -255,28 +393,31 @@ impl<'a> Parser<'a> {
 
         if self.peek() == Some(b'(') {
             self.i += 1;
-            let head = self.expr(g)?;
-            // `(external ...)` and `(opaque ...)` are node shapes, not applies.
-            if head == wk::name_of(head).and(Some(head)).unwrap_or(head) {
-                if let Some(CoreNode::Atom { name: Some(n) }) = g.get(head).cloned() {
-                    if n == "external" {
-                        return self.finish_external(g);
-                    }
-                    if n == "opaque" {
-                        return self.finish_opaque(g);
-                    }
-                }
+            self.ws();
+            // `External` and `Opaque` are node *shapes*, not applications, so
+            // they need a head the reader can tell from an operator. They used
+            // to be recognised by the atom names `external` and `opaque`, which
+            // silently reserved those two names: `(external a)` as an ordinary
+            // application failed to parse at all. The `#` sigil cannot collide
+            // with a raw id or a datum label, both of which require digits
+            // immediately after it.
+            if self.eat_head(b"#external") {
+                return self.finish_external(g);
             }
+            if self.eat_head(b"#opaque") {
+                return self.finish_opaque(g);
+            }
+            let head = self.expr(g)?;
             // Binder form: second token is a parenthesised binding list.
             self.ws();
-            let is_bind = self.peek() == Some(b'(') && self.looks_like_bindings();
+            let is_bind = self.peek() == Some(b'[');
             if is_bind {
-                self.i += 1; // consume '('
+                self.i += 1; // consume '['
                 let mut vars = Vec::new();
                 loop {
                     self.ws();
                     match self.peek() {
-                        Some(b')') => {
+                        Some(b']') => {
                             self.i += 1;
                             break;
                         }
@@ -328,16 +469,6 @@ impl<'a> Parser<'a> {
         self.atom_or_literal(g)
     }
 
-    /// A binding list is `((v ...) ...)` or `()` — its first inner token is a
-    /// `(` or an immediate `)`.
-    fn looks_like_bindings(&self) -> bool {
-        let mut j = self.i + 1;
-        while j < self.s.len() && (self.s[j] as char).is_whitespace() {
-            j += 1;
-        }
-        matches!(self.s.get(j), Some(b'(') | Some(b')'))
-    }
-
     fn finish_external(&mut self, g: &mut ObjectGraph) -> Result<ObjectId, String> {
         let ns = self.token()?;
         let loc = self.token()?;
@@ -351,7 +482,7 @@ impl<'a> Parser<'a> {
         let digest = if dig == "-" {
             None
         } else {
-            let v = unhex(&dig).ok_or("bad digest")?;
+            let v = unhex_field(&dig).ok_or("bad digest")?;
             let mut d = [0u8; 32];
             if v.len() != 32 {
                 return Err("digest must be 32 bytes".into());
@@ -361,8 +492,8 @@ impl<'a> Parser<'a> {
         };
         Ok(g.external(ExternalRef {
             namespace: unquote(&ns),
-            locator: unhex(&loc).ok_or("bad locator")?,
-            version: if ver == "-" { None } else { Some(unhex(&ver).ok_or("bad version")?) },
+            locator: unhex_field(&loc).ok_or("bad locator")?,
+            version: if ver == "-" { None } else { Some(unhex_field(&ver).ok_or("bad version")?) },
             digest,
         }))
     }
@@ -377,7 +508,7 @@ impl<'a> Parser<'a> {
         self.i += 1;
         Ok(g.intern(CoreNode::Opaque {
             tag: unquote(&tag),
-            payload: unhex(&payload).ok_or("bad opaque payload")?,
+            payload: unhex_field(&payload).ok_or("bad opaque payload")?,
         }))
     }
 
@@ -435,14 +566,30 @@ impl<'a> Parser<'a> {
             return Err("unterminated string".into());
         }
         let t = self.token()?;
+        // `true`/`false` are Bool *literals*; the well-known truth *atoms* are
+        // `#true`/`#false` and are handled in the `#` branch above, before the
+        // raw-id reader. They are different objects with different evaluation
+        // behaviour — the atoms are Supported/Refuted, the literals are
+        // Unsupported — and the atoms previously had no surface form at all, so
+        // a graph containing `wk::TOP` printed as "true", reparsed as a
+        // literal, and silently changed meaning while satisfying the
+        // round-trip property.
         if t == "true" {
             return Ok(g.boolean(true));
         }
         if t == "false" {
             return Ok(g.boolean(false));
         }
-        if let Some(h) = t.strip_prefix("0x") {
-            return Ok(g.lit(LiteralValue::Bytes(unhex(h).ok_or("bad bytes")?)));
+        // A malformed byte literal is an *atom named* `0x…`, not an error. The
+        // reader used to bail here, which made `0x.f` unreadable even though
+        // nothing could have produced it as a literal — so the printer and the
+        // reader disagreed about which tokens were literals at all, and the
+        // disagreement was a parse failure rather than a wrong meaning. The
+        // decimal case has always fallen through this way.
+        if let Some(h) = t.strip_prefix("0x")
+            && let Some(bytes) = unhex(h)
+        {
+            return Ok(g.lit(LiteralValue::Bytes(bytes)));
         }
         if let Some((m, s)) = t.split_once('d')
             && let (Ok(mantissa), Ok(scale)) = (m.parse::<BigInt>(), s.parse::<i32>())
@@ -496,8 +643,9 @@ pub fn to_bytes(g: &ObjectGraph, root: ObjectId) -> Vec<u8> {
                 out.push(4);
                 push_u128(&mut out, binder.0);
                 push_u64(&mut out, vars.len() as u64);
+                // A stored slot is a domain and nothing else — no variable id,
+                // which is what makes alpha-equivalent binders one object.
                 for b in vars {
-                    push_u128(&mut out, b.var.0);
                     match b.domain {
                         Some(d) => {
                             out.push(1);
@@ -574,10 +722,9 @@ pub fn from_bytes(g: &mut ObjectGraph, buf: &[u8]) -> Result<ObjectId, String> {
                 let k = c.u64()? as usize;
                 let mut vars = Vec::with_capacity(k);
                 for _ in 0..k {
-                    let var = ObjectId(c.u128()?);
                     let domain =
                         if c.u8()? == 1 { Some(ObjectId(c.u128()?)) } else { None };
-                    vars.push(Binding { var, domain });
+                    vars.push(Binder { domain });
                 }
                 let m = c.u64()? as usize;
                 let mut bodies = Vec::with_capacity(m);

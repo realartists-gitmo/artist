@@ -42,7 +42,7 @@
 //! decision is made exactly, in `admission.rs`.
 
 /// Bumped whenever the DDL below changes in a way that needs a rebuild.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Embedding width. CodeRankEmbed emits 768; the fallback bge-small emits 384,
 /// so this travels with the model choice and a change forces a reindex.
@@ -59,9 +59,20 @@ pub const RELATIONS: &[(&str, &str)] = &[
     ),
     (
         "fact",
+        // Keyed by the **proposition** id — the content id of the normalized
+        // text — so the same belief learned independently on two machines is
+        // one row. A counter-derived key could not do that: two peers allocate
+        // the same integer for different beliefs, and `:put` is an upsert, so
+        // the collision is silent data loss rather than an error.
+        //
+        // `live`/`superseded_by` stay here as *derived* state. They are
+        // recomputed when the projection is rebuilt from the merged log and are
+        // never merged directly — merging them is meaningless, since `live=false`
+        // on one peer against `live=true` on another has no resolution rule.
         r#"
         :create fact {
-            fact_id: Int
+            prop_hi: Int,
+            prop_lo: Int
             =>
             subject: String,
             predicate: String,
@@ -69,9 +80,30 @@ pub const RELATIONS: &[(&str, &str)] = &[
             text: String,
             emb: <F32; 768>,
             live: Bool default true,
-            superseded_by: Int? default null,
-            source_session: String default '',
-            source_seq: Int default 0,
+            superseded_hi: Int? default null,
+            superseded_lo: Int? default null,
+            origin: String default 'unknown',
+            created_at: Float default now(),
+        }
+        "#,
+    ),
+    (
+        "observation",
+        // One row per *time* a proposition was recorded. Deliberately not keyed
+        // by proposition: two independent sources asserting the same thing is
+        // evidence, and collapsing them would destroy exactly the signal that
+        // makes agreement worth anything.
+        //
+        // `(source_session, source_seq)` is globally unique as long as session
+        // ids are, costs nothing to maintain, and was already being written on
+        // every fact row as metadata.
+        r#"
+        :create observation {
+            source_session: String,
+            source_seq: Int
+            =>
+            prop_hi: Int,
+            prop_lo: Int,
             origin: String default 'unknown',
             created_at: Float default now(),
         }
@@ -161,14 +193,49 @@ pub const RELATIONS: &[(&str, &str)] = &[
         "operand",
         r#":create operand { hi: Int, lo: Int, position: Int => value_hi: Int, value_lo: Int }"#,
     ),
+    // A bound slot carries a domain and nothing else. It used to carry the
+    // variable's id too, which meant `(forall ((f Path)) …)` and
+    // `(forall ((x Path)) …)` stored as two different objects that no dedup
+    // could ever merge — the variable's *name* was part of the fact's identity.
+    // Binders are stored in de Bruijn form at SCHEMA_VERSION 5; see
+    // `artist_logic::object::Binder`.
     (
         "binder_var",
         r#"
         :create binder_var {
             hi: Int, lo: Int, position: Int
             =>
-            var_hi: Int, var_lo: Int,
             dom_hi: Int? default null, dom_lo: Int? default null,
+        }
+        "#,
+    ),
+    // ---- assertions ------------------------------------------------------
+    //
+    // **Storing an expression is not believing it.** The same graph can be a
+    // queried proposition, a quoted one, a residual, or an asserted belief, and
+    // persisting the nodes says nothing about which. `object` holds expressions;
+    // this holds claims *about* them.
+    //
+    // Keyed on the assertion's own derived id, never on the proposition. The
+    // same proposition is routinely asserted by different agents, in different
+    // worlds, over different intervals, with opposite polarity — keying on the
+    // proposition would let one of those silently overwrite another. The
+    // proposition is an ordinary column, so it can be indexed and joined.
+    (
+        "assertion",
+        r#"
+        :create assertion {
+            hi: Int, lo: Int
+            =>
+            prop_hi: Int, prop_lo: Int,
+            affirmed: Bool,
+            agent_hi: Int? default null, agent_lo: Int? default null,
+            world_hi: Int? default null, world_lo: Int? default null,
+            valid_from: Int? default null,
+            valid_to: Int? default null,
+            recorded_at: Int,
+            modality_hi: Int? default null, modality_lo: Int? default null,
+            scope_hi: Int? default null, scope_lo: Int? default null,
         }
         "#,
     ),

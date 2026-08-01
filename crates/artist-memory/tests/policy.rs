@@ -7,7 +7,7 @@
 //! near-identical to what it contradicts.
 
 use artist_memory::schema::DIM;
-use artist_memory::{Admission, MemoryStore, NewFact, Scope, admit};
+use artist_memory::{Admission, MemoryStore, NewFact, admit};
 
 fn vector(seed: u64) -> Vec<f32> {
     let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -37,7 +37,7 @@ fn fact(text: &str, seed: u64) -> NewFact {
 }
 
 async fn store(dir: &tempfile::TempDir) -> MemoryStore {
-    MemoryStore::open(dir.path().join("memory.rocks"), Scope::Project)
+    MemoryStore::open(dir.path().join("memory.rocks"))
         .await
         .expect("open store")
 }
@@ -147,7 +147,7 @@ async fn a_correction_revises_rather_than_being_dropped() {
             .expect("candidates");
         assert_eq!(
             admit(fix, &candidates),
-            Admission::Revises(0),
+            Admission::Revises(artist_memory::identity::proposition_id(stale)),
             "a reversal must supersede, not be discarded"
         );
     }
@@ -157,7 +157,10 @@ async fn a_correction_revises_rather_than_being_dropped() {
         .revision_candidates(stale, &vector(1), 5)
         .await
         .expect("candidates");
-    assert_eq!(admit(stale, &candidates), Admission::Restates(0));
+    assert_eq!(
+        admit(stale, &candidates),
+        Admission::Restates(artist_memory::identity::proposition_id(stale))
+    );
 
     // And an unrelated fact survives even though retrieval surfaces it, so the
     // discrimination above is the threshold's doing rather than empty recall.
@@ -184,7 +187,12 @@ async fn a_revision_leaves_the_old_belief_out_of_recall() {
         .put_facts(&[fact("never use tabs for indentation in this repo", 2)])
         .await
         .expect("put")[0];
-    s.supersede(0, new).await.expect("supersede");
+    s.supersede(
+        artist_memory::identity::proposition_id("always use tabs for indentation in this repo"),
+        new,
+    )
+    .await
+    .expect("supersede");
 
     let hits = s.search_facts("tabs indentation", &[], 5).await.expect("search");
     assert_eq!(hits.len(), 1, "only the current belief should recall: {hits:?}");
@@ -196,5 +204,8 @@ async fn a_revision_leaves_the_old_belief_out_of_recall() {
     );
 
     let rendered = artist_memory::render(&hits);
-    assert!(rendered.contains(&format!("id=\"{new}\"")), "{rendered}");
+    assert!(
+        rendered.contains(&format!("id=\"{}\"", artist_memory::identity::handle(new))),
+        "{rendered}"
+    );
 }

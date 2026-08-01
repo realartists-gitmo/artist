@@ -12,7 +12,7 @@
 //! query or a continuation is.
 
 use anyhow::{Result, anyhow};
-use artist_logic::object::{Binding, CoreNode, ExternalRef, LiteralValue, ObjectGraph, ObjectId};
+use artist_logic::object::{Binder, CoreNode, ExternalRef, LiteralValue, ObjectGraph, ObjectId};
 use cozo::DataValue;
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -45,7 +45,6 @@ pub const GRAPH_RELATIONS: &[(&str, &str)] = &[
         :create binder_var {
             hi: Int, lo: Int, position: Int
             =>
-            var_hi: Int, var_lo: Int,
             dom_hi: Int? default null, dom_lo: Int? default null,
         }
         "#,
@@ -110,7 +109,6 @@ pub async fn store_expression(
                     operands.push(row5(hi, lo, i as i64, vh, vl));
                 }
                 for (i, b) in vars.iter().enumerate() {
-                    let (vh, vl) = split(b.var);
                     let (dh, dl) = match b.domain {
                         Some(d) => {
                             let (a, c) = split(d);
@@ -122,8 +120,6 @@ pub async fn store_expression(
                         DataValue::from(hi),
                         DataValue::from(lo),
                         DataValue::from(i as i64),
-                        DataValue::from(vh),
-                        DataValue::from(vl),
                         dh,
                         dl,
                     ]));
@@ -149,8 +145,8 @@ pub async fn store_expression(
          :put object {hi, lo => kind, name, has_name, payload}", objects).await?;
     put(store, "?[hi, lo, position, value_hi, value_lo] <- $rows
          :put operand {hi, lo, position => value_hi, value_lo}", operands).await?;
-    put(store, "?[hi, lo, position, var_hi, var_lo, dom_hi, dom_lo] <- $rows
-         :put binder_var {hi, lo, position => var_hi, var_lo, dom_hi, dom_lo}", binder_vars).await?;
+    put(store, "?[hi, lo, position, dom_hi, dom_lo] <- $rows
+         :put binder_var {hi, lo, position => dom_hi, dom_lo}", binder_vars).await?;
     Ok(root)
 }
 
@@ -161,6 +157,17 @@ pub async fn load_expression(
     g: &mut ObjectGraph,
     root: ObjectId,
 ) -> Result<ObjectId> {
+    load_all(store, g).await?;
+    Ok(root)
+}
+
+/// Load **every** stored object into `g`, returning the ids.
+///
+/// `load_expression` always read the whole table anyway — it queried `*object`
+/// unfiltered and then handed back the root it was given. Naming that shape is
+/// what lets [`crate::relational::RelationalView`] index stored *rules*, which
+/// live in this table and are not reachable from `stmt`/`arg` at all.
+pub async fn load_all(store: &MemoryStore, g: &mut ObjectGraph) -> Result<Vec<ObjectId>> {
     let objects = store
         .script(
             "?[hi, lo, kind, name, has_name, payload] :=
@@ -179,13 +186,14 @@ pub async fn load_expression(
         .await?;
     let binder_vars = store
         .script(
-            "?[hi, lo, position, var_hi, var_lo, dom_hi, dom_lo] :=
-                *binder_var{hi, lo, position, var_hi, var_lo, dom_hi, dom_lo}",
+            "?[hi, lo, position, dom_hi, dom_lo] :=
+                *binder_var{hi, lo, position, dom_hi, dom_lo}",
             BTreeMap::new(),
             false,
         )
         .await?;
 
+    let mut loaded = Vec::new();
     // Bucket children by owner, keeping position order.
     let mut ops: BTreeMap<ObjectId, BTreeMap<i64, ObjectId>> = BTreeMap::new();
     for r in &operands.rows {
@@ -194,10 +202,10 @@ pub async fn load_expression(
             .or_default()
             .insert(int(r, 2)?, join(int(r, 3)?, int(r, 4)?));
     }
-    let mut vars: BTreeMap<ObjectId, BTreeMap<i64, Binding>> = BTreeMap::new();
+    let mut vars: BTreeMap<ObjectId, BTreeMap<i64, Binder>> = BTreeMap::new();
     for r in &binder_vars.rows {
         let owner = join(int(r, 0)?, int(r, 1)?);
-        let domain = match (r.get(5), r.get(6)) {
+        let domain = match (r.get(3), r.get(4)) {
             (Some(DataValue::Null), _) | (None, _) => None,
             (Some(a), Some(b)) => Some(join(
                 a.get_int().ok_or_else(|| anyhow!("dom_hi"))?,
@@ -205,10 +213,7 @@ pub async fn load_expression(
             )),
             _ => None,
         };
-        vars.entry(owner).or_default().insert(
-            int(r, 2)?,
-            Binding { var: join(int(r, 3)?, int(r, 4)?), domain },
-        );
+        vars.entry(owner).or_default().insert(int(r, 2)?, Binder { domain });
     }
 
     for r in &objects.rows {
@@ -254,8 +259,9 @@ pub async fn load_expression(
             other => return Err(anyhow!("unknown object kind {other}")),
         };
         g.define(id, node);
+        loaded.push(id);
     }
-    Ok(root)
+    Ok(loaded)
 }
 
 async fn put(store: &MemoryStore, script: &'static str, rows: Vec<DataValue>) -> Result<()> {
