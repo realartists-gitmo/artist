@@ -63,11 +63,33 @@ pub enum Opened {
 #[derive(Default)]
 pub struct Windows {
     live: Mutex<HashMap<String, Child>>,
+    /// Which binary to re-exec, when it is not this one.
+    ///
+    /// Only a test sets this, but it is not a test hook so much as the thing
+    /// that made the spawn path testable at all: `current_exe` under a test
+    /// binary is the test harness, which knows nothing about
+    /// [`WINDOW_SUBCOMMAND`], so every check of this module had to stop at the
+    /// registry and stub the child. Everything past the stub — the re-exec,
+    /// the grace period against a real window, the geometry a real child
+    /// writes on the way out — went unverified because of one call.
+    executable: Option<PathBuf>,
 }
 
 impl Windows {
+    /// A registry that spawns `executable` rather than the running binary.
+    pub fn with_executable(executable: PathBuf) -> Self {
+        Windows {
+            live: Mutex::new(HashMap::new()),
+            executable: Some(executable),
+        }
+    }
+
     /// Show `slug`, unless it is already showing.
     pub fn open(&self, project: &Path, slug: &str, url: &str, title: &str) -> io::Result<Opened> {
+        let executable = match &self.executable {
+            Some(executable) => executable.clone(),
+            None => std::env::current_exe()?,
+        };
         let mut live = self.live.lock().expect("window registry poisoned");
 
         if let Some(child) = live.get_mut(slug) {
@@ -81,13 +103,7 @@ impl Windows {
             }
         }
 
-        let mut child = command(
-            std::env::current_exe()?,
-            url,
-            title,
-            &geometry_path(project, slug),
-        )
-        .spawn()?;
+        let mut child = command(executable, url, title, &geometry_path(project, slug)).spawn()?;
 
         // Spawning proves only that the binary exists. The child re-execs
         // artist and dispatches on argv, so it can still die at once: a build
