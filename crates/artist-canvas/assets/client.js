@@ -398,6 +398,20 @@ function hideOverlay() {
 
 export const artist = {
   /**
+   * Where this canvas mounts.
+   *
+   * Asked for rather than looked up, because `#root` is only the answer when a
+   * canvas is the whole document. A project exported as one file holds several
+   * canvases in one realm, and each needs its own element — a hard-coded
+   * `getElementById("root")` in every entry made that impossible, which is why
+   * the set export used to have to isolate canvases in separate frames.
+   */
+  root: document.getElementById("root"),
+
+  /** This session's key, so nothing has to build a canvas URL by hand. */
+  key: boot.key,
+
+  /**
    * Put text into the conversation. `mode` is required:
    *   "steer" — correct the turn that is running. Refused if none is.
    *   "queue" — start a turn after the current one, or now if idle.

@@ -14,6 +14,10 @@
 // `artist.static` is true here and absent in a live canvas, so model-written
 // code can branch on it the same way the kit does.
 
+// Replaced wholesale by the exporter when a project is flattened as one
+// document: several canvases then share a realm, and a global would be one
+// canvas's boot data visible to all of them. A single-canvas export leaves this
+// as it stands, because there it is the only canvas there is.
 const boot = globalThis.__ARTIST__ ?? {};
 
 /** Minimal version of client.js's channel, without the reporting path. */
@@ -61,8 +65,29 @@ const escape = (value) =>
     .replace(/>/g, "&gt;");
 
 export const artist = {
-  /** The flag the kit branches on, and model code can too. */
+  /**
+   * Where this canvas mounts.
+   *
+   * A single-canvas export owns the document and uses `#root`. A whole-project
+   * export puts several canvases in one realm and gives each its own element,
+   * named here rather than assumed by the entry.
+   */
+  root:
+    (boot.mount && document.getElementById(boot.mount)) ||
+    document.getElementById("root"),
+
+  /**
+   * True in an exported canvas, absent in a live one.
+   *
+   * The kit no longer reads this — an export substitutes a different `@artist/ui`
+   * rather than asking components which world they are in. It stays for
+   * model-written code, which is the one place the question is honest: a button
+   * you wrote that calls a tool has to decide for itself what to be here.
+   */
   static: true,
+
+  /** No session to key, so anything that needs one renders its absent case. */
+  key: null,
 
   send: refused("send"),
   call: refused("call"),

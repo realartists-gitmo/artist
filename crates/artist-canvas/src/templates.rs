@@ -78,13 +78,18 @@ pub fn manifest_for(title: &str, template: &Template) -> Manifest {
 /// lets the file everybody *does* edit swap in place, with local state, scroll
 /// and focus intact.
 const MAIN: &str = r#"import { createRoot } from "react-dom/client";
+import { artist } from "@artist/canvas";
 import { ErrorBoundary, Toaster } from "@artist/ui";
 import App from "./App.jsx";
 
 // Mounting is a side effect, so editing this file always costs a full reload.
 // It is kept to exactly this line for that reason — write the app in App.jsx,
 // which updates in place on save.
-createRoot(document.getElementById("root")).render(
+//
+// `artist.root` rather than getElementById("root"): a canvas is not always the
+// whole document. Exported as part of a project, several canvases share one
+// page and each is told where it goes.
+createRoot(artist.root).render(
   <ErrorBoundary>
     <App />
     <Toaster />

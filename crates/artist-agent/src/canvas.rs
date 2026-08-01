@@ -117,7 +117,7 @@ impl PortableTool for CanvasTool {
         // dead link in it, so "all of them" is the shape that keeps a project's
         // surfaces working once they leave this machine.
         if mode == "export" && raw.trim().is_empty() {
-            return self.export_project();
+            return self.export_project().await;
         }
 
         // `join` is told which canvas by the ticket, not by a name — the
@@ -138,7 +138,7 @@ impl PortableTool for CanvasTool {
             // Needs no server: it reads files and writes a file. Starting one
             // to flatten a canvas would bind a port for a task that never
             // touches the network.
-            "export" => self.export(&slug),
+            "export" => self.export(&slug).await,
             "share" => self.share(&slug).await,
             // The only mode whose whole purpose is to serve something, and so
             // the only one that may bring a server into being.
@@ -712,8 +712,9 @@ impl CanvasTool {
     }
 
     /// Every canvas in the project, in one file, with a lobby.
-    fn export_project(&self) -> Result<String, CanvasError> {
+    async fn export_project(&self) -> Result<String, CanvasError> {
         let flattened = artist_canvas::export::export_project(&self.project)
+            .await
             .map_err(|error| CanvasError(error.to_string()))?;
         if flattened.canvases.is_empty() {
             return Err(CanvasError(
@@ -752,8 +753,9 @@ impl CanvasTool {
     /// The other half of what a canvas is. A live canvas is excellent while it
     /// is being made and gone when the session ends; this is the copy that
     /// travels — to a phone, to someone else, to six months from now.
-    fn export(&self, slug: &str) -> Result<String, CanvasError> {
+    async fn export(&self, slug: &str) -> Result<String, CanvasError> {
         let flattened = artist_canvas::export::export(&self.project, slug)
+            .await
             .map_err(|error| CanvasError(error.to_string()))?;
 
         let directory = self
@@ -782,13 +784,12 @@ impl CanvasTool {
             flattened.html.len() / 1024,
         );
 
-        // The two things the model would otherwise have to discover by opening
-        // the file on another machine.
-        if !flattened.still_online.is_empty() {
+        // Worth saying because it is the one part of an export that needed the
+        // network to *build*, even though the result needs none to open.
+        if !flattened.dependencies.is_empty() {
             out.push_str(&format!(
-                "\n\nNeeds a network: {} — a declared dependency lives on a CDN and there is \
-                 nothing to inline.",
-                flattened.still_online.join(", ")
+                "\n\nFetched and inlined: {}.",
+                flattened.dependencies.join(", ")
             ));
         }
         out.push_str(

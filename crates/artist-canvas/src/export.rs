@@ -55,6 +55,8 @@ pub enum ExportError {
     },
     #[error("`{specifier}` in {module} points outside the canvas")]
     Escapes { module: String, specifier: String },
+    #[error("could not fetch a declared dependency: {0}")]
+    Fetch(String),
 }
 
 /// A canvas, flattened.
@@ -65,10 +67,10 @@ pub struct Exported {
     pub html: String,
     /// Canvas-relative paths of the modules that went in, entry first.
     pub modules: Vec<String>,
-    /// Specifiers left pointing at the network, which is the one thing an
-    /// export cannot make offline: a declared `[deps]` package lives on a CDN
-    /// and there is nothing to inline. Reported so the caller can say so.
-    pub still_online: Vec<String>,
+    /// Declared `[deps]` that were fetched and inlined, with how many modules
+    /// each pulled in. Reported because it is the one part of an export that
+    /// needed the network to *build*, even though it needs none to open.
+    pub dependencies: Vec<String>,
 }
 
 impl std::fmt::Debug for Exported {
@@ -76,19 +78,68 @@ impl std::fmt::Debug for Exported {
         out.debug_struct("Exported")
             .field("bytes", &self.html.len())
             .field("modules", &self.modules)
-            .field("still_online", &self.still_online)
+            .field("dependencies", &self.dependencies)
             .finish()
     }
 }
 
+/// One canvas, reduced to import-map entries.
+struct Flattened {
+    imports: BTreeMap<String, String>,
+    /// The specifier that starts it.
+    entry: String,
+    modules: Vec<String>,
+    dependencies: Vec<String>,
+}
+
 /// Flatten `slug` into a single self-contained page.
-pub fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
+pub async fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
     let registry = Registry::discover(project);
     let canvas = registry
         .get(slug)
         .ok_or_else(|| ExportError::Unknown(slug.to_owned()))?;
-    let manifest = &canvas.manifest;
 
+    // A canvas alone in a document keeps its boot data in a global, which is
+    // where a page's own runtime naturally lives.
+    let mut flat = flatten(canvas, SCHEME, "globalThis.__ARTIST__").await?;
+    // Encoded, not raw. An import map's values are URLs, and a value that is
+    // not one becomes a null entry the browser refuses to resolve — which took
+    // the page down with a message no test was looking for.
+    flat.imports.extend(
+        shared_vendor()
+            .into_iter()
+            .map(|(specifier, code)| (specifier, data_url(&code))),
+    );
+
+    let state = crate::StateStore::open(&canvas.root).snapshot();
+    let html = page(
+        slug,
+        &canvas.manifest.title,
+        canvas.manifest.tailwind,
+        &flat.imports,
+        &flat.entry,
+        &serde_json::to_string(&state.plain()).unwrap_or_else(|_| "{}".into()),
+        state.rev,
+    );
+
+    Ok(Exported {
+        html,
+        modules: flat.modules,
+        dependencies: flat.dependencies,
+    })
+}
+
+/// Walk one canvas's modules and inline them under `prefix`.
+///
+/// The prefix is what lets several canvases live in one document: every
+/// specifier a canvas produces is namespaced by it, so two canvases that both
+/// have an `App.jsx` — or both import `@artist/ui` — never collide.
+async fn flatten(
+    canvas: &crate::Canvas,
+    prefix: &str,
+    boot: &str,
+) -> Result<Flattened, ExportError> {
+    let manifest = &canvas.manifest;
     let entry = normalise(manifest.entry.trim_start_matches("./"));
     let mut compiled: BTreeMap<String, String> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -111,6 +162,14 @@ pub fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
         let mut rewritten = source.clone();
         // Back to front, so an earlier edit cannot shift a later span.
         for specifier in found.iter().rev() {
+            // A canvas's own `@artist/*` imports point at its own copies of the
+            // kit, which is what lets several canvases share one page without
+            // sharing one `artist`.
+            if PER_CANVAS.contains(&specifier.value.as_str()) {
+                let quoted = assets::json_string(&format!("{prefix}{}", specifier.value));
+                rewritten.replace_range(specifier.start as usize..specifier.end as usize, &quoted);
+                continue;
+            }
             if !is_relative(&specifier.value) {
                 continue;
             }
@@ -120,7 +179,7 @@ pub fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
                     specifier: specifier.value.clone(),
                 })?;
             queue.push(target.clone());
-            let quoted = assets::json_string(&format!("{SCHEME}{target}"));
+            let quoted = assets::json_string(&format!("{prefix}{target}"));
             rewritten.replace_range(specifier.start as usize..specifier.end as usize, &quoted);
         }
 
@@ -140,38 +199,43 @@ pub fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
 
     let mut imports: BTreeMap<String, String> = BTreeMap::new();
     for (module, code) in &compiled {
-        imports.insert(format!("{SCHEME}{module}"), data_url(code));
+        imports.insert(format!("{prefix}{module}"), data_url(code));
     }
-    for (specifier, code) in assets::inlinable() {
-        imports.insert(specifier.to_owned(), data_url(&code));
+    for (specifier, code) in kit_for(prefix, boot) {
+        imports.insert(specifier, data_url(&code));
     }
 
-    // A declared dependency is the one thing that cannot be inlined: it lives
-    // on a CDN and nothing here fetches. Left pointing at the network, and
-    // reported, rather than dropped into a broken import.
-    let mut still_online = Vec::new();
+    // Declared dependencies are fetched and inlined like everything else, so
+    // "opens with no network" is true rather than nearly true. Each fetched
+    // module is keyed in the map by its own absolute URL, which is what the
+    // modules above it were rewritten to import — an import map may key on a
+    // URL, and that is what turns a CDN's internal references into references
+    // to the copies sitting in this file.
+    let mut dependencies = Vec::new();
     for (specifier, url) in &manifest.deps {
-        if crate::deps::check(url).is_ok() {
-            imports.insert(specifier.clone(), url.clone());
-            still_online.push(specifier.clone());
+        if crate::deps::check(url).is_err() {
+            continue;
         }
+        let mut fetched = BTreeMap::new();
+        inline_dependency(url, &mut fetched).await?;
+
+        let Some(entry) = fetched.get(url) else {
+            return Err(ExportError::Fetch(format!("{url} returned nothing")));
+        };
+        imports.insert(specifier.clone(), data_url(entry));
+        for (fetched_url, code) in &fetched {
+            if fetched_url != url {
+                imports.insert(fetched_url.clone(), data_url(code));
+            }
+        }
+        dependencies.push(format!("{specifier} ({} modules)", fetched.len()));
     }
 
-    let state = crate::StateStore::open(&canvas.root).snapshot();
-    let html = page(
-        slug,
-        &manifest.title,
-        manifest.tailwind,
-        &imports,
-        &entry,
-        &serde_json::to_string(&state.plain()).unwrap_or_else(|_| "{}".into()),
-        state.rev,
-    );
-
-    Ok(Exported {
-        html,
+    Ok(Flattened {
+        imports,
+        entry: format!("{prefix}{entry}"),
         modules: order,
-        still_online,
+        dependencies,
     })
 }
 
@@ -190,29 +254,50 @@ pub fn export(project: &Path, slug: &str) -> Result<Exported, ExportError> {
 /// anyway; separate realms give that for free and cannot leak into each other.
 /// The cost is React once per canvas, which is text in a file nobody is paying
 /// bandwidth for.
-pub fn export_project(project: &Path) -> Result<ExportedSet, ExportError> {
+pub async fn export_project(project: &Path) -> Result<ExportedSet, ExportError> {
     let registry = Registry::discover(project);
+    let mut imports: BTreeMap<String, String> = shared_vendor()
+        .into_iter()
+        .map(|(specifier, code)| (specifier, data_url(&code)))
+        .collect();
+    let mut dependencies = Vec::new();
     let mut pages = Vec::new();
-    let mut still_online = Vec::new();
 
     for canvas in &registry.canvases {
-        let flattened = export(project, &canvas.slug)?;
-        still_online.extend(flattened.still_online.iter().cloned());
+        let slug = &canvas.slug;
+        let prefix = format!("{SCHEME}{slug}/");
+        let state = crate::StateStore::open(&canvas.root).snapshot();
+
+        // Each canvas's runtime is handed its own slug, state and mount point
+        // as a literal. A global would be the first canvas's data seen by all
+        // of them, which is the thing this whole arrangement exists to avoid.
+        let boot = format!(
+            "{{ slug: {}, title: {}, state: {}, mount: {} }}",
+            assets::json_string(slug),
+            assets::json_string(canvas.manifest.title.trim()),
+            serde_json::to_string(&state.plain()).unwrap_or_else(|_| "{}".into()),
+            assets::json_string(&format!("root-{slug}")),
+        );
+
+        let flat = flatten(canvas, &prefix, &boot).await?;
+        dependencies.extend(flat.dependencies.iter().cloned());
+        imports.extend(flat.imports);
+
         let title = if canvas.manifest.title.trim().is_empty() {
-            canvas.slug.clone()
+            slug.clone()
         } else {
             canvas.manifest.title.trim().to_owned()
         };
-        pages.push((canvas.slug.clone(), title, flattened.html));
+        pages.push((slug.clone(), title, flat.entry));
     }
 
-    still_online.sort();
-    still_online.dedup();
-    let html = lobby_page(&pages);
+    dependencies.sort();
+    dependencies.dedup();
+    let html = lobby_page(&pages, &imports);
     Ok(ExportedSet {
         html,
         canvases: pages.into_iter().map(|(slug, _, _)| slug).collect(),
-        still_online,
+        dependencies,
     })
 }
 
@@ -220,14 +305,15 @@ pub fn export_project(project: &Path) -> Result<ExportedSet, ExportError> {
 pub struct ExportedSet {
     pub html: String,
     pub canvases: Vec<String>,
-    pub still_online: Vec<String>,
+    pub dependencies: Vec<String>,
 }
 
 /// The document holding every canvas.
-fn lobby_page(pages: &[(String, String, String)]) -> String {
+fn lobby_page(pages: &[(String, String, String)], imports: &BTreeMap<String, String>) -> String {
     let mut nav = String::new();
     let mut frames = String::new();
-    for (index, (slug, title, html)) in pages.iter().enumerate() {
+    let mut entries = String::new();
+    for (index, (slug, title, entry)) in pages.iter().enumerate() {
         nav.push_str(&format!(
             "      <button data-for=\"{slug}\"{selected}>{title}</button>\n",
             slug = assets::escape_html(slug),
@@ -238,19 +324,31 @@ fn lobby_page(pages: &[(String, String, String)]) -> String {
                 ""
             },
         ));
-        // `srcdoc` rather than a blob: a blob URL is minted at runtime and dies
-        // with the tab, which would make the file depend on having been opened
-        // by something that could mint one. srcdoc is just text in the document.
+        // A div, not an iframe. Each canvas mounts into its own element in one
+        // shared realm — which is only possible because an entry asks the
+        // runtime where it goes rather than hunting for `#root`.
         frames.push_str(&format!(
-            "    <iframe data-canvas=\"{slug}\"{hidden} srcdoc=\"{doc}\"></iframe>\n",
+            "    <div class=\"canvas\" data-canvas=\"{slug}\"{hidden}><div id=\"root-{slug}\"></div></div>\n",
             slug = assets::escape_html(slug),
             hidden = if index == 0 { "" } else { " hidden" },
-            doc = escape_attribute(html),
         ));
+        entries.push_str(&format!("      import {};\n", assets::json_string(entry)));
     }
     if pages.is_empty() {
         frames.push_str("    <p class=\"empty\">This project has no canvases.</p>\n");
     }
+
+    let map = imports
+        .iter()
+        .map(|(specifier, target)| {
+            format!(
+                "    {}: {}",
+                assets::json_string(specifier),
+                assets::json_string(target)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
 
     format!(
         r#"<!doctype html>
@@ -274,18 +372,27 @@ fn lobby_page(pages: &[(String, String, String)]) -> String {
       nav button[aria-current="true"] {{
         color: var(--a-text); border-color: var(--a-border); background: var(--a-bg);
       }}
-      iframe {{ flex: 1; width: 100%; border: 0; }}
+      .canvas {{ flex: 1; overflow: auto; }}
       .empty {{ padding: 32px; color: var(--a-muted); }}
     </style>
+    <script type="importmap">
+{{
+  "imports": {{
+{map}
+  }}
+}}
+    </script>
   </head>
   <body>
     <nav>
 {nav}    </nav>
-{frames}    <script>
-      // Navigation only. The frames are separate realms on purpose and nothing
-      // reaches across them.
+{frames}    <script type="module">
+{entries}    </script>
+    <script>
+      // Navigation only. Every canvas is already mounted; this decides which
+      // one is on screen, so switching keeps whatever the others were showing.
       const show = (slug) => {{
-        for (const frame of document.querySelectorAll("iframe[data-canvas]")) {{
+        for (const frame of document.querySelectorAll(".canvas[data-canvas]")) {{
           frame.hidden = frame.dataset.canvas !== slug;
         }}
         for (const button of document.querySelectorAll("nav button")) {{
@@ -305,8 +412,10 @@ fn lobby_page(pages: &[(String, String, String)]) -> String {
 "#,
         tokens = crate::palette::tokens_css(),
         base = crate::palette::BASE_CSS,
+        map = map,
         nav = nav,
         frames = frames,
+        entries = entries,
     )
 }
 
@@ -357,6 +466,172 @@ pub fn stamp(now: std::time::SystemTime) -> String {
         (time % 3600) / 60,
         time % 60
     )
+}
+
+/// Our own modules, which need one copy per canvas in a project export.
+///
+/// They bind `artist` at module scope — `import { artist } from
+/// "@artist/canvas"` — so a single shared copy would bind to whichever canvas
+/// loaded first and hand every other canvas that one's state and mount point.
+/// The vendored libraries have no such binding and stay shared, which is where
+/// the weight is anyway: React and ReactDOM are over a megabyte together, the
+/// kit is sixty kilobytes.
+const PER_CANVAS: &[&str] = &[
+    "@artist/canvas",
+    "@artist/ui",
+    "@artist/ui-full",
+    "@artist/react",
+];
+
+/// The kit, rewritten to import its own per-canvas copies.
+///
+/// `boot` is the canvas's own slug, state and mount element, substituted into
+/// the runtime rather than read from a global — a global is exactly the thing
+/// that cannot work once two canvases share a page.
+fn kit_for(prefix: &str, boot: &str) -> Vec<(String, String)> {
+    assets::inlinable()
+        .into_iter()
+        .filter(|(specifier, _)| PER_CANVAS.contains(specifier))
+        .map(|(specifier, code)| {
+            let code = if specifier == "@artist/canvas" {
+                code.replace("globalThis.__ARTIST__ ?? {}", &format!("{boot} ?? {{}}"))
+            } else {
+                code
+            };
+            (format!("{prefix}{specifier}"), rewrite_kit(&code, prefix))
+        })
+        .collect()
+}
+
+/// Point a module's `@artist/*` imports at this canvas's copies.
+fn rewrite_kit(code: &str, prefix: &str) -> String {
+    let found = transform::specifiers(Path::new("kit.js"), code);
+    let mut out = code.to_owned();
+    for specifier in found.iter().rev() {
+        if !PER_CANVAS.contains(&specifier.value.as_str()) {
+            continue;
+        }
+        let quoted = assets::json_string(&format!("{prefix}{}", specifier.value));
+        out.replace_range(specifier.start as usize..specifier.end as usize, &quoted);
+    }
+    out
+}
+
+/// The vendored libraries, shared by every canvas in a document.
+fn shared_vendor() -> Vec<(String, String)> {
+    assets::inlinable()
+        .into_iter()
+        .filter(|(specifier, _)| !PER_CANVAS.contains(specifier))
+        .map(|(specifier, code)| (specifier.to_owned(), code))
+        .collect()
+}
+
+/// How deep a CDN package's own imports will be followed.
+///
+/// esm.sh answers a package with a stub that re-exports from one or two more
+/// modules, so a couple of levels covers the real shape. A ceiling exists at
+/// all because the graph is on somebody else's server and its size is their
+/// decision, not ours.
+const DEP_DEPTH: usize = 6;
+
+/// How many remote modules one export will pull in.
+const DEP_MODULES: usize = 64;
+
+/// Fetch a declared dependency and everything it imports.
+///
+/// Export used to leave `[deps]` pointing at the CDN, which made "opens with no
+/// network" false for any canvas declaring one — the failure landing on the
+/// person you sent it to rather than on you. Fetching here is not the proxying
+/// the live path refuses: that was a permanent server-side fetcher on the
+/// request path for a model-written URL. This is one explicit operation, run
+/// when a person asks for a file to take away, and [`crate::deps::check`] is
+/// applied at *every* hop rather than only the first — a CDN redirecting into
+/// somewhere else does not get to smuggle a module in.
+async fn inline_dependency(
+    entry: &str,
+    into: &mut BTreeMap<String, String>,
+) -> Result<(), ExportError> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| ExportError::Fetch(error.to_string()))?;
+
+    let mut queue = vec![(entry.to_owned(), 0usize)];
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    while let Some((url, depth)) = queue.pop() {
+        if depth > DEP_DEPTH || into.len() >= DEP_MODULES || !seen.insert(url.clone()) {
+            continue;
+        }
+        crate::deps::check(&url).map_err(|error| ExportError::Fetch(error.to_string()))?;
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| ExportError::Fetch(format!("{url}: {error}")))?;
+        if !response.status().is_success() {
+            return Err(ExportError::Fetch(format!(
+                "{url}: the CDN answered {}",
+                response.status()
+            )));
+        }
+        let source = response
+            .text()
+            .await
+            .map_err(|error| ExportError::Fetch(format!("{url}: {error}")))?;
+
+        // The module's own imports, resolved against *its* URL — which is the
+        // whole reason the live path could not proxy these. A CDN entry point
+        // re-exports from a root-relative path, and once it is inlined here
+        // there is no origin left to resolve that against, so each one is
+        // turned into an absolute URL now and rewritten to point at the copy.
+        let found = transform::specifiers(Path::new("dep.js"), &source);
+        let mut rewritten = source.clone();
+        for specifier in found.iter().rev() {
+            let Some(absolute) = absolutise(&url, &specifier.value) else {
+                continue;
+            };
+            queue.push((absolute.clone(), depth + 1));
+            let quoted = assets::json_string(&absolute);
+            rewritten.replace_range(specifier.start as usize..specifier.end as usize, &quoted);
+        }
+        into.insert(url, rewritten);
+    }
+    Ok(())
+}
+
+/// Resolve a specifier found inside a module fetched from `base`.
+///
+/// Deliberately small: absolute URLs pass through, root-relative and relative
+/// paths resolve against the origin and directory of the module that named
+/// them. A bare specifier inside a CDN module is left alone, because it is the
+/// CDN's own import map's business and not something to guess at.
+fn absolutise(base: &str, specifier: &str) -> Option<String> {
+    if specifier.starts_with("https://") {
+        return Some(specifier.to_owned());
+    }
+    let rest = base.strip_prefix("https://")?;
+    let (host, path) = match rest.split_once('/') {
+        Some((host, path)) => (host, format!("/{path}")),
+        None => (rest, "/".to_owned()),
+    };
+    if let Some(rooted) = specifier.strip_prefix('/') {
+        return Some(format!("https://{host}/{rooted}"));
+    }
+    if !is_relative(specifier) {
+        return None;
+    }
+    let directory = path.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+    Some(format!(
+        "https://{host}{}",
+        prefixed(&normalise(&format!("{directory}/{specifier}")))
+    ))
+}
+
+/// `normalise` drops the leading slash; a URL path needs it back.
+fn prefixed(path: &str) -> String {
+    format!("/{path}")
 }
 
 /// Is this a specifier the exporter has to resolve on disk?
@@ -509,7 +784,10 @@ fn page(
         state = state,
         rev = rev,
         tailwind = tailwind,
-        entry_json = assets::json_string(&format!("{SCHEME}{entry}")),
+        // Already namespaced by `flatten`, which is the only thing that knows
+        // the prefix — prefixing again here produced `canvas:canvas:main.jsx`,
+        // an unresolved specifier that took the whole page down silently.
+        entry_json = assets::json_string(entry),
     )
 }
 

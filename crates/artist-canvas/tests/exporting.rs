@@ -39,12 +39,12 @@ impl Drop for Project {
 /// Nothing in an exported file may point anywhere. This is the whole contract:
 /// the reader may be on a plane, on a phone, or on a machine that has never had
 /// artist installed.
-#[test]
-fn an_export_reaches_for_nothing() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_reaches_for_nothing() {
     let project = Project::new("selfcontained");
     project.scaffold("demo", "dashboard");
 
-    let flattened = export::export(&project.root, "demo").expect("export");
+    let flattened = export::export(&project.root, "demo").await.expect("export");
     let html = &flattened.html;
 
     // The paths a live canvas is served from. Any of them surviving means a
@@ -78,15 +78,77 @@ fn an_export_reaches_for_nothing() {
     );
 }
 
+/// The document has to be able to start.
+///
+/// Every other test here checks that things are *present*. None of them noticed
+/// when the entry was namespaced twice — `canvas:canvas:main.jsx` — because the
+/// pieces were all still in the file, just wired to a specifier no map key
+/// matched. The page went blank with nothing in the console, which is the
+/// worst possible way for an exported file to fail: on someone else's machine,
+/// silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_entry_the_document_imports_is_one_the_map_can_resolve() {
+    let project = Project::new("entrywired");
+    project.scaffold("demo", "dashboard");
+
+    let html = export::export(&project.root, "demo")
+        .await
+        .expect("export")
+        .html;
+
+    let map: serde_json::Value = {
+        let start = html.find(r#"<script type="importmap">"#).expect("map");
+        let body = &html[start + r#"<script type="importmap">"#.len()..];
+        let end = body.find("</script>").expect("map end");
+        serde_json::from_str(&body[..end]).expect("valid import map")
+    };
+
+    // The one module the document names itself. Scanned from *after* the tag,
+    // because the first quote inside it belongs to `type="module"`.
+    let entry = {
+        let marker = "<script type=\"module\">import ";
+        let at = html.rfind(marker).expect("entry") + marker.len();
+        let rest = &html[at..];
+        let open = rest.find('"').expect("quote");
+        let close = rest[open + 1..].find('"').expect("quote");
+        rest[open + 1..open + 1 + close].to_owned()
+    };
+
+    assert!(
+        map["imports"].get(&entry).is_some(),
+        "the document imports `{entry}`, which the map cannot resolve. Keys: {:?}",
+        map["imports"]
+            .as_object()
+            .map(|imports| imports.keys().collect::<Vec<_>>())
+    );
+
+    // And every target has to be a URL. A map value that is not one becomes a
+    // null entry, and the browser then refuses the specifier — which is how
+    // React once ended up unreachable in a file that contained all of it: the
+    // vendored modules had been put in as raw JavaScript, and every test that
+    // asked "is react-dom present?" said yes.
+    for (specifier, target) in map["imports"].as_object().expect("imports") {
+        let target = target.as_str().unwrap_or_default();
+        assert!(
+            target.starts_with("data:") || target.starts_with("https://"),
+            "`{specifier}` maps to something that is not a URL: {:.60}",
+            target
+        );
+    }
+}
+
 /// Fast Refresh is for a page a watcher is editing underneath. An exported file
 /// has neither, so shipping the runtime would be weight in the one artifact
 /// whose whole job is to be small enough to send.
-#[test]
-fn an_export_carries_no_hot_reload_machinery() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_carries_no_hot_reload_machinery() {
     let project = Project::new("norefresh");
     project.scaffold("demo", "blank");
 
-    let html = export::export(&project.root, "demo").expect("export").html;
+    let html = export::export(&project.root, "demo")
+        .await
+        .expect("export")
+        .html;
     for absent in ["$RefreshReg$", "__ARTIST_REFRESH__", "@artist/refresh"] {
         assert!(
             !html.contains(absent),
@@ -97,13 +159,14 @@ fn an_export_carries_no_hot_reload_machinery() {
 
 /// Every template has to survive the trip, because the model picks one without
 /// knowing which of them the exporter happens to have been tried against.
-#[test]
-fn every_template_exports() {
+#[tokio::test(flavor = "multi_thread")]
+async fn every_template_exports() {
     for name in templates::names() {
         let project = Project::new(&format!("t-{name}"));
         project.scaffold("demo", name);
 
         let flattened = export::export(&project.root, "demo")
+            .await
             .unwrap_or_else(|error| panic!("`{name}` failed to export: {error}"));
         assert!(
             flattened.html.contains("<div id=\"root\"></div>"),
@@ -117,8 +180,8 @@ fn every_template_exports() {
 }
 
 /// State is what the canvas was showing, so it is content and travels with it.
-#[test]
-fn state_travels_with_the_canvas() {
+#[tokio::test(flavor = "multi_thread")]
+async fn state_travels_with_the_canvas() {
     let project = Project::new("state");
     project.scaffold("demo", "blank");
 
@@ -127,7 +190,10 @@ fn state_travels_with_the_canvas() {
         .set("rows", serde_json::json!(42))
         .expect("write state");
 
-    let html = export::export(&project.root, "demo").expect("export").html;
+    let html = export::export(&project.root, "demo")
+        .await
+        .expect("export")
+        .html;
     assert!(
         html.contains("\"rows\""),
         "the state the canvas was showing did not travel"
@@ -138,33 +204,45 @@ fn state_travels_with_the_canvas() {
 /// A canvas that links to another exports, on its own, into a document with a
 /// dead link in it. The set export is the answer, and the property that matters
 /// is that each canvas is still a whole working page inside it.
-#[test]
-fn a_project_exports_as_one_document_with_every_canvas_in_it() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_exports_as_one_document_with_every_canvas_in_it() {
     let project = Project::new("set");
     project.scaffold("alpha", "dashboard");
     project.scaffold("beta", "form");
 
-    let flattened = export::export_project(&project.root).expect("export project");
+    let flattened = export::export_project(&project.root)
+        .await
+        .expect("export project");
     assert_eq!(flattened.canvases, ["alpha", "beta"]);
 
     let html = &flattened.html;
-    // One frame per canvas, and the nav that switches between them.
-    assert_eq!(
-        html.matches("<iframe data-canvas=").count(),
-        2,
-        "{html:.200}"
-    );
+    // One realm, one mount point each, and the nav that switches between them.
+    assert!(html.contains("id=\"root-alpha\""), "no mount for alpha");
+    assert!(html.contains("id=\"root-beta\""), "no mount for beta");
     assert!(html.contains("data-for=\"alpha\""));
     assert!(html.contains("data-for=\"beta\""));
+    assert!(
+        !html.contains("<iframe"),
+        "canvases should share a realm, not be isolated in frames"
+    );
 
-    // Each frame holds a real export, escaped into the attribute. If the
-    // escaping were wrong the document would end early and the rest would be
-    // rendered as text, so finding both intact is the check.
+    // Namespaced per canvas, which is what makes one realm safe: both of these
+    // have an App.jsx and both import @artist/ui.
+    for specifier in [
+        "canvas:alpha/main.jsx",
+        "canvas:beta/main.jsx",
+        "canvas:alpha/@artist/canvas",
+        "canvas:beta/@artist/canvas",
+    ] {
+        assert!(html.contains(specifier), "`{specifier}` is missing");
+    }
+
+    // And the heavy vendored libraries are shared rather than duplicated,
+    // which is the entire reason for sharing a realm.
     assert_eq!(
-        html.matches("&lt;div id=&quot;root&quot;&gt;&lt;/div&gt;")
-            .count(),
-        2,
-        "each canvas needs its own mount point inside its frame"
+        html.matches("\"react-dom/client\":").count(),
+        1,
+        "react-dom was inlined more than once"
     );
     assert!(
         !html.contains("/@vendor/"),
@@ -174,18 +252,20 @@ fn a_project_exports_as_one_document_with_every_canvas_in_it() {
 
 /// An empty project is a real state the model can reach, and it must not
 /// produce a file that looks like a working export of nothing.
-#[test]
-fn an_empty_project_exports_nothing_rather_than_something_broken() {
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_project_exports_nothing_rather_than_something_broken() {
     let project = Project::new("emptyset");
-    let flattened = export::export_project(&project.root).expect("export project");
+    let flattened = export::export_project(&project.root)
+        .await
+        .expect("export project");
     assert!(flattened.canvases.is_empty());
     assert!(flattened.html.contains("no canvases"), "{}", flattened.html);
 }
 
 /// A canvas that reads a file from outside its own directory would inline it
 /// into a document meant to be handed to other people.
-#[test]
-fn a_canvas_cannot_export_a_file_from_outside_itself() {
+#[tokio::test(flavor = "multi_thread")]
+async fn a_canvas_cannot_export_a_file_from_outside_itself() {
     let project = Project::new("escape");
     project.scaffold("demo", "blank");
     std::fs::write(
@@ -199,7 +279,9 @@ fn a_canvas_cannot_export_a_file_from_outside_itself() {
     )
     .expect("entry");
 
-    let error = export::export(&project.root, "demo").expect_err("should refuse");
+    let error = export::export(&project.root, "demo")
+        .await
+        .expect_err("should refuse");
     assert!(
         matches!(error, export::ExportError::Escapes { .. }),
         "unexpected error: {error}"

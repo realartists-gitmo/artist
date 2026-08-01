@@ -32,18 +32,26 @@ pub const REFRESH: &str = include_str!("../assets/refresh.js");
 /// `client.js`'s stand-in for a canvas that has been exported to a file.
 pub const EXPORT: &str = include_str!("../assets/export.js");
 
+/// The kit as it exists in an exported file: the same components, minus the
+/// ones that were only ever ways to reach a harness.
+pub const UI_STATIC: &str = include_str!("../assets/ui-static.jsx");
+
 /// Every module an exported canvas needs inlined, as (specifier, JavaScript).
 ///
 /// The knowledge of what is vendored lives here rather than in the exporter,
 /// so adding a package to the kit cannot silently produce exports that fail on
 /// an unresolved import.
 ///
-/// Two deliberate differences from what the server hands a live page.
+/// Three deliberate differences from what the server hands a live page, all of
+/// them substitutions at the module boundary rather than flags inside a module.
+///
 /// `@artist/canvas` resolves to [`EXPORT`] rather than the client, because
-/// there is no server to talk to. And `@artist/refresh` is absent: Fast Refresh
-/// swaps modules the file watcher noticed changing, and an exported file has
-/// neither, so shipping the runtime would be dead weight in something whose
-/// whole job is to travel.
+/// there is no server to talk to. `@artist/ui` resolves to [`UI_STATIC`], which
+/// is the kit with its affordances removed and its content kept — the real kit
+/// stays reachable at `@artist/ui-full`, which is what the static one builds
+/// on. And `@artist/refresh` is absent: Fast Refresh swaps modules the file
+/// watcher noticed changing, and an exported file has neither, so shipping the
+/// runtime would be dead weight in something whose whole job is to travel.
 pub fn inlinable() -> Vec<(&'static str, String)> {
     let mut modules: Vec<(&'static str, String)> = BARE
         .iter()
@@ -54,7 +62,14 @@ pub fn inlinable() -> Vec<(&'static str, String)> {
         .collect();
 
     modules.push(("@artist/canvas", compiled("export.js", EXPORT).to_owned()));
-    modules.push(("@artist/ui", compiled("ui.jsx", UI).to_owned()));
+    // Order matters to neither the map nor the browser, but the pairing does:
+    // `ui-static` imports `ui-full`, so shipping one without the other is an
+    // unresolved import in a file nobody can debug once it has travelled.
+    modules.push((
+        "@artist/ui",
+        compiled("ui-static.jsx", UI_STATIC).to_owned(),
+    ));
+    modules.push(("@artist/ui-full", compiled("ui.jsx", UI).to_owned()));
     modules.push(("@artist/react", compiled("hooks.js", HOOKS).to_owned()));
     modules
 }
