@@ -27,7 +27,19 @@ impl Workspace {
         crate::drift::DriftWatch::new(self.files.clone(), self.actor.clone())
     }
 
-    pub fn open(project_root: impl AsRef<Path>, state_dir: impl AsRef<Path>) -> Result<Self> {
+    /// Open a workspace for `actor`.
+    ///
+    /// The identity is required rather than defaulted because anchor state is
+    /// stored per actor: everything that shares an id shares one row and
+    /// overwrites it. A default would make that collision the easy path and an
+    /// invisible one — callers that genuinely have no conversation yet should
+    /// say so with a name of their own, and re-actor via [`Self::with_actor`]
+    /// once they do.
+    pub fn open(
+        project_root: impl AsRef<Path>,
+        state_dir: impl AsRef<Path>,
+        actor: &str,
+    ) -> Result<Self> {
         let root = std::fs::canonicalize(project_root).context("canonicalize project root")?;
         if !root.is_dir() {
             bail!("project root is not a directory")
@@ -70,7 +82,7 @@ impl Workspace {
         Ok(Self {
             root: Arc::new(root),
             files,
-            actor: AgentIdentity::from_id("artist").map_err(anyhow::Error::msg)?,
+            actor: AgentIdentity::from_id(actor).map_err(anyhow::Error::msg)?,
             index: picker,
         })
     }
@@ -201,7 +213,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let workspace = Workspace::open(root.path(), state.path()).unwrap();
+        let workspace = Workspace::open(root.path(), state.path(), "test").unwrap();
         assert!(workspace.resolve_new("../escape").is_err());
         assert_eq!(
             workspace

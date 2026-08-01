@@ -10,7 +10,7 @@ fn workspace(files: &[(&str, &str)]) -> (tempfile::TempDir, tempfile::TempDir, W
         std::fs::write(target, content).unwrap();
     }
     let state = tempfile::tempdir().unwrap();
-    let workspace = Workspace::open(root.path(), state.path()).unwrap();
+    let workspace = Workspace::open(root.path(), state.path(), "test").unwrap();
     (root, state, workspace)
 }
 

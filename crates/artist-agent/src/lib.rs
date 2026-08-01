@@ -616,6 +616,24 @@ async fn attempt(
 /// later hops get their own namespace. The depth comes from the event log, so
 /// this is stable across a resume and a rewind past a boundary reuses the
 /// earlier hop's lineage.
+/// Bind a tool bundle to the conversation that is using it.
+///
+/// Refuses the placeholder rather than passing it through. `SessionHandles`
+/// defaults `conversation_id` to `"default"`, and a path that reaches a real
+/// turn still holding it would put every such session back on one shared
+/// actor — silently, which is the failure this whole change exists to remove.
+/// Loud here beats a collision nobody can see.
+fn tools_for_conversation(tools: &ToolBundle, conversation_id: &str) -> Result<ToolBundle> {
+    if conversation_id.trim().is_empty() || conversation_id == "default" {
+        anyhow::bail!(
+            "a run needs a real conversation id to scope its anchor state; got \
+             `{conversation_id}`. Sharing one actor across sessions makes them overwrite each \
+             other's anchors."
+        );
+    }
+    tools.for_actor(conversation_id)
+}
+
 fn provider_lineage(conversation_id: &str, depth: usize) -> String {
     if depth == 0 {
         conversation_id.to_owned()
@@ -649,7 +667,16 @@ async fn stream_chat_with<C: CompletionClient>(
 where
     C::CompletionModel: 'static,
 {
-    let tools = tool_context.native;
+    // Anchor state is keyed by actor, and the bundle is built before any
+    // conversation exists — so every session would otherwise share one actor,
+    // and with it one row. Concurrent sessions overwrite each other's anchors
+    // on every edit, and a resumed one can load the other's table.
+    //
+    // The conversation is the right key, and the one the per-agent scoping was
+    // built for: a resumed session reclaims its own anchors, two live ones
+    // never touch. Re-actoring is a clone that shares the coordinator behind
+    // it, which is the same thing delegates already do for subagents.
+    let tools = &tools_for_conversation(tool_context.native, &handles.conversation_id)?;
     let mcp = tool_context.mcp;
     let model = run.model.as_str();
     let profile = &run.profile;
@@ -1428,6 +1455,33 @@ pub async fn stream_prompt(
 mod tests {
     use super::request_params;
     use llm_provider::ProviderKind;
+
+    /// Anchor state is keyed by actor, so a session reaching a real turn on the
+    /// placeholder id would share one row with every other such session — each
+    /// overwriting the other's anchors, and a resumed one loading a stranger's
+    /// table. That has to fail loudly: the whole hazard is that it is invisible.
+    #[test]
+    fn a_run_refuses_the_placeholder_conversation_id() {
+        let bundle = artist_tools::ToolBundle::new(
+            artist_tools::Workspace::open(
+                tempfile::tempdir().expect("project").path(),
+                tempfile::tempdir().expect("state").path(),
+                "artist-unbound",
+            )
+            .expect("workspace"),
+        );
+
+        for placeholder in ["default", "", "   "] {
+            let refused = super::tools_for_conversation(&bundle, placeholder);
+            assert!(
+                refused.is_err(),
+                "`{placeholder}` was accepted as a conversation id"
+            );
+        }
+
+        let scoped = super::tools_for_conversation(&bundle, "session-01H8XYZ");
+        assert!(scoped.is_ok(), "a real conversation id must be accepted");
+    }
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {

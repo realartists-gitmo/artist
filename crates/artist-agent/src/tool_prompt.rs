@@ -188,7 +188,7 @@ mod tests {
         let project = tempfile::tempdir().expect("project dir");
         let state = project.path().join(".state");
         let workspace =
-            artist_tools::Workspace::open(project.path(), &state).expect("open workspace");
+            artist_tools::Workspace::open(project.path(), &state, "test").expect("open workspace");
         (workspace, project)
     }
 

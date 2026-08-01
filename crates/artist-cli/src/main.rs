@@ -1089,6 +1089,11 @@ fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Resu
     Ok(ToolBundle::new(Workspace::open(
         std::fs::canonicalize(project)?,
         project_state_dir(config_root, project)?,
+        // The bundle outlives any one conversation and is built before the
+        // first exists, so this identity is a placeholder: every real turn
+        // re-actors it to its conversation id. Named for what it is, so anchor
+        // state written under it is recognisable as nobody's.
+        "artist-unbound",
     )?))
 }
 

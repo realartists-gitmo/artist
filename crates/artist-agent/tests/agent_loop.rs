@@ -122,6 +122,7 @@ impl Harness {
         let workspace = artist_tools::Workspace::open(
             project.path().to_path_buf(),
             config.path().to_path_buf(),
+            "test",
         )
         .unwrap();
         let mcp = artist_agent::mcp::McpManager::load(config.path())
@@ -168,7 +169,13 @@ async fn a_tool_result_is_paired_into_the_next_request() {
         &provider(&url),
         &ChatInput::from("read the file".to_owned()),
         harness.context(),
-        SessionHandles::default(),
+        // A real run always carries one; anchor state is scoped by it, and the
+        // placeholder is refused precisely so a session cannot reach a turn
+        // still sharing an actor with every other session.
+        SessionHandles {
+            conversation_id: "test-conversation".to_owned(),
+            ..SessionHandles::default()
+        },
         |_| Ok(()),
     )
     .await;
@@ -211,7 +218,13 @@ async fn a_call_to_an_unregistered_tool_is_reported_back_to_the_model() {
         &provider(&url),
         &ChatInput::from("use a tool that does not exist".to_owned()),
         harness.context(),
-        SessionHandles::default(),
+        // A real run always carries one; anchor state is scoped by it, and the
+        // placeholder is refused precisely so a session cannot reach a turn
+        // still sharing an actor with every other session.
+        SessionHandles {
+            conversation_id: "test-conversation".to_owned(),
+            ..SessionHandles::default()
+        },
         |_| Ok(()),
     )
     .await;
@@ -257,7 +270,13 @@ async fn a_panicking_tool_fails_that_call_rather_than_the_run() {
         &provider(&url),
         &ChatInput::from("read past the end".to_owned()),
         harness.context(),
-        SessionHandles::default(),
+        // A real run always carries one; anchor state is scoped by it, and the
+        // placeholder is refused precisely so a session cannot reach a turn
+        // still sharing an actor with every other session.
+        SessionHandles {
+            conversation_id: "test-conversation".to_owned(),
+            ..SessionHandles::default()
+        },
         |_| Ok(()),
     )
     .await;
