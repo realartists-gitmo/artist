@@ -878,7 +878,13 @@ mod tests {
             .await
             .expect("status");
         assert!(status.contains("url: http://"), "{status}");
-        assert!(status.contains("No errors reported"), "{status}");
+        // Nothing has drained this canvas yet, so the quiet covers the whole
+        // time it has existed — a different claim from the one below, and the
+        // stronger of the two.
+        assert!(
+            status.contains("No errors since this canvas was first served"),
+            "a first check should say how far back its silence reaches: {status}"
+        );
         // The load-bearing line. A report that is merely empty reads as "all
         // well" — this one has to say *why* it is empty and what to do about
         // it, or the model concludes a canvas nobody can see is working.
@@ -907,6 +913,14 @@ mod tests {
             })
             .await
             .expect("status again");
+        // The check above drained, so this one's silence covers only the gap
+        // since it. Saying so is the whole fix: two identical "no errors" lines
+        // in a row, the second of them narrower, is how a drained buffer gets
+        // read as a problem that went away.
+        assert!(
+            status.contains("since the last check"),
+            "a repeat check must narrow its claim: {status}"
+        );
         assert!(
             status.contains("rows = 42"),
             "state the model just wrote should come back: {status}"
