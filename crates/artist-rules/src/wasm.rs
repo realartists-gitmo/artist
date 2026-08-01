@@ -89,7 +89,9 @@ fn engine() -> &'static wasmtime::Engine {
         let mut config = wasmtime::Config::new();
         config.epoch_interruption(true);
         config.wasm_component_model(true);
-        config.wasm_exceptions(false);
+        // Renamed upstream when the exception-handling proposal landed; the
+        // intent is unchanged, which is to leave it off.
+        config.wasm_legacy_exceptions(false);
         config.wasm_gc(false);
         let engine = wasmtime::Engine::new(&config).expect("baseline wasmtime config");
         // One background ticker drives every store's deadline.
