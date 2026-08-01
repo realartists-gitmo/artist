@@ -387,6 +387,8 @@ impl CanvasTool {
         let mut out = format!("canvas `{slug}` — {}\n", canvas.manifest.title);
         out.push_str(&format!("url: {}\n", server.url(slug)));
 
+        // Read before the drain, which closes the window it describes.
+        let (since, seen) = server.report_window(slug);
         let reports = server.take_reports(Some(slug));
         let (problems, rest): (Vec<_>, Vec<_>) = reports
             .iter()
@@ -397,7 +399,18 @@ impl CanvasTool {
             rest.into_iter().partition(|report| report.level == "style");
 
         if problems.is_empty() {
-            out.push_str("\nNo errors reported since the last check.\n");
+            // Unqualified, "no errors" reads as "none, ever" — and reports
+            // drain, so it only ever meant "none since something last looked".
+            // Two calls in a row would show errors and then silence, and the
+            // silence reads as a fix.
+            out.push_str(&match since {
+                Some(elapsed) => format!(
+                    "\nNo errors in the {} since the last check ({seen} report(s) so far this \
+                     session).\n",
+                    describe(elapsed)
+                ),
+                None => "\nNo errors since this canvas was first served.\n".to_owned(),
+            });
         } else {
             out.push_str(&format!("\n{} error(s):\n", problems.len()));
             for report in &problems {
@@ -439,7 +452,21 @@ impl CanvasTool {
                     .unwrap_or("unknown")
             )),
             Some(digest) => {
-                out.push_str("\nOn screen now:\n");
+                // Which build the page is showing. A canvas the model just
+                // edited may not have swapped yet, and a digest of the previous
+                // version is indistinguishable from proof the edit did nothing
+                // — the single most likely way this report misleads.
+                let current = server.revision(slug);
+                let showing = digest.get("rev").and_then(|rev| rev.as_u64());
+                match showing {
+                    Some(showing) if showing < current => out.push_str(&format!(
+                        "\nOn screen now — but this page is showing build {showing} and the \
+                         canvas is at {current}, so it has not picked up your last {} edit(s) \
+                         yet. Check again before concluding anything from what follows.\n",
+                        current - showing
+                    )),
+                    _ => out.push_str("\nOn screen now:\n"),
+                }
                 if let Some(text) = digest.get("text").and_then(|t| t.as_array()) {
                     let visible: Vec<_> = text
                         .iter()
@@ -617,6 +644,24 @@ fn truncate(value: &str, limit: usize) -> String {
     format!("{head}… ({} chars)", value.chars().count())
 }
 
+/// An elapsed time the way a person would say it.
+///
+/// This lands mid-sentence in a report the model reads as prose; `83.4721s`
+/// reads as machine output and gets skimmed past, which defeats the point of
+/// saying it at all.
+fn describe(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds == 0 {
+        return "moment".to_owned();
+    }
+    let (count, unit) = match seconds {
+        seconds if seconds < 60 => (seconds, "second"),
+        seconds if seconds < 3600 => (seconds / 60, "minute"),
+        seconds => (seconds / 3600, "hour"),
+    };
+    format!("{count} {unit}{}", if count == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +815,148 @@ mod tests {
         let stored =
             artist_canvas::StateStore::open(&project.path().join(".artist/canvas/demo")).snapshot();
         assert_eq!(stored.plain().get("rows"), Some(&json!(42)));
+    }
+
+    /// The whole loop a model actually runs, in order, against a live server.
+    ///
+    /// Every mode is checked in isolation above, and all of it with nothing
+    /// served — which is the state where `status` has the least to say. This
+    /// is the arrangement the model meets in practice, and it asserts on what
+    /// the *text* conveys rather than only on side effects, because that text
+    /// is the entire interface: a model that cannot see the canvas has this
+    /// and nothing else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_model_facing_loop_says_something_usable_at_every_step() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let root = project.path();
+        let canvas = Lazy::new(
+            root.to_owned(),
+            Arc::new(artist_canvas::bridge::DetachedHost),
+        );
+        let tool = CanvasTool::new(root.to_owned(), Arc::clone(&canvas), Recorder::noop());
+
+        let empty = tool
+            .call(CanvasArgs {
+                mode: Some("list".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("list");
+        assert!(
+            empty.contains("mode=create"),
+            "an empty project should say how to stop being one: {empty}"
+        );
+
+        let created = tool
+            .call(CanvasArgs {
+                mode: Some("create".into()),
+                name: Some("Sales Report".into()),
+                template: Some("dashboard".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("create");
+        // The three things the model needs next: which files it may edit, that
+        // editing reloads the page, and how to find out whether it compiled.
+        assert!(created.contains("main.jsx"), "{created}");
+        assert!(created.contains("mode=open"), "{created}");
+        assert!(created.contains("mode=status"), "{created}");
+        assert!(
+            root.join(".artist/canvas/sales-report/canvas.toml")
+                .is_file(),
+            "create reported success without writing the manifest"
+        );
+
+        canvas.server().await.expect("server starts");
+
+        let status = tool
+            .call(CanvasArgs {
+                mode: Some("status".into()),
+                name: Some("Sales Report".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("status");
+        assert!(status.contains("url: http://"), "{status}");
+        assert!(status.contains("No errors reported"), "{status}");
+        // The load-bearing line. A report that is merely empty reads as "all
+        // well" — this one has to say *why* it is empty and what to do about
+        // it, or the model concludes a canvas nobody can see is working.
+        assert!(
+            status.contains("No open window") && status.contains("mode=open"),
+            "an unopened canvas must explain its own silence: {status}"
+        );
+        assert!(status.contains("Shared state is empty"), "{status}");
+
+        let mut entries = serde_json::Map::new();
+        entries.insert("rows".into(), json!(42));
+        tool.call(CanvasArgs {
+            mode: Some("state".into()),
+            name: Some("Sales Report".into()),
+            entries: Some(entries),
+            ..Default::default()
+        })
+        .await
+        .expect("write state");
+
+        let status = tool
+            .call(CanvasArgs {
+                mode: Some("status".into()),
+                name: Some("Sales Report".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("status again");
+        assert!(
+            status.contains("rows = 42"),
+            "state the model just wrote should come back: {status}"
+        );
+
+        // Nothing ever opened a window, and saying so plainly matters: the
+        // alternative reads as a window that failed to close.
+        let closed = tool
+            .call(CanvasArgs {
+                mode: Some("close".into()),
+                name: Some("Sales Report".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("close");
+        assert!(closed.contains("nothing to close"), "{closed}");
+
+        let listed = tool
+            .call(CanvasArgs {
+                mode: Some("list".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("list again");
+        assert!(listed.contains("sales-report"), "{listed}");
+        assert!(
+            listed.contains("http://"),
+            "a served canvas should list its url: {listed}"
+        );
+    }
+
+    /// A typo is the most likely thing to reach this tool, and the reply is the
+    /// model's only way to recover: it has to name what does exist.
+    #[tokio::test]
+    async fn an_unknown_canvas_is_answered_with_the_ones_that_exist() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let (tool, _canvas) = unstarted(project.path());
+
+        let error = tool
+            .call(CanvasArgs {
+                mode: Some("status".into()),
+                name: Some("dmeo".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("status answers rather than failing");
+        assert!(
+            error.contains("demo"),
+            "the real canvas went unmentioned: {error}"
+        );
     }
 
     #[test]

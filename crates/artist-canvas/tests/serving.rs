@@ -156,6 +156,78 @@ async fn the_page_can_report_its_own_errors_back_to_the_harness() {
     assert_eq!(reports[0].message, "boom");
     // Draining is destructive, so the model never re-reads a stale failure.
     assert!(server.take_reports(Some("demo")).is_empty());
+
+    // Which is exactly why the empty result has to come with a window. The
+    // count survives the drain: without it, "no errors" from a buffer someone
+    // else emptied is indistinguishable from one that never filled.
+    let (since, seen) = server.report_window("demo");
+    assert_eq!(seen, 1, "the drained report should still be counted");
+    assert!(
+        since.is_some(),
+        "after a drain, `no errors` covers only the time since it"
+    );
+
+    // A canvas nothing has looked at yet has no window to report, which is a
+    // different sentence: none since it was served, rather than none lately.
+    let (fresh, none) = server.report_window("never-checked");
+    assert_eq!((fresh, none), (None, 0));
+}
+
+/// The digest says what is on screen; without a build number on it, a page that
+/// has not applied the model's last edit is indistinguishable from proof that
+/// the edit changed nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_is_told_which_build_it_is_showing() {
+    let project = Project::new("revision");
+    project.canvas("demo", "", ENTRY);
+
+    let server = Server::start(project.root.clone())
+        .await
+        .expect("server starts");
+
+    // Nothing has changed yet, and the shell says so rather than omitting it —
+    // a missing number would leave `canvas status` unable to tell "current"
+    // from "unknown".
+    assert_eq!(server.revision("demo"), 0);
+    let shell = reqwest::get(server.url("demo"))
+        .await
+        .expect("shell")
+        .text()
+        .await
+        .unwrap();
+    assert!(shell.contains("rev: 0"), "the shell must stamp the build");
+
+    // An edit the watcher sees advances it. Polled rather than slept on: the
+    // watcher is a real filesystem notification and its latency is the
+    // platform's, not ours.
+    std::fs::write(
+        project.root.join(".artist/canvas/demo/main.jsx"),
+        ENTRY.replace("hello", "goodbye"),
+    )
+    .expect("edit");
+
+    for _ in 0..100 {
+        if server.revision("demo") > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        server.revision("demo") > 0,
+        "editing a canvas should advance the build the server serves"
+    );
+
+    // And a page loading now starts life on the new build rather than 0.
+    let shell = reqwest::get(server.url("demo"))
+        .await
+        .expect("shell again")
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        shell.contains(&format!("rev: {}", server.revision("demo"))),
+        "a page loaded after an edit should start on the current build"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

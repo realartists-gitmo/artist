@@ -196,6 +196,11 @@ rpc("canvas.ask.pending")
 // copy. A module URL is its identity, so this is also what makes the re-import
 // a genuinely new evaluation.
 let generation = 0;
+// Which build of the canvas this page is actually showing. Starts at whatever
+// the server was serving when the shell was sent and advances only when a swap
+// succeeds — so a failed update leaves it behind, which is exactly the state
+// the model needs to be told about.
+let revision = boot.rev ?? 0;
 
 /**
  * Swap one edited module without reloading the page.
@@ -208,7 +213,7 @@ let generation = 0;
  * page never imported, an import that throws, or a runtime that reports the
  * update was not handled.
  */
-async function applyUpdate({ path }) {
+async function applyUpdate({ path, rev }) {
   const runtime = globalThis.__ARTIST_REFRESH__;
   if (!runtime || !path) {
     location.reload();
@@ -235,6 +240,10 @@ async function applyUpdate({ path }) {
     // Let the newly registered families settle before asking React to swap.
     await new Promise((resolve) => setTimeout(resolve, 0));
     runtime.performReactRefresh();
+    // Only now: everything above can bail to a reload or throw, and claiming
+    // the build before it is on screen is the whole failure this number exists
+    // to expose.
+    if (typeof rev === "number") revision = rev;
     hideOverlay();
   } catch (error) {
     // A compile error arrives as a throwing module; showing it beats a reload
@@ -325,6 +334,9 @@ function digest() {
 
   return {
     mounted: true,
+    // Which build this describes. Without it a digest taken before an edit
+    // landed looks exactly like a digest proving the edit changed nothing.
+    rev: revision,
     elements: [...seen.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)
       .map(([tag, n]) => `${tag}×${n}`),
     text,

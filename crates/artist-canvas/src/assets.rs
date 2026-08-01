@@ -182,7 +182,13 @@ fn import_map(manifest: &Manifest) -> String {
 /// Order matters: the import map must precede any module, the runtime must
 /// precede the entry so it catches errors thrown during the first render, and
 /// Tailwind must be able to see the DOM the entry produces.
-pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
+///
+/// `rev` is the build the page starts life showing. It matters because a page
+/// is not always current: it loads, the model edits, and until the swap lands
+/// the DOM still describes the previous version. Without a number on it, a
+/// digest of the old page is indistinguishable from proof that an edit did
+/// nothing.
+pub fn shell(slug: &str, manifest: &Manifest, key: &str, rev: u64) -> String {
     let title = if manifest.title.trim().is_empty() {
         slug
     } else {
@@ -219,7 +225,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
 {map}
     </script>
     <script>
-      window.__ARTIST__ = {{ slug: {slug_json}, key: {key_json} }};
+      window.__ARTIST__ = {{ slug: {slug_json}, key: {key_json}, rev: {rev} }};
     </script>{tailwind}
     <script type="module" src="/@artist/refresh.js"></script>
     <script type="module" src="/@artist/client.js"></script>
@@ -237,6 +243,7 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
         map = import_map(manifest),
         slug_json = json_string(slug),
         key_json = json_string(key),
+        rev = rev,
         tailwind = tailwind,
         entry = escape_html(&format!("./{}", manifest.entry.trim_start_matches("./"))),
     )
@@ -374,7 +381,7 @@ mod tests {
             entry: "app.tsx".into(),
             ..Manifest::default()
         };
-        let html = shell("perf", &manifest, "s3cret");
+        let html = shell("perf", &manifest, "s3cret", 0);
 
         assert!(html.contains(r#"src="./app.tsx""#), "{html}");
         assert!(html.contains(r#"key: "s3cret""#), "{html}");
@@ -391,7 +398,7 @@ mod tests {
     /// so the policy is stated rather than assumed.
     #[test]
     fn the_shell_sends_no_referrer() {
-        let html = shell("perf", &Manifest::default(), "s3cret");
+        let html = shell("perf", &Manifest::default(), "s3cret", 0);
         assert!(
             html.contains(r#"<meta name="referrer" content="no-referrer" />"#),
             "{html}"
@@ -409,7 +416,7 @@ mod tests {
             tailwind: false,
             ..Manifest::default()
         };
-        assert!(!shell("x", &manifest, "k").contains("tailwind-browser.js"));
+        assert!(!shell("x", &manifest, "k", 0).contains("tailwind-browser.js"));
     }
 
     /// A canvas title is model-written text landing in markup.
@@ -419,7 +426,7 @@ mod tests {
             title: "</title><script>alert(1)</script>".into(),
             ..Manifest::default()
         };
-        let html = shell("x", &manifest, "k");
+        let html = shell("x", &manifest, "k", 0);
         assert!(!html.contains("<script>alert(1)"), "{html}");
         assert!(html.contains("&lt;/title&gt;"), "{html}");
     }

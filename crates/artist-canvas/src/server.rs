@@ -17,7 +17,7 @@ use std::{
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
@@ -65,6 +65,8 @@ pub struct Report {
 enum Signal {
     Reload {
         slug: String,
+        /// The build this reload brings the page up to.
+        rev: u64,
     },
     /// One module changed. The page re-imports just that module and lets React
     /// Refresh swap the components, so scroll position, focus and state all
@@ -73,6 +75,10 @@ enum Signal {
         slug: String,
         /// Canvas-relative, matching the URL the page originally imported.
         path: String,
+        /// The build applying this update brings the page up to. The page
+        /// echoes it back in its digest, which is how `canvas status` can tell
+        /// a page showing the model's latest edit from one that is behind.
+        rev: u64,
     },
     /// Shared state changed.
     ///
@@ -89,20 +95,16 @@ enum Signal {
         questions: Vec<artist_session::ask::Question>,
     },
     /// An agent event, forwarded verbatim.
-    Agent {
-        event: serde_json::Value,
-    },
+    Agent { event: serde_json::Value },
     /// Asks any open page to describe what it is showing.
-    Digest {
-        slug: String,
-    },
+    Digest { slug: String },
 }
 
 impl Signal {
     /// Which canvas should see this, or `None` for everyone.
     fn addressed_to(&self) -> Option<&str> {
         match self {
-            Signal::Reload { slug }
+            Signal::Reload { slug, .. }
             | Signal::Update { slug, .. }
             | Signal::Digest { slug }
             | Signal::State { slug, .. } => Some(slug),
@@ -136,6 +138,26 @@ struct Inner {
     /// The windows this session put on screen, so they can be closed with it.
     windows: crate::window::Windows,
     host: Arc<dyn CanvasHost>,
+    /// Per-canvas bookkeeping that exists so `canvas status` can qualify what
+    /// it reports rather than stating it flat. See [`History`].
+    history: Mutex<std::collections::HashMap<String, History>>,
+}
+
+/// What a canvas has been through this session.
+///
+/// Both fields answer a question the model would otherwise get wrong. A digest
+/// says what is on screen but not *which build* that is, so a page that has not
+/// picked up the last edit reads as proof the edit did nothing. And
+/// `take_reports` drains, so "no errors" means "none since something last
+/// looked" — which, unqualified, reads as "none, ever".
+#[derive(Default)]
+struct History {
+    /// Bumped every time the source behind this canvas changes.
+    edits: u64,
+    /// Every report that has arrived, including ones already drained.
+    reports_seen: u64,
+    /// When `take_reports` last emptied this canvas's reports.
+    last_drain: Option<Instant>,
 }
 
 /// A running canvas server.
@@ -242,6 +264,7 @@ impl Server {
             states: DashMap::new(),
             windows: crate::window::Windows::default(),
             host,
+            history: Mutex::new(std::collections::HashMap::new()),
         });
 
         let router = Router::new()
@@ -374,8 +397,50 @@ impl Server {
         None
     }
 
+    /// Which build of a canvas the server is currently serving.
+    ///
+    /// A page reports the one it is showing, and the two together are the only
+    /// way to tell a digest of the model's latest edit from a digest of what
+    /// was on screen before it.
+    pub fn revision(&self, slug: &str) -> u64 {
+        self.inner
+            .history
+            .lock()
+            .expect("history lock poisoned")
+            .get(slug)
+            .map(|history| history.edits)
+            .unwrap_or(0)
+    }
+
+    /// How much of the session a "no errors" line actually covers: time since
+    /// the last drain, and how many reports have arrived over the whole
+    /// session.
+    ///
+    /// `None` means nothing has drained this canvas yet, so the window is the
+    /// whole session. Call before [`take_reports`](Self::take_reports), which
+    /// closes the window it describes.
+    pub fn report_window(&self, slug: &str) -> (Option<Duration>, u64) {
+        let history = self.inner.history.lock().expect("history lock poisoned");
+        match history.get(slug) {
+            Some(history) => (
+                history.last_drain.map(|at| at.elapsed()),
+                history.reports_seen,
+            ),
+            None => (None, 0),
+        }
+    }
+
     /// Everything the page has reported since the last drain.
     pub fn take_reports(&self, slug: Option<&str>) -> Vec<Report> {
+        if let Some(slug) = slug {
+            self.inner
+                .history
+                .lock()
+                .expect("history lock poisoned")
+                .entry(slug.to_owned())
+                .or_default()
+                .last_drain = Some(Instant::now());
+        }
         let mut reports = self.inner.reports.lock().expect("report lock poisoned");
         match slug {
             None => reports.drain(..).collect(),
@@ -395,6 +460,9 @@ impl Server {
     fn spawn_watcher(&self) {
         let root = self.inner.project.join(crate::registry::CANVAS_DIR);
         let signals = self.inner.signals.clone();
+        // The watcher is the only place that knows an edit happened, so it is
+        // the only place that can number one.
+        let inner = Arc::clone(&self.inner);
         let base = root.clone();
         let project = self.inner.project.clone();
         std::thread::spawn(move || {
@@ -445,12 +513,13 @@ impl Server {
                 changed.sort();
                 changed.dedup();
                 for (slug, module) in changed {
+                    let rev = inner.bump_edits(&slug);
                     // A module can be swapped in place. The manifest, a
                     // stylesheet or an asset changes the page itself, so the
                     // page has to be rebuilt.
                     let _ = match module {
-                        Some(path) => signals.send(Signal::Update { slug, path }),
-                        None => signals.send(Signal::Reload { slug }),
+                        Some(path) => signals.send(Signal::Update { slug, path, rev }),
+                        None => signals.send(Signal::Reload { slug, rev }),
                     };
                 }
             }
@@ -601,7 +670,14 @@ async fn serve_shell(
             detail: None,
         });
     }
-    html(assets::shell(&slug, &manifest, &inner.key))
+    let rev = inner
+        .history
+        .lock()
+        .expect("history lock poisoned")
+        .get(&slug)
+        .map(|history| history.edits)
+        .unwrap_or(0);
+    html(assets::shell(&slug, &manifest, &inner.key, rev))
 }
 
 async fn serve_module(
@@ -1052,7 +1128,24 @@ impl Inner {
             .clone()
     }
 
+    /// Count an edit and return the build number it produces.
+    fn bump_edits(&self, slug: &str) -> u64 {
+        let mut history = self.history.lock().expect("history lock poisoned");
+        let entry = history.entry(slug.to_owned()).or_default();
+        entry.edits += 1;
+        entry.edits
+    }
+
     fn push_report(&self, report: Report) {
+        // Counted before it can be drained: the total is what makes a drained
+        // buffer distinguishable from one that was always empty.
+        self.history
+            .lock()
+            .expect("history lock poisoned")
+            .entry(report.slug.clone())
+            .or_default()
+            .reports_seen += 1;
+
         let mut reports = self.reports.lock().expect("report lock poisoned");
         if reports.len() >= REPORT_CAPACITY {
             reports.pop_front();
@@ -1376,6 +1469,7 @@ mod tests {
             states: DashMap::new(),
             windows: crate::window::Windows::default(),
             host: Arc::new(crate::bridge::DetachedHost),
+            history: Mutex::new(std::collections::HashMap::new()),
         };
 
         assert!(
