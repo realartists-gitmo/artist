@@ -47,6 +47,22 @@ impl StateStore {
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (agent_id, canonical_path)
                 );
+
+                -- Who last wrote each path, and what they left there. Shared
+                -- across processes, which is the whole point: an in-memory map
+                -- can only attribute writes made by this process, so a second
+                -- artist in the same worktree was invisible.
+                --
+                -- `content_hash` is what makes attribution a claim rather than
+                -- a record. An agent wrote this path once; the user may have
+                -- edited it since, and naming the agent then would send the
+                -- model coordinating with one that did nothing.
+                CREATE TABLE IF NOT EXISTS file_writers (
+                    canonical_path TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    written_at INTEGER NOT NULL
+                );
                 "#,
             )
             .map_err(sql_error)?;
@@ -76,6 +92,22 @@ impl StateStore {
                     prefixes_json TEXT NOT NULL,
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (agent_id, canonical_path)
+                );
+
+                -- Who last wrote each path, and what they left there. Shared
+                -- across processes, which is the whole point: an in-memory map
+                -- can only attribute writes made by this process, so a second
+                -- artist in the same worktree was invisible.
+                --
+                -- `content_hash` is what makes attribution a claim rather than
+                -- a record. An agent wrote this path once; the user may have
+                -- edited it since, and naming the agent then would send the
+                -- model coordinating with one that did nothing.
+                CREATE TABLE IF NOT EXISTS file_writers (
+                    canonical_path TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    written_at INTEGER NOT NULL
                 );
                 "#,
             )
@@ -155,6 +187,94 @@ impl StateStore {
         }
         transaction.commit().map_err(sql_error)?;
         Ok(())
+    }
+
+    /// Record who wrote a path and what they left there.
+    ///
+    /// One upsert per write, alongside the `replace_anchor_state` that already
+    /// runs on the same path, so the marginal cost is a row rather than a round
+    /// trip of its own.
+    pub async fn record_writer(
+        &self,
+        path: &str,
+        agent_id: &AgentId,
+        content_hash: &str,
+    ) -> Result<(), HashlineError> {
+        let now = now_ms();
+        self.connection
+            .lock()
+            .await
+            .execute(
+                "INSERT INTO file_writers(canonical_path, agent_id, content_hash, written_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(canonical_path) DO UPDATE SET
+                     agent_id=excluded.agent_id,
+                     content_hash=excluded.content_hash,
+                     written_at=excluded.written_at",
+                params![path, agent_id.0, content_hash, now],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Who wrote each of `paths`, and the hash they left.
+    ///
+    /// Queried only for paths that have actually drifted, which is rare — so
+    /// this never runs on the hot path even though the write side does.
+    pub async fn writers_for(
+        &self,
+        paths: &[String],
+    ) -> Result<HashMap<String, (String, String)>, HashlineError> {
+        if paths.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = std::iter::repeat_n("?", paths.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let connection = self.connection.lock().await;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT canonical_path, agent_id, content_hash FROM file_writers
+                 WHERE canonical_path IN ({placeholders})"
+            ))
+            .map_err(sql_error)?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(paths.iter()))
+            .map_err(sql_error)?;
+        let mut result = HashMap::new();
+        while let Some(row) = rows.next().map_err(sql_error)? {
+            let path: String = row.get(0).map_err(sql_error)?;
+            let agent: String = row.get(1).map_err(sql_error)?;
+            let hash: String = row.get(2).map_err(sql_error)?;
+            result.insert(path, (agent, hash));
+        }
+        Ok(result)
+    }
+
+    /// Drop anchor state belonging to identities that cannot be a conversation.
+    ///
+    /// Anchor state is keyed by actor. Before that key was the conversation it
+    /// was the constant `artist`, so every session shared one row and took
+    /// turns overwriting it. Those rows are now unreachable — nothing loads
+    /// them, and anchors reissue on the next read of any file — so this is
+    /// tidying rather than repair. `artist-unbound` joins them: it is the
+    /// identity a tool bundle carries before it is bound to a conversation, so
+    /// anything written under it belongs to nobody.
+    ///
+    /// Best effort by design. Failing to tidy must never stop a session
+    /// starting, and the rows are inert either way.
+    pub async fn forget_unowned_anchor_state(&self) -> Result<usize, HashlineError> {
+        const UNOWNED: [&str; 3] = ["artist", "artist-unbound", "default"];
+        let removed = self
+            .connection
+            .lock()
+            .await
+            .execute(
+                "DELETE FROM anchor_states WHERE agent_id IN (?1, ?2, ?3)",
+                params![UNOWNED[0], UNOWNED[1], UNOWNED[2]],
+            )
+            .map_err(sql_error)?;
+        Ok(removed)
     }
 }
 

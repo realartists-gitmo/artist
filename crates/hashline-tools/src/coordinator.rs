@@ -58,14 +58,11 @@ pub struct FileCoordinator {
     managers: Arc<Mutex<HashMap<String, Arc<Mutex<FileToolManager>>>>>,
     path_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     lock_directory: Arc<PathBuf>,
-    /// Last actor to write each path, and the hash of what they wrote.
+    /// Whether the one-off tidy of pre-conversation anchor state has run.
     ///
-    /// In-memory, so a write from another process is correctly unattributed
-    /// rather than guessed at. The hash is what makes attribution a *claim*
-    /// rather than a guess within this process too: an agent wrote this path
-    /// once, but the user may have edited it since, and naming the agent then
-    /// would send the model coordinating with one that did not do it.
-    last_writers: Arc<Mutex<HashMap<String, (String, String)>>>,
+    /// Once per coordinator rather than per session: the rows it removes are
+    /// inert, so repeating the sweep would be work for nothing.
+    tidied: Arc<Mutex<bool>>,
 }
 
 struct PathTransaction {
@@ -93,7 +90,7 @@ impl FileCoordinator {
             managers: Arc::new(Mutex::new(HashMap::new())),
             path_locks: Arc::new(Mutex::new(HashMap::new())),
             lock_directory: Arc::new(lock_directory),
-            last_writers: Arc::new(Mutex::new(HashMap::new())),
+            tidied: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -206,7 +203,7 @@ impl FileCoordinator {
         let state = manager.export_issued_prefixes();
         drop(manager);
         let hash = content_hash(content.as_bytes());
-        self.note_writer(&normalized, actor, hash.clone()).await;
+        self.note_writer(&normalized, actor, &hash).await;
         self.state
             .replace_anchor_state(&actor.id, &state)
             .await
@@ -286,7 +283,7 @@ impl FileCoordinator {
         let state = manager.export_issued_prefixes();
         drop(manager);
         let hash = content_hash(&bytes);
-        self.note_writer(&normalized, actor, hash.clone()).await;
+        self.note_writer(&normalized, actor, &hash).await;
         self.state
             .replace_anchor_state(&actor.id, &state)
             .await
@@ -360,11 +357,17 @@ impl FileCoordinator {
 
         let mut drifts = { manager.lock().await.describe_drift(&moved) };
 
-        // Attribution is the coordinator's to give: it is the only layer that
-        // sees every actor. A write we made ourselves is not drift worth
-        // reporting to the actor that made it, but one from another session is
-        // a coordination signal.
-        let writers = self.last_writers.lock().await;
+        // Attribution comes from the store rather than from memory, so a write
+        // by another *process* in this worktree is attributable too — which is
+        // the melting-pot case, and the one an in-process map could never see.
+        // Only for paths that actually drifted, so the query stays off the hot
+        // path even though the write side does not.
+        let changed: Vec<String> = drifts.iter().map(|drift| drift.path.clone()).collect();
+        let writers = self
+            .state
+            .writers_for(&changed)
+            .await
+            .map_err(anyhow::Error::msg)?;
         for drift in &mut drifts {
             let DriftKind::Modified { after_text, .. } = &drift.kind else {
                 // Nothing to check a hash against, so nothing to claim.
@@ -384,17 +387,34 @@ impl FileCoordinator {
     }
 
     /// Record who wrote a path and what they left there, for drift attribution.
-    async fn note_writer(&self, path: &str, actor: &AgentIdentity, hash: String) {
-        self.last_writers
-            .lock()
-            .await
-            .insert(path.to_owned(), (actor.id.0.clone(), hash));
+    ///
+    /// Best effort: attribution is a nicety on top of a drift report that is
+    /// itself a nicety on top of anchors that already fail safe. Losing a row
+    /// costs a change reported as unattributed — never a wrong edit — so this
+    /// must not fail a write that has already landed on disk.
+    async fn note_writer(&self, path: &str, actor: &AgentIdentity, hash: &str) {
+        let _ = self.state.record_writer(path, &actor.id, hash).await;
+    }
+
+    /// Drop anchor state left by identities that predate conversation scoping.
+    ///
+    /// Runs once, lazily, on the first manager a coordinator hands out — rather
+    /// than at construction, which would put a database write in the path of
+    /// every `Workspace::open` including those that never touch a file.
+    async fn tidy_once(&self) {
+        let mut tidied = self.tidied.lock().await;
+        if *tidied {
+            return;
+        }
+        *tidied = true;
+        let _ = self.state.forget_unowned_anchor_state().await;
     }
 
     async fn manager_for(&self, actor: &AgentIdentity) -> Result<Arc<Mutex<FileToolManager>>> {
         if let Some(manager) = self.managers.lock().await.get(&actor.id.0).cloned() {
             return Ok(manager);
         }
+        self.tidy_once().await;
         let persisted = self
             .state
             .load_anchor_state(&actor.id)
@@ -671,6 +691,97 @@ mod tests {
         assert!(
             drifts[0].writer.is_none(),
             "a later outside edit was blamed on beta: {drifts:?}"
+        );
+    }
+
+    /// The melting-pot case that an in-memory map could never serve: the write
+    /// came from a *different process*, so nothing in this one saw it happen.
+    /// Two coordinators over one store stand in for two artist processes
+    /// sharing a worktree.
+    #[tokio::test]
+    async fn a_write_from_another_process_is_still_attributed() {
+        let (first, root) = coordinator("cross-process");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        let alpha = agent("alpha");
+        read(&first, &alpha, &path).await;
+
+        // A second artist, with its own coordinator and its own in-memory
+        // state, over the same database and lock directory.
+        let config = FileToolConfig {
+            workspace_root: Some(root.clone()),
+            ..FileToolConfig::default()
+        };
+        let second = FileCoordinator::open(config, root.join("anchors.sqlite"), root.join("locks"))
+            .expect("second coordinator");
+        second
+            .write_file(
+                &agent("beta"),
+                path.clone(),
+                "one\nWRITTEN BY ANOTHER PROCESS\n".to_owned(),
+                WriteCondition::Any,
+            )
+            .await
+            .expect("beta writes");
+
+        let drifts = first.drifted(&alpha).await.expect("alpha checks");
+        assert_eq!(drifts.len(), 1, "{drifts:?}");
+        assert_eq!(
+            drifts[0].writer.as_deref(),
+            Some("beta"),
+            "a cross-process write was not attributed: {drifts:?}"
+        );
+    }
+
+    /// Anchor state written before conversation scoping belongs to nobody —
+    /// nothing loads it, and anchors reissue on read. Tidying it is safe, and
+    /// leaving it would keep a row around that looks like a session.
+    #[tokio::test]
+    async fn anchor_state_from_before_conversation_scoping_is_forgotten() {
+        let (files, root) = coordinator("tidy");
+        let file = root.join("a.txt");
+        std::fs::write(&file, "one\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+
+        // Stand in for a session from before the change.
+        read(&files, &agent("artist"), &path).await;
+        let state = files.state.clone();
+        assert!(
+            !state
+                .load_anchor_state(&agent("artist").id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "the fixture did not write any state to tidy"
+        );
+
+        // A fresh coordinator over the same store tidies on its first manager.
+        let config = FileToolConfig {
+            workspace_root: Some(root.clone()),
+            ..FileToolConfig::default()
+        };
+        let next = FileCoordinator::open(config, root.join("anchors.sqlite"), root.join("locks"))
+            .expect("next coordinator");
+        read(&next, &agent("session-01"), &path).await;
+
+        assert!(
+            state
+                .load_anchor_state(&agent("artist").id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "unowned anchor state survived"
+        );
+        // The real session's own state is untouched.
+        assert!(
+            !state
+                .load_anchor_state(&agent("session-01").id)
+                .await
+                .expect("load")
+                .is_empty(),
+            "tidying took a real session's state with it"
         );
     }
 
