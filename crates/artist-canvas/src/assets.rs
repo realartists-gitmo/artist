@@ -242,7 +242,6 @@ pub fn shell(slug: &str, manifest: &Manifest, key: &str) -> String {
     )
 }
 
-
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -323,10 +322,7 @@ mod tests {
     #[test]
     fn declared_deps_link_at_the_cdn() {
         let manifest = Manifest {
-            deps: BTreeMap::from([(
-                "three".to_owned(),
-                "https://esm.sh/three@0.170".to_owned(),
-            )]),
+            deps: BTreeMap::from([("three".to_owned(), "https://esm.sh/three@0.170".to_owned())]),
             ..Manifest::default()
         };
         let map = import_map(&manifest);
@@ -346,7 +342,10 @@ mod tests {
         let manifest = Manifest {
             deps: BTreeMap::from([
                 ("good".to_owned(), "https://esm.sh/ok".to_owned()),
-                ("evil".to_owned(), "https://evil.example/payload.js".to_owned()),
+                (
+                    "evil".to_owned(),
+                    "https://evil.example/payload.js".to_owned(),
+                ),
                 ("plain".to_owned(), "http://esm.sh/insecure".to_owned()),
                 (
                     "sneaky".to_owned(),
@@ -363,7 +362,10 @@ mod tests {
         assert!(!map.contains("evil.example"), "{map}");
         assert!(!map.contains("\"evil\""), "{map}");
         assert!(!map.contains("insecure"), "{map}");
-        assert!(!map.contains("\"sneaky\""), "credentials trick admitted: {map}");
+        assert!(
+            !map.contains("\"sneaky\""),
+            "credentials trick admitted: {map}"
+        );
     }
 
     #[test]

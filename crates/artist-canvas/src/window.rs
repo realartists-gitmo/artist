@@ -119,8 +119,7 @@ impl Windows {
         let mut live = self.live.lock().expect("window registry poisoned");
         match live.remove(slug) {
             Some(mut child) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child);
                 true
             }
             None => false,
@@ -131,11 +130,7 @@ impl Windows {
     pub fn close_all(&self) {
         let mut live = self.live.lock().expect("window registry poisoned");
         for (_, mut child) in live.drain() {
-            let _ = child.kill();
-            // Reaped rather than left as a zombie: artist may be a long-lived
-            // process, and a session that opens canvases repeatedly would
-            // otherwise accumulate defunct children for its whole life.
-            let _ = child.wait();
+            stop(&mut child);
         }
     }
 
@@ -157,6 +152,50 @@ impl Drop for Windows {
     }
 }
 
+/// How long a window gets to close itself before it is killed.
+///
+/// Paid once per open window when the session ends, so it cannot be generous —
+/// but a window that answers does so in single-digit milliseconds, and the
+/// grace is a deadline rather than a delay: the loop below returns the moment
+/// the child is gone.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// How often to check, so a window that closes at once is not waited on.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(5);
+
+/// Ask a window to close; kill it if it will not.
+///
+/// This used to be a bare `kill`, which is unanswerable — and the child has
+/// something to say on the way out: it records the window's size and position
+/// so reopening the canvas does not mean re-dragging it. SIGKILL meant that
+/// only ever happened when the *user* clicked the titlebar X, so the exit path
+/// artist itself takes at the end of every session was the one that forgot.
+///
+/// Closing the child's stdin is the request. The kill stays as the backstop
+/// for a window that is wedged, or old enough not to be listening.
+fn stop(child: &mut Child) {
+    // The child is reading this and nothing else ever writes to it, so
+    // dropping the handle is an EOF the child cannot miss.
+    drop(child.stdin.take());
+
+    let deadline = Instant::now() + SHUTDOWN_GRACE;
+    loop {
+        match child.try_wait() {
+            // Gone, and reaped by the `try_wait` that saw it.
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() >= deadline => break,
+            Ok(None) => std::thread::sleep(SHUTDOWN_POLL),
+            Err(_) => break,
+        }
+    }
+
+    let _ = child.kill();
+    // Reaped rather than left as a zombie: artist may be a long-lived process,
+    // and a session that opens canvases repeatedly would otherwise accumulate
+    // defunct children for its whole life.
+    let _ = child.wait();
+}
+
 /// The command `Windows::open` will spawn.
 ///
 /// Separated so a test can inspect it without launching a window.
@@ -176,7 +215,17 @@ fn command(executable: PathBuf, url: &str, title: &str, geometry: &Path) -> Comm
         // discarded — it never reaches the terminal either way — but a pipe
         // can be read back, which is what turns "it did not open" into a
         // reason. `failed_to_start` owns that pipe from here.
-        .stdin(Stdio::null())
+        //
+        // stdin is a pipe nothing is ever written to. Closing it is how
+        // [`stop`] asks the window to go, and because the kernel closes it
+        // too when this process dies, the child also learns about a crash
+        // immediately rather than inferring it from a dead socket six seconds
+        // later. A signal would have been the obvious alternative and is
+        // worse: artist runs on a multi-threaded tokio runtime that is
+        // already up before the window subcommand is dispatched, so SIGTERM
+        // would be delivered to whichever thread has not blocked it and take
+        // the process down before the window could record anything.
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     command
@@ -342,6 +391,54 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// The window records where it was on the way out, so closing it has to be
+    /// a request it can answer rather than a kill it cannot.
+    #[test]
+    fn a_window_is_asked_to_close_before_it_is_killed() {
+        // `cat` stands in for the window: it reads stdin and ends at EOF,
+        // which is exactly what the child's hangup watcher does.
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let started = Instant::now();
+        stop(&mut child);
+        assert!(
+            started.elapsed() < SHUTDOWN_GRACE,
+            "a window that closes itself should not be waited on for the full grace"
+        );
+    }
+
+    /// The kill has to stay. A wedged window, or one from a build that predates
+    /// the hangup watcher, would otherwise keep the session from ending.
+    #[test]
+    fn a_window_that_will_not_close_is_still_killed() {
+        // `sleep` never reads stdin, so closing the pipe means nothing to it.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let started = Instant::now();
+        stop(&mut child);
+        assert!(
+            started.elapsed() >= SHUTDOWN_GRACE,
+            "the grace should have been paid in full before killing"
+        );
+        // Reaped, not merely signalled: `stop` is what stands between a
+        // long-lived artist and a pile of defunct children.
+        assert!(
+            matches!(child.try_wait(), Err(_) | Ok(Some(_))),
+            "the killed window was left unreaped"
+        );
     }
 
     /// Geometry belongs to the canvas, not to the machine: a canvas showing a

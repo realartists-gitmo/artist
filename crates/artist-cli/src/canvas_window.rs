@@ -66,6 +66,54 @@ impl Geometry {
     }
 }
 
+/// Record where the window is, so reopening this canvas puts it back.
+///
+/// Called from every path that ends the event loop rather than only from the
+/// titlebar X. It used to hang off `CloseRequested` alone, which meant the
+/// common exit — artist closing its own windows as the session ends — always
+/// forgot, and the user's sizing survived only if they happened to close the
+/// window by hand first.
+#[cfg(feature = "webview")]
+fn remember(window: &tao::window::Window, path: Option<&std::path::Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    let scale = window.scale_factor();
+    let size = window.inner_size().to_logical::<f64>(scale);
+    let position = window
+        .outer_position()
+        .ok()
+        .map(|point| point.to_logical::<f64>(scale));
+    Geometry {
+        width: size.width,
+        height: size.height,
+        x: position.map(|point| point.x),
+        y: position.map(|point| point.y),
+    }
+    .save(path);
+}
+
+/// Stop when the parent closes the window's stdin.
+///
+/// That is artist asking for the window back — `canvas close`, or the session
+/// ending — and it arrives as an EOF rather than a signal for a reason the
+/// parent's `stop` explains. It also fires if artist dies without asking,
+/// because the kernel closes the write end with it; that overlaps with
+/// [`watch_parent`] and beats it by several seconds.
+#[cfg(feature = "webview")]
+fn stop_on_hangup(stop: impl Fn() + Send + 'static) {
+    use std::io::Read;
+
+    std::thread::spawn(move || {
+        // Nothing is ever written, so this blocks until the pipe closes. A
+        // read that somehow returns data is not a hangup and must not be
+        // treated as one.
+        let mut byte = [0u8; 1];
+        while let Ok(1) = std::io::stdin().read(&mut byte) {}
+        stop();
+    });
+}
+
 /// Watch the parent's server, and stop when it stops.
 ///
 /// The child is a separate process, so nothing about it dies automatically when
@@ -144,6 +192,10 @@ pub fn run(url: &str, title: &str) -> anyhow::Result<()> {
     watch_parent(url, move || {
         let _ = proxy.send_event(());
     });
+    let proxy = event_loop.create_proxy();
+    stop_on_hangup(move || {
+        let _ = proxy.send_event(());
+    });
 
     let builder = WebViewBuilder::new()
         .with_url(url)
@@ -171,27 +223,16 @@ pub fn run(url: &str, title: &str) -> anyhow::Result<()> {
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            // The parent's server stopped answering, so artist is gone and this
-            // window can no longer do anything.
-            Event::UserEvent(()) => *control_flow = ControlFlow::Exit,
-            Event::WindowEvent {
+            // Three ways to the same end, and all three have to remember: the
+            // user closing the window, artist asking for it back, and artist
+            // vanishing out from under it. Only the first of those is the one
+            // a person thinks of as "closing the window", and it is the rarest.
+            Event::UserEvent(())
+            | Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                if let Some(path) = remembered.as_deref() {
-                    let size = window.inner_size().to_logical::<f64>(window.scale_factor());
-                    let position = window
-                        .outer_position()
-                        .ok()
-                        .map(|point| point.to_logical::<f64>(window.scale_factor()));
-                    Geometry {
-                        width: size.width,
-                        height: size.height,
-                        x: position.map(|point| point.x),
-                        y: position.map(|point| point.y),
-                    }
-                    .save(path);
-                }
+                remember(&window, remembered.as_deref());
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}

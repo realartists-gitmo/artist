@@ -31,7 +31,6 @@ pub const ALLOWED_HOSTS: &[&str] = &[
     "ga.jspm.io",
 ];
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum DepError {
     #[error("only https URLs may be declared as deps, got `{0}`")]
