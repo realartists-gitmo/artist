@@ -239,6 +239,145 @@ edge case — then the restriction is not acceptable and AFT is the answer.
 
 **Next step is not code.** It is working §5.1–5.8 through Design B on paper,
 recording where it gives an answer and where it refuses, and only then deciding.
+That is done — see §8, which finds no unresolved case and two resolutions better
+than this section expected.
+
+
+## 8. The battery worked through Design B
+
+Done on paper, case by case. **Design B survives all eight**, and two of them
+resolve better than §3–§4 anticipated — the resolution falls out of the attack
+relation instead of needing a policy exception.
+
+**Setup.** Layer 0 is `strict-kernel-v1`, unchanged: testimony, connectives,
+quantifiers, strict rules, `⟦·⟧₀` into `FIVE`. Layer 1 arguments are finite
+trees whose leaves are layer-0 conclusions and whose steps are rules from `R`;
+strict rules may be applied *within* layer 1 to defeasible conclusions, which is
+ordinary ASPIC+. Layer 2 is Dung's grounded extension of `(Args, Defeat)`.
+
+### 8.1 `B` at a leaf — resolved, and with no special rule
+
+An argument whose leaf is `Conflicted` **undermines itself**. `⟦p⟧₀ = B` is
+designated *and* anti-designated, so the very same layer-0 conclusion that
+licenses the leaf also supplies the contradiction that undermines it. A
+self-attacking argument is never in the grounded extension, since `F(S)` requires
+every attacker to be attacked by a member of `S` and an argument cannot defend
+itself.
+
+So a conflicted fact cannot silently found a default, and **nothing had to be
+added** — no "leaves must be `T`, not merely designated" exception, which was the
+obvious move and would have been a second notion of support living beside layer
+0's. Falling out of the attack relation is the difference between a semantics and
+a pile of rules.
+
+### 8.2 Rebuttal — sceptically undecided ✓
+
+`usually(bird → flies)`, `usually(penguin → ¬flies)`, Tweety both. The two
+arguments rebut each other; with no preference neither defeat is filtered;
+`F(∅)` contains neither, and iteration adds neither. Undecided.
+
+Crucially **evaluation order cannot affect this**, because the framework is built
+before it is evaluated. That is the structural reason Design B cannot reproduce
+the "whichever rule fired first wins" defect.
+
+### 8.3 Defeasibly-derived undercutting — works, and needs no mutual dependency
+
+`(unless E P)` with `E` concluded by argument `C`. `C` undercuts `A`. Grounded
+semantics resolves it by construction: if nothing attacks `C`, then `C ∈ F(∅)`
+and `A` is out; if some unattacked `D` attacks `C`, then `C` is out and `A` is
+in at the next stage.
+
+The recursion terminates on the ordinal construction of the grounded extension.
+**No layer-0 feedback is involved** — `E` is concluded in layer 1, and this is
+precisely the case that killed attempts 1 and 2 when the valuation and the
+acceptance were mutually defined.
+
+### 8.4 Undermining a sub-argument ✓, and it names the retracted rule's bug
+
+Attacks are on *sub-arguments*, so the attacker set of `A` is the union over
+every sub-argument of `A`. The retracted `Step::Defeasible` read the exception
+off the top `unless` node and called that complete — under this definition it was
+missing every attack on every premise beneath it.
+
+### 8.5 Preference cycles — degrade to sceptical, no acyclicity assumption
+
+Defeat is attack *not filtered by* preference: `B` defeats `A'` iff `B` attacks
+`A'` and **not** `B ≺ A'`. With a store holding `a ≺ b ≺ c ≺ a`, the relation is
+not a strict partial order — and the literal reading still behaves. Where `a ≺ b`
+and `b ≺ a` both hold, both attacks fail to be filtered, so both defeats stand,
+so both arguments are mutually defeated and neither is accepted.
+
+A cycle therefore reads as *no preference wins*, which is sceptical and safe, and
+it matches `prefer`'s existing refusal to bake in transitivity. **No
+well-foundedness assumption on `≺` is required**, which was the alternative and
+would have made a store's ordinary testimony able to make the semantics
+undefined.
+
+### 8.6 Two-cycle and self-support ✓ — and this is where the rank comes from
+
+`a` attacks `b`, `b` attacks `a`. `F(∅) = {unattacked arguments} = ∅`, and
+iteration stays `∅`. The grounded extension is empty, as required — while every
+*local* "is each attacker attacked by an accepted argument" test accepts `{a}`.
+
+The certificate consequence is exact: carry **`rank(a)` = the least `n` with
+`a ∈ Fⁿ(∅)`**, and have the kernel check that every attacker of `a` is defeated
+by an argument of *strictly lower* rank. `F⁰(∅)` is the unattacked arguments, so
+ranks bottom out and circular defence cannot be certified. This is the local
+check the retracted §11.4 wanted and did not have.
+
+Self-support does not arise: arguments are finite trees, so an argument cannot
+take its own conclusion as a premise.
+
+### 8.7 Floating conclusions — a stated choice, and the right one here
+
+Two arguments concluding `X` by different routes, attacking each other on their
+intermediate steps. Sceptical grounded semantics accepts neither, so `X` is not
+accepted even though it follows either way.
+
+Stated deliberately rather than inherited silently. For a memory that must
+explain itself it is also the better answer: accepting `X` would mean holding a
+belief whose every supporting argument the system has rejected, and "I cannot
+tell you why" is worse than "undecided" for something whose whole purpose is
+being able to say why.
+
+### 8.8 Reduction to the frozen base ✓
+
+`R = ∅` ⟹ no argument contains a defeasible step ⟹ rebut, undercut and undermine
+are all vacuous (each requires a defeasible element) ⟹ no defeats ⟹ the grounded
+extension is *all* arguments ⟹ conclusions are exactly layer 0's.
+
+`strict-kernel-v1` is recovered on the nose, so `tests/cross_spec.rs` and
+`tests/soundness.rs` continue to pin the same behaviour.
+
+### 8.9 The restriction, stated precisely
+
+Design B forbids exactly one thing: **a defeasible conclusion may not be an input
+to layer 0's fixpoint.** It may be used freely inside layer 1, including by
+strict rules.
+
+Working the cases showed this is narrower than §4 feared. "Usually the build is
+fast" followed strictly by "if the build is fast, deploy" is fine — the strict
+step happens in layer 1. What is excluded is a default affecting layer 0's own
+truth computation, e.g. a default about the truth predicate feeding groundedness.
+That is exotic, and if it is ever needed it is the trigger to switch to AFT.
+
+## 9. Where this leaves the decision
+
+Design B survives §5 with no unresolved case, one restriction that is narrow and
+stateable, and a certificate form (§8.6's rank) that is locally checkable — which
+was the sticking point that killed the last attempt.
+
+**Still required before any code**, per §2, and none of it is done:
+
+1. The denotation written out — `⟦usually P⟧`, `⟦unless E P⟧`, `⟦prefer a b⟧` in
+   terms of the layer-2 extension, as clauses, not prose.
+2. The theorem stated and proved: existence and uniqueness of the grounded
+   extension over `(Args, Defeat)` as constructed here, plus §8.8's reduction as
+   a lemma rather than an observation.
+3. The judgment-type change of §6 — `⟦E⟧ ∈ {N,F}` is not expressible today, and a
+   default defeated by a conflicted exception is exactly the case that matters.
+4. Review of this document, including §8, by someone trying to break it. Two
+   prior constructions passed my own reading and did not survive that.
 
 ## References
 
