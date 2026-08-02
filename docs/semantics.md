@@ -100,8 +100,16 @@ Open = N (neither told)   Supported = T   Refuted = F   Conflicted = B (told bot
   join, `¬` swaps `T`/`F` and fixes `N`/`B`.
 - **knowledge order `≤_k`**: `N <_k T <_k B`, `N <_k F <_k B`.
 
-Both orders are complete lattices and every connective is `≤_k`-monotone. De
-Morgan, double negation and distributivity are theorems, not test cases.
+Both orders are complete lattices. De Morgan, double negation and distributivity
+are theorems of the bilattice, not test cases.
+
+**`∧`, `∨` and `¬` are `≤_k`-monotone; `⊃` is not**, and revisions 4–5 claimed it
+of every connective. With consequent `F`: `N ≤_k T`, yet `N ⊃ F = T` and
+`T ⊃ F = F`, and `T ≰_k F`. Learning more about the antecedent can therefore
+*lower* an implication in the knowledge order, so "evaluation only moves upward"
+is not available for `⊃`. Nothing below depends on it: §4.2's fixpoint is
+monotone in the **valuation** order `⊑` by an argument about total extensions,
+which never appeals to connective monotonicity.
 
 **Validity is *always designated*** — value in `{T, B}` — not always `T`. In a
 logic where `B` means *told both*, a formula coming out `B` has been established;
@@ -265,18 +273,32 @@ that consult nothing — which after §10's corrections means `Axiom` alone.
 `Bound = None | Partial | Certain` on each side, giving nine pairs. Only the
 `Certain` cells constrain `M`:
 
+**The domain is `FIVE`, not `FOUR`.** Revisions 4–5 tabulated allowed sets over
+`FOUR` alone, so an `Ungrounded` certificate — which establishes `⟦n⟧ = ⊥` — had
+no cell it could land in and the theorem could not state what that rule proves.
+Undefinedness is a possible value of `⟦·⟧`, so it must be a possible member.
+
 - `support = Certain` ⟹ `⟦n⟧ ∈ {T, B}`
 - `refutation = Certain` ⟹ `⟦n⟧ ∈ {F, B}`
-- `None` ⟹ no constraint. An unestablished support is not a denial.
+- `None` ⟹ no constraint — and *no constraint* includes `⊥`. An unestablished
+  support is not a denial, and it is not a claim that the sentence is grounded
+  either.
 - `Partial` ⟹ **no constraint.** It reports the search, not the structure.
+- A `grounding` of `StableLoop` or `Oscillatory` ⟹ `⟦n⟧ = ⊥`, and this is the
+  *only* way to establish that, which is why grounding is a component of the
+  judgment rather than a decoration on it.
 
-Hence the nine cells:
+Hence:
 
-| support \ refutation | None | Partial | Certain |
-|---|---|---|---|
-| **None** | `may = FOUR`, `must = ⊥` | same | `may = {F,B}`, `must = F` |
-| **Partial** | `may = FOUR`, `must = ⊥` | same | `may = {F,B}`, `must = F` |
-| **Certain** | `may = {T,B}`, `must = T` | same | `may = {B}`, `must = B` |
+| support \ refutation | None / Partial | Certain |
+|---|---|---|
+| **None / Partial** | `allowed = FIVE` | `allowed = {F,B}` |
+| **Certain** | `allowed = {T,B}` | `allowed = {B}` |
+
+and independently, `grounding ≠ Grounded` ⟹ `allowed = {⊥}`. Both bounds
+`Certain` together with a non-`Grounded` grounding is unsatisfiable, and a
+checker producing it has proved a contradiction — which is a rejectable state,
+not a value.
 
 `Partial` asserting nothing is deliberate: it makes every `Partial` cell
 trivially sound, so a rule that can only reach `Partial` is one that has told the
@@ -398,7 +420,7 @@ preserve correctness. No field is believed — including the axis fields.
 
 | rule | Γ contributed | rests on |
 |---|---|---|
-| `Axiom` | `∅` | `⟦⊤⟧ = T`, `⟦⊥⟧ = F` in every `M` |
+| `Axiom` | `∅` | `⟦#true⟧ = T`, `⟦#false⟧ = F` in every `M` |
 | `Told` | `{the record}` | §8.2 — the trust point |
 | `Negation` | premise's | §3, the FOUR involution |
 | `Connective` | premises' | §3, meet and join **by position** |
@@ -408,13 +430,17 @@ preserve correctness. No field is believed — including the axis fields.
 | `Instantiate` | premise's | §4.3, a designated meet forces every instance |
 | `Ungrounded` | `∅` | §4.3, reference fragment only |
 
+Throughout, `⊥` is **undefinedness** — the absence of a value in a partial
+valuation (§4.2) — and never the false truth atom, which is written `#false`.
+Revision 5 used the one glyph for both in `Axiom`'s lemma.
+
 **`Axiom` is restored and is not a special case of `Tautology`.** Revision 1
 subsumed it, having enumerated *Boolean* valuations — but this semantics is
 Belnap's, and a classical tautology need not be `T` in FOUR: `P ∨ ¬P` at `N` is
 `N`, and `P → P` at `N` is `N`. Enumerating Boolean assignments certified formulas
 that are not valid here. A `Tautology` rule for this logic must enumerate **FOUR**
 valuations, and the set it then licenses is nearly empty — so the rule is
-**withdrawn**, and `⊤`/`⊥` are handled by `Axiom`, whose lemma is immediate. The
+**withdrawn**, and `#true`/`#false` are handled by `Axiom`, whose lemma is immediate. The
 `constructive` flag goes with it: it was distinguishing two classical notions
 inside a semantics where neither applies.
 
@@ -544,11 +570,6 @@ property test rather than another table of examples.
 
 - **General ungroundedness.** Needs a closed-unfounded-set witness and a closure
   checker. Tractable; not written.
-- **Multi-slot instantiation.** `Instance` and `Exhaustive` substitute one bound
-  variable, so a binder over several slots — `∃x,y ∈ σ. R(x,y)` — is evaluable but
-  not certifiable. Extending it means substituting a tuple and checking each
-  slot's domain membership; the shape is the same and the de Bruijn bookkeeping
-  is the only new part.
 - **Multi-slot instantiation** remains the binder gap: `Instantiate` and
   `Instance` substitute one variable, so `∃x,y ∈ σ. R(x,y)` is evaluable and not
   certifiable.

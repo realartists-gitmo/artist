@@ -646,38 +646,6 @@ pub(crate) enum Skeleton {
 }
 
 impl Skeleton {
-    /// Intuitionistic propositional validity, by **G4ip** — Dyckhoff's
-    /// contraction-free sequent calculus, which terminates without loop
-    /// checking because every rule strictly reduces a well-founded measure.
-    ///
-    /// This exists because gating *all* validity on determinacy was wrong.
-    /// `P → P` needs no bivalence, no sharpness and no classical logic; it holds
-    /// constructively, so refusing to certify it over a borderline predicate was
-    /// a bug, not caution. What genuinely needs bivalence is a much smaller set
-    /// — excluded middle, double-negation elimination, reductio, and the
-    /// truth-table method itself — and those are the ones the gate is for.
-    ///
-    /// So: anything provable here is certified unconditionally. Anything valid
-    /// only under the classical truth table is certified only where totality is
-    /// established.
-    pub(crate) fn intuitionistic(&self) -> bool {
-        prove(&[], self, 0)
-    }
-
-    /// Evaluate over **Belnap's FOUR** rather than the Booleans.
-    ///
-    /// `digits` packs one base-4 value per atom: `0 = N`, `1 = T`, `2 = F`,
-    /// `3 = B`. This exists because [`Self::eval`] answers a question about a
-    /// *different logic* from the one this system commits to (semantics §3), and
-    /// a soundness property test caught the difference in both polarities:
-    /// `P ∨ ¬P` at `N` is `N ∨ N = N`, not `T`, and `P ∧ ¬P` at `N` is `N`, not
-    /// `F`. Enumerating Boolean masks therefore certified a tautology as
-    /// `Supported` and a contradiction as `Refuted` where the model says neither.
-    ///
-    /// Almost nothing is FOUR-valid, which is the honest consequence of a logic
-    /// whose store can hold both and neither: the shortcut survives only for
-    /// formulas built over `⊤`/`⊥`, and everything else falls through to ordinary
-    /// evaluation against real facts — where it belonged.
     pub(crate) fn eval4(&self, digits: u64) -> Four {
         match self {
             Skeleton::Const(b) => {
@@ -711,175 +679,7 @@ impl Skeleton {
     }
 }
 
-/// One step of G4ip: does `goal` follow intuitionistically from `ctx`?
-///
-/// The left rules for implication are what make this terminating: an implication
-/// whose antecedent is compound is *replaced* by simpler implications rather
-/// than being reused, so no rule ever needs the same principal formula twice.
-fn prove(ctx: &[Skeleton], goal: &Skeleton, depth: u32) -> bool {
-    if depth > 64 {
-        return false;
-    }
-    // Axiom, ⊤R, ⊥L.
-    if matches!(goal, Skeleton::Const(true)) {
-        return true;
-    }
-    if ctx.iter().any(|f| matches!(f, Skeleton::Const(false))) {
-        return true;
-    }
-    if ctx.iter().any(|f| same(f, goal)) {
-        return true;
-    }
 
-    // **Invertible right rules before the one non-invertible left rule.**
-    // `→R` and `∧R` never lose completeness, so applying them first is free —
-    // and running the left loop first meant `L→→` fired early and `return
-    // false` abandoned sequents that were provable the other way round.
-    // `¬¬¬P → ¬P` was the visible casualty.
-    match goal {
-        Skeleton::Imp(a, b) => {
-            let mut next = ctx.to_vec();
-            next.push((**a).clone());
-            return prove(&next, b, depth + 1);
-        }
-        Skeleton::Not(a) => {
-            let mut next = ctx.to_vec();
-            next.push((**a).clone());
-            return prove(&next, &Skeleton::Const(false), depth + 1);
-        }
-        Skeleton::And(parts) if !parts.is_empty() => {
-            return parts.iter().all(|p| prove(ctx, p, depth + 1));
-        }
-        _ => {}
-    }
-
-    // Invertible left rules next: they never lose completeness either.
-    for i in 0..ctx.len() {
-        match ctx[i].clone() {
-            Skeleton::And(parts) => {
-                let mut next = ctx.to_vec();
-                next.remove(i);
-                next.extend(parts);
-                return prove(&next, goal, depth + 1);
-            }
-            Skeleton::Or(parts) => {
-                let mut base = ctx.to_vec();
-                base.remove(i);
-                return parts.iter().all(|p| {
-                    let mut next = base.clone();
-                    next.push(p.clone());
-                    prove(&next, goal, depth + 1)
-                });
-            }
-            Skeleton::Not(inner) => {
-                // ¬A is A → ⊥.
-                let mut next = ctx.to_vec();
-                next[i] = Skeleton::Imp(inner, Box::new(Skeleton::Const(false)));
-                return prove(&next, goal, depth + 1);
-            }
-            Skeleton::Imp(ante, conseq) => match *ante {
-                // p → B with p already present: use it.
-                // `⊤ → B` gives `B` outright: there is no `L⊤` rule and `⊤` is
-                // never pushed into the context, so this hypothesis used to sit
-                // there forever and `(⊤ → P) → P` was unprovable.
-                Skeleton::Const(true) => {
-                    let mut next = ctx.to_vec();
-                    next[i] = *conseq;
-                    return prove(&next, goal, depth + 1);
-                }
-                // `⊥ → B` is vacuous and can be discarded.
-                Skeleton::Const(false) => {
-                    let mut next = ctx.to_vec();
-                    next.remove(i);
-                    return prove(&next, goal, depth + 1);
-                }
-                Skeleton::Atom(_) => {
-                    if ctx.iter().any(|f| same(f, &ante)) {
-                        let mut next = ctx.to_vec();
-                        next[i] = *conseq;
-                        return prove(&next, goal, depth + 1);
-                    }
-                }
-                // (A ∧ B) → C  ⇒  A → (B → C)
-                Skeleton::And(parts) => {
-                    let mut folded = *conseq;
-                    for part in parts.into_iter().rev() {
-                        folded = Skeleton::Imp(Box::new(part), Box::new(folded));
-                    }
-                    let mut next = ctx.to_vec();
-                    next[i] = folded;
-                    return prove(&next, goal, depth + 1);
-                }
-                // (A ∨ B) → C  ⇒  A → C, B → C
-                Skeleton::Or(parts) => {
-                    let mut next = ctx.to_vec();
-                    next.remove(i);
-                    for part in parts {
-                        next.push(Skeleton::Imp(Box::new(part), conseq.clone()));
-                    }
-                    return prove(&next, goal, depth + 1);
-                }
-                // ¬A → C  ⇒  (A → ⊥) → C
-                Skeleton::Not(inner) => {
-                    let mut next = ctx.to_vec();
-                    next[i] = Skeleton::Imp(
-                        Box::new(Skeleton::Imp(inner, Box::new(Skeleton::Const(false)))),
-                        conseq,
-                    );
-                    return prove(&next, goal, depth + 1);
-                }
-                // (A → B) → C: the one non-invertible left rule.
-                Skeleton::Imp(a, b) => {
-                    let mut first = ctx.to_vec();
-                    first[i] = Skeleton::Imp(b.clone(), conseq.clone());
-                    let inner_goal = Skeleton::Imp(a, b);
-                    if !prove(&first, &inner_goal, depth + 1) {
-                        return false;
-                    }
-                    let mut second = ctx.to_vec();
-                    second[i] = *conseq;
-                    return prove(&second, goal, depth + 1);
-                }
-            },
-            // ⊥ in the context already succeeded above; atoms are only used
-            // by the axiom rule and the `p → B` case.
-            Skeleton::Atom(_) | Skeleton::Const(_) => {}
-        }
-    }
-
-    // Right rules.
-    match goal {
-        Skeleton::And(parts) => parts.iter().all(|p| prove(ctx, p, depth + 1)),
-        Skeleton::Imp(a, b) => {
-            let mut next = ctx.to_vec();
-            next.push((**a).clone());
-            prove(&next, b, depth + 1)
-        }
-        Skeleton::Not(a) => {
-            let mut next = ctx.to_vec();
-            next.push((**a).clone());
-            prove(&next, &Skeleton::Const(false), depth + 1)
-        }
-        // ∨R is not invertible: try each disjunct.
-        Skeleton::Or(parts) => parts.iter().any(|p| prove(ctx, p, depth + 1)),
-        _ => false,
-    }
-}
-
-/// Structural equality on skeletons — atoms are compared by index, so two
-/// occurrences of one node are the same formula.
-fn same(a: &Skeleton, b: &Skeleton) -> bool {
-    match (a, b) {
-        (Skeleton::Const(x), Skeleton::Const(y)) => x == y,
-        (Skeleton::Atom(x), Skeleton::Atom(y)) => x == y,
-        (Skeleton::Not(x), Skeleton::Not(y)) => same(x, y),
-        (Skeleton::Imp(x1, y1), Skeleton::Imp(x2, y2)) => same(x1, x2) && same(y1, y2),
-        (Skeleton::And(x), Skeleton::And(y)) | (Skeleton::Or(x), Skeleton::Or(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q))
-        }
-        _ => false,
-    }
-}
 
 /// What a body does across an unbounded region of an integer domain.
 ///
@@ -1672,16 +1472,18 @@ impl State<'_> {
                 return None;
             }
         }
-        // **Constructive first.** `P → P`, `¬(P ∧ ¬P)` and `P ∧ ⊤ ↔ P` hold
-        // without bivalence, without sharpness, without classical logic — so
-        // gating them on determinacy was simply wrong, and refusing to certify
-        // `P → P` over a borderline predicate was a bug rather than caution.
-        let constructive = if all_true {
-            shape.intuitionistic()
-        } else {
-            // Refuting `X` constructively is proving `¬X`.
-            Skeleton::Not(Box::new(shape.clone())).intuitionistic()
-        };
+        // **There is no constructive tier, and there was no sound way to have
+        // one.** It claimed G4ip validity presumes only that no atom is `both`.
+        // That presumption does not validate it: `¬(P ∧ ¬P)` is G4ip-provable and
+        // at `N` evaluates to `¬(N ∧ N) = ¬N = N`, which is undesignated, and `N`
+        // is not `both`. Excluding gaps *and* gluts is bivalence — the classical
+        // tier's own presumption — under which G4ip proves a strict subset of
+        // what the truth table proves. So the tier was unsound as stated and
+        // redundant once corrected.
+        //
+        // What it was protecting is protected better: `P → P` needs no
+        // presumption at all, and the FOUR tier above certifies it
+        // unconditionally, because `⊃` is the strong implication.
         // **Not `merge`.** Merging asks "what do these claims come to", and
         // `Unknown` is superseded by anything said. This asks "is every atom
         // *established* total", where silence is the whole objection — so an
@@ -1693,10 +1495,10 @@ impl State<'_> {
         } else {
             declared.fold(Determinacy::Unknown, |a, b| a.max(b))
         };
-        // Only what needs bivalence is gated on it: excluded middle,
-        // double-negation elimination, reductio, and everything else the truth
-        // table proves and G4ip cannot.
-        if !constructive && self.mode == Mode::Certify && !worst.licenses_classical() {
+        // Everything reaching here presumes bivalence, so in `Certify` mode it
+        // is gated on totality being established — no exceptions, since there is
+        // no longer a class of formula that earns its way past.
+        if self.mode == Mode::Certify && !worst.licenses_classical() {
             return None;
         }
         let mut r = EvaluationResult::certain(all_true);

@@ -64,9 +64,14 @@ pub enum Step {
     /// otherwise `assumed` is not "nobody vouched" but "the vector was
     /// non-empty", which any producer satisfies with one arbitrary integer.
     Told { node: ObjectId, holds: bool, sources: Vec<ObjectId> },
-    /// A truth atom. `⟦⊤⟧ = T` and `⟦⊥⟧ = F` in every structure, so this is the
-    /// only rule that contributes nothing to `Γ` and the only source of an
-    /// **unconditional** judgment (semantics §7.1, §10).
+    /// A truth atom. `⟦#true⟧ = T` and `⟦#false⟧ = F` in every structure, so this
+    /// is the only rule that introduces nothing into `Γ` (semantics §7.1, §10).
+    ///
+    /// It is **not** the only source of an unconditional judgment, and saying so
+    /// was wrong twice: `Ungrounded` consults no testimony either, and any
+    /// composition over axioms — `Negation` of one, a `Connective` of several —
+    /// ends with `Γ` empty. Unconditionality is a property of `Γ`, not a
+    /// privilege of a rule.
     ///
     /// It replaces the `Tautology` rule, which enumerated *Boolean* valuations
     /// under a semantics that is Belnap's. A classical tautology need not be `T`

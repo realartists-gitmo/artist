@@ -237,14 +237,25 @@ fn constructive_tautologies_certify_over_a_vague_predicate() {
         "P → P is intuitionistically valid; sharpness is irrelevant to it"
     );
 
+    // **Non-contradiction is *not* certifiable over a vague predicate**, and
+    // this asserted that it was on the strength of a constructive tier that has
+    // since been removed as unsound. `¬(P ∧ ¬P)` is provable in G4ip, and in
+    // Belnap's FOUR at `N` it is `¬(N ∧ N) = ¬N = N` — undesignated. The tier
+    // claimed to presume only "no atom is `both`", which `N` satisfies, so the
+    // presumption did not validate what it licensed. Excluding gaps *and* gluts
+    // is bivalence, and under bivalence G4ip proves a strict subset of the truth
+    // table, so the tier bought nothing once corrected.
+    //
+    // `P → P` above still certifies, and for a better reason: it is valid in
+    // FOUR itself, presuming nothing. The two came apart, which is the point.
     let nc = {
         let conj = g.apply(wk::AND, vec![h, nh]);
         g.apply(wk::NOT, vec![conj])
     };
-    assert_eq!(
+    assert_ne!(
         ev.certify(&mut g, nc, &Vague, 20_000).evidential(),
         Evidential::Supported,
-        "non-contradiction is constructive too"
+        "non-contradiction needs bivalence, which `heap` does not have"
     );
 
     let with_top = g.apply(wk::AND, vec![h, wk::TOP]);

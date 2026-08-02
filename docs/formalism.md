@@ -1,8 +1,19 @@
 # The artist expression language
 
 The representation every durable fact is stored in, and the target every
-extractor emits. Normative: where this document and the code disagree, the code
-(`crates/artist-logic`) wins and this document is a bug.
+extractor emits.
+
+**Normativity is split, and the split is load-bearing.** For *syntax* — what a
+node is, how it is written, hashed, printed and stored — the code
+(`crates/artist-logic`) wins and this document is a bug: the graph is the
+artifact. For *meaning* — the logic, the axes, validity, groundedness,
+provenance — [`semantics.md`](semantics.md) wins and **the code** is the bug.
+
+This document said "the code wins" without qualification for its whole life, and
+every drift it records below was therefore resolved in the code's favour by
+default. That is the wrong default for a system whose kernel is supposed to be
+*proved* against something: a semantics that loses whenever the implementation
+disagrees is not a specification, it is a changelog.
 
 Every claim below that can be executed is executed. `crates/artist-logic/tests/`
 holds `roundtrip.rs`, `identity.rs`, `graph_eval.rs` — and `conformance.rs`,

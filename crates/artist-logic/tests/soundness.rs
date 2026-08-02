@@ -153,16 +153,28 @@ fn denote_over(
     seen
 }
 
-/// §7.2's nine cells. Only `Certain` constrains the structure — `support`
-/// asserts `⟦n⟧ ∈ {T,B}` and `refutation` asserts `⟦n⟧ ∈ {F,B}`. `Partial`
-/// reports the search and asserts nothing, which is what makes every `Partial`
-/// cell trivially sound.
-fn interval(r: &EvaluationResult) -> (Option<Four>, Vec<Four>) {
+/// §7.2's allowed sets, **over FIVE**. Only `Certain` constrains the structure —
+/// `support` asserts `⟦n⟧ ∈ {T,B}`, `refutation` asserts `⟦n⟧ ∈ {F,B}`. `Partial`
+/// reports the search and asserts nothing, which makes every `Partial` cell
+/// trivially sound.
+///
+/// `None`/`None` allows `⊥` as well as the four. It has to: `⟦n⟧` is genuinely
+/// undefined for an ungrounded sentence, so a domain of FOUR alone could not
+/// state what an `Ungrounded` certificate proves, and the soundness theorem had
+/// no cell for its conclusion.
+fn allowed(r: &EvaluationResult) -> (Option<Four>, Vec<Option<Four>>) {
+    let some = |xs: &[Four]| xs.iter().map(|x| Some(*x)).collect::<Vec<_>>();
     match (r.support == Bound::Certain, r.refutation == Bound::Certain) {
-        (true, true) => (Some(Four::B), vec![Four::B]),
-        (true, false) => (Some(Four::T), vec![Four::T, Four::B]),
-        (false, true) => (Some(Four::F), vec![Four::F, Four::B]),
-        (false, false) => (None, Four::ALL.to_vec()),
+        (true, true) => (Some(Four::B), some(&[Four::B])),
+        (true, false) => (Some(Four::T), some(&[Four::T, Four::B])),
+        (false, true) => (Some(Four::F), some(&[Four::F, Four::B])),
+        // `None` is `⊥`: undefined is a possible value, so it is a possible
+        // member.
+        (false, false) => {
+            let mut v = some(&Four::ALL);
+            v.push(None);
+            (None, v)
+        }
     }
 }
 
@@ -298,18 +310,15 @@ fn evaluation_brackets_the_denotation() {
         } else {
             partial.clone()
         };
-        let truth = match denote_over(&g, term, &atoms, &effective, bivalent) {
-            Some(t) => t,
-            // Undetermined even under the presumption: the evaluator may say
-            // anything an interval permits, so there is nothing to check.
-            None => continue,
-        };
-        let (must, may) = interval(&r);
+        // `None` here is `⊥` — genuinely undefined — and is now a checkable
+        // outcome rather than a case to skip.
+        let truth = denote_over(&g, term, &atoms, &effective, bivalent);
+        let (must, may) = allowed(&r);
 
-        if let Some(must) = must {
+        if let (Some(must), Some(t)) = (must, truth) {
             assert!(
-                must.le_k(truth),
-                "case {case}: must={must:?} is not ≤_k the denotation {truth:?} \
+                must.le_k(t),
+                "case {case}: must={must:?} is not ≤_k the denotation {t:?} \
                  (support={:?} refutation={:?})",
                 r.support,
                 r.refutation
@@ -317,7 +326,7 @@ fn evaluation_brackets_the_denotation() {
         }
         assert!(
             may.contains(&truth),
-            "case {case}: denotation {truth:?} outside may={may:?} \
+            "case {case}: denotation {truth:?} outside allowed={may:?} \
              (support={:?} refutation={:?})",
             r.support,
             r.refutation
