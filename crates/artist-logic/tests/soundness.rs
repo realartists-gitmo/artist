@@ -98,6 +98,17 @@ fn eval_total(g: &ObjectGraph, n: ObjectId, atoms: &[ObjectId], vals: &[Four], f
     if let Some(i) = atoms.iter().position(|a| *a == n) {
         return vals[i];
     }
+    // Quantifiers over an enumerated domain: the meet and join of the instances,
+    // exactly as §4.3 has it. `instances` maps the binder node to the already-
+    // generated atoms it ranges over, so no substitution is needed here — the
+    // reference stays obviously correct rather than becoming a second evaluator.
+    if let Some((binder, members)) = quantified(g, n, atoms) {
+        let vals = members.iter().map(|m| eval_total(g, *m, atoms, vals, fuel - 1));
+        return match binder {
+            b if b == wk::FORALL => vals.fold(Four::T, Four::and),
+            _ => vals.fold(Four::F, Four::or),
+        };
+    }
     match g.get(n) {
         Some(CoreNode::Apply { operator, operands }) => {
             let ops: Vec<Four> =
@@ -191,18 +202,100 @@ impl Lcg {
     }
 }
 
-fn gen_term(g: &mut ObjectGraph, rng: &mut Lcg, atoms: &[ObjectId], depth: u32) -> ObjectId {
+/// If `n` is a binder over a `set` domain, its kind and the instance nodes it
+/// ranges over.
+///
+/// The generator builds quantifiers whose body is a predicate applied to the
+/// bound variable, over a domain listing exactly the arguments in play — so the
+/// instances are nodes the fixture already holds, and the reference can take the
+/// meet or join of them directly.
+fn quantified(
+    g: &ObjectGraph,
+    n: ObjectId,
+    atoms: &[ObjectId],
+) -> Option<(ObjectId, Vec<ObjectId>)> {
+    let (binder, vars, bodies) = match g.get(n) {
+        Some(CoreNode::Bind { binder, vars, bodies }) => (*binder, vars, bodies),
+        _ => return None,
+    };
+    if !matches!(binder, wk::FORALL | wk::EXISTS) || vars.len() != 1 {
+        return None;
+    }
+    let dom = vars[0].domain?;
+    let members = match g.get(dom) {
+        Some(CoreNode::Apply { operator, operands }) if *operator == wk::SET_DOMAIN => {
+            operands.clone()
+        }
+        _ => return None,
+    };
+    // The body is `(pred (bvar 0))`; its instances are `(pred m)` for each member.
+    let pred = match g.get(*bodies.first()?) {
+        Some(CoreNode::Apply { operator, .. }) => *operator,
+        _ => return None,
+    };
+    let insts: Vec<ObjectId> = members
+        .iter()
+        .filter_map(|m| {
+            atoms.iter().copied().find(|a| match g.get(*a) {
+                Some(CoreNode::Apply { operator, operands }) => {
+                    *operator == pred && operands.as_slice() == [*m]
+                }
+                _ => false,
+            })
+        })
+        .collect();
+    (insts.len() == members.len()).then_some((binder, insts))
+}
+
+fn gen_term(
+    g: &mut ObjectGraph,
+    rng: &mut Lcg,
+    atoms: &[ObjectId],
+    quants: &[ObjectId],
+    depth: u32,
+) -> ObjectId {
     if depth == 0 || rng.pick(3) == 0 {
+        // Quantified nodes are drawn as leaves: they are opaque to the
+        // propositional structure above them, and their own instances are
+        // already in `atoms`.
+        if !quants.is_empty() && rng.pick(4) == 0 {
+            return quants[rng.pick(quants.len())];
+        }
         return atoms[rng.pick(atoms.len())];
     }
-    let a = gen_term(g, rng, atoms, depth - 1);
-    let b = gen_term(g, rng, atoms, depth - 1);
+    let a = gen_term(g, rng, atoms, quants, depth - 1);
+    let b = gen_term(g, rng, atoms, quants, depth - 1);
     match rng.pick(4) {
         0 => g.apply(wk::NOT, vec![a]),
         1 => g.apply(wk::AND, vec![a, b]),
         2 => g.apply(wk::OR, vec![a, b]),
         _ => g.apply(wk::IMPLIES, vec![a, b]),
     }
+}
+
+/// One `∀` and one `∃` per predicate, over the complete domain of the arguments
+/// in play.
+///
+/// **These had no property coverage at all.** `gen_term` built only `not`, `and`,
+/// `or` and `implies` for this suite's whole life, so `Instance`, `Exhaustive`
+/// and `Instantiate` — two of which were later refuted by hand-built
+/// countermodels — were never exercised by a generated case.
+fn gen_quantifiers(
+    g: &mut ObjectGraph,
+    preds: &[ObjectId],
+    args: &[ObjectId],
+) -> Vec<ObjectId> {
+    use artist_logic::object::Binding;
+    let dom = g.apply(wk::SET_DOMAIN, args.to_vec());
+    let mut out = Vec::new();
+    for p in preds {
+        for binder in [wk::FORALL, wk::EXISTS] {
+            let v = g.fresh();
+            let body = g.apply(*p, vec![v]);
+            out.push(g.bind(binder, vec![Binding { var: v, domain: Some(dom) }], vec![body]));
+        }
+    }
+    out
 }
 
 /// **§4.2's monotonicity lemma**, which is the one Knaster–Tarski is earned from.
@@ -218,7 +311,7 @@ fn phi_is_monotone_under_information_extension() {
     let mut rng = Lcg(0xf00d);
     let mut terms = Vec::new();
     for _ in 0..60 {
-        terms.push(gen_term(&mut g, &mut rng, &atoms, 3));
+        terms.push(gen_term(&mut g, &mut rng, &atoms, &[], 3));
     }
 
     // Every partial valuation, and every ⊑-extension of it.
@@ -275,6 +368,11 @@ fn evaluation_brackets_the_denotation_with_self_reference() {
 
 fn brackets(recursive: bool) {
     let mut rng = Lcg(0x5eed_1234);
+    // **Coverage is asserted, not assumed.** A generator that silently stops
+    // producing a shape leaves a passing test that checks nothing — which is how
+    // `B` went ungenerated for this suite's whole life, and how a regression
+    // written earlier today passed vacuously.
+    let mut with_quantifier = 0usize;
 
     for case in 0..300 {
         let mut g = ObjectGraph::new();
@@ -340,11 +438,16 @@ fn brackets(recursive: bool) {
             partial.push(None);
         }
 
+        let quants = gen_quantifiers(&mut g, &preds, &args);
+
         let mut pool = atoms.clone();
         pool.push(wk::TOP);
         pool.push(wk::BOT);
-        let term = gen_term(&mut g, &mut rng, &pool, 3);
+        let term = gen_term(&mut g, &mut rng, &pool, &quants, 3);
 
+        if mentions_binder(&g, term, 8) {
+            with_quantifier += 1;
+        }
         let r = GraphEvaluator::new().eval(&mut g, term, &s, 100_000);
 
         // **Γ can include bivalence, and §7.1 quantifies over `M ⊨ Γ`.** The
@@ -396,6 +499,26 @@ fn brackets(recursive: bool) {
             r.support,
             r.refutation
         );
+    }
+
+    assert!(
+        with_quantifier > 20,
+        "only {with_quantifier} of 300 generated terms contained a quantifier — \
+         `Instance`, `Exhaustive` and `Instantiate` would be untested"
+    );
+}
+
+/// Does `n` mention a binder anywhere? Bounded, because the graph has cycles.
+fn mentions_binder(g: &ObjectGraph, n: ObjectId, fuel: u32) -> bool {
+    if fuel == 0 {
+        return false;
+    }
+    match g.get(n) {
+        Some(CoreNode::Bind { .. }) => true,
+        Some(CoreNode::Apply { operands, .. }) => {
+            operands.iter().any(|o| mentions_binder(g, *o, fuel - 1))
+        }
+        _ => false,
     }
 }
 
