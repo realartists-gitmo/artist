@@ -546,3 +546,93 @@ fn the_worked_values_hold() {
         "P ∨ ¬P at N is N ∨ N = N — enumerating Boolean masks certifies a falsehood here"
     );
 }
+
+/// **Every certificate the evaluator emits must check, and must not claim more
+/// than the evaluator did.**
+///
+/// This is the de Bruijn criterion as a property rather than as two hand-picked
+/// examples. It is independent of which repair to `⟦·⟧` wins, because it relates
+/// the evaluator to its own kernel rather than either to the semantics: a step
+/// the kernel rejects is a bug wherever the truth turns out to lie, and so is a
+/// certificate proving more than the result it accompanies.
+///
+/// `eval_traced` discards a derivation that does not conclude the root, so an
+/// empty certificate is the honest outcome for anything the rules cannot reach —
+/// and that case is counted, because a suite where *every* certificate is empty
+/// would pass this while testing nothing.
+#[test]
+fn emitted_certificates_check_and_never_overclaim() {
+    let mut rng = Lcg(0xce27);
+    let (mut checked, mut empty) = (0usize, 0usize);
+
+    for case in 0..300 {
+        let mut g = ObjectGraph::new();
+        let args = [g.atom("a"), g.atom("b")];
+        let preds: Vec<ObjectId> = ["p", "q"].iter().map(|n| g.atom(n)).collect();
+
+        let mut s = MapGraphStructure::new();
+        let mut atoms = Vec::new();
+        for p in &preds {
+            let closed = rng.pick(2) == 0;
+            if closed {
+                s = s.closed(*p);
+            }
+            for a in &args {
+                atoms.push(g.apply(*p, vec![*a]));
+                match rng.pick(4) {
+                    0 => s = s.conflicting(*p, vec![*a]),
+                    1 => s = s.fact(*p, vec![*a]),
+                    _ => {}
+                }
+            }
+        }
+        let quants = gen_quantifiers(&mut g, &preds, &args);
+        let mut pool = atoms.clone();
+        pool.push(wk::TOP);
+        pool.push(wk::BOT);
+        let term = gen_term(&mut g, &mut rng, &pool, &quants, 3);
+
+        let (r, cert) = GraphEvaluator::new().eval_traced(&mut g, term, &s, 100_000);
+        if cert.steps.is_empty() {
+            empty += 1;
+            continue;
+        }
+        checked += 1;
+        let c = cert.check(&g).unwrap_or_else(|e| {
+            // Naming the step matters: "Unlicensed { step: 12 }" is not a bug
+            // report, and the first failure this test produced took a second run
+            // to localise.
+            if let artist_logic::certificate::Invalid::Unlicensed { step }
+            | artist_logic::certificate::Invalid::Mismatched { step } = e
+            {
+                eprintln!("offending step {step}: {:?}", cert.steps[step]);
+            }
+            panic!("case {case}: the evaluator emitted a derivation its own kernel rejects: {e:?}")
+        });
+        assert_eq!(c.node, term, "case {case}: concluded the wrong node");
+        assert!(
+            cert.justifies(&g, term, &r),
+            "case {case}: certificate claims more than the result\n  \
+             bounds  cert {:?}/{:?}  result {:?}/{:?}\n  \
+             ground  cert {:?}  result {:?}\n  \
+             deriv   cert {:?}  result {:?}\n  \
+             determ  cert {:?}  result {:?}",
+            c.support,
+            c.refutation,
+            r.support,
+            r.refutation,
+            c.grounding,
+            r.grounding,
+            c.derivation,
+            r.derivation,
+            c.determinacy,
+            r.determinacy
+        );
+    }
+
+    assert!(
+        checked > 30,
+        "only {checked} of 300 cases produced a certificate ({empty} empty) — \
+         the property would be passing on nothing"
+    );
+}

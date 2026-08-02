@@ -1436,9 +1436,23 @@ impl State<'_> {
         };
         match decided {
             Some(holds) => {
-                let (cited, slot) = if holds { (conseq, 1) } else { (ante, 0) };
-                if let Some(k) = self.cite(cited) {
-                    self.emit(Step::Connective { node, premises: vec![(k, slot)], holds });
+                // **Refuting an implication needs both operands cited.** Support
+                // comes from the consequent alone, so one premise covers it; but
+                // refutation is `A⁺ ∧ C⁻`, and the kernel's `Connective` rule
+                // requires every position covered when no single operand decides.
+                // Emitting only the antecedent produced a derivation the kernel
+                // rejected as `Unlicensed` — the evaluator and its own checker
+                // disagreeing, which a property test found on its first case.
+                let cites: Vec<(usize, usize)> = if holds {
+                    self.cite(conseq).map(|k| (k, 1)).into_iter().collect()
+                } else {
+                    self.cite(ante)
+                        .zip(self.cite(conseq))
+                        .map(|(a, c)| vec![(a, 0), (c, 1)])
+                        .unwrap_or_default()
+                };
+                if !cites.is_empty() {
+                    self.emit(Step::Connective { node, premises: cites, holds });
                 }
                 scan.decided(holds, self.snapshot)
             }
@@ -1689,11 +1703,27 @@ impl State<'_> {
             None => self.unsupported(resolved),
             Some(CoreNode::Atom { .. }) if resolved == wk::TOP => {
                 self.emit(Step::Axiom { node: resolved, holds: true });
-                EvaluationResult::certain(true)
+                // Total, and *derived*: a truth atom's condition is maximally
+                // sharp and owes nothing to a declaration. The kernel's `Axiom`
+                // rule already concluded this, so leaving it `Unknown` here made
+                // the certificate look like it was overclaiming when it was the
+                // evaluator under-reporting — `justifies` compares the two.
+                let mut r = EvaluationResult::certain(true);
+                r.determinacy = Determinacy::Total;
+                r.determinacy_basis = DeterminacyBasis::Derived;
+                r
             }
             Some(CoreNode::Atom { .. }) if resolved == wk::BOT => {
                 self.emit(Step::Axiom { node: resolved, holds: false });
-                EvaluationResult::certain(false)
+                // Total, and *derived*: a truth atom's condition is maximally
+                // sharp and owes nothing to a declaration. The kernel's `Axiom`
+                // rule already concluded this, so leaving it `Unknown` here made
+                // the certificate look like it was overclaiming when it was the
+                // evaluator under-reporting — `justifies` compares the two.
+                let mut r = EvaluationResult::certain(false);
+                r.determinacy = Determinacy::Total;
+                r.determinacy_basis = DeterminacyBasis::Derived;
+                r
             }
             // A bare atom or literal is not a proposition; it denotes.
             Some(CoreNode::Atom { .. })
