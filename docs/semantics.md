@@ -350,10 +350,39 @@ the second removes the mismatch.
    and says nothing about `f`, so the contradictory pair above is no longer
    expressible.
 
-**This is the same move AFT makes** (`defeasibility.md` §3): a pair of partial
-components under a precision order, which is the approximation bilattice. That
-the strict repair and the defeasibility construction converge on one structure is
-evidence for it, and means the two should be done together rather than in series.
+**What it costs.** `Bound` must gain a state. All four FOUR values are already
+distinguishable as pairs — `T = (Certain, None)`, `F = (None, Certain)`,
+`N = (None, None)`, `B = (Certain, Certain)` — but `Bound::None` conflates *the
+bit is 0* with *the bit is unknown*. `F`'s support bit is an established zero;
+a truth-teller's is undefined; both report `None`. Every clause reading `¬a⁺`
+needs the difference, so this is a judgment-type change and not a re-derivation.
+
+**What it buys, beyond the refutation.** Working it through, the repair pays for
+itself three times over — which is the strongest evidence available that it is
+the right branch rather than the convenient one:
+
+- `Instance`, `Instantiate` and `Connective` recover **as stated**, because all
+  three were always claims about bits and only the semantics disagreed.
+- **The false-antecedent row returns.** `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺`, so a known-zero
+  support bit supports the implication outright. That row was given up when the
+  strong implication landed, precisely because `refutation: Certain` admits the
+  designated `B` — the repair recovers it instead of trading it away for good.
+- **It is the precondition `defeasibility.md` §6 named.** `⟦E⟧ ∈ {N,F}` — *E
+  fails* — becomes expressible, and a default defeated by a *conflicted*
+  exception is exactly the case that separates it from `⟦E⟧ ∈ {F,B}`.
+
+**And it is the same move AFT makes** (`defeasibility.md` §3): a pair of partial
+components under a precision order, which is the approximation bilattice. The
+strict repair and the defeasible construction have converged on one structure.
+That reopens §7 of that document — Design B was preferred because it kept layer 0
+frozen and avoided AFT's cost, and layer 0 is now moving to AFT's structure
+anyway. **Sequence: repair layer 0, re-decide, then defeasibility.**
+
+**Not yet written**, and it is the next thing: the per-bit clauses for every
+operator, the per-bit fixpoint and its monotonicity proof, what `Grounding`
+becomes when one bit is settled and the other is not, and the nine lemmas
+re-derived. None of that is code, and none of it should be until reviewed — the
+last three rules that shipped on my own reading did not survive someone else's.
 
 ### 7.2 What a `(support, refutation)` pair asserts
 

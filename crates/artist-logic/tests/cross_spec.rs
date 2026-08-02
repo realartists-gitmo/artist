@@ -257,20 +257,27 @@ fn a_default_still_evaluates() {
 }
 
 // ---------------------------------------------------------------------------
-// REFUTED — outstanding soundness debt, from adversarial review of the rules.
+// Outstanding soundness debt, from adversarial review of the nine rules.
 //
-// `⟦·⟧` assigns one *complete* FOUR value or none; the bounds reason about the
-// two evidence bits independently. A support bit can be fixed across every
-// completion while the complete value varies between `T` and `B` — the semantics
-// says `⊥`, the certificate says `Certain`, and `Certain` excludes `⊥`.
+// `⟦·⟧` assigns a node one *complete* FOUR value or none; the bounds reason
+// about the two evidence bits independently. A support bit can be fixed across
+// every completion while the complete value varies between `T` and `B` — the
+// semantics says `⊥`, the certificate says `Certain`, and `Certain` excludes
+// `⊥`. `Instance` and `Instantiate` are refuted by countermodel; `Connective`
+// needs a side condition it does not have.
 //
-// These run under `cargo test -- --ignored` and assert the behaviour the repair
-// in semantics.md §7.1b must produce. They are ignored rather than deleted
-// because a known-unsound rule with no failing test is how the last three got
-// re-invented. Un-ignore them as the repair lands.
+// **The repair chosen is semantics.md §7.1b: give `⟦·⟧` independently partial
+// components.** So these tests assert what *that* repair requires — which is
+// mostly that the evaluator's existing answers become correct rather than
+// merely reported. An earlier draft of this block asserted the opposite,
+// encoding the repair that was *not* chosen; that is recorded because writing a
+// regression for the wrong branch of a decision is its own failure mode.
+//
+// They run under `cargo test -- --ignored` and fail until the judgment type can
+// express a support bit that is *established zero* rather than merely unknown.
 // ---------------------------------------------------------------------------
 
-/// A truth-teller: `Q := (holds (quote Q))`, whose denotation is `⊥`.
+/// A truth-teller: `Q := (holds (quote Q))`, whose bits are both undefined.
 fn truth_teller(g: &mut ObjectGraph) -> ObjectId {
     let q = g.alloc();
     let quoted = g.apply(wk::QUOTE, vec![q]);
@@ -280,17 +287,75 @@ fn truth_teller(g: &mut ObjectGraph) -> ObjectId {
     q
 }
 
-/// **`Connective` short-circuits, and short-circuiting is unsound here.**
+/// **`Bound::None` conflates an established zero with an unknown.**
 ///
-/// `B ∨ T = T` and `B ∨ F = B`, so with an undefined second operand the
-/// completions disagree and `⟦P ∨ Q⟧ = ⊥`. The evaluator answers `Supported`.
+/// This is the whole repair, and the other items follow from it. All four FOUR
+/// values are already distinguishable as pairs — `T` is `(Certain, None)`, `F` is
+/// `(None, Certain)`, `N` is `(None, None)`, `B` is `(Certain, Certain)`. What is
+/// *not* distinguishable is the support bit of `F`, which is **established 0**,
+/// from the support bit of a truth-teller, which is **unknown**: both report
+/// `None`.
 ///
-/// The result is internally contradictory by §7.2's own reading: `Certain`
-/// asserts `⟦n⟧ ∈ {T,B}` while the `StableLoop` it simultaneously reports asserts
-/// `⟦n⟧ = ⊥`.
+/// It shows up wherever a clause reads `¬a⁺`. `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺`, so a
+/// node whose support bit is a known zero supports any implication over it,
+/// while an unknown one supports nothing — and the evaluator cannot tell them
+/// apart, so it must treat both as unknown and loses the first.
+///
+/// It is also the precondition `defeasibility.md` §6 names: a default defeated
+/// by a *conflicted* exception is exactly the case that separates `⟦E⟧ ∈ {N,F}`
+/// from `⟦E⟧ ∈ {F,B}`, and it cannot be stated until this lands.
 #[test]
-#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
-fn a_disjunction_with_an_undefined_operand_is_not_supported() {
+#[ignore = "semantics.md §7.1b: judgment type cannot express an established zero"]
+fn an_established_zero_is_distinguishable_from_an_unknown() {
+    let (mut g, nodes, s) = four_valued();
+    let f = nodes.iter().find(|(k, _)| *k == "F").unwrap().1;
+    let n = nodes.iter().find(|(k, _)| *k == "N").unwrap().1;
+    let q = truth_teller(&mut g);
+
+    // `F` has support bit 0; the truth-teller's is undefined. Under §7.1b the
+    // implications over them must differ — `F ⊃ N = T`, while `Q ⊃ N` is
+    // undetermined on both bits.
+    let over_f = g.apply(wk::IMPLIES, vec![f, n]);
+    let over_q = g.apply(wk::IMPLIES, vec![q, n]);
+    assert_ne!(
+        ev(&mut g, over_f, &s),
+        ev(&mut g, over_q, &s),
+        "a known-zero support bit and an unknown one cannot license the same answer"
+    );
+}
+
+/// With an established zero available, the false-antecedent row returns.
+///
+/// `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺`, so `a⁺ = 0` gives support outright. That row was
+/// sacrificed when the strong implication landed, precisely because
+/// `refutation: Certain` admits `B`; the repair recovers it rather than trading
+/// it away permanently.
+#[test]
+#[ignore = "semantics.md §7.1b: needs an established-zero support bit"]
+fn a_failing_antecedent_supports_an_implication_again() {
+    let (mut g, nodes, s) = four_valued();
+    let f = nodes.iter().find(|(k, _)| *k == "F").unwrap().1;
+    let n = nodes.iter().find(|(k, _)| *k == "N").unwrap().1;
+    let imp = g.apply(wk::IMPLIES, vec![f, n]);
+    assert_eq!(
+        ev(&mut g, imp, &s),
+        Evidential::Supported,
+        "F ⊃ N = T: the antecedent is established not-designated"
+    );
+}
+
+/// **Grounding becomes per-bit, and the contradictory pair stops being
+/// expressible.**
+///
+/// Today `(or B Q)` reports `support: Certain` *and* `grounding: StableLoop` —
+/// which §7.2 reads as `⟦n⟧ ∈ {T,B}` and `⟦n⟧ = ⊥` simultaneously. Under §7.1b
+/// the support bit is 1 and the refutation bit is undefined, so the result is
+/// consistent; what must change is that `Grounded` no longer means "the whole
+/// value is defined" while a `Certain` bound is read as implying it.
+#[test]
+#[ignore = "semantics.md §7.1b: grounding is not yet per-bit"]
+fn a_partly_grounded_result_is_stateable() {
+    use artist_logic::evidence::{Bound, Grounding};
     let mut g = ObjectGraph::new();
     let (b, a) = (g.atom("b"), g.atom("a"));
     let ba = g.apply(b, vec![a]);
@@ -299,51 +364,10 @@ fn a_disjunction_with_an_undefined_operand_is_not_supported() {
 
     let disj = g.apply(wk::OR, vec![ba, q]);
     let r = GraphEvaluator::new().eval(&mut g, disj, &s, 100_000);
+    assert_eq!(r.support, Bound::Certain, "the support bit really is 1");
     assert_ne!(
-        r.evidential(),
-        Evidential::Supported,
-        "B ∨ ⊥ is ⊥ under the exact-value semantics, not T"
+        r.grounding,
+        Grounding::StableLoop,
+        "and the node is not simply ungrounded — one of its bits is settled"
     );
-}
-
-/// The dual: `B ∧ T = B`, `B ∧ F = F`, so `⟦P ∧ Q⟧ = ⊥` while the evaluator
-/// answers `Refuted`.
-#[test]
-#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
-fn a_conjunction_with_an_undefined_operand_is_not_refuted() {
-    let mut g = ObjectGraph::new();
-    let (b, a) = (g.atom("b"), g.atom("a"));
-    let ba = g.apply(b, vec![a]);
-    let q = truth_teller(&mut g);
-    let s = MapGraphStructure::new().conflicting(b, vec![a]);
-
-    let conj = g.apply(wk::AND, vec![ba, q]);
-    let r = GraphEvaluator::new().eval(&mut g, conj, &s, 100_000);
-    assert_ne!(r.evidential(), Evidential::Refuted, "B ∧ ⊥ is ⊥, not F");
-}
-
-/// **No result may claim a `Certain` bound and a non-`Grounded` grounding.**
-///
-/// §7.2: the first asserts `⟦n⟧ ∈ {T,B}` or `{F,B}`, the second asserts
-/// `⟦n⟧ = ⊥`. This is the cleanest statement of the defect — it needs no
-/// countermodel, only the evaluator's own output read against its own spec.
-#[test]
-#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
-fn a_certain_bound_and_an_ungrounded_verdict_cannot_coexist() {
-    use artist_logic::evidence::{Bound, Grounding};
-    let mut g = ObjectGraph::new();
-    let (b, a) = (g.atom("b"), g.atom("a"));
-    let ba = g.apply(b, vec![a]);
-    let q = truth_teller(&mut g);
-    let s = MapGraphStructure::new().conflicting(b, vec![a]);
-
-    for node in [g.apply(wk::OR, vec![ba, q]), g.apply(wk::AND, vec![ba, q])] {
-        let r = GraphEvaluator::new().eval(&mut g, node, &s, 100_000);
-        let certain = r.support == Bound::Certain || r.refutation == Bound::Certain;
-        assert!(
-            !(certain && r.grounding != Grounding::Grounded),
-            "claims a Certain bound while reporting {:?}",
-            r.grounding
-        );
-    }
 }
