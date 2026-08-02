@@ -443,18 +443,31 @@ Written as `(support, refutation)`; `⊓` is meet, `⊔` is join.
 | `(forall [(v D)] P)` | all members supported **and** `D` enumerable and complete | any member refuted |
 | `(exists [(v D)] P)` | any member supported | all members refuted **and** `D` complete |
 | `(count …)`, `(sum …)` | a `[lo, hi]` interval carrying its own exactness; `<=` reads the bounds, so a comparison decides before the scan ends | — |
-| `(usually P)` † | `Certain` when a default is on record, marked `Derivation::Default` | `P` refuted, or a counter-default on record |
-| `(unless E P)` † | `P`, undecided when `E` holds | likewise |
+| `(usually P)` † | **`Unsupported`** — see below | `Unsupported` |
+| `(unless E P)` † | **`Unsupported`** — see below | `Unsupported` |
 | `(quantity n u)` under `=`/`<=` | both sides normalised to a base unit via stored `scale` facts | — |
 | `(at t P)` | `P` against the structure as of `t` | likewise |
 | `(quote E)` | opaque — `E` is **not** evaluated | — |
 | `(holds (quote P))` | descends into `P` | likewise |
 | atom `p(a…)` | resolver says `Holds` | resolver says `Fails` |
 
-**† `usually`, `unless` and `prefer` are evaluator behaviour, not certified
-semantics.** Their rows describe what the implementation does; they are *not*
-transfer rules in the sense the others are, because those denote and these do
-not. `docs/semantics.md` §11.3 records why: two fixpoint constructions for the
+**† `usually`, `unless` and `prefer` do not denote, so they cannot return a
+bound.**
+
+`Bound::Certain` is *defined* as a constraint on `⟦n⟧` (semantics §7.2):
+`support = Certain` asserts `⟦n⟧⁺ = 1`. An expression with no denotation has no
+`⟦n⟧` for a bound to constrain, so a result carrying `Certain` for one is not
+merely optimistic — it is **ill-typed**. Saying "evaluable but not certifiable"
+does not fix that: the same result type cannot honestly hold both a bound and a
+node the bounds cannot speak about.
+
+So these return `Unsupported` with unconstrained bounds, which is the existing
+way of saying *this operator has no semantics here*. Recovering the useful
+behaviour needs either a denotation (§11.3, open) or a separate advisory result
+type that is explicitly not a bound — a decision, not a patch.
+
+Their previous rows are kept below as a description of what the implementation
+did, because it is the specification that has moved. `docs/semantics.md` §11.3 records why: two fixpoint constructions for the
 combined grounding/argumentation operator have been proposed and both refuted,
 so `R` and `≺` sit in `M` uninterpreted. **No kernel rule mentions them, and a
 `Step` for a default was shipped once on an invalid proof and retracted.** Until

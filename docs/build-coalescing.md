@@ -2,14 +2,18 @@
 
 ## Status
 
-Specified, not implemented. This document covers concurrent expensive commands
-in a shared worktree: what several agents running `cargo test` at once should
-do, why the answer is not worktree isolation, and how the same treatment
-generalizes past cargo.
+Implemented for the foreground bash path — `artist-tools/src/coalesce.rs` and
+`tree_jobs.rs`. Attribution is a note on the shared result rather than a
+per-agent diff.
 
-Attribution (see Core invariants 5) depends on agent identity infrastructure
-Artist does not have. That dependency is called out in Open questions and is the
-only part of this design that is blocked; coalescing itself is not.
+This document covers concurrent expensive commands in a shared worktree: what
+several agents running `cargo test` at once should do, why the answer is not
+worktree isolation, and how the same treatment generalizes past cargo.
+
+Coalescing is per process. Cargo's own build lock still serializes across
+processes, so the cross-process case degrades to today's behaviour rather than
+breaking — and the motivating case, several subagents under one harness, is
+in-process.
 
 The decisive architectural choice is:
 

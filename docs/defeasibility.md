@@ -272,20 +272,33 @@ trees whose leaves are layer-0 conclusions and whose steps are rules from `R`;
 strict rules may be applied *within* layer 1 to defeasible conclusions, which is
 ordinary ASPIC+. Layer 2 is Dung's grounded extension of `(Args, Defeat)`.
 
-### 8.1 `B` at a leaf — resolved, and with no special rule
+### 8.1 `B` at a leaf — REFUTED, and reopened
 
-An argument whose leaf is `Conflicted` **undermines itself**. `⟦p⟧₀ = B` is
-designated *and* anti-designated, so the very same layer-0 conclusion that
-licenses the leaf also supplies the contradiction that undermines it. A
-self-attacking argument is never in the grounded extension, since `F(S)` requires
-every attacker to be attacked by a member of `S` and an argument cannot defend
-itself.
+The claim was that an argument whose leaf is `Conflicted` **undermines itself**,
+so no policy is needed. **That does not follow.**
 
-So a conflicted fact cannot silently found a default, and **nothing had to be
-added** — no "leaves must be `T`, not merely designated" exception, which was the
-obvious move and would have been a second notion of support living beside layer
-0's. Falling out of the attack relation is the difference between a semantics and
-a pile of rules.
+`⟦p⟧₀ = B` means `p` is designated *and* anti-designated, and negation fixes `B`,
+so `p` and `¬p` are both supported. But "both are supported" is not "this
+argument attacks itself": an attack is a relation between *arguments*, and the
+claim never constructed the attacking argument, named the contrary relation, or
+said which sub-argument it targets. It asserted a conclusion in the vocabulary of
+the attack relation without building one.
+
+It also contradicts §8.8. If a conflicted layer-0 leaf generates an undermining
+attack automatically, then undermining is *not* vacuous when no defeasible
+element exists, and the reduction fails. Both cannot hold.
+
+**The shape a repair must have**, and it must be stated and proved rather than
+observed:
+
+> Strict conclusions remain independently accepted at layer 0. An attack may
+> target them **only as premises inside an argument that contains a defeasible
+> step.**
+
+That preserves layer 0 under reduction while still preventing `B` from founding a
+default. It is not yet written, and the interaction with `⟨1,1⟩` under the §7.1b
+per-bit repair — where "designated and anti-designated" is a pair of settled bits
+rather than one value — has not been examined at all.
 
 ### 8.2 Rebuttal — sceptically undecided ✓
 
@@ -316,34 +329,78 @@ every sub-argument of `A`. The retracted `Step::Defeasible` read the exception
 off the top `unless` node and called that complete — under this definition it was
 missing every attack on every premise beneath it.
 
-### 8.5 Preference cycles — degrade to sceptical, no acyclicity assumption
+### 8.5 Preference cycles — REFUTED, and backwards in the dangerous direction
 
-Defeat is attack *not filtered by* preference: `B` defeats `A'` iff `B` attacks
-`A'` and **not** `B ≺ A'`. With a store holding `a ≺ b ≺ c ≺ a`, the relation is
-not a strict partial order — and the literal reading still behaves. Where `a ≺ b`
-and `b ≺ a` both hold, both attacks fail to be filtered, so both defeats stand,
-so both arguments are mutually defeated and neither is accepted.
+The claim was that a preference cycle degrades to "no preference wins", leaving
+both arguments mutually defeated and neither accepted. **The arithmetic runs the
+other way.** With
 
-A cycle therefore reads as *no preference wins*, which is sceptical and safe, and
-it matches `prefer`'s existing refusal to bake in transitivity. **No
-well-foundedness assumption on `≺` is required**, which was the alternative and
-would have made a store's ordinary testimony able to make the semantics
-undefined.
+```
+B defeats A  ⟺  B attacks A  ∧  ¬(B ≺ A)
+```
 
-### 8.6 Two-cycle and self-support ✓ — and this is where the rank comes from
+and both `a ≺ b` and `b ≺ a` on record, `¬(a ≺ b)` is *false* — so `a` does **not**
+defeat `b`, and symmetrically. Both defeats are **suppressed**, not preserved.
+Both arguments are then undefeated, and two contrary conclusions are *both
+accepted*. That is the opposite of sceptical, and worse than the behaviour the
+section claimed to rule out.
 
-`a` attacks `b`, `b` attacks `a`. `F(∅) = {unattacked arguments} = ∅`, and
-iteration stays `∅`. The grounded extension is empty, as required — while every
-*local* "is each attacker attacked by an accepted argument" test accepts `{a}`.
+A three-cycle has no uniform answer at all: the result depends on the directions
+of the attacks relative to the preference edges, so there is no "cycles degrade
+gracefully" story to tell.
 
-The certificate consequence is exact: carry **`rank(a)` = the least `n` with
-`a ∈ Fⁿ(∅)`**, and have the kernel check that every attacker of `a` is defeated
-by an argument of *strictly lower* rank. `F⁰(∅)` is the unattacked arguments, so
-ranks bottom out and circular defence cannot be certified. This is the local
-check the retracted §11.4 wanted and did not have.
+Three further omissions, each of which must be settled before this section can be
+rewritten:
 
-Self-support does not arise: arguments are finite trees, so an argument cannot
-take its own conclusion as a premise.
+- **`≺` is over rules; arguments are what get compared.** ASPIC+ requires an
+  explicit **lifting** — last-link, weakest-link, or another — and the choice
+  changes which rationality postulates hold. None was named.
+- **Preference is FOUR-valued testimony, so `¬(B ≺ A)` is not Boolean absence.**
+  A *conflicted* or *unknown* preference should presumably not suppress an
+  attack, which means suppression requires the preference to be **exactly `T`** —
+  another exact-value judgment, and the same judgment-type problem as
+  `semantics.md` §7.1b. The two are not independent.
+- **Attack and defeat must be split consistently.** This document says attack is
+  structural and preference converts attack into defeat; `semantics.md` §11.2
+  already folds preference *into* the definition of rebuttal. One of them is
+  wrong and they are currently both written down.
+
+### 8.6 Two-cycle ✓, but the certificate form does not survive
+
+The semantic half stands. `a` attacks `b`, `b` attacks `a`, the grounded
+extension is empty, and every *local* "is each attacker attacked by an accepted
+argument" test wrongly accepts `{a}`. Self-support does not arise, because
+arguments are finite trees and cannot take their own conclusion as a premise.
+
+**The certificate form proposed for it does not.** Three problems, in increasing
+order of seriousness:
+
+- **Off by one.** `F⁰(∅) = ∅`; `F¹(∅)` is the unattacked set. The text said `F⁰`
+  was the unattacked arguments, so every rank in it is wrong by one and the
+  bottoming-out argument does not land where it was said to.
+- **Natural-number ranks are not general.** They certify the whole grounded
+  extension only for a **finite, or suitably finitary**, framework. A general
+  framework needs transfinite iteration, and an ordinal witness is not local.
+- **"Derive every attacker from the graph and rule base" may not terminate.**
+  Unbounded rule instantiation can generate infinitely many arguments, so
+  completeness is not something a checker can simply recompute.
+
+So the design must **choose**, and the choice is a scope decision rather than a
+detail:
+
+1. require the relevant framework to be finite and closed;
+2. permit only **sound-but-incomplete** finite-rank certificates — some accepted
+   arguments are simply not certifiable; or
+3. define ordinal or richer witnesses, giving up locality.
+
+**And attacker completeness must not go in `Γ`.** §6 proposed exactly that, and
+it recreates the defect it was written to avoid: *"assuming I omitted no
+attacker, this is accepted"* is `Exhaustive`'s `complete` flag in its third
+disguise. The repair is to bind the certificate to a **snapshot** — a hash of the
+rule base and graph plus a transaction instant — and have the checker derive
+completeness *relative to that snapshot*. Then the assumption is not "I found
+them all" but "this is the world I was reading", which is checkable and is
+already how `snapshot()` works in the store.
 
 ### 8.7 Floating conclusions — a stated choice, and the right one here
 
@@ -357,14 +414,23 @@ belief whose every supporting argument the system has rejected, and "I cannot
 tell you why" is worse than "undecided" for something whose whole purpose is
 being able to say why.
 
-### 8.8 Reduction to the frozen base ✓
+### 8.8 Reduction — the theorem has no defined subject yet
 
-`R = ∅` ⟹ no argument contains a defeasible step ⟹ rebut, undercut and undermine
-are all vacuous (each requires a defeasible element) ⟹ no defeats ⟹ the grounded
-extension is *all* arguments ⟹ conclusions are exactly layer 0's.
+§4 says `R = ∅` makes layer 1 *empty* and the answer is layer 0's. §8.8 said
+`R = ∅` leaves arguments, *all of which are accepted*. Those are different
+claims, and "recovered on the nose" was asserted over the gap between them.
 
-`strict-kernel-v1` is recovered on the nose, so `tests/cross_spec.rs` and
-`tests/soundness.rs` continue to pin the same behaviour.
+Four definitions are missing, and the theorem cannot be stated without them:
+
+- Is a layer-0 conclusion a **zero-step argument**, or does it sit outside the
+  framework entirely?
+- Do **strict-only arguments** live in layer 1?
+- Is the final result `L₀ ∪ {Conc(a) : a ∈ GE}`, or `L₀` together with only those
+  `a` containing a defeasible step, or something else?
+- Can defeat ever **remove** a layer-0 conclusion? §8.1's repair says no; §8.1 as
+  originally written said yes.
+
+Until those are fixed, this is a statement of intent, not a lemma.
 
 ### 8.9 The restriction, stated precisely
 
@@ -378,23 +444,69 @@ step happens in layer 1. What is excluded is a default affecting layer 0's own
 truth computation, e.g. a default about the truth predicate feeding groundedness.
 That is exotic, and if it is ever needed it is the trigger to switch to AFT.
 
+### 8.10 The battery was too small, and said so before ignoring it
+
+§4 records that the ASPIC+ **rationality postulates are not automatic** for
+arbitrary preference relations, and §8 then declared the design sound without
+checking one of them. Four more cases, and none is optional — a rule-based system
+failing any of them produces conclusion sets no reader can act on:
+
+- **Sub-argument closure.** If `a ∈ GE` then every sub-argument of `a` is in
+  `GE`. Violated, a system accepts a conclusion while rejecting a step it rests
+  on.
+- **Closure under strict rules.** The accepted conclusions must be closed under
+  the strict rules — otherwise the system accepts `A` and `A → C` strictly and
+  refuses `C`.
+- **Consistency, adapted to FOUR.** The standard postulate says the accepted set
+  is consistent. Here "consistent" needs restating, because `B` is *designated
+  and* anti-designated by construction: a base that holds `p` both ways is not an
+  inconsistency the argumentation layer created and must not be one it is blamed
+  for. What the postulate should say instead is not yet written.
+- **The preference lifting** chosen in §8.5, whichever it is, satisfying the
+  above. Last-link and weakest-link differ precisely on which postulates survive,
+  so the choice cannot be deferred past this point.
+
 ## 9. Where this leaves the decision
 
-Design B survives §5 with no unresolved case, one restriction that is narrow and
-stateable, and a certificate form (§8.6's rank) that is locally checkable — which
-was the sticking point that killed the last attempt.
+**Design B does not survive §5 as written.** Adversarial review refuted three of
+the eight worked cases and showed the reduction has no defined subject:
 
-**Still required before any code**, per §2, and none of it is done:
+| case | status |
+|---|---|
+| 8.1 `B` at a leaf | **refuted** — self-undermining was asserted, not constructed, and it contradicts 8.8 |
+| 8.5 preference cycles | **refuted** — the defeat condition suppresses both attacks, so both contrary conclusions are *accepted* |
+| 8.6 certificate form | **refuted** — off-by-one in the rank, natural ranks are not general, completeness is not recomputable, and it was placed in `Γ` |
+| 8.8 reduction | **undefined** — "layer 1 is empty" and "all arguments accepted" are different claims |
+| 8.2, 8.3, 8.4, 8.7 | stand |
+
+The direction still looks right, and the grounded-extension theorem was never the
+hard part. The actual work is **preference semantics** (lifting, and FOUR-valued
+`≺` needing exactly `T` to suppress), **the `B`-premise treatment**, **finite
+attacker completeness against a snapshot**, and **the exact layer boundary**.
+
+**Still required before any code**, and none of it is done:
 
 1. The denotation written out — `⟦usually P⟧`, `⟦unless E P⟧`, `⟦prefer a b⟧` in
    terms of the layer-2 extension, as clauses, not prose.
-2. The theorem stated and proved: existence and uniqueness of the grounded
-   extension over `(Args, Defeat)` as constructed here, plus §8.8's reduction as
-   a lemma rather than an observation.
-3. The judgment-type change of §6 — `⟦E⟧ ∈ {N,F}` is not expressible today, and a
-   default defeated by a conflicted exception is exactly the case that matters.
-4. Review of this document, including §8, by someone trying to break it. Two
-   prior constructions passed my own reading and did not survive that.
+2. **Attack and defeat split consistently**, in one place: this document and
+   `semantics.md` §11.2 currently disagree about whether preference is inside
+   rebuttal or converts attack to defeat.
+3. **A preference lifting** named (last-link, weakest-link, …) with its
+   postulates checked, and suppression requiring `≺` to be exactly `T` — which
+   ties this to `semantics.md` §7.1b rather than being independent of it.
+4. **The layer boundary**, stated as §8.1's candidate restriction and proved:
+   strict conclusions independently accepted at layer 0, attackable only as
+   premises inside an argument containing a defeasible step.
+5. **A finiteness or incompleteness decision** for certificates (§8.6), and
+   completeness bound to a **snapshot** rather than assumed in `Γ`.
+6. The theorem stated and proved, with §8.8's reduction as a lemma — which first
+   needs §8.8's four definitions.
+7. The judgment-type change of §6.
+8. **Rationality postulates** (§8.10), including a `FOUR`-adapted consistency
+   postulate that does not blame the argumentation layer for a base holding `p`
+   both ways.
+9. Review again. Three constructions have now passed my own reading and not
+   survived someone else's.
 
 ## References
 

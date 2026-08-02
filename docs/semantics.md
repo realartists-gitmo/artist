@@ -82,10 +82,10 @@ A **structure** `M` is a tuple `⟨D, T, S, W, A, P, Δ, C, N⟩`.
 
 Revision 1's `RuleApp` cited a section defining a rule base, defeat relation and
 priority order that was never written, and §10 accordingly derives rule
-application from ordinary implication, needing none of them. **`R` and `≺` are
-now defined** — see §11, which gives the combined operator its fixpoint theorem —
-but no kernel rule depends on them yet, and none should until the attacker-set
-completeness check exists.
+application from ordinary implication, needing none of them. `R` and `≺` are now *present* in `M` and **not interpreted**: §11.3 records that
+two fixpoint constructions for the combined operator were proposed and both
+refuted, so there is no valuation to point at. No kernel rule depends on them and
+none may until there is.
 
 ## 3. The evidential axis is Belnap's FOUR
 

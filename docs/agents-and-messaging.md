@@ -2,8 +2,11 @@
 
 ## Status
 
-Specified, not implemented. This document covers three things that turned out
-to be one subsystem: what an agent *is* once there are many of them, how they
+Implemented, except where Open questions says otherwise. The registry, identity,
+delivery, `tell`/`query`/`reply`/`gc`, and unified multi-`await` are in;
+`yield` is not.
+
+This document covers three things that turned out to be one subsystem: what an agent *is* once there are many of them, how they
 are named and addressed, and how they talk to each other.
 
 It also absorbs the subagent/task distinction: they are the same primitive here,
@@ -70,9 +73,9 @@ ever inherited: every child claims its own in `run_agent`, and the
 carried down so the child can yield it when it in turn blocks on a grandchild.
 Nothing about a handoff touches a running job.
 
-The registry is `DelegateJobs::for_project`, backed by a
-`OnceLock<DashMap<PathBuf, Registry>>` keyed by project root — so jobs are
-scoped to the **project**, not to the session or the profile. A handoff keeps
+The registry is `DelegateJobs::for_project`, now backed by an on-disk table
+(`artist_registry::Jobs`) keyed by project root — so jobs are scoped to the
+**project**, not to the session, the profile, or the process. A handoff keeps
 them because it never had the power to lose them. `docs/profiles.md` invariant 4
 is untouched: the outgoing agent is still terminal, and jobs were simply never
 its property.
@@ -104,9 +107,10 @@ internal key for workspace ownership, todo ownership, and log lineage
 ### Allocation
 
 Names are unique per machine, which makes allocation a shared-state problem: an
-artist session is a process, and several run at once. The per-process
-`OnceLock<DashMap<..>>` pattern used by `profiles::project_semaphore` cannot
-express this. Allocation needs an on-disk registry with locking.
+artist session is a process, and several run at once. A per-process
+`OnceLock<DashMap<..>>` cannot express that — which is why the delegation
+semaphore, the job table and the roster all moved to `artist-registry`, an
+on-disk store with `flock` critical sections and liveness-based reclaim.
 
 That registry is also what `tell`/`query` need in order to route a name to a
 live session — which is why **identity allocation and message routing are one
@@ -369,16 +373,17 @@ rule.
   `yield` is written. Note the reference implementation we looked at
   (`oh-my-pi`'s `requireYieldTool` / `outputSchema`) does not document an answer
   either.
-- **The job registry and the delegation semaphore are per-*process*, not
-  per-machine.** Both are `OnceLock` statics keyed by project root
-  (`delegate_jobs::REGISTRIES`, `profiles::project_semaphore`), so two `artist`
-  processes on the same repository share neither. Two consequences: `await`
-  cannot reach a job started by another process, and `max_concurrent` is
-  enforced per process rather than per project — N processes give N times the
-  configured concurrency on one machine. This is the same defect the name
-  allocator has to solve anyway (see Identity → Allocation), so the on-disk
-  registry built for names is the natural home for jobs too, and building it
-  once for both is the recommendation.
+- **Cross-process cancel.** A job's record crosses processes but its abort
+  handle does not, so cancelling another process's job is refused rather than
+  faked. A control marker the owner polls would close this; reporting
+  "cancelled" for work still running would be worse than refusing.
+- **`gc` selectors are an explicit member list**, not yet a predicate language.
+  Materialisation means adding one later costs an evaluation at construction
+  rather than a redesign.
+- **`yield` is not implemented.** The structured-return path — a synthetic
+  forced-tool whose parameters are the profile's schema — is designed above but
+  unwritten, and the "what happens when a child never yields" question below
+  still gates it.
 - **Selector expressiveness for `gc`.** Materialisation makes this cheap to
   defer, but the initial predicate set still has to be chosen.
 - **Runaway chatter.** A tells B, B tells A, indefinitely. No cycle detection is
