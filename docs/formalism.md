@@ -386,19 +386,21 @@ Only the **propositional skeleton** is decided: full higher-order validity is
 undecidable, the boolean structure over opaque atoms is not, and at these sizes
 it is free. Quantified validity keeps going to the budget.
 
-**Validity is decided in three tiers, and only the first is unconditional.**
-This section previously described two — intuitionistic and classical — and
-credited the first with certifying unconditionally. That is false in this logic
-and `docs/semantics.md` §10 is the authority: `¬(P ∧ ¬P)` is provable in G4ip,
-and at `N` it is `N ∧ N = N` whose negation is `N`, which is not designated. A
-soundness property test found exactly that formula.
+**Validity is decided in two tiers, and only the first is unconditional.**
 
 1. **FOUR-validity** — designated under every Belnap valuation. Unconditional,
-   and the only tier that is. `⊤`, `⊥` and structure over them.
-2. **Intuitionistic** (G4ip, Dyckhoff's contraction-free calculus) — presumes no
-   atom is `both`. Recorded as `DeterminacyBasis::Presumed`.
-3. **Classical truth table** — presumes bivalence. Also `Presumed`, and gated on
-   `Total` in `Certify` mode.
+   recorded `DeterminacyBasis::Derived`. `#true`, `#false`, and structure over
+   them; `P → P` lands here because `→` is the strong implication.
+2. **Classical truth table** — presumes bivalence. Recorded
+   `DeterminacyBasis::Presumed`, and gated on `Total` in `Certify` mode.
+
+There was a third, between them: G4ip intuitionistic validity, credited with
+certifying unconditionally on the grounds that it presumes only "no atom is
+`both`". **It is deleted, and the presumption never licensed it.**
+`¬(P ∧ ¬P)` is G4ip-provable and at `N` is `¬(N ∧ N) = N`, undesignated — and
+`N` is not `both`. Excluding gaps *and* gluts is bivalence, under which G4ip
+proves a strict subset of the truth table, so once corrected the tier was
+redundant as well as unsound. `docs/semantics.md` §10 is the authority.
 
 Implication is kept as itself in the skeleton rather than desugared, because
 `→` **is not** `¬A ∨ B`. It is Arieli–Avron's strong implication (semantics §3):
@@ -437,17 +439,26 @@ Written as `(support, refutation)`; `⊓` is meet, `⊔` is join.
 | `(not P)` | `refutation(P)` | `support(P)` |
 | `(and P…)` | `⊓ support(Pᵢ)` | `⊔ refutation(Pᵢ)` |
 | `(or P…)` | `⊔ support(Pᵢ)` | `⊓ refutation(Pᵢ)` |
-| `(implies P Q)` | as `(or (not P) Q)` | — |
+| `(implies P Q)` | `support(Q)` — the **strong** implication (semantics §3), never `(or (not P) Q)` | `support(P)` **and** `refutation(Q)` |
 | `(forall [(v D)] P)` | all members supported **and** `D` enumerable and complete | any member refuted |
 | `(exists [(v D)] P)` | any member supported | all members refuted **and** `D` complete |
 | `(count …)`, `(sum …)` | a `[lo, hi]` interval carrying its own exactness; `<=` reads the bounds, so a comparison decides before the scan ends | — |
-| `(usually P)` | `Certain` when a default is on record, marked `Derivation::Default` | `P` refuted, or a counter-default on record |
-| `(unless E P)` | `P`, undecided when `E` holds | likewise |
+| `(usually P)` † | `Certain` when a default is on record, marked `Derivation::Default` | `P` refuted, or a counter-default on record |
+| `(unless E P)` † | `P`, undecided when `E` holds | likewise |
 | `(quantity n u)` under `=`/`<=` | both sides normalised to a base unit via stored `scale` facts | — |
 | `(at t P)` | `P` against the structure as of `t` | likewise |
 | `(quote E)` | opaque — `E` is **not** evaluated | — |
 | `(holds (quote P))` | descends into `P` | likewise |
 | atom `p(a…)` | resolver says `Holds` | resolver says `Fails` |
+
+**† `usually`, `unless` and `prefer` are evaluator behaviour, not certified
+semantics.** Their rows describe what the implementation does; they are *not*
+transfer rules in the sense the others are, because those denote and these do
+not. `docs/semantics.md` §11.3 records why: two fixpoint constructions for the
+combined grounding/argumentation operator have been proposed and both refuted,
+so `R` and `≺` sit in `M` uninterpreted. **No kernel rule mentions them, and a
+`Step` for a default was shipped once on an invalid proof and retracted.** Until
+a construction survives review, a default is evaluable and not certifiable.
 
 Note the asymmetry in the quantifiers: one counterexample refutes a universal
 immediately, but *supporting* one requires the domain to be both enumerable and

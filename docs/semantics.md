@@ -265,8 +265,17 @@ relate a value to a set. The abstract domain is the four sets §7.2 tabulates,
 ordered by inclusion; `must` is recoverable as the `≤_k`-greatest lower bound of
 the allowed set, and is a convenience, not the statement.
 
-Unconditional judgments are the special case `Γ = ∅`, reachable only through rules
-that consult nothing — which after §10's corrections means `Axiom` alone.
+Unconditional judgments are the special case `Γ = ∅`: every rule in the
+derivation consulted nothing. `Axiom` and `Ungrounded` introduce nothing, and
+every other rule contributes only what its premises carry — so `Negation` over an
+axiom, a `Connective` over axioms, an `Instantiate` over an unconditional
+universal, and any composition of these are unconditional too.
+
+**This said "`Axiom` alone" for two revisions**, in three places, and it was
+false each time. Unconditionality is a property of `Γ`, not a privilege granted
+to one rule, and the distinction matters because §8.5 reads an empty `Γ` as a
+*claim* — that the judgment holds in every structure — rather than as a missing
+attribution.
 
 ### 7.2 What a `(support, refutation)` pair asserts
 
