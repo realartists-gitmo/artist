@@ -1370,6 +1370,103 @@ impl State<'_> {
         out
     }
 
+    /// `(implies A C)` under **Arieli–Avron's strong implication**, which is what
+    /// semantics §3 commits to: `A ⊃ C = C` when `A` is designated, `T`
+    /// otherwise.
+    ///
+    /// This used to run through the ordinary connective scan with operand 0
+    /// negated — i.e. materially, as `¬A ∨ C`. The two differ, and one direction
+    /// is **unsound**: with `A` conflicted, `¬B ∨ F = B ∨ F = B` is designated
+    /// while `B ⊃ F = F` is not, so a refuted implication was reported as
+    /// supported. A store that holds both directions of a claim is ordinary here,
+    /// so this was reachable, and the soundness property test could not see it
+    /// because `MapGraphStructure` cannot express `Conflicted`.
+    ///
+    /// What the two bounds can establish, and nothing more:
+    ///
+    /// * **Support** — from the consequent alone. If `C` is designated then
+    ///   `A ⊃ C` is designated either way: it is `C` when `A` is designated, and
+    ///   `T` when it is not.
+    /// * **Refutation** — needs `A` designated *and* `C` anti-designated, which
+    ///   is exactly `support`/`refutation` being `Certain` on the two operands.
+    ///
+    /// The material shortcut "a refuted antecedent supports the implication" is
+    /// **not** available: `refutation: Certain` asserts `⟦A⟧ ∈ {F,B}`, and `B` is
+    /// designated. Losing it costs completeness on `(implies #false X)`, which
+    /// now comes back `Open` — sound, and weaker than before.
+    fn implication(
+        &mut self,
+        node: ObjectId,
+        ante: ObjectId,
+        conseq: ObjectId,
+        env: &GraphEnv,
+    ) -> EvaluationResult {
+        if self.exhausted() {
+            return self.out_of_budget(node);
+        }
+        // **Operands in source order**, which is not a stylistic choice. Budget
+        // is consumed as evaluation proceeds, so whichever operand runs first
+        // takes a share that grows with the *total* budget and starves the
+        // other. Evaluating the consequent first made `(implies A (forall …))`
+        // refute at budget 32 and go open at 128 — a property test caught the
+        // retraction. Left to right keeps each operand's share monotone.
+        let a = self.check(ante, env);
+        let a = self.seal(a);
+        let c = self.check(conseq, env);
+        let c = self.seal(c);
+
+        let mut scan = Scan::new(false);
+        scan.absorb(&a);
+        scan.absorb(&c);
+
+        // A designated consequent decides on its own: `A ⊃ C` is `C` when `A` is
+        // designated and `T` when it is not, so either way it is designated.
+        // Refutation needs `A` designated *and* `C` anti-designated.
+        //
+        // The material shortcut — a refuted antecedent supporting the
+        // implication — is **not** available, because `refutation: Certain`
+        // asserts `⟦A⟧ ∈ {F,B}` and `B` is designated. That costs
+        // `(implies #false X)`, which is now `Open`.
+        let decided = if c.support.is_certain() {
+            Some(true)
+        } else if a.support.is_certain() && c.refutation.is_certain() {
+            Some(false)
+        } else {
+            None
+        };
+        match decided {
+            Some(holds) => {
+                let (cited, slot) = if holds { (conseq, 1) } else { (ante, 0) };
+                if let Some(k) = self.cite(cited) {
+                    self.emit(Step::Connective { node, premises: vec![(k, slot)], holds });
+                }
+                scan.decided(holds, self.snapshot)
+            }
+            // Undecided: neither bound is established, and both operands were
+            // visited, so what is missing is information rather than traversal.
+            //
+            // Built explicitly rather than through `finish_scan`, because that
+            // reads bounds a `Scan` accumulated through `step` — and this scan
+            // was only fed axes. An empty join-scan finishes at `or`'s identity,
+            // *refuted*, which the enclosing `not` then turned into `Supported`
+            // for a truth-teller.
+            None => {
+                let worst = downgrade(
+                    downgrade(ComputeStatus::Exact, a.compute_status),
+                    c.compute_status,
+                );
+                let mut out = EvaluationResult::new(worst);
+                out.grounding = scan.grounding;
+                out.derivation = scan.derivation;
+                out.determinacy = scan.determinacy;
+                out.defeated_by = scan.defeated_by.clone();
+                out.credence = scan.credence;
+                out.snapshot = self.snapshot;
+                out
+            }
+        }
+    }
+
     /// Is this true — or false — **whatever the store says**?
     ///
     /// The evaluator could not recognise a single logical truth. `P → P` came
@@ -1677,8 +1774,9 @@ impl State<'_> {
                 self.wrap_continuation(r, wk::NOT, &[])
             }
             wk::AND | wk::OR | wk::IMPLIES => {
-                if op == wk::IMPLIES && args.len() != 2 {
-                    return self.unsupported(node);
+                if op == wk::IMPLIES {
+                    let [ante, conseq] = args else { return self.unsupported(node) };
+                    return self.implication(node, *ante, *conseq, env);
                 }
                 // An operand list is exhaustive by construction, so a
                 // connective is a scan whose enumeration is always complete.

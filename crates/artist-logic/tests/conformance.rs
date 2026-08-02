@@ -149,8 +149,19 @@ fn row_implies() {
         let (q, b) = (g.atom("q-other"), g.atom("b-other"));
         g.apply(q, vec![b])
     };
+    // **The false-antecedent row is `Open`, and that is a completeness loss
+    // taken deliberately.** `→` is the strong implication (docs/semantics.md
+    // §3), so `A ⊃ C` is `C` when `A` is designated and `T` otherwise — and
+    // establishing "A is not designated" needs `⟦A⟧ ∈ {N,F}`, which the two
+    // bounds cannot express: `refutation: Certain` asserts `⟦A⟧ ∈ {F,B}`, and
+    // `B` is designated.
+    //
+    // Materially the row held, and materially the evaluator was *unsound*: with
+    // `A` conflicted, `¬B ∨ F = B` reads designated while `B ⊃ F = F`, so a
+    // refuted implication came back supported. Trading a true-but-underivable
+    // row for a false-and-derivable one is the right direction.
     for (a, b, expect) in [
-        (no, unknown, Evidential::Supported),   // false antecedent
+        (no, unknown, Evidential::Open),        // false antecedent: see above
         (yes, yes, Evidential::Supported),      // true consequent
         (yes, no, Evidential::Refuted),         // the only refuting case
         (unknown, other, Evidential::Open),     // both open, and unrelated

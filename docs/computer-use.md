@@ -58,10 +58,38 @@ own display server, and once that is forced it is the better architecture anyway
 
 **Implemented** (`crates/artist-computer/src/stage/`): a headless
 [smithay](https://github.com/Smithay/smithay) compositor on `GlesRenderer` over
-GBM/EGL, on its own thread behind a `Send + Sync` proxy; `wl_compositor`,
-`wl_shm`, `xdg_shell`, `wl_seat`, `wl_data_device_manager`; keyboard and pointer
+GBM/EGL, on its own thread behind a `Send + Sync` proxy; keyboard and pointer
 delivery; offscreen render target and PNG capture; a private `dbus-daemon` plus
 `at-spi-bus-launcher` and `at-spi2-registryd`.
+
+### The registry is a compatibility surface
+
+A client reads the registry once and decides from it what it is capable of. A
+missing global is not a graceful degradation — it is usually a hard exit or a
+silent fall back to a much slower path, and the symptom shows up in the
+application rather than here.
+
+| Global | Why it is not optional |
+|---|---|
+| `wl_compositor`, `wl_subcompositor`, `wl_shm` | The baseline. Surfaces and shared-memory buffers. |
+| `xdg_wm_base` | Toplevels. Without it nothing has a window. |
+| `wl_seat` | Keyboard and pointer. Input is delivered into this seat. |
+| `wl_data_device_manager` | The clipboard. Not optional for real tasks — it is also how off-keymap text is typed. |
+| `wl_output`, `zxdg_output_manager_v1` | How a client learns the screen exists. Toolkits that find no output pick a default size, skip scale setup, and in several cases never map a window at all. Surfaces are `enter`ed onto it as they appear. |
+| `zwp_linux_dmabuf_v1` **v4** | How a GPU client hands over a texture it already has. Without it Chromium, anything on Vulkan or GL, and Waydroid's Android surfaces either read back through shared memory every frame or refuse to start. Version 4 carries a feedback tranche naming our render node, so a client allocates on the device we can actually import from. |
+| `zxdg_decoration_manager_v1` | Lets us *insist* on server-side decorations. A client-drawn titlebar is pixels no rung knows the geometry of — the agent could neither avoid its close button nor deliberately use it. |
+| `wp_viewporter` | Clients that scale their own buffers commit a viewport and expect it honoured. |
+| `wp_presentation` | Advertised **and answered** on every render, on `CLOCK_MONOTONIC`. A client that asks for feedback and never receives it can throttle itself waiting, which makes an unserviced global worse than an absent one. |
+
+Deliberately absent: `wp_fractional_scale` (the stage is scale 1, so there is
+nothing fractional to negotiate) and `zwlr_screencopy` (we own the buffers, so
+capture is a direct read rather than a protocol).
+
+Every one of these is asserted from a real Wayland client in
+`tests/stage_client.rs`, including a client that allocates a GPU buffer through
+GBM, exports it as a dmabuf and has its pixels read back out of the composite —
+because "the global is advertised" and "the import works" are different claims,
+and only the second is what an application experiences.
 
 **Filesystem:** shares `$HOME`. An overlay would break the credential reuse that
 is the whole reason to run locally rather than in a VM, and would contradict this
@@ -91,6 +119,22 @@ Both were hit during implementation, and both are silent:
   through `XDG_RUNTIME_DIR` means mutating process-global state; two stages then
   race and the loser's clients connect to the winner's display. The socket is
   bound by absolute path instead.
+- **A leak through D-Bus activation.** `org.a11y.Bus` has a `.service` file, so
+  asking *any* session bus for it starts a launcher if none has claimed the name
+  — and an activated service inherits the **daemon's** environment, not ours. The
+  stage's `dbus-daemon` was inheriting the user's `XDG_RUNTIME_DIR`, so that
+  activated launcher answered with the user's own accessibility bus at
+  `/run/user/1000/at-spi/bus`, and the stage attached to it. The agent could see
+  the user's applications and the tree it called private was not. It raced our
+  own launcher and so only lost under load, surfacing as an intermittent
+  "Server GUID mismatch" rather than as anything resembling a leak. Fixed by
+  setting `XDG_RUNTIME_DIR` and clearing `DISPLAY` on the daemon itself.
+- **A configure the client never receives.** smithay's `send_pending_configure`
+  suppresses the event when nothing changed — and the decoration mode is already
+  `ServerSide` from the initial configure, so a client binding xdg-decoration
+  afterwards and asking for client-side got no reply at all and fell back to its
+  own default. Decoration requests are answered with an unconditional
+  `send_configure`.
 
 ## The ladder
 
@@ -118,9 +162,16 @@ Three things make this real rather than a slogan:
 Rung 0 deserves emphasis because it is the rung everyone omits and the one that
 carries most of the value.
 
-Rung 3 is **observation-only**. Minting anchors from a pixel grid is coordinates
-wearing a hat; a surface with no tree reports "no actionable surface" — a loud,
-honest failure.
+Rung 3 **was** observation-only, on the reasoning that minting anchors from a
+pixel grid is coordinates wearing a hat. That was half right, and the correction
+matters because it is the same distinction the rejected steal-list items turn on:
+coordinates are dangerous when the **model** supplies them. When the *harness*
+reads the screen, finds the text and mints the anchor, the model names it exactly
+as at every other rung and never sees a position.
+
+So rung 3 now clicks what it can read. See [rung 3](computer-use-ocr.md) for the
+models, the one place edit distance is permitted, and what four rounds of
+optimization measured.
 
 ## Anchors
 
@@ -289,6 +340,20 @@ Externalizing keeps the log proportional to the number of *distinct* images.
 > [the audit](computer-use-audit.md), and what is worth adding next is in
 > [the steal list](computer-use-steal-list.md).
 
+**Verified against real applications**, not only fixtures:
+
+- **Rung 2 on a real GTK dialog** — 8 nodes, 8 named, **7 declaring actions**
+  (`button "Delete" -> ["Click"]`). This was the plan's flagged risk: whether
+  real toolkits expose enough actions to be invoked by name rather than clicked.
+  They do.
+- **Rung 3 on a real window** — client buffer through the compositor's own
+  capture, through detection and recognition, to an anchor, to a click the client
+  received within 4px of the text's centre.
+- **Two applications on one stage are told apart by pid**, not by title — and a
+  per-window capture contains only that window. Every toplevel here is given the
+  whole output, so cropping the finished composite would have returned the whole
+  screen; capture recomposites with just that window's surface tree instead.
+
 **Built and verified**
 
 - Anchors, deltas, render budgeting, program semantics, label cross-check.
@@ -323,6 +388,11 @@ Externalizing keeps the log proportional to the number of *distinct* images.
   cross-checked against the focused element.
 - Observation decay, image externalization, screenshots, and `computer.*` event
   recording — so `artist computer log`, `frame` and `distill` have input.
+- **Rung 3 is actionable**, not observation-only. PP-OCRv5 on `rten` reads the
+  screen, the harness mints the anchors, and the model names them exactly as at
+  every other rung — so a game or a canvas is drivable without the model ever
+  seeing a coordinate. Damage-region cropping makes it affordable, measured at
+  15.5x. See [rung 3](computer-use-ocr.md).
 - Tool UI.
 
 **Known gaps** — real, and stated rather than implied:
@@ -335,16 +405,21 @@ Externalizing keeps the log proportional to the number of *distinct* images.
   guardrail pattern**, because no regex over the arguments can recover a name the
   arguments do not contain. The optional focus label covers the case where the
   model knows what it is aiming at; nothing covers the case where it does not.
-- **Rung 3 is observation-only.** A surface with no tree reports "no actionable
-  surface". Games, canvases and broken accessibility support are out of reach
-  until a localizer exists (steal list item 15).
+- **Rung 3 pixel *typing* and scrolling.** The rung can now click what it can
+  read and send keys — see [rung 3](computer-use-ocr.md) — but text entry needs a
+  focused field it cannot identify, and scrolling needs a container it cannot
+  see. Both report plainly rather than pretending.
 - **`Surface::children` has no implementors**, so a `target=_blank` tab is
   unreachable, and `GetFullAxTreeParams::default()` is main-frame only — an
   iframe (a payment form, an embedded login) is not observable.
 - **No benchmark number.** The design argument is strong and the evidence is
   absent.
-- **One compositor, one platform.** Linux/Wayland, our own stage. No macOS, no
-  Windows, no Android.
+- **Linux/Wayland only, for now.** One compositor — ours. macOS, Windows,
+  Android and iOS are **not built yet**, which is a backlog item rather than a
+  scope decision: phones are an accepted goal (steal list item 17). The ladder
+  transfers to all of them; the stage does not, and each needs its own `Stage`
+  implementation. Android is the closest — it has an excellent rung 0 (intents,
+  content providers) and a first-class rung 2 (`AccessibilityNodeInfo`).
 
 ## Concurrency
 
@@ -386,9 +461,12 @@ GUI can do anything a person at that keyboard could.
   coordinate space to keep straight, for no capability gained. The *size* is
   configurable (`[computer] screen = "1280x800"`), because viewport size
   genuinely changes what an application shows; the number of outputs is not.
-- **Rung 3 cannot act.** See above — this is the point, not a limitation.
-- **No OCR.** A surface that reaches rung 3 with no tree reports "no actionable
-  surface" rather than inviting the model to guess at pixels.
+- **Rung 3 cannot type or scroll.** It clicks what it can read and sends keys.
+  Typing needs a focused field it cannot identify and scrolling needs a container
+  it cannot see, so both say so rather than pretending.
+- **No general OCR.** The rung answers "where is the thing you named", not "what
+  does this screen say". Transcription is a much harder problem and is not the
+  one we have.
 
 ## Related
 

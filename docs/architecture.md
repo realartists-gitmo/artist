@@ -46,7 +46,9 @@ artist/                          # Cargo workspace
     ├── computer-use.md          # The computer-use subsystem
     ├── computer-use-audit.md    # Adversarial review: defects, by severity
     ├── computer-use-landscape.md # What every other harness does
-    └── computer-use-steal-list.md # What to take from them, and what not to
+    ├── computer-use-steal-list.md # What to take from them, and what not to
+    ├── computer-use-ocr.md      # Rung 3 text localization, and four measured optimizations
+    └── computer-use-platforms.md # A Stage on Android, Windows, macOS and iOS
 ```
 
 | Crate | Responsibility |
