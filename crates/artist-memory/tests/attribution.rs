@@ -147,3 +147,54 @@ async fn a_retracted_claim_stops_vouching() {
         "agent-b vouches; agent-a still does not"
     );
 }
+
+/// **A denier does not vouch for the claim it denies.**
+///
+/// `att` selects the agents whose testimony *explains the verdict* (§8.4), so an
+/// agent who denied a proposition is not a source you can go and check for it.
+/// The belief-layer loop pushed every agent regardless of `affirmed` — three
+/// lines below a comment explaining that retractions do not vouch.
+///
+/// This goes through the `Assertion` path rather than `assert_stmt`, because
+/// that is the only way to record polarity, and the fix landed in 408f012
+/// without a test. A fix nobody can fail is the thing this file exists to stop.
+#[tokio::test]
+async fn a_denier_does_not_vouch_for_the_claim_it_denies() {
+    use artist_logic::evidence::{Assertion, Polarity};
+    use artist_memory::{record_assertion, store_expression};
+
+    let (_d, s) = store().await;
+    let mut g = ObjectGraph::new();
+    let (deprecated, api) = (g.atom("deprecated"), g.atom("api-v1"));
+    let prop = g.apply(deprecated, vec![api]);
+    store_expression(&s, &g, prop).await.expect("store");
+
+    let (carol, dan) = (g.atom("carol"), g.atom("dan"));
+    record_assertion(
+        &s,
+        &Assertion { asserting_agent: Some(carol), ..Assertion::affirm(prop, 1_000) }.sealed(),
+    )
+    .await
+    .expect("carol affirms");
+    record_assertion(
+        &s,
+        &Assertion {
+            asserting_agent: Some(dan),
+            polarity: Polarity::Deny,
+            ..Assertion::affirm(prop, 2_000)
+        }
+        .sealed(),
+    )
+    .await
+    .expect("dan denies");
+
+    let view = RelationalView::load(&s).await.expect("load");
+    let sources = view.attribution(prop);
+
+    assert!(sources.contains(&carol), "carol affirmed it, so carol vouches");
+    assert!(
+        !sources.contains(&dan),
+        "dan denied it — `authorities` on a `Told{{holds:true}}` step means \
+         *sources you can go and check*, not everyone with an opinion"
+    );
+}
