@@ -566,9 +566,18 @@ impl RelationalView {
             // had. Prefer the session — it is the finer of the two.
             let session = str_at(row, 4).unwrap_or_default();
             let origin = str_at(row, 5).unwrap_or_default();
+            // **The two namespaces must not overlap.** `origin` is arbitrary
+            // caller text, so an origin of `"session:abc"` used to mint the
+            // identical atom that session `abc` mints — a caller could claim
+            // provenance from a run it was not. Semantics §8.4 requires naming to
+            // be injective, and injectivity across a *union* of namespaces needs
+            // each to be prefixed, not just one.
+            //
+            // `origin:` rather than bare, so neither namespace is the default and
+            // a future third one cannot silently collide with whichever was.
             let source = match (session.as_str(), origin.as_str()) {
                 ("", "") | ("", "unknown") => None,
-                ("", o) => Some(view.source_atom(o)),
+                ("", o) => Some(view.source_atom(&format!("origin:{o}"))),
                 (s, _) => Some(view.source_atom(&format!("session:{s}"))),
             };
             view.history

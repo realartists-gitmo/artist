@@ -99,8 +99,9 @@ async fn a_source_named_like_an_operator_is_not_that_operator() {
     );
     assert_eq!(
         sources[0],
-        artist_logic::ObjectGraph::content_atom("source"),
-        "and it is the ordinary content-addressed atom for that name"
+        ObjectGraph::content_atom("origin:source"),
+        "and it is the ordinary content-addressed atom for that origin — \
+         namespaced, since `origin` and `source_session` share an id space"
     );
 }
 
@@ -196,5 +197,35 @@ async fn a_denier_does_not_vouch_for_the_claim_it_denies() {
         !sources.contains(&dan),
         "dan denied it — `authorities` on a `Told{{holds:true}}` step means \
          *sources you can go and check*, not everyone with an opinion"
+    );
+}
+
+/// **A caller cannot forge provenance from a session it is not.**
+///
+/// `origin` is arbitrary caller text and `source_session` names the run that
+/// wrote the row. They were mapped into one namespace with only the session side
+/// prefixed, so an origin of `"session:abc"` minted the atom session `abc`
+/// mints. §8.4 requires naming to be injective, and injectivity across a *union*
+/// of namespaces needs every side prefixed rather than just one.
+#[tokio::test]
+async fn an_origin_cannot_impersonate_a_session() {
+    let (_d, s) = store().await;
+    let holds = intern(&s, "claims").await.expect("sym");
+    let thing = intern(&s, "thing").await.expect("sym");
+
+    assert_stmt(&s, holds, &[thing], "session:abc").await.expect("fact");
+    let view = RelationalView::load(&s).await.expect("load");
+    let sources = view.attribution(proposition(holds, &[oid(thing)]));
+
+    assert_eq!(sources.len(), 1);
+    assert_ne!(
+        sources[0],
+        ObjectGraph::content_atom("session:abc"),
+        "an origin saying `session:abc` is not the run `abc`"
+    );
+    assert_eq!(
+        sources[0],
+        ObjectGraph::content_atom("origin:session:abc"),
+        "it is an origin, and the namespace says so"
     );
 }
