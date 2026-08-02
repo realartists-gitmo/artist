@@ -169,3 +169,36 @@ pub fn caller2() { caller1(); }
     assert!(out.contains("caller2"), "expected caller2 (depth 2), got:\n{}", out);
     assert!(out.contains("1 symbols transitively affected"), "expected 1 transitive symbol (caller2), got:\n{}", out);
 }
+
+/// `impact` holds the same edges as `callers`/`callees` and must render them at
+/// the same precision. It previously printed the file but not the line, and
+/// suppressed `Exact` confidence entirely, which made it look lossier than the
+/// dedicated commands while carrying identical data.
+#[test]
+fn impact_entries_carry_line_and_confidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"imp\"\nversion = \"0.1.0\"\n",
+    );
+    write(
+        &root.join("src/lib.rs"),
+        "pub fn helper() -> u32 {\n    7\n}\n\npub fn caller() -> u32 {\n    helper() + 1\n}\n",
+    );
+
+    let (out, _) = run_in(root, &["impact", "helper", ".", "--depth", "1"]);
+    assert!(out.contains("caller"), "caller missing:\n{out}");
+    assert!(
+        out.contains("src/lib.rs:6"),
+        "call-site line missing — impact should locate, not just name:\n{out}"
+    );
+    assert!(
+        out.contains("Exact"),
+        "resolved edges must show confidence, not just unresolved ones:\n{out}"
+    );
+    assert!(
+        !out.contains("):"),
+        "line rendered outside the parentheses:\n{out}"
+    );
+}

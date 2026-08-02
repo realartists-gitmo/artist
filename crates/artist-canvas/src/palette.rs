@@ -346,6 +346,89 @@ pub fn hex(color: u32) -> String {
     format!("#{color:06x}")
 }
 
+/// One semantic colour, in both schemes.
+///
+/// Four values rather than two, because a semantic is a *pair*: the ink and
+/// the surface it is painted on. Deriving all four from one `ramp` call is
+/// what makes `--a-danger` legible on `--a-danger-surface` true by
+/// construction rather than by a table someone has to keep in step.
+#[derive(Clone, Copy, Debug)]
+pub struct Semantic {
+    pub name: &'static str,
+    /// On a light ground.
+    pub light: u32,
+    /// On a dark one, where the ramp is mirrored and the pastels become the
+    /// foregrounds. `danger` takes 300 rather than 200 because the text that
+    /// sits on a filled control has to keep clearing AA once both flip.
+    pub dark: u32,
+    /// The tint this colour fills a panel or a badge with, on a light ground.
+    pub surface_light: u32,
+    /// And on a dark one. 950 rather than the straight mirror at 900: the eye
+    /// reads added luminance on a dark ground far more readily than it reads a
+    /// tint on paper, and 900 lands as a block of colour rather than a tint.
+    pub surface_dark: u32,
+}
+
+/// Where the ink sits on a light ground.
+///
+/// 800 rather than 700 because ink now has to clear AA on its *own* surface,
+/// not just on white. At 700 that pairing runs 3.73–4.30:1 across the
+/// families; at 800 it runs 5.69–6.54:1, and the 700 step is left exactly
+/// where it was for the `text-x-700`-on-white case it was solved for.
+const INK_LIGHT: usize = 8;
+
+/// The tint a surface is filled with, at each end.
+const SURFACE_LIGHT: usize = 1;
+const SURFACE_DARK: usize = 10;
+
+impl Semantic {
+    /// Both values for one scheme: the ink, then the surface under it.
+    pub fn pair(self, dark_scheme: bool) -> (u32, u32) {
+        if dark_scheme {
+            (self.dark, self.surface_dark)
+        } else {
+            (self.light, self.surface_light)
+        }
+    }
+}
+
+/// The aliases both the utilities and the kit's tokens are built from.
+///
+/// One source for both, because they drifted. `theme_css` gave the aliases no
+/// dark override while `tokens_css` gave `--a-accent` one, so in dark mode a
+/// `bg-accent` div stayed a dark blue while a `<Button variant="accent">`
+/// beside it went pastel — two accents on one page, and only in dark. Deriving
+/// both from this list is what stops that from being expressible.
+pub fn semantics() -> [Semantic; 4] {
+    /// One anchor, four steps of its own ramp. Nothing here can name a colour
+    /// from a different family by accident.
+    fn from(name: &'static str, anchor: u32, dark_step: usize) -> Semantic {
+        let ramp = ramp(anchor);
+        Semantic {
+            name,
+            light: ramp[INK_LIGHT],
+            dark: ramp[dark_step],
+            surface_light: ramp[SURFACE_LIGHT],
+            surface_dark: ramp[SURFACE_DARK],
+        }
+    }
+
+    [
+        from("accent", BLUE, 2),
+        from("danger", RED, 3),
+        from("warning", YELLOW, 2),
+        from("success", MINT, 2),
+    ]
+}
+
+/// One alias by name. Panics on an unknown one: the callers are this file.
+fn semantic(name: &str) -> Semantic {
+    semantics()
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("no semantic colour named `{name}`"))
+}
+
 /// The `@theme` block Tailwind reads its palette from.
 ///
 /// Injected into every canvas, so a utility class the model writes without
@@ -363,13 +446,13 @@ pub fn theme_css() -> String {
     }
     // Semantic aliases the kit and templates use, so a canvas can say what it
     // means rather than picking a hue.
-    out.push_str(&format!(
-        "  --color-accent: {};\n  --color-danger: {};\n  --color-warning: {};\n  --color-success: {};\n",
-        hex(ramp(BLUE)[7]),
-        hex(ramp(RED)[7]),
-        hex(ramp(YELLOW)[7]),
-        hex(ramp(MINT)[7]),
-    ));
+    for alias in semantics() {
+        out.push_str(&format!(
+            "  --color-{}: {};\n",
+            alias.name,
+            hex(alias.light)
+        ));
+    }
     out.push_str("}\n");
 
     // The utilities have to flip with the scheme, or `bg-red-100 text-red-800`
@@ -387,6 +470,16 @@ pub fn theme_css() -> String {
                 hex(mirrored)
             ));
         }
+    }
+    // The aliases flip too. They are not families, so the loop above misses
+    // them, and leaving them behind is exactly how `bg-accent` and
+    // `<Button variant="accent">` came to be different colours in dark mode.
+    for alias in semantics() {
+        out.push_str(&format!(
+            "    --color-{}: {};\n",
+            alias.name,
+            hex(alias.dark)
+        ));
     }
     out.push_str("  }\n}\n");
     out
@@ -416,13 +509,32 @@ mod tests {
         ]
     }
 
+    /// Every family, not just the seven the terminal supplies.
+    ///
+    /// The guarantees below are about what a model can type, and it can type
+    /// `text-violet-700` as readily as `text-pink-700`. Checking only the
+    /// anchored seven left fifteen families — two thirds of the palette —
+    /// resting on the solver being right, with nothing to catch a regression
+    /// in `PASTEL_LIGHTNESS` or `saturated_for` that touched only derived hues.
+    fn every_family() -> Vec<(&'static str, [u32; 11])> {
+        FAMILIES
+            .iter()
+            .map(|family| (family.name, family.ramp()))
+            .collect()
+    }
+
+    fn at(ramp: &[u32; 11], step: u16) -> u32 {
+        let index = STEPS.iter().position(|s| *s == step).expect("known step");
+        ramp[index]
+    }
+
     /// The whole reason for the ramp. Text weights have to clear AA on the
     /// surface they sit on, or the theme is pretty and unreadable.
     #[test]
     fn text_weights_are_readable_on_a_light_surface() {
-        for (name, anchor) in anchors() {
+        for (name, ramp) in every_family() {
             for weight in [700, 800, 900, 950] {
-                let color = step(anchor, weight);
+                let color = at(&ramp, weight);
                 let ratio = contrast(color, WHITE_SURFACE);
                 assert!(
                     ratio >= 4.5,
@@ -436,9 +548,9 @@ mod tests {
     /// Dark mode inverts which end of the ramp carries text.
     #[test]
     fn light_weights_are_readable_on_a_dark_surface() {
-        for (name, anchor) in anchors() {
+        for (name, ramp) in every_family() {
             for weight in [100, 200, 300] {
-                let color = step(anchor, weight);
+                let color = at(&ramp, weight);
                 let ratio = contrast(color, DARK_SURFACE);
                 assert!(
                     ratio >= 4.5,
@@ -451,15 +563,29 @@ mod tests {
 
     /// The commonest pairing a model writes: tinted surface, dark text of the
     /// same family.
+    ///
+    /// Checked in both schemes, though the mirror makes them the same number:
+    /// dark mode swaps which of the two colours is the ground, and contrast is
+    /// symmetric. That is the property worth pinning — the pairing cannot pass
+    /// in one scheme and fail in the other while the dark block is a mirror.
     #[test]
     fn the_common_tinted_pairing_is_readable() {
-        for (name, anchor) in anchors() {
-            let surface = step(anchor, 100);
-            let text = step(anchor, 900);
+        for (name, ramp) in every_family() {
+            let surface = at(&ramp, 100);
+            let text = at(&ramp, 900);
             let ratio = contrast(text, surface);
             assert!(
                 ratio >= 4.5,
                 "{name}-900 on {name}-100 is {ratio:.2}:1, needs 4.5"
+            );
+
+            // The dark block maps `-100` to what light mode calls `-900`, and
+            // vice versa, so this is the same pair with the roles exchanged.
+            let dark_surface = at(&ramp, 900);
+            let dark_text = at(&ramp, 100);
+            assert!(
+                (contrast(dark_text, dark_surface) - ratio).abs() < 0.01,
+                "{name} pairing is not symmetric across the mirror"
             );
         }
     }
@@ -470,8 +596,7 @@ mod tests {
     /// every `hover:bg-*-600` a no-op.
     #[test]
     fn adjacent_steps_are_visibly_different() {
-        for (name, anchor) in anchors() {
-            let ramp = ramp(anchor);
+        for (name, ramp) in every_family() {
             // Checked from the anchor down. Above it the steps are genuinely
             // near-white — an off-white family cannot separate 50 from 100 and
             // should not try, or it bands.
@@ -491,8 +616,7 @@ mod tests {
     /// and every hover state disappears.
     #[test]
     fn each_ramp_is_monotonically_darker() {
-        for (name, anchor) in anchors() {
-            let ramp = ramp(anchor);
+        for (name, ramp) in every_family() {
             for pair in ramp.windows(2) {
                 assert!(
                     luminance(pair[0]) > luminance(pair[1]),
@@ -662,24 +786,34 @@ mod preview {
 /// Generating them here keeps one source of truth for both the utilities a
 /// model types and the components it composes.
 pub fn tokens_css() -> String {
-    let blue = ramp(BLUE);
     let neutral = ramp(WHITE);
-    let mint = ramp(MINT);
-    let yellow = ramp(YELLOW);
-    let red = ramp(RED);
+    // The same four the utilities get, so `--a-accent` and `--color-accent`
+    // cannot disagree in either scheme.
+    let accent_alias = semantic("accent");
+    let danger_alias = semantic("danger");
+    let warn_alias = semantic("warning");
+    let ok_alias = semantic("success");
 
     format!(
         ":root {{\n\
-         \x20 --a-bg: #ffffff;\n\
+         \x20 --a-bg: {bg};\n\
+         \x20 --a-card: #ffffff;\n\
          \x20 --a-fg: {fg};\n\
          \x20 --a-muted: {muted};\n\
          \x20 --a-subtle: {subtle};\n\
          \x20 --a-border: {border};\n\
          \x20 --a-accent: {accent};\n\
          \x20 --a-accent-fg: #ffffff;\n\
+         \x20 --a-accent-surface: {accent_surface};\n\
          \x20 --a-danger: {danger};\n\
+         \x20 --a-danger-surface: {danger_surface};\n\
          \x20 --a-ok: {ok};\n\
+         \x20 --a-ok-surface: {ok_surface};\n\
          \x20 --a-warn: {warn};\n\
+         \x20 --a-warn-surface: {warn_surface};\n\
+         \x20 --a-accent-fill: {fill};\n\
+         \x20 --a-accent-fill-fg: {fill_fg};\n\
+         \x20 --a-accent-fill-edge: {fill_edge};\n\
 {charts_light}\
          \x20 --a-radius: 8px;\n\
          \x20 --a-sp: 4px;\n\
@@ -693,41 +827,77 @@ pub fn tokens_css() -> String {
          @media (prefers-color-scheme: dark) {{\n\
          \x20 :root {{\n\
          \x20   --a-bg: {dark_bg};\n\
+         \x20   --a-card: {dark_card};\n\
          \x20   --a-fg: {dark_fg};\n\
          \x20   --a-muted: {dark_muted};\n\
          \x20   --a-subtle: {dark_subtle};\n\
          \x20   --a-border: {dark_border};\n\
          \x20   --a-accent: {dark_accent};\n\
          \x20   --a-accent-fg: {dark_accent_fg};\n\
+         \x20   --a-accent-surface: {dark_accent_surface};\n\
          \x20   --a-danger: {dark_danger};\n\
+         \x20   --a-danger-surface: {dark_danger_surface};\n\
          \x20   --a-ok: {dark_ok};\n\
+         \x20   --a-ok-surface: {dark_ok_surface};\n\
          \x20   --a-warn: {dark_warn};\n\
+         \x20   --a-warn-surface: {dark_warn_surface};\n\
 {charts_dark}\
          \x20 }}\n\
          }}\n",
+        // The page ground is artist's own white rather than #ffffff, and cards
+        // are what stay white. With both at #ffffff a Card was separated from
+        // the page by a 1px hairline and nothing else, which is most of why a
+        // canvas read as flat; #F2F1ED is `PASTEL_WHITE`, one of the six, and
+        // sits at 1.13:1 under a white card — enough to separate them, nowhere
+        // near enough to read as a box.
+        bg = hex(neutral[2]),
         fg = hex(neutral[10]),
-        muted = hex(neutral[7]),
+        // 800 rather than 700 now that muted text often sits on the tinted
+        // ground rather than on white: at 700 it is 4.08:1 there, which is
+        // under the bar it was chosen to clear.
+        muted = hex(neutral[8]),
         subtle = hex(neutral[0]),
-        border = hex(neutral[2]),
-        accent = hex(blue[7]),
-        danger = hex(red[7]),
-        ok = hex(mint[7]),
-        warn = hex(yellow[7]),
+        // A step darker, because the old border was the colour the page is now.
+        border = hex(neutral[3]),
+        accent = hex(accent_alias.light),
+        accent_surface = hex(accent_alias.surface_light),
+        danger = hex(danger_alias.light),
+        danger_surface = hex(danger_alias.surface_light),
+        ok = hex(ok_alias.light),
+        ok_surface = hex(ok_alias.surface_light),
+        warn = hex(warn_alias.light),
+        warn_surface = hex(warn_alias.surface_light),
+        // The one control that is filled rather than tinted, and the only
+        // place the terminal's blue appears at full strength. The same pastel
+        // in both schemes: on a dark ground it carries itself at 11.9:1, and on
+        // the light one it is 1.2:1 against the page, so it takes a 600-step
+        // rim to clear the 3:1 a control's own boundary needs.
+        fill = hex(ramp(BLUE)[2]),
+        fill_fg = hex(ramp(BLUE)[10]),
+        fill_edge = hex(ramp(BLUE)[6]),
         charts_light = chart_block(6),
         // Dark mode reads off the opposite end: the pastels themselves become
         // the foregrounds they were designed to be in the terminal.
         dark_bg = hex(mix(neutral[10], 0x00_00_00, 0.55)),
+        // What the ground used to lift to. Cards take it, and `--a-subtle`
+        // moves one step further out so a card's header strip still reads as a
+        // step away from the card rather than as the card.
+        dark_card = hex(mix(neutral[10], 0x00_00_00, 0.25)),
         dark_fg = hex(neutral[1]),
         dark_muted = hex(neutral[4]),
-        dark_subtle = hex(mix(neutral[10], 0x00_00_00, 0.25)),
+        dark_subtle = hex(mix(neutral[10], 0x00_00_00, 0.05)),
         dark_border = hex(neutral[9]),
-        dark_accent = hex(blue[2]),
+        dark_accent = hex(accent_alias.dark),
         // The accent flips to a light pastel in dark mode, so what sits on top
         // of it has to flip too — white on pastel is about 1.3:1.
         dark_accent_fg = hex(neutral[10]),
-        dark_danger = hex(red[3]),
-        dark_ok = hex(mint[2]),
-        dark_warn = hex(yellow[2]),
+        dark_accent_surface = hex(accent_alias.surface_dark),
+        dark_danger = hex(danger_alias.dark),
+        dark_danger_surface = hex(danger_alias.surface_dark),
+        dark_ok = hex(ok_alias.dark),
+        dark_ok_surface = hex(ok_alias.surface_dark),
+        dark_warn = hex(warn_alias.dark),
+        dark_warn_surface = hex(warn_alias.surface_dark),
         // Charts sit on the dark ground in dark mode, so their lines come from
         // the light end of each ramp — the same inversion the utilities get.
         charts_dark = chart_block(3),
@@ -798,8 +968,10 @@ code, pre, kbd, samp { font-family: var(--a-mono); font-size: .875em; }
 /* A tab's own indicator is its underline; a ring drawn outside it reads as a
    detached box, so keep the focus ring inside the tab's bounds. */
 :where([role='tab']):focus-visible { outline-offset: -2px; }
+/* A field is a raised surface, not the page. Left on `--a-bg` it would take
+   the ground's tint and stop reading as somewhere you type. */
 :where(input, select, textarea) { border-radius: var(--a-radius);
-  border: 1px solid var(--a-border); background: var(--a-bg); padding: .375rem .5rem; }
+  border: 1px solid var(--a-border); background: var(--a-card); padding: .375rem .5rem; }
 :where(table) { border-collapse: collapse; }
 :where(hr) { border: 0; border-top: 1px solid var(--a-border); margin: 1rem 0; }
 ::selection { background: var(--a-accent); color: var(--a-accent-fg); }
@@ -846,12 +1018,173 @@ mod token_tests {
     fn kit_tokens_come_from_the_same_ramps() {
         let tokens = tokens_css();
         assert!(
-            tokens.contains(&hex(ramp(BLUE)[7])),
-            "accent is not blue-700"
+            tokens.contains(&hex(ramp(BLUE)[INK_LIGHT])),
+            "accent is not blue-800"
         );
-        assert!(tokens.contains(&hex(ramp(RED)[7])), "danger is not red-700");
+        assert!(
+            tokens.contains(&hex(ramp(RED)[INK_LIGHT])),
+            "danger is not red-800"
+        );
         assert!(!tokens.contains("#2563eb"), "the invented accent survived");
         assert!(!tokens.contains("#18181b"), "the invented neutral survived");
+    }
+
+    /// The whole point of moving the ink to 800: a semantic's text has to be
+    /// readable on that semantic's own surface, in both schemes. At 700 this
+    /// ran 3.73–4.30:1 and was the reason tinted panels could not be the house
+    /// style.
+    #[test]
+    fn semantic_ink_is_readable_on_its_own_surface() {
+        for alias in semantics() {
+            for (scheme, dark) in [("light", false), ("dark", true)] {
+                let (ink, surface) = alias.pair(dark);
+                let ratio = contrast(ink, surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{scheme} {} on its own surface is {ratio:.2}:1",
+                    alias.name
+                );
+            }
+        }
+    }
+
+    /// A surface is a tint, not a fill. If it drifted toward the middle of the
+    /// ramp the panel would stop reading as a panel and start reading as a
+    /// block of colour — which is exactly what 900 did on the dark side.
+    #[test]
+    fn semantic_surfaces_stay_close_to_the_ground() {
+        let neutral = ramp(WHITE);
+        let light_ground = neutral[2];
+        let dark_ground = mix(neutral[10], 0x00_00_00, 0.55);
+
+        for alias in semantics() {
+            let light = contrast(alias.surface_light, light_ground);
+            assert!(
+                light < 1.5,
+                "the light {} surface is {light:.2}:1 off the ground",
+                alias.name
+            );
+            let dark = contrast(alias.surface_dark, dark_ground);
+            assert!(
+                dark < 1.5,
+                "the dark {} surface is {dark:.2}:1 off the ground",
+                alias.name
+            );
+        }
+    }
+
+    /// The page and a card have to be told apart without a border doing all
+    /// the work, and still not read as two different backgrounds.
+    #[test]
+    fn a_card_separates_from_the_page_in_both_schemes() {
+        let tokens = tokens_css();
+        let neutral = ramp(WHITE);
+
+        let light = contrast(neutral[2], 0xFF_FF_FF);
+        assert!(
+            (1.05..1.3).contains(&light),
+            "light page-to-card separation is {light:.3}:1"
+        );
+        let dark = contrast(
+            mix(neutral[10], 0x00_00_00, 0.55),
+            mix(neutral[10], 0x00_00_00, 0.25),
+        );
+        assert!(
+            (1.05..1.3).contains(&dark),
+            "dark page-to-card separation is {dark:.3}:1"
+        );
+
+        // The page must not still be white, and a card must have somewhere of
+        // its own to be — this is the pairing the kit reads.
+        assert!(
+            tokens.contains(&format!("--a-bg: {}", hex(neutral[2]))),
+            "the page ground is not artist's white"
+        );
+        assert!(tokens.contains("--a-card:"), "there is no card surface");
+    }
+
+    /// The one place the terminal's blue is painted at full strength. It is
+    /// the same pastel in both schemes, so its foreground can be one value —
+    /// but on a light ground it is nearly the page, so its rim has to carry
+    /// the boundary on its own.
+    #[test]
+    fn the_filled_control_is_the_terminal_blue_in_both_schemes() {
+        let blue = ramp(BLUE);
+        let fill = blue[2];
+        assert_eq!(fill, BLUE, "the filled control is not the terminal's blue");
+
+        let text = contrast(blue[10], fill);
+        assert!(text >= 4.5, "text on the filled control is {text:.2}:1");
+
+        let page = ramp(WHITE)[2];
+        let rim = contrast(blue[6], page);
+        assert!(
+            rim >= 3.0,
+            "the rim is {rim:.2}:1 against the page, under the 3:1 a control's \
+             own boundary needs — and the fill itself is only {:.2}:1",
+            contrast(fill, page)
+        );
+    }
+
+    /// The aliases are not families, so `theme_css`'s mirror loop steps right
+    /// over them. While they had no dark override, `bg-accent` stayed a dark
+    /// blue on a dark page and a `<Button variant="accent">` next to it went
+    /// pastel — the same word, two colours, in one scheme only.
+    #[test]
+    fn the_semantic_aliases_flip_with_the_scheme() {
+        let css = theme_css();
+        let (light_block, dark_block) = css
+            .split_once("prefers-color-scheme: dark")
+            .expect("theme_css emits a dark block");
+
+        for alias in semantics() {
+            let declaration = format!("--color-{}:", alias.name);
+            assert!(
+                light_block.contains(&declaration),
+                "{declaration} missing from @theme"
+            );
+            assert!(
+                dark_block.contains(&declaration),
+                "{declaration} has no dark override"
+            );
+            assert_ne!(
+                alias.light, alias.dark,
+                "{} is the same colour in both schemes",
+                alias.name
+            );
+        }
+    }
+
+    /// The utilities and the kit have to resolve to the same colour in both
+    /// schemes. This is the assertion the drift was hiding from.
+    #[test]
+    fn the_aliases_and_the_kit_tokens_agree() {
+        let theme = theme_css();
+        let tokens = tokens_css();
+
+        for (alias, token) in [
+            ("accent", "--a-accent"),
+            ("danger", "--a-danger"),
+            ("warning", "--a-warn"),
+            ("success", "--a-ok"),
+        ] {
+            let entry = semantics()
+                .into_iter()
+                .find(|entry| entry.name == alias)
+                .expect("a known alias");
+            for (scheme, value) in [("light", entry.light), ("dark", entry.dark)] {
+                assert!(
+                    theme.contains(&format!("--color-{alias}: {}", hex(value))),
+                    "the {scheme} utility for {alias} is not {}",
+                    hex(value)
+                );
+                assert!(
+                    tokens.contains(&format!("{token}: {}", hex(value))),
+                    "the {scheme} kit token {token} is not {}",
+                    hex(value)
+                );
+            }
+        }
     }
 
     /// Body text has to be readable on the surface it is painted on, in both
@@ -859,12 +1192,19 @@ mod token_tests {
     #[test]
     fn body_text_is_readable_in_both_schemes() {
         let neutral = ramp(WHITE);
-        let light = contrast(neutral[10], 0xFF_FF_FF);
-        assert!(light >= 4.5, "light-mode body text is {light:.2}:1");
+        // Both grounds, not just the card: most body text in a canvas sits on
+        // the page, and the page is no longer white.
+        for (label, ground) in [("page", neutral[2]), ("card", 0xFF_FF_FF)] {
+            let light = contrast(neutral[10], ground);
+            assert!(light >= 4.5, "light-mode body text on the {label} is {light:.2}:1");
+        }
 
         let dark_bg = mix(neutral[10], 0x00_00_00, 0.55);
-        let dark = contrast(neutral[1], dark_bg);
-        assert!(dark >= 4.5, "dark-mode body text is {dark:.2}:1");
+        let dark_card = mix(neutral[10], 0x00_00_00, 0.25);
+        for (label, ground) in [("page", dark_bg), ("card", dark_card)] {
+            let dark = contrast(neutral[1], ground);
+            assert!(dark >= 4.5, "dark-mode body text on the {label} is {dark:.2}:1");
+        }
     }
 
     /// A filled button is a foreground on an accent, and the accent flips
@@ -872,34 +1212,46 @@ mod token_tests {
     /// pastel blue — invisible — in dark mode.
     #[test]
     fn text_on_a_filled_control_is_readable_in_both_schemes() {
-        let blue = ramp(BLUE);
-        let red = ramp(RED);
         let neutral = ramp(WHITE);
 
-        for (name, accent) in [("accent", blue[7]), ("danger", red[7])] {
-            let ratio = contrast(0xFF_FF_FF, accent);
+        // Read off the alias list rather than restated, so a change to what
+        // `danger` means in dark mode is checked here rather than diverging.
+        for alias in semantics() {
+            if alias.name == "warning" || alias.name == "success" {
+                // These tint surfaces and badges; nothing fills a control with
+                // them, so there is no foreground pairing to guarantee.
+                continue;
+            }
+            let light = contrast(0xFF_FF_FF, alias.light);
             assert!(
-                ratio >= 4.5,
-                "light-mode {name} button text is {ratio:.2}:1"
+                light >= 4.5,
+                "light-mode {} button text is {light:.2}:1",
+                alias.name
             );
-        }
-        for (name, accent) in [("accent", blue[2]), ("danger", red[3])] {
-            let ratio = contrast(neutral[10], accent);
-            assert!(ratio >= 4.5, "dark-mode {name} button text is {ratio:.2}:1");
+            let dark = contrast(neutral[10], alias.dark);
+            assert!(
+                dark >= 4.5,
+                "dark-mode {} button text is {dark:.2}:1",
+                alias.name
+            );
         }
     }
 
     #[test]
     fn muted_text_still_clears_the_bar() {
         let neutral = ramp(WHITE);
-        // Muted is dimmer than body text but is still text, so it takes the
-        // 700 weight rather than the 600 used for borders and large type.
-        let light = contrast(neutral[7], 0xFF_FF_FF);
-        assert!(light >= 4.5, "muted text is {light:.2}:1 on white");
-        assert!(
-            contrast(neutral[10], 0xFF_FF_FF) > light,
-            "muted should be dimmer than body text"
-        );
+        // Muted is dimmer than body text but is still text, so it has to clear
+        // the bar on the tinted page as well as on a card — which is what took
+        // it from 700 to 800. A subtitle in an AppShell header sits on the
+        // page, and at 700 it landed on 4.08:1 there.
+        for (label, ground) in [("page", neutral[2]), ("card", 0xFF_FF_FF)] {
+            let light = contrast(neutral[8], ground);
+            assert!(light >= 4.5, "muted text is {light:.2}:1 on the {label}");
+            assert!(
+                contrast(neutral[10], ground) > light,
+                "muted should be dimmer than body text on the {label}"
+            );
+        }
     }
 
     /// Every charted family must exist and be told apart from its neighbours;

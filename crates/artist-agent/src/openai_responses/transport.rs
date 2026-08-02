@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -38,6 +41,24 @@ pub struct Client {
     conversation_id: String,
     effective_context_window: Option<u64>,
     unsupported_context_management: Arc<Mutex<HashSet<String>>>,
+    /// Digest → provider file id, so an image goes up once instead of on every
+    /// turn for the rest of the session. `None` disables the substitution.
+    handles: Option<artist_session::HandleLedger>,
+    /// Set once the endpoint has refused an upload. A files endpoint is not
+    /// universal — the Codex backend has no reason to expose one — and probing
+    /// it on every screenshot would turn a missing feature into a per-image
+    /// round trip.
+    /// Refused capabilities, held for the session rather than the client — a
+    /// client is rebuilt every user turn, so flags kept here would be forgotten
+    /// between turns and every missing endpoint re-probed forever.
+    capabilities: artist_session::ProviderCapabilities,
+    /// Where the provider-side conversation currently stands, when it is
+    /// holding one for us. A cache over the local event log, never the source
+    /// of truth — see [`artist_session::chain`].
+    chain: artist_session::ChainState,
+    /// Which provider-side handles this session may use. Passed in rather than
+    /// read from the environment; see [`crate::statefulness`].
+    statefulness: crate::Statefulness,
 }
 
 impl Client {
@@ -50,6 +71,10 @@ impl Client {
             conversation_id: "default".into(),
             effective_context_window: None,
             unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
+            handles: None,
+            capabilities: artist_session::ProviderCapabilities::for_session(),
+            chain: artist_session::ChainState::new(),
+            statefulness: crate::Statefulness::default(),
         }
     }
     pub fn chatgpt(
@@ -68,6 +93,10 @@ impl Client {
             conversation_id: "default".into(),
             effective_context_window: None,
             unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
+            handles: None,
+            capabilities: artist_session::ProviderCapabilities::for_session(),
+            chain: artist_session::ChainState::new(),
+            statefulness: crate::Statefulness::default(),
         }
     }
     pub fn with_provider_context(
@@ -82,6 +111,257 @@ impl Client {
     pub fn with_effective_context_window(mut self, window: Option<u64>) -> Self {
         self.effective_context_window = window;
         self
+    }
+
+    /// Send images once and reference them thereafter.
+    pub fn with_handles(mut self, handles: artist_session::HandleLedger) -> Self {
+        self.handles = Some(handles);
+        self
+    }
+
+    /// Adopt the session's chain position and refused-capability record.
+    ///
+    /// Both must outlive this client: it is rebuilt for every user turn, and a
+    /// chain that resets each turn never saves anything while a capability
+    /// probe that resets each turn costs a request every turn.
+    pub fn with_session_state(
+        mut self,
+        chain: artist_session::ChainState,
+        capabilities: artist_session::ProviderCapabilities,
+        statefulness: crate::Statefulness,
+    ) -> Self {
+        self.chain = chain;
+        self.capabilities = capabilities;
+        self.statefulness = statefulness;
+        self
+    }
+
+    /// Whether this endpoint can hold a conversation for us.
+    ///
+    /// Two conditions, both required. Chaining needs `store: true`, which the
+    /// ChatGPT/Codex backend does not honour — that path authenticates a
+    /// subscription rather than an account with retained responses, and asking
+    /// it to keep a conversation is a request it has no way to satisfy. Only
+    /// the API-key route reaches an endpoint that retains anything.
+    ///
+    /// And it is opt-in even there. The saving is real — a measured 95.4% of
+    /// bytes on a 48-turn session were resends — but the failure mode of
+    /// getting it wrong is a model shown a conversation that did not happen,
+    /// which is worse than any bandwidth. It stays behind a switch until it has
+    /// been exercised against the live endpoint rather than only a scripted
+    /// one.
+    fn chaining_supported(&self) -> bool {
+        matches!(self.credentials, Credentials::ApiKey(_))
+            && self.statefulness.chaining
+    }
+
+    /// Replace inline image bytes with ids the provider already holds.
+    ///
+    /// A stateless API resends the whole conversation every turn, so a
+    /// screenshot inlined as base64 is re-uploaded on every subsequent request
+    /// for the rest of the session. On a measured 48-turn session in this
+    /// repository 95.4% of all bytes uploaded were resends, and that session
+    /// contained no images at all.
+    ///
+    /// Every failure path here degrades to inlining, which is exactly today's
+    /// behaviour — an upload that does not happen costs bandwidth, never
+    /// correctness. The first refusal disables uploads for the session so a
+    /// backend without a files endpoint pays one wasted request, not one per
+    /// image.
+    async fn externalize_images(&self, input: &mut [Value]) {
+        let Some(ledger) = &self.handles else {
+            return;
+        };
+        if !self.has_side_endpoints() {
+            return;
+        }
+        let pending = artist_session::inline_images::inline_images(input);
+        if pending.is_empty() {
+            return;
+        }
+        let namespace = self.context_namespace();
+        let mut resolved = std::collections::BTreeMap::new();
+        for image in pending {
+            if let Some(id) = ledger.get(&namespace, &image.digest) {
+                resolved.insert(image.digest, id);
+                continue;
+            }
+            if !self.capabilities.may_upload() {
+                continue;
+            }
+            match self.upload(&image).await {
+                Ok(id) => {
+                    // Recorded before use: a handle we uploaded but failed to
+                    // remember would be re-uploaded on every later turn.
+                    let _ = ledger.put(&namespace, &image.digest, &id);
+                    resolved.insert(image.digest, id);
+                }
+                Err(_) => {
+                    self.capabilities.refuse_uploads();
+                    break;
+                }
+            }
+        }
+        if !resolved.is_empty() {
+            artist_session::inline_images::apply_handles(input, &resolved);
+        }
+    }
+
+    /// Replace the system prompt with a reference to a stored one.
+    ///
+    /// The preamble is the largest single thing resent on every request and the
+    /// one that must never change mid-session. Referencing it by id addresses
+    /// both at once: it leaves the request, so it costs nothing to resend and
+    /// has no way to drift. Where [`crate::prefix::PrefixFreezer`] enforces
+    /// stability in our code, this enforces it in the protocol — the strictly
+    /// stronger form, because it holds regardless of what our code does.
+    ///
+    /// Opt-in, and separately from chaining. Unlike an image upload, publishing
+    /// a prompt leaves a durable artifact on the provider's side rather than
+    /// one that rides a single conversation; that is the user's call to make,
+    /// not a default to inherit. The content itself is no more exposed than it
+    /// already was — it goes up in `instructions` on every request today.
+    async fn externalize_prompt(&self, body: &mut Request) {
+        let (Some(ledger), Some(instructions)) = (&self.handles, body.instructions.clone()) else {
+            return;
+        };
+        if !self.stored_prompts_enabled() || instructions.is_empty() || !self.has_side_endpoints() {
+            return;
+        }
+        let namespace = format!("{}/prompts", self.context_namespace());
+        let digest = artist_session::content_digest(instructions.as_bytes());
+
+        let stored = match ledger.get(&namespace, &digest) {
+            Some(stored) => stored,
+            None => {
+                if !self.capabilities.may_store_prompts() {
+                    return;
+                }
+                match self.publish_prompt(&instructions).await {
+                    Ok(stored) => {
+                        let _ = ledger.put(&namespace, &digest, &stored);
+                        stored
+                    }
+                    Err(_) => {
+                        self.capabilities.refuse_prompts();
+                        return;
+                    }
+                }
+            }
+        };
+
+        // `id@version`, so a stored prompt is always referenced at the exact
+        // revision that was published for this content.
+        let (id, version) = match stored.split_once('@') {
+            Some((id, version)) => (id.to_owned(), Some(version.to_owned())),
+            None => (stored, None),
+        };
+        body.prompt = Some(super::PromptRef {
+            id,
+            version,
+            variables: None,
+        });
+        // Both would be redundant, and the saving is precisely in not sending
+        // this.
+        body.instructions = None;
+    }
+
+    /// Store a system prompt with the provider, returning `id@version`.
+    async fn publish_prompt(&self, instructions: &str) -> Result<String, CompletionError> {
+        let response = self
+            .http
+            .post(format!("{}/prompts", self.endpoint.trim_end_matches('/')))
+            .headers(self.headers()?)
+            .json(&json!({
+                "prompt": {"instructions": instructions},
+            }))
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        let text = response.text().await.map_err(transport)?;
+        if !status.is_success() {
+            return Err(CompletionError::ProviderError(format!(
+                "prompt publish HTTP {status}: {}",
+                sanitize(&text)
+            )));
+        }
+        let wire: Value = serde_json::from_str(&text)?;
+        let id = wire
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CompletionError::ProviderError("prompt publish returned no id".into()))?;
+        Ok(match wire.get("version").and_then(Value::as_str) {
+            Some(version) => format!("{id}@{version}"),
+            None => id.to_owned(),
+        })
+    }
+
+    /// Whether this endpoint serves anything besides `/responses`.
+    ///
+    /// The ChatGPT/Codex backend does not. Probed directly rather than assumed:
+    /// `GET /responses` there answers `405 Method Not Allowed` with a JSON body
+    /// — a real route, wrong verb — while `/files` and `/prompts` answer `403`
+    /// with an HTML error page, which is the edge refusing a path the API does
+    /// not publish.
+    ///
+    /// Without this the first turn of every session spends a request
+    /// discovering that again. The capability record would then suppress the
+    /// rest, so this saves one request per session rather than one per turn —
+    /// small, but it is a request that can never succeed. Revisit if that
+    /// backend ever grows the endpoints.
+    fn has_side_endpoints(&self) -> bool {
+        matches!(self.credentials, Credentials::ApiKey(_))
+    }
+
+    fn stored_prompts_enabled(&self) -> bool {
+        self.statefulness.stored_prompt
+    }
+
+    /// Put one image on the provider's files endpoint, returning its id.
+    async fn upload(&self, image: &artist_session::InlineImage) -> Result<String, CompletionError> {
+        let extension = image
+            .media_type
+            .rsplit('/')
+            .next()
+            .filter(|ext| ext.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or("png");
+        let part = reqwest::multipart::Part::bytes(image.bytes.clone())
+            .file_name(format!("{}.{extension}", image.digest))
+            .mime_str(&image.media_type)
+            .map_err(boxed)?;
+        let form = reqwest::multipart::Form::new()
+            // `vision` is the purpose that permits a file to be referenced from
+            // an image content block.
+            .text("purpose", "vision")
+            .part("file", part);
+
+        let mut headers = self.headers()?;
+        // Set by the multipart body, which carries its own boundary.
+        headers.remove(CONTENT_TYPE);
+
+        let response = self
+            .http
+            .post(format!("{}/files", self.endpoint.trim_end_matches('/')))
+            .headers(headers)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        let text = response.text().await.map_err(transport)?;
+        if !status.is_success() {
+            return Err(CompletionError::ProviderError(format!(
+                "file upload HTTP {status}: {}",
+                sanitize(&text)
+            )));
+        }
+        serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|wire| wire.get("id")?.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                CompletionError::ProviderError("file upload returned no id".to_owned())
+            })
     }
 
     /// Compact the full canonical sidecar plus current context. The sidecar is
@@ -225,7 +505,57 @@ impl ArtistOpenAiModel {
             .snapshot(&self.conversation_id, &self.client.context_namespace())
             .await;
         let fresh_fingerprints = body.input.iter().map(wire_fingerprint).collect::<Vec<_>>();
-        body.input = reconcile_inputs(saved, &checkpoint, body.input.clone(), &fresh_fingerprints);
+        let common = common_prefix(&saved, &checkpoint, &body.input, &fresh_fingerprints);
+        let chain_key = artist_session::chain::key(
+            &self.client.conversation_id,
+            &self.client.context_namespace(),
+        );
+
+        // Any history rewrite invalidates the chain, detected here rather than
+        // hooked onto each cause.
+        //
+        // A shortfall against the checkpoint means this turn's history no
+        // longer matches what the provider was told — which is precisely what a
+        // stream-rule replay, a compaction and a handoff all produce. Deriving
+        // it from the fingerprints covers every one of them, plus whatever
+        // rewrites history next year, without any of them having to remember
+        // this exists.
+        if common < checkpoint.len() {
+            self.client
+                .chain
+                .invalidate(&chain_key, artist_session::chain::Broke::HistoryRewritten);
+        }
+
+        match self
+            .client
+            .chain
+            .plan(&chain_key, self.client.chaining_supported())
+        {
+            artist_session::ChainSend::Chained {
+                previous_response_id,
+            } => {
+                // The provider is holding everything up to `common`; sending it
+                // again would duplicate the conversation rather than continue
+                // it.
+                body.previous_response_id = Some(previous_response_id);
+                body.store = Some(true);
+                body.input = answer_orphaned_calls(body.input.split_off(common));
+            }
+            artist_session::ChainSend::Full => {
+                body.input =
+                    reconcile_inputs(saved, &checkpoint, body.input.clone(), &fresh_fingerprints);
+            }
+        }
+
+        // After reconciliation, so it covers the restored sidecar suffix as
+        // well as this turn's new items — the older images are precisely the
+        // ones that have been resent the most times.
+        //
+        // Fingerprints are taken above, before substitution: they identify a
+        // conversation item, and an item must not change identity because its
+        // image moved from bytes to a handle.
+        self.client.externalize_images(&mut body.input).await;
+        self.client.externalize_prompt(&mut body).await;
         (body, fresh_fingerprints)
     }
 
@@ -328,6 +658,19 @@ impl CompletionModel for ArtistOpenAiModel {
                     .insert(self.model.clone());
                 continue;
             }
+            // A refused chain must not be retried into: drop it, and the
+            // loop's next attempt finds it cold and restates the conversation.
+            // Recovery costs one request, which is why no attempt is made to
+            // distinguish an expired response from a withdrawn feature.
+            if body.previous_response_id.is_some() && chain_refused(status.as_u16(), &text) {
+                self.client.chain.invalidate(
+                    &artist_session::chain::key(
+                        &self.client.conversation_id,
+                        &self.client.context_namespace(),
+                    ),
+                    artist_session::chain::Broke::ProviderRefused,
+                );
+            }
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
@@ -396,6 +739,19 @@ impl CompletionModel for ArtistOpenAiModel {
                     .insert(self.model.clone());
                 continue;
             }
+            // A refused chain must not be retried into: drop it, and the
+            // loop's next attempt finds it cold and restates the conversation.
+            // Recovery costs one request, which is why no attempt is made to
+            // distinguish an expired response from a withdrawn feature.
+            if body.previous_response_id.is_some() && chain_refused(status.as_u16(), &text) {
+                self.client.chain.invalidate(
+                    &artist_session::chain::key(
+                        &self.client.conversation_id,
+                        &self.client.context_namespace(),
+                    ),
+                    artist_session::chain::Broke::ProviderRefused,
+                );
+            }
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
@@ -407,6 +763,8 @@ impl CompletionModel for ArtistOpenAiModel {
         let canonical_input = body.input.clone();
         let provider_namespace = self.client.context_namespace();
         let input_checkpoint = checkpoint;
+        let chain = self.client.chain.clone();
+        let chain_key = artist_session::chain::key(&conversation_id, &provider_namespace);
         let stream: StreamingResult<StreamResponse> = Box::pin(async_stream::stream! {
             let mut buffer = String::new();
             let mut accumulated_text = String::new();
@@ -471,6 +829,16 @@ impl CompletionModel for ArtistOpenAiModel {
                                             Err(error) => { yield Err(error); return; }
                                         }
                                         context.commit_checkpoint(&conversation_id, &provider_namespace, saved, full_checkpoint).await;
+                                        // The turn landed whole, so the next
+                                        // one may chain onto it. Advancing only
+                                        // here means an interrupted or failed
+                                        // turn leaves the chain where it was
+                                        // and the next request restates
+                                        // everything — the safe direction.
+                                        chain.advance(
+                                            &chain_key,
+                                            final_response.wire.get("id").and_then(Value::as_str).unwrap_or_default(),
+                                        );
                                     }
                                     yield Ok(event);
                                     }
@@ -668,13 +1036,13 @@ fn wire_fingerprint(value: &Value) -> String {
     serde_json::to_string(&canonical(value)).expect("JSON values serialize")
 }
 
-fn reconcile_inputs(
-    saved: Vec<Value>,
-    checkpoint: &[String],
-    fresh: Vec<Value>,
-    fingerprints: &[String],
-) -> Vec<Value> {
-    let common = if checkpoint.is_empty() && !saved.is_empty() {
+/// How much of `fresh` the provider has already been told.
+///
+/// Split out of [`reconcile_inputs`] because conversation chaining needs the
+/// same number for the opposite purpose: reconciliation uses it to know what to
+/// append, chaining uses it to know what to *omit*.
+fn common_prefix(saved: &[Value], checkpoint: &[String], fresh: &[Value], fingerprints: &[String]) -> usize {
+    if checkpoint.is_empty() && !saved.is_empty() {
         // Schema-v1 snapshots did not record a cursor. Rig history contains prior
         // assistant turns, so migrate conservatively at the last such boundary;
         // everything after it is the new user/tool-result suffix.
@@ -688,7 +1056,26 @@ fn reconcile_inputs(
             .zip(fingerprints)
             .take_while(|(a, b)| a == b)
             .count()
-    };
+    }
+}
+
+/// A refusal that names the chain we tried to continue, rather than the request
+/// itself.
+///
+/// Deliberately broad: an expired response, an unknown one and an endpoint that
+/// never supported chaining all warrant the same action, and mistaking an
+/// ordinary bad request for a chain problem costs only a needless full resend.
+fn chain_refused(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 404) && body.contains("previous_response")
+}
+
+fn reconcile_inputs(
+    saved: Vec<Value>,
+    checkpoint: &[String],
+    fresh: Vec<Value>,
+    fingerprints: &[String],
+) -> Vec<Value> {
+    let common = common_prefix(&saved, checkpoint, &fresh, fingerprints);
     let mut merged = saved;
     // A diverged history is intentionally appended from its divergence point. In the
     // normal growing-history case this adds only genuinely new framework items.
@@ -897,6 +1284,37 @@ mod transport_tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    /// The signal that drives chain invalidation.
+    ///
+    /// A history that still matches what the provider was told yields a prefix
+    /// as long as the checkpoint. Anything shorter means the conversation was
+    /// rewritten underneath it — a stream-rule replay, a compaction, a handoff —
+    /// and a chain continued across that would show the model a conversation
+    /// that never happened.
+    #[test]
+    fn an_unchanged_history_matches_the_whole_checkpoint() {
+        let fresh = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "two"})];
+        let fingerprints: Vec<String> = fresh.iter().map(wire_fingerprint).collect();
+        let checkpoint = fingerprints.clone();
+        let saved = vec![json!({"role": "assistant", "content": "ok"})];
+
+        let common = common_prefix(&saved, &checkpoint, &fresh, &fingerprints);
+        assert_eq!(common, checkpoint.len(), "an intact history must not look rewritten");
+    }
+
+    #[test]
+    fn a_rewritten_history_falls_short_of_the_checkpoint() {
+        let told = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "two"})];
+        let checkpoint: Vec<String> = told.iter().map(wire_fingerprint).collect();
+        // The second turn was replaced, which is what a rule replay does.
+        let fresh = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "rewritten"})];
+        let fingerprints: Vec<String> = fresh.iter().map(wire_fingerprint).collect();
+        let saved = vec![json!({"role": "assistant", "content": "ok"})];
+
+        let common = common_prefix(&saved, &checkpoint, &fresh, &fingerprints);
+        assert!(common < checkpoint.len(), "a rewrite must be detected: {common}");
+    }
 
     #[test]
     fn checkpoint_replay_adds_only_new_history_across_turns_tools_and_compaction() {

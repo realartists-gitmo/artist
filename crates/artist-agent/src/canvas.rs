@@ -187,7 +187,10 @@ fn description_text() -> String {
              @tanstack/react-table, and Tailwind classes. Tailwind's palette is remapped to \
              artist's own colours, so ordinary classes like `bg-blue-100` or `text-red-700` are \
              already on-theme — use them, and avoid hard-coded hex, rgb() and named colours, \
-             which bypass the theme and are reported back to you by `status`. Composed class \
+             which bypass the theme and are reported back to you by `status`. One pairing to \
+             know: text on its own family's tint needs the 800 step, so `bg-red-100 \
+             text-red-800`, not `text-red-700` — below 800 it is under 4.5:1 and `status` says \
+             so. <Alert> and <Badge> take that pairing from the tokens already. Composed class \
              names like `text-${{tone}}-700` do work here, unlike in a build-time Tailwind \
              setup: the palette is generated in the browser from the live DOM, so a class only \
              has to exist once it is rendered. Plus the kit — prefer it over writing your own:\n\

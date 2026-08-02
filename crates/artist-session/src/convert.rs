@@ -682,7 +682,11 @@ mod tests {
 
         let mut messages = original.clone();
         externalize_images(&mut messages, &attachments);
-        assert!(!serde_json::to_string(&messages).unwrap().contains("dXNlciBpbWFnZQ"));
+        assert!(
+            !serde_json::to_string(&messages)
+                .unwrap()
+                .contains("dXNlciBpbWFnZQ")
+        );
         rehydrate_images(&mut messages, &attachments);
         assert_eq!(messages, original);
     }
@@ -690,7 +694,9 @@ mod tests {
     #[test]
     fn externalizing_twice_is_idempotent() {
         let (_dir, attachments) = store();
-        let original = vec![tool_result_with(vec![ToolResultContent::Image(png(b"once"))])];
+        let original = vec![tool_result_with(vec![ToolResultContent::Image(png(
+            b"once",
+        ))])];
 
         let mut messages = original.clone();
         externalize_images(&mut messages, &attachments);
@@ -714,7 +720,10 @@ mod tests {
         ])];
         externalize_images(&mut messages, &attachments);
         let stored = std::fs::read_dir(attachments.dir()).unwrap().count();
-        assert_eq!(stored, 1, "content addressing must deduplicate identical frames");
+        assert_eq!(
+            stored, 1,
+            "content addressing must deduplicate identical frames"
+        );
     }
 
     #[test]

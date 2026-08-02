@@ -46,7 +46,20 @@ pub fn resolve_target_qns(calls: &CallGraph, target: &str) -> Vec<Qn> {
 /// it's a callable or a type. Both halves are searched and deduped together.
 pub fn resolve_target_full(calls: &CallGraph, target: &str) -> Vec<ResolvedTarget> {
     let (file_filter, symbol) = split_file_filter(target);
-    let parts: Vec<&str> = symbol.split('.').collect();
+    // Accept `Type::method` as well as `Type.method`.
+    //
+    // Every renderer prints qns with `::` — it is what `Qn::to_string` emits
+    // and what `callees`, `impact` and `map` put on screen — but this only
+    // ever split on `.`, so the exact string the tools *print* was rejected
+    // when fed back in. For an agent that copies a symbol out of one command's
+    // output and into another's argument, that is the difference between the
+    // surface composing and not.
+    //
+    // `symbol` itself is still passed to `qn_matches` untouched, so the
+    // explicit whole-qn form keeps matching on the fast path above the
+    // segment comparison.
+    let normalised = symbol.replace("::", ".");
+    let parts: Vec<&str> = normalised.split('.').collect();
 
     let mut out: Vec<ResolvedTarget> = Vec::new();
     for qn in collect_callable_qns(calls) {
@@ -164,4 +177,25 @@ mod tests {
             (Some("src/foo.rs"), "Foo.bar")
         );
     }
+
+    /// Every renderer prints qns with `::`, so the printed form must be a valid
+    /// input form. It was not: `callees` would emit `PathAnchors::cursor` and
+    /// `callers`/`trace`/`impact` would then reject that exact string, which
+    /// breaks copying a symbol from one command into another.
+    #[test]
+    fn the_printed_separator_is_an_accepted_input_separator() {
+        let dotted = split_file_filter("Type.method").1.replace("::", ".");
+        let colons = split_file_filter("Type::method").1.replace("::", ".");
+        assert_eq!(dotted, colons);
+        assert_eq!(colons.split('.').collect::<Vec<_>>(), vec!["Type", "method"]);
+    }
+
+    #[test]
+    fn a_bare_name_is_unaffected_by_separator_normalisation() {
+        assert_eq!(
+            split_file_filter("method").1.replace("::", ".").split('.').collect::<Vec<_>>(),
+            vec!["method"]
+        );
+    }
+
 }

@@ -129,7 +129,12 @@ async fn drive(
                     calls: Arc::clone(&tool.calls),
                 });
         if let Some(steering) = steering {
-            builder = builder.add_hook(SteeringHook(steering.clone()));
+            builder = builder.add_hook(SteeringHook {
+                steering: steering.clone(),
+                // No identity in the TTSR harness: these tests are about
+                // user steering surviving an abort, not about mail.
+                inbox: None,
+            });
         }
         let agent = builder
             .add_hook(TtsrHook(Arc::clone(&ttsr)))

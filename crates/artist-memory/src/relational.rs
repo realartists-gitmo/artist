@@ -370,12 +370,20 @@ impl RelationalView {
             }
             view.index_rules(&g, &ids, &believed);
             view.index_reserved(&g, &beliefs);
-            view.stmt_count += ids.len() as u64 + beliefs.len() as u64;
+            view.stmt_count += ids.len() as u64;
             view.rule_graph = g;
         }
         // Outside the block above on purpose: statement provenance does not
         // depend on the object table loading, and burying it there would make a
         // failure to read expressions silently unattribute every ordinary fact.
+        //
+        // The belief count moved out with it. It was left inside, so on the
+        // object-table failure path a new belief row changed `attribution`
+        // without moving `snapshot()` — two views disagreeing about who vouches
+        // for a claim while carrying one universe version, which is exactly the
+        // composition `compose_snapshot` exists to refuse. Count where the data
+        // is read, not where an unrelated read happened to succeed.
+        view.stmt_count += beliefs.len() as u64;
         view.derive_attribution(&beliefs);
         Ok(view)
     }
@@ -431,9 +439,16 @@ impl RelationalView {
     /// other graph would produce for the same name — which is what lets a
     /// certificate carrying it be re-checked in a process that never saw this
     /// view. The name is remembered so `hydrate` can define the node.
+    /// Mint the content-addressed atom naming a provenance source.
+    ///
+    /// **Not via `ObjectGraph::atom`.** A fresh graph pre-interns every
+    /// `wk::NAMES` label, and `atom` checks that table first — so an origin of
+    /// `"source"`, `"proof"`, `"true"` or any of ~110 reserved words returned the
+    /// *operator's* well-known id. A reader resolving that authority got a
+    /// logical connective. Semantics §8.4 requires naming to be injective, and
+    /// this violated it for exactly the words a store is most likely to hold.
     fn source_atom(&mut self, name: &str) -> ObjectId {
-        let mut scratch = ObjectGraph::new();
-        let id = scratch.atom(name);
+        let id = ObjectGraph::content_atom(name);
         self.source_names.insert(id, name.to_string());
         id
     }
@@ -458,12 +473,31 @@ impl RelationalView {
                 // A retraction is not a claim about the world, so whoever wrote
                 // it does not vouch for the tuple.
                 let (true, Some(src)) = (*is_assert, *source) else { continue };
-                let prop = g.apply(p, tuple.clone());
-                push(&mut out, prop, src);
+                // **Index every alias spelling, not just the canonical one.**
+                // `history` has been through `canonicalise_log`, so these tuples
+                // are canonical — while the evaluator asks with whatever name the
+                // *query* used. Indexing only the canonical form moved a belief's
+                // sources onto a name nobody had written and stripped them from
+                // the one the agent did (semantics §8.3: aliases are the same
+                // proposition and must give the same sources).
+                //
+                // `attribution` cannot canonicalise on the way in, because it
+                // receives an opaque node id with no predicate or arguments to
+                // work from. So the index carries the spellings instead.
+                for spelling in self.alias_spellings(*pred, tuple) {
+                    let prop = g.apply(p, spelling);
+                    push(&mut out, prop, src);
+                }
             }
         }
         for b in beliefs {
-            if let Some(agent) = b.agent {
+            // **Polarity.** `att` selects the agents whose testimony explains the
+            // verdict (semantics §8.4), so an agent who *denied* a proposition
+            // does not vouch for it. This loop pushed every agent regardless,
+            // and a denier was certified as an authority for a `Supported`
+            // verdict three lines below a comment saying retractions do not
+            // vouch.
+            if let (Some(agent), true) = (b.agent, b.affirmed) {
                 push(&mut out, b.proposition, agent);
             }
         }
@@ -1146,6 +1180,16 @@ impl GraphStructure for RelationalView {
     }
 
     fn attribution(&self, proposition: ObjectId) -> Vec<ObjectId> {
+        // **Canonicalise, exactly as `known` does.** The index is built after
+        // coreference has settled, so it is keyed on canonical tuples; the
+        // evaluator asks with the raw query tuple. Looking up without
+        // canonicalising meant a merge moved a belief's sources onto an alias
+        // nobody had written and stripped them from the name the agent actually
+        // used — semantics §8.3: aliases are the same proposition and must give
+        // the same sources.
+        // The index carries every alias spelling (see `derive_attribution`),
+        // because this receives an opaque node id and cannot decompose it into
+        // predicate and arguments to canonicalise the way `known` does.
         self.attribution.get(&proposition).cloned().unwrap_or_default()
     }
 
@@ -1355,6 +1399,43 @@ impl RelationalView {
                 if wk::is_extensional_at(pred, i) { self.canonical(*a) } else { *a }
             })
             .collect()
+    }
+
+    /// Every tuple that canonicalises to `tuple`, by replacing each extensional
+    /// argument with any member of its alias class.
+    ///
+    /// Bounded by the product of the class sizes, which are small in practice —
+    /// and capped, because a store with one huge class should degrade to naming
+    /// the canonical form rather than to quadratic index growth.
+    fn alias_spellings(&self, pred: Sym, tuple: &[ObjectId]) -> Vec<Vec<ObjectId>> {
+        let p = oid(pred);
+        let mut out: Vec<Vec<ObjectId>> = vec![Vec::new()];
+        for (i, a) in tuple.iter().enumerate() {
+            let members: Vec<ObjectId> = if wk::is_extensional_at(p, i) {
+                let mut m: Vec<ObjectId> =
+                    self.same.iter().filter(|(_, v)| *v == a).map(|(k, _)| *k).collect();
+                m.push(*a);
+                m.sort_unstable();
+                m.dedup();
+                m
+            } else {
+                vec![*a]
+            };
+            if out.len().saturating_mul(members.len()) > 64 {
+                return vec![tuple.to_vec()];
+            }
+            out = out
+                .into_iter()
+                .flat_map(|prefix| {
+                    members.iter().map(move |m| {
+                        let mut next = prefix.clone();
+                        next.push(*m);
+                        next
+                    })
+                })
+                .collect();
+        }
+        out
     }
 
     fn canonical(&self, t: ObjectId) -> ObjectId {

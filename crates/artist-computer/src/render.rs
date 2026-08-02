@@ -12,7 +12,6 @@
 
 use crate::anchors::{Change, Entry, Observation};
 
-
 /// Longest rendered value before it is cut.
 const VALUE_CAP: usize = 120;
 /// How many static-text lines survive before the rest is summarized.
@@ -198,6 +197,15 @@ fn truncate(value: &str, cap: usize) -> String {
     format!("{kept}…")
 }
 
+/// `truncate`, for the one other module that renders model-facing text.
+///
+/// `search.rs` answers a question rather than describing a surface, so it has
+/// its own format — but a name must be cut the same way in both, or the same
+/// element reads differently depending on which call surfaced it.
+pub(crate) fn truncate_public(value: &str) -> String {
+    truncate(value, VALUE_CAP)
+}
+
 /// The stub a decayed observation leaves behind.
 pub fn elided(surface: &str, epoch: u64, image: Option<&str>) -> String {
     format!(
@@ -285,7 +293,9 @@ mod tests {
         book.observe(
             &Snapshot::new(
                 (0..20)
-                    .map(|index| Node::new(format!("old{index}"), Role::Button, format!("Old {index}")))
+                    .map(|index| {
+                        Node::new(format!("old{index}"), Role::Button, format!("Old {index}"))
+                    })
                     .collect(),
             ),
             false,
@@ -293,7 +303,9 @@ mod tests {
         let after = book.observe(
             &Snapshot::new(
                 (0..20)
-                    .map(|index| Node::new(format!("new{index}"), Role::Button, format!("New {index}")))
+                    .map(|index| {
+                        Node::new(format!("new{index}"), Role::Button, format!("New {index}"))
+                    })
                     .collect(),
             ),
             false,
@@ -397,12 +409,13 @@ mod tests {
 
     #[test]
     fn flags_render_when_notable() {
-        let (_book, observed) = book_with(vec![Node::new("a", Role::CheckBox, "Remember me")
-            .with_state(NodeState {
+        let (_book, observed) = book_with(vec![
+            Node::new("a", Role::CheckBox, "Remember me").with_state(NodeState {
                 checked: true,
                 disabled: true,
                 ..NodeState::default()
-            })]);
+            }),
+        ]);
         let text = observation("win:1", &observed, None);
         assert!(text.contains("[disabled,checked]"));
     }

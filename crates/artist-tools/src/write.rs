@@ -65,9 +65,18 @@ impl PortableTool for WriteTool {
             .context_radius(3)
             .to_string();
         let diff = output::anchored_diff(&diff, &[], &result.result.lines);
+        // Creating a file is how a new module — and sometimes a new unit —
+        // enters the project, so this is a commit like any other. No changed
+        // lines are passed: a whole-file write encloses every declaration in
+        // it, and "everything you just wrote has callers" is not a useful
+        // sentence. The architectural half of the note is the part that
+        // matters here.
+        let aftermath = crate::annotate::after_commit(&self.0, &target, &[])
+            .await
+            .unwrap_or_default();
         Ok(output::head(
             format!(
-                "Written {} ({} bytes; {}).\n\nDiff:\n{}",
+                "Written {} ({} bytes; {}).\n\nDiff:\n{}{aftermath}",
                 args.path,
                 args.content.len(),
                 if created { "created" } else { "overwritten" },

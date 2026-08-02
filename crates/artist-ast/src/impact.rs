@@ -90,7 +90,17 @@ pub struct ImpactReport {
 /// `run_impact` is a CLI driver — it writes to stdout and yields an exit code,
 /// which is unusable from a host embedding this crate. The analysis is
 /// identical; only the delivery differs.
-pub fn report_text(target: &str, root: &Path, opts: &ImpactOptions) -> Result<String, String> {
+/// The structured reports, for a host that renders them itself.
+///
+/// `report_text` and `run_impact` both bake in this crate's `file:line`
+/// rendering. Artist addresses lines by mnemonic anchor instead, so it needs
+/// the `ImpactEntry` values — which already carry `file`, `line`, `kind` and
+/// `confidence` — rather than a finished string.
+pub fn report(
+    target: &str,
+    root: &Path,
+    opts: &ImpactOptions,
+) -> Result<Vec<ImpactReport>, String> {
     let graph = graph_cache::ensure_with_calls(root, false).map_err(|e| e.to_string())?;
     let calls = graph
         .calls
@@ -102,11 +112,16 @@ pub fn report_text(target: &str, root: &Path, opts: &ImpactOptions) -> Result<St
             "no symbol matches '{target}' (try a more specific suffix like 'Type.method')"
         ));
     }
-    let reports: Vec<_> = candidates
+    Ok(candidates
         .iter()
         .map(|c| compute_impact(c, calls, &graph.deps, root, opts))
-        .collect();
-    Ok(render_text(&reports, candidates.len()))
+        .collect())
+}
+
+pub fn report_text(target: &str, root: &Path, opts: &ImpactOptions) -> Result<String, String> {
+    let reports = report(target, root, opts)?;
+    let count = reports.len();
+    Ok(render_text(&reports, count))
 }
 
 pub fn run_impact(
@@ -814,16 +829,25 @@ fn render_text(reports: &[ImpactReport], candidate_count: usize) -> String {
                         Some(d) if d > 1 => format!(" depth={}", d).dimmed().to_string(),
                         _ => String::new(),
                     };
+                    // Show confidence on every entry, `Exact` included. Hiding
+                    // it there made a resolved edge indistinguishable from one
+                    // the renderer simply had nothing to say about, and left
+                    // `impact` looking less precise than `callers` when it
+                    // holds exactly the same data.
                     let conf_tag = match &e.confidence {
-                        Some(c) if c != "Exact" => format!(" {}", colorize_confidence(c)),
-                        _ => String::new(),
+                        Some(c) => format!(" {}", colorize_confidence(c)),
+                        None => String::new(),
                     };
                     out.push_str(&format!(
                         "    {}{} {} {}{}{}\n",
                         if e.qn.starts_with('[') { "" } else { "→ " }.dimmed(),
                         e.kind.dimmed(),
                         name_or_raw_segment(&e.qn).yellow(),
-                        colorize_file_path(&e.qn, &e.file),
+                        // `ImpactEntry` has carried `line` all along and only
+                        // the JSON renderer emitted it. Without it a reader
+                        // knows which function is involved but not where to
+                        // look — the one thing `callers` gave that this did not.
+                        colorize_file_path(&e.qn, &e.file, e.line),
                         depth_tag,
                         conf_tag,
                     ));
@@ -877,14 +901,24 @@ fn colorize_confidence(c: &str) -> String {
     }
 }
 
-fn colorize_file_path(qn: &str, file: &str) -> String {
+/// `(path:line)`, or `(path)` when the line is unknown.
+///
+/// The line goes inside the parentheses so the pair reads as one location the
+/// way `path:line` does everywhere else — appending it afterwards produced
+/// `(path):line`, which looks like a typo.
+fn colorize_file_path(qn: &str, file: &str, line: u32) -> String {
     let display = if qn.contains("::") {
         let parts: Vec<&str> = qn.splitn(2, "::").collect();
         if parts.len() == 2 { parts[0] } else { file }
     } else {
         file
     };
-    format!(" ({})", display).truecolor(100, 100, 100).to_string()
+    let located = if line == 0 {
+        display.to_string()
+    } else {
+        format!("{display}:{line}")
+    };
+    format!(" ({located})").truecolor(100, 100, 100).to_string()
 }
 
 /// Terminal `::` segment of a qn, or the string unchanged when it's a

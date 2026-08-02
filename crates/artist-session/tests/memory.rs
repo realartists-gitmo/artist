@@ -169,7 +169,10 @@ async fn revising_model_context_leaves_the_transcript_untouched() {
             AttachmentStore::new(dir.path().join("attachments")),
         );
         memory
-            .append("s", vec![Message::user("look"), Message::assistant("looked")])
+            .append(
+                "s",
+                vec![Message::user("look"), Message::assistant("looked")],
+            )
             .await
             .unwrap();
         recorder.flush().await;
@@ -191,7 +194,10 @@ async fn revising_model_context_leaves_the_transcript_untouched() {
         AttachmentStore::new(dir.path().join("attachments")),
     );
     memory
-        .append("s", vec![Message::user("look"), Message::assistant("looked")])
+        .append(
+            "s",
+            vec![Message::user("look"), Message::assistant("looked")],
+        )
         .await
         .unwrap();
     // Same history, rewritten in place.

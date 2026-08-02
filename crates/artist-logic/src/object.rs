@@ -548,6 +548,21 @@ impl ObjectGraph {
     // ---- constructors ---------------------------------------------------
 
     /// A named atom, interned by name so the same name is the same object.
+    /// The content id of a named atom, **without** consulting the well-known
+    /// table.
+    ///
+    /// [`Self::atom`] returns the reserved id for any name in `wk::NAMES`, which
+    /// is right for parsing — `and` should be `wk::AND` — and wrong for anything
+    /// minting an id *from* a string that happens to collide. A provenance
+    /// source called `"source"` is not the `source` operator, and returning the
+    /// operator's id makes an authority resolve to a logical connective.
+    ///
+    /// Static because callers that need this have no graph to intern into and do
+    /// not want one: the id is a pure function of the name.
+    pub fn content_atom(name: &str) -> ObjectId {
+        content_id(&CoreNode::Atom { name: Some(name.to_string()) })
+    }
+
     pub fn atom(&mut self, name: &str) -> ObjectId {
         if let Some(id) = self.names.get(name) {
             return *id;

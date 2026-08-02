@@ -391,24 +391,45 @@ impl Stages {
 
     /// Everything that does not make the output materially harder to read.
     ///
-    /// Drops `keys` (rewrites token interiors) and `meta_bpe` (nests tags
-    /// inside tags), and sets `flat_legend` so plain BPE cannot reintroduce
-    /// nesting through its own minted tags. What remains either replaces whole
-    /// self-contained tokens or collapses whole duplicate lines, and every
-    /// legend entry resolves to literal text in exactly one lookup.
+    /// Readable *and* reversible: every byte of the input is recoverable from
+    /// the body plus the legend.
+    ///
+    /// Drops `keys` (rewrites token interiors) and `meta_bpe` (nests tags in
+    /// tags) for readability, and — more importantly — drops the two stages
+    /// that leave no legend entry and therefore cannot be undone:
+    ///
+    /// - `trim_zeros` rewrites `0001abc9de` to `1abc9de`. On log text that is
+    ///   cosmetic; on agent output it silently mutates git SHAs, checksums and
+    ///   zero-padded ids, and nothing downstream can tell it happened.
+    /// - `dedup` deletes blank lines outright, collapses runs to `... xN`, and
+    ///   treats lines differing only in sub-second timestamp as identical.
+    ///
+    /// Both are cheap to give up: measured on a `cargo build -v` log from this
+    /// workspace, the two of them together compressed it by 0.0%.
     pub const fn legible() -> Self {
         Self {
             keys: false,
             meta_bpe: false,
             flat_legend: true,
+            trim_zeros: false,
+            dedup: false,
             ..Self::all()
         }
     }
 
-    /// Only the stages that need no legend at all: zero-trim and line dedup.
-    /// Nothing is substituted, so the surviving text is byte-identical to the
-    /// original.
-    pub const fn lossless_looking() -> Self {
+    /// **Lossy.** Only the two stages that produce no legend entry, and so
+    /// cannot be reversed or even detected: leading-zero trimming and line
+    /// dedup.
+    ///
+    /// The surviving lines are unsubstituted, which is what makes this
+    /// deceptive — the output *looks* untouched while `0001abc9de` has become
+    /// `1abc9de` and the blank lines are gone. Named for what it does rather
+    /// than how it reads: an earlier name here called it "lossless-looking",
+    /// which described the appearance and buried the behaviour.
+    ///
+    /// Kept because summarising a huge repetitive log is a legitimate use. Do
+    /// not put agent output through it — see [`Stages::legible`].
+    pub const fn lossy_summary() -> Self {
         Self {
             trim_zeros: true,
             timestamps: false,
@@ -1013,6 +1034,58 @@ mod tests {
         let b = squeeze_with(&raw, Stages::all());
         assert_eq!(a.body, b.body);
         assert_eq!(a.legend, b.legend);
+    }
+
+
+    // --- encoder fidelity -------------------------------------------------
+
+    /// Input that trips every lossy stage: a git SHA with leading zeros, a
+    /// zero-padded id, a blank line, and a run of identical lines.
+    const ADVERSARIAL: &str = "commit 0001abc9de fix: thing\n\nerror code 000042\nretrying\nretrying\ndone";
+
+    /// `legible` is the profile artist puts tool output through, so it must be
+    /// reversible. A silently mutated git SHA is worse than truncation: the
+    /// model cannot tell it happened.
+    #[test]
+    fn legible_round_trips_adversarial_input_exactly() {
+        let sq = squeeze_with(ADVERSARIAL, Stages::legible());
+        assert_eq!(
+            expand(&sq.body, &sq.legend),
+            ADVERSARIAL,
+            "legible profile did not round-trip"
+        );
+    }
+
+    #[test]
+    fn legible_preserves_leading_zeros_in_identifiers() {
+        let sq = squeeze_with("commit 0001abc9de\n", Stages::legible());
+        assert!(
+            sq.body.contains("0001abc9de"),
+            "leading zeros were trimmed from an identifier: {:?}",
+            sq.body
+        );
+    }
+
+    #[test]
+    fn legible_keeps_blank_lines() {
+        let sq = squeeze_with("alpha\n\nbravo\n", Stages::legible());
+        assert!(
+            sq.body.contains("\n\n"),
+            "blank line was dropped: {:?}",
+            sq.body
+        );
+    }
+
+    /// The control: the full pipeline really is lossy on this input, so the
+    /// assertions above are testing something real.
+    #[test]
+    fn the_full_pipeline_really_is_lossy() {
+        let sq = squeeze_with(ADVERSARIAL, Stages::all());
+        assert_ne!(
+            expand(&sq.body, &sq.legend),
+            ADVERSARIAL,
+            "full pipeline round-tripped; the fidelity tests prove nothing"
+        );
     }
 
 }

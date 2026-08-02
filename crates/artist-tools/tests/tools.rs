@@ -368,3 +368,50 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     assert!(!following.contains(typo));
     assert!(!following.contains("read>"));
 }
+
+/// Coalescing is wired into the foreground bash path, not just implemented
+/// beside it: two identical tree-job commands issued concurrently share one
+/// run and both callers are told the result was shared.
+///
+/// Uses `tsc`, which classifies as a tree job and is almost certainly not
+/// installed — the command fails fast, which is fine. What is under test is
+/// that classification reaches the coalescer and that both callers come back
+/// from the same run, not what the command does.
+#[tokio::test]
+async fn identical_tree_job_commands_share_one_run() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let bash = std::sync::Arc::new(BashTool::new(workspace));
+
+    let invoke = |bash: std::sync::Arc<BashTool>| async move {
+        call(
+            &*bash,
+            json!({"mode":"exec","command":"tsc --build --noEmit"}),
+        )
+        .await
+    };
+    let (first, second) = tokio::join!(invoke(bash.clone()), invoke(bash.clone()));
+
+    let shared = [&first, &second]
+        .iter()
+        .filter(|output| output.contains("shared with"))
+        .count();
+    assert!(
+        shared >= 1,
+        "expected a shared-run note.\nfirst: {first}\nsecond: {second}"
+    );
+}
+
+/// A command with no descriptor must behave exactly as before — no coalescing,
+/// no note, no shared result. Guessing here would either share results between
+/// commands that are not interchangeable or serialize things that never
+/// contended.
+#[tokio::test]
+async fn an_unclassified_command_is_untouched_by_coalescing() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let bash = BashTool::new(workspace);
+    let output = call(&bash, json!({"mode":"exec","command":"echo hello"})).await;
+
+    assert!(output.contains("hello"));
+    assert!(!output.contains("shared with"), "{output}");
+    assert!(output.contains("status: completed"), "{output}");
+}

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::{Caps, Node, Role, Rung, Snapshot, SurfaceId};
 use crate::program::{Settle, SettleKind, SettleOutcome, Step, StepError};
-use crate::surface::{Surface, SettleWatch};
+use crate::surface::{SettleWatch, Surface};
 
 /// How long the screen must stop changing before `quiet` settles.
 const QUIET_MS: u64 = 250;
@@ -233,7 +233,9 @@ impl Drop for PtySurface {
         // Closing a surface must not leave a process holding a terminal — and
         // must reap it, or every closed surface leaves a zombie behind.
         if let Some(child) = &self.child {
-            let mut child = child.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut child = child
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -447,7 +449,9 @@ impl Surface for PtySurface {
             Step::Type { text, .. } => self.send(text.as_bytes()),
             Step::Click(target) => Err(StepError::Unsupported {
                 anchor: target.anchor.clone(),
-                role: node.map(|node| node.role.label().to_owned()).unwrap_or_default(),
+                role: node
+                    .map(|node| node.role.label().to_owned())
+                    .unwrap_or_default(),
                 name: node.map(|node| node.name.clone()).unwrap_or_default(),
                 action: "click",
             }),
@@ -466,12 +470,10 @@ impl Surface for PtySurface {
             other @ (Step::Navigate { .. }
             | Step::Back { .. }
             | Step::Forward { .. }
-            | Step::Invoke { .. }) => {
-                Err(StepError::Backend(format!(
-                    "a terminal has no {:?} — drive it with key, type and scroll",
-                    other.action()
-                )))
-            }
+            | Step::Invoke { .. }) => Err(StepError::Backend(format!(
+                "a terminal has no {:?} — drive it with key, type and scroll",
+                other.action()
+            ))),
         }
     }
 }
@@ -657,8 +659,14 @@ mod tests {
             .collect::<String>();
 
         assert!(text.contains("user@host:~$ ls"), "{text:?}");
-        assert!(!text.contains('\u{1b}'), "raw escapes reached the model: {text:?}");
-        assert!(!text.contains("window title"), "OSC payload leaked: {text:?}");
+        assert!(
+            !text.contains('\u{1b}'),
+            "raw escapes reached the model: {text:?}"
+        );
+        assert!(
+            !text.contains("window title"),
+            "OSC payload leaked: {text:?}"
+        );
         // Only the final state of an in-place redraw survives.
         assert!(text.contains("downloading 100%"), "{text:?}");
         assert!(!text.contains("downloading  10%"), "{text:?}");

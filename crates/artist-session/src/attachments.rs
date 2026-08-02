@@ -68,6 +68,15 @@ impl AttachmentStore {
     }
 }
 
+/// The content address this crate assigns to a blob.
+///
+/// Public because the same address keys more than the blob store: a remote file
+/// id, a stored prompt, a cached prefix. One digest, one object, wherever it
+/// happens to live.
+pub fn content_digest(bytes: &[u8]) -> String {
+    hex_digest(bytes)
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);

@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Inner</title>
+<button id="pay">Confirm payment</button>
+<p id="done"></p>
+<script>
+  document.getElementById('pay').addEventListener('click', () => {
+    document.getElementById('done').textContent = 'Payment confirmed';
+  });
+</script>

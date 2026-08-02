@@ -18,7 +18,7 @@
 //! Hard-coded colour was never the failure that mattered. What actually breaks
 //! a canvas is a prop the kit does not have — React drops it silently, the
 //! model sees no error, and reports success on a card with no title. That, and
-//! using a light surface on a dark ground, are what this reports now.
+//! text too light to read on the tint it was put on, are what this reports now.
 
 use oxc::{
     allocator::Allocator,
@@ -107,13 +107,53 @@ const KIT: &[(&str, &[&str])] = &[
     ("Sparkline", &["values", "width", "height", "tone"]),
 ];
 
-/// Utility classes that are a light surface, which reads as a glare on the dark
-/// ground a canvas defaults to.
-fn light_surface_class(class: &str) -> bool {
-    let Some(rest) = class.strip_prefix("bg-") else {
-        return false;
-    };
-    matches!(rest.rsplit('-').next(), Some("50" | "100"))
+/// The step a utility class names, if it names one of a real family.
+///
+/// `bg-red-100` is `("red", 100)`; `bg-white`, `bg-accent` and `p-4` are not a
+/// family step and are nobody's business here.
+fn family_step(class: &str, prefix: &str) -> Option<(&'static str, u16)> {
+    let rest = class.strip_prefix(prefix)?;
+    let (name, step) = rest.rsplit_once('-')?;
+    let step: u16 = step.parse().ok()?;
+    let family = crate::palette::FAMILIES
+        .iter()
+        .find(|family| family.name == name)?;
+    Some((family.name, step))
+}
+
+/// Text too light to be read on the tint it was put on.
+///
+/// A tinted surface with its family's ink is the house style — `Alert`,
+/// `Badge` and the toasts are all built that way — so `bg-x-100` is right, and
+/// the check that used to flag it on sight was wrong once the palette started
+/// mirroring families for dark mode.
+///
+/// What is still wrong is the step. Ink has to clear AA on its own surface,
+/// which happens at 800 and not before: across the families `text-x-700` on
+/// `bg-x-100` runs 3.73–4.30:1. Only a pairing inside one `className` is
+/// visible from here, which is the form a model hand-rolls it in.
+fn unreadable_on_its_own_tint(classes: &[&str]) -> Option<(String, String)> {
+    const TINTS: [u16; 3] = [50, 100, 200];
+    /// Where ink starts clearing AA on its own family's tint.
+    const INK: u16 = 800;
+
+    for class in classes {
+        let Some((family, tint)) = family_step(class, "bg-") else {
+            continue;
+        };
+        if !TINTS.contains(&tint) {
+            continue;
+        }
+        for other in classes {
+            if let Some((ink_family, step)) = family_step(other, "text-")
+                && ink_family == family
+                && step < INK
+            {
+                return Some(((*other).to_owned(), (*class).to_owned()));
+            }
+        }
+    }
+    None
 }
 
 struct Scan<'a> {
@@ -171,16 +211,14 @@ impl<'a> Visit<'a> for Scan<'a> {
             if prop == "className"
                 && let Some(JSXAttributeValue::StringLiteral(value)) = &attribute.value
             {
-                for class in value.value.split_whitespace() {
-                    if light_surface_class(class) {
-                        self.found.push(Drift {
-                            line: self.line_of(attribute.span.start),
-                            found: class.to_owned(),
-                            hint: "a light surface on the dark ground a canvas defaults to; \
-                                   the palette flips with the scheme, so this is already handled",
-                        });
-                        break;
-                    }
+                let classes: Vec<&str> = value.value.split_whitespace().collect();
+                if let Some((ink, tint)) = unreadable_on_its_own_tint(&classes) {
+                    self.found.push(Drift {
+                        line: self.line_of(attribute.span.start),
+                        found: format!("{ink} on {tint}"),
+                        hint: "under 4.5:1 — ink on its own family's tint needs the 800 step; \
+                               or use <Alert>/<Badge>, which take the pairing from the tokens",
+                    });
                 }
             }
         }
@@ -333,16 +371,30 @@ mod tests {
         assert!(found(r##"const a = { anchor: "#top" };"##).is_empty());
     }
 
-    /// The palette flips with the scheme now, so a hand-picked light surface is
-    /// both unnecessary and wrong on the dark ground.
+    /// Ink on its own family's tint is the house style, so the surface itself
+    /// is not drift. The step is: 700 on a 100 tint is 3.73–4.30:1 across the
+    /// families, which is the pairing the kit's own components had to move off.
     #[test]
-    fn a_light_surface_class_is_reported() {
-        let drift = scan(r#"const a = <div className="bg-red-100 text-red-800">x</div>;"#);
+    fn ink_too_light_for_its_own_tint_is_reported() {
+        let drift = scan(r#"const a = <div className="bg-red-100 text-red-700">x</div>;"#);
         assert_eq!(drift.len(), 1);
-        assert_eq!(drift[0].found, "bg-red-100");
+        assert_eq!(drift[0].found, "text-red-700 on bg-red-100");
+        assert_eq!(drift[0].line, 1);
 
+        // The pairing the tokens themselves use.
+        assert!(found(r#"const a = <div className="bg-red-100 text-red-800">x</div>;"#).is_empty());
+        assert!(found(r#"const a = <div className="bg-red-100 text-red-900">x</div>;"#).is_empty());
+        // A different family on the tint is not this check's business — the
+        // contrast is a different question and guessing it would be a false
+        // positive, which is what the whole scan is built to avoid.
+        assert!(found(r#"const a = <div className="bg-red-100 text-cyan-700">x</div>;"#).is_empty());
+        // Either half alone says nothing.
         assert!(found(r#"const a = <div className="bg-red-700 text-white">x</div>;"#).is_empty());
-        assert!(found(r#"const a = <div className="text-red-100">x</div>;"#).is_empty());
+        assert!(found(r#"const a = <div className="text-red-700">x</div>;"#).is_empty());
+        assert!(found(r#"const a = <div className="bg-red-100">x</div>;"#).is_empty());
+        // Not a family step, so not a pairing.
+        assert!(found(r#"const a = <div className="bg-accent text-red-700">x</div>;"#).is_empty());
+        assert!(found(r#"const a = <div className="bg-white p-4 text-red-700">x</div>;"#).is_empty());
     }
 
     /// A file that will not parse is already reported, with a position.

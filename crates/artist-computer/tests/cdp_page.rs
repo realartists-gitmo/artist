@@ -8,8 +8,14 @@
 
 use std::time::Duration;
 
+#[path = "support/mod.rs"]
+mod support;
+
+use artist_computer::program::Expect;
 use artist_computer::surface::cdp::{CdpPage, connect};
-use artist_computer::{AnchorBook, Program, Settle, SettleKind, Step, Surface, Target, run_program};
+use artist_computer::{
+    AnchorBook, Program, Settle, SettleKind, Step, Surface, Target, run_program,
+};
 
 const PAGE: &str = r#"<!doctype html>
 <html><body>
@@ -23,9 +29,14 @@ const PAGE: &str = r#"<!doctype html>
 "#;
 
 fn chromium() -> Option<String> {
-    ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]
-        .into_iter()
-        .find_map(which)
+    [
+        "chromium",
+        "chromium-browser",
+        "google-chrome-stable",
+        "google-chrome",
+    ]
+    .into_iter()
+    .find_map(which)
 }
 
 fn which(name: &str) -> Option<String> {
@@ -33,7 +44,21 @@ fn which(name: &str) -> Option<String> {
     path.exists().then(|| path.to_string_lossy().into_owned())
 }
 
+/// Only one browser at a time, for the whole test binary.
+///
+/// Each of these tests launches a real Chromium; `cargo test` runs them in
+/// parallel by default, and eleven concurrent browsers is enough to make
+/// launches time out on an ordinary machine. The suite then fails under its own
+/// default settings, which makes it worse than useless — a red run stops
+/// meaning anything.
+///
+/// Held for the life of the browser rather than just the launch, because the
+/// contention is memory and CPU across the whole test, not the spawn.
+static ONE_BROWSER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct Chromium {
+    /// Released when the browser is dropped, letting the next test start one.
+    _slot: tokio::sync::MutexGuard<'static, ()>,
     child: std::process::Child,
     /// The browser profile. Dropped after the child is reaped below.
     _dir: tempfile::TempDir,
@@ -62,6 +87,7 @@ impl Drop for Chromium {
 
 /// Launch headless Chromium the way the stage would: port 0, own profile.
 async fn launch(page_url: &str) -> Option<(Chromium, chromiumoxide::Browser)> {
+    let slot = ONE_BROWSER.lock().await;
     let binary = chromium()?;
     let dir = tempfile::tempdir().ok()?;
     let profile = dir.path().join("profile");
@@ -96,6 +122,7 @@ async fn launch(page_url: &str) -> Option<(Chromium, chromiumoxide::Browser)> {
         .ok()?;
 
     let guard = Chromium {
+        _slot: slot,
         child,
         _dir: dir,
         fixture: None,
@@ -117,6 +144,36 @@ async fn bounded<T>(what: &str, future: impl std::future::Future<Output = T>) ->
         Ok(value) => value,
         Err(_) => panic!("{what} did not complete within 30s"),
     }
+}
+
+/// A page served over a real `http://` origin.
+///
+/// `file://` proves the protocol and nothing beyond it: `fetch` does not work
+/// there, so no content can arrive after a click; a frame from another path is
+/// another origin; and nothing ever loads slowly. Every genuinely hard thing
+/// about driving a page needs a real origin to exist at all.
+async fn served_page(
+    pages: &support::pages::Pages,
+    path: &str,
+) -> Option<(Chromium, chromiumoxide::Browser, CdpPage)> {
+    let (guard, browser) = launch(&pages.url(path)).await?;
+    let page = bounded("listing browser pages", async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Ok(pages) = browser.pages().await
+                && let Some(page) = pages.into_iter().next()
+            {
+                return Some(page);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await?;
+    let surface = CdpPage::attach("tab:1", page).await.ok()?;
+    Some((guard, browser, surface))
 }
 
 async fn fixture_page() -> Option<(Chromium, chromiumoxide::Browser, CdpPage)> {
@@ -272,7 +329,7 @@ async fn the_tool_launches_a_browser_and_observes_it() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let page = dir.path().join("fixture.html");
     std::fs::write(&page, PAGE).unwrap();
 
@@ -546,7 +603,10 @@ async fn a_redirect_chain_leaves_no_requests_outstanding() {
     // And the navigation actually landed.
     let snapshot = surface.snapshot().await.expect("snapshot");
     assert!(
-        snapshot.nodes.iter().any(|node| node.name.contains("Arrived")),
+        snapshot
+            .nodes
+            .iter()
+            .any(|node| node.name.contains("Arrived")),
         "the redirect chain never reached its destination"
     );
     server.abort();
@@ -572,11 +632,14 @@ async fn typing_into_a_filled_field_replaces_its_contents() {
     let anchor = loop {
         let snapshot = surface.snapshot().await.expect("snapshot");
         let observed = book.observe(&snapshot, true);
-        if let Some(entry) = observed
-            .entries
-            .iter()
-            .find(|entry| entry.node.name.contains("Email"))
-        {
+        // The *field*, not the first thing named "Email". In document order a
+        // `<label>`'s text precedes its input, so matching on the name alone
+        // selects the label — which is exactly the mistake a model makes, and
+        // why the tool now refuses it with a message naming the role.
+        if let Some(entry) = observed.entries.iter().find(|entry| {
+            entry.node.name.contains("Email")
+                && matches!(entry.node.role, artist_computer::Role::TextBox)
+        }) {
             break entry.anchor.clone();
         }
         assert!(tokio::time::Instant::now() < deadline, "no email field");
@@ -614,4 +677,212 @@ async fn typing_into_a_filled_field_replaces_its_contents() {
         value, "new@example.com",
         "typing appended instead of replacing"
     );
+}
+
+/// Content that only exists after a click resolves a network request.
+///
+/// The failure this catches is the one every naive settle predicate has:
+/// `document.readyState` is already `complete` before the click, so a predicate
+/// keyed on it reports the page quiet while the list is still empty and the
+/// model observes a screen that has not happened yet.
+#[tokio::test]
+async fn a_click_that_loads_content_settles_only_once_the_content_is_there() {
+    let Ok(pages) = support::pages::Pages::start() else {
+        eprintln!("skipping: could not bind a local origin");
+        return;
+    };
+    let Some((_guard, _browser, surface)) = served_page(&pages, "spa.html").await else {
+        eprintln!("skipping: chromium is not available here");
+        return;
+    };
+
+    let mut book = AnchorBook::new();
+    let observed = book.observe(&surface.snapshot().await.unwrap(), true);
+    let anchor = observed
+        .entries
+        .iter()
+        .find(|entry| entry.node.name.contains("Load orders"))
+        .map(|entry| entry.anchor.clone())
+        .expect("the button should be in the tree");
+
+    let report = run_program(
+        &surface,
+        &mut book,
+        &Program {
+            steps: vec![Step::Click(Target {
+                anchor,
+                label: Some("Load orders".into()),
+            })],
+            settle: Settle {
+                until: SettleKind::NetworkIdle,
+                timeout_ms: 8_000,
+            },
+            // The assertion *is* the settle: an order can only be named if the
+            // request finished before the program reported.
+            expect: Expect::Appears("Order 4471".into()),
+        },
+    )
+    .await
+    .expect("the program should run");
+
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(
+        report.expect_met,
+        Some(true),
+        "settle returned before the loaded content existed"
+    );
+}
+
+/// A control inside a shadow root.
+///
+/// A `document.querySelectorAll` walk cannot see it. The accessibility tree can,
+/// and that is precisely the claim rung 1 rests on — untested until now, and the
+/// pattern every modern component library produces.
+#[tokio::test]
+async fn a_button_inside_a_shadow_root_can_be_named_and_clicked() {
+    let Ok(pages) = support::pages::Pages::start() else {
+        eprintln!("skipping: could not bind a local origin");
+        return;
+    };
+    let Some((_guard, _browser, surface)) = served_page(&pages, "shadow.html").await else {
+        eprintln!("skipping: chromium is not available here");
+        return;
+    };
+
+    let mut book = AnchorBook::new();
+    let observed = book.observe(&surface.snapshot().await.unwrap(), true);
+    let Some(anchor) = observed
+        .entries
+        .iter()
+        .find(|entry| entry.node.name.contains("Save settings"))
+        .map(|entry| entry.anchor.clone())
+    else {
+        panic!(
+            "a shadow-root button was not in the tree; rung 1 cannot drive component \
+             libraries. Nodes seen: {:?}",
+            observed
+                .entries
+                .iter()
+                .map(|entry| entry.node.name.clone())
+                .collect::<Vec<_>>()
+        );
+    };
+
+    let report = run_program(
+        &surface,
+        &mut book,
+        &Program {
+            steps: vec![Step::Click(Target {
+                anchor,
+                label: Some("Save settings".into()),
+            })],
+            settle: Settle {
+                until: SettleKind::Quiet,
+                timeout_ms: 3_000,
+            },
+            expect: Expect::Appears("Saved unset".into()),
+        },
+    )
+    .await
+    .expect("the program should run");
+
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(report.expect_met, Some(true), "the click did not reach it");
+}
+
+/// A control inside an iframe.
+///
+/// Cross-document, so it is a different CDP target with its own DOM. If the
+/// surface only ever reads the main frame, the entire contents of every payment
+/// widget, embedded editor and consent dialog on the web is invisible.
+#[tokio::test]
+async fn a_button_inside_an_iframe_is_reachable() {
+    let Ok(pages) = support::pages::Pages::start() else {
+        eprintln!("skipping: could not bind a local origin");
+        return;
+    };
+    let Some((_guard, _browser, surface)) = served_page(&pages, "frames.html").await else {
+        eprintln!("skipping: chromium is not available here");
+        return;
+    };
+
+    let mut book = AnchorBook::new();
+    let observed = book.observe(&surface.snapshot().await.unwrap(), true);
+    let names: Vec<String> = observed
+        .entries
+        .iter()
+        .map(|entry| entry.node.name.clone())
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("Confirm payment")),
+        "the iframe's button was not in the tree, so framed content cannot be driven. \
+         Seen: {names:?}"
+    );
+}
+
+/// A navigation that starts after the click returns.
+///
+/// The race that makes "click, then observe" report the *previous* page. A
+/// settle that samples immediately sees the old document, still quiet, still
+/// complete.
+#[tokio::test]
+async fn a_navigation_that_starts_late_is_still_waited_for() {
+    let Ok(pages) = support::pages::Pages::start() else {
+        eprintln!("skipping: could not bind a local origin");
+        return;
+    };
+    let Some((_guard, _browser, surface)) = served_page(&pages, "nav.html").await else {
+        eprintln!("skipping: chromium is not available here");
+        return;
+    };
+
+    let mut book = AnchorBook::new();
+    let observed = book.observe(&surface.snapshot().await.unwrap(), true);
+    let anchor = observed
+        .entries
+        .iter()
+        .find(|entry| entry.node.name.contains("Continue to step two"))
+        .map(|entry| entry.anchor.clone())
+        .expect("the link should be in the tree");
+
+    let report = run_program(
+        &surface,
+        &mut book,
+        &Program {
+            steps: vec![Step::Click(Target {
+                anchor,
+                label: Some("Continue to step two".into()),
+            })],
+            settle: Settle {
+                until: SettleKind::NetworkIdle,
+                timeout_ms: 8_000,
+            },
+            expect: Expect::Appears("You reached the second page".into()),
+        },
+    )
+    .await
+    .expect("the program should run");
+
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert_eq!(
+        report.expect_met,
+        Some(true),
+        "settle returned while the old document was still showing"
+    );
+}
+
+/// A temporary directory only this user can enter.
+///
+/// `tempfile::tempdir()` creates with `create_dir`, which respects the umask —
+/// so on any machine with the usual `umask 022` it produces mode 0755. The
+/// stage rightly refuses to put its sockets and a browser profile there, and
+/// every test using one therefore *skipped* rather than ran. Silent, permanent,
+/// and on the exact test whose doc comment says a model reaches terminals and
+/// nothing else until it passes.
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("make it private");
+    dir
 }

@@ -41,6 +41,15 @@ impl Resources {
         }))
     }
 
+    /// Problems encountered while loading instructions and skills.
+    ///
+    /// These were collected and then dropped on the floor: an `AGENTS.md` over
+    /// the size cap, or a skill with unparseable frontmatter, failed silently
+    /// and the user was left believing their instructions were in effect.
+    pub fn diagnostics(&self) -> &[String] {
+        &self.0.diagnostics
+    }
+
     pub fn available_skills(&self) -> Vec<AvailableSkill> {
         self.0
             .skills

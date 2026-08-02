@@ -5,6 +5,7 @@ use crate::{
     capture::{CaptureHook, ToolMeta},
     delegate_jobs::DelegateJobs,
     resources::Resources,
+    tool_set::{self, DelegationEnv},
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
 use artist_session::{
@@ -25,11 +26,101 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// A run's seat on the delegation semaphore, held in a slot it can be lifted
+/// out of and put back.
+///
+/// Delegation depth is uncapped, which only works if an ancestor chain cannot
+/// consume every permit and starve its own descendants. A parent awaiting a
+/// child is not doing work, so it yields its seat for the duration of the
+/// nested call and takes one again when the child returns. It holds nothing
+/// while re-acquiring, so this cannot deadlock: the seat it gave up is enough
+/// for a serial chain of any depth to make progress.
+///
+/// Under concurrent fan-out a yielded seat may be taken by a sibling before the
+/// child claims it, in which case the child fails with the same loud
+/// "concurrency limit reached" as before. That is the existing, intended
+/// behaviour of `max_concurrent`; what this removes is depth being a second,
+/// undocumented limit on top of it.
+#[derive(Clone)]
+pub(crate) struct PermitSlot {
+    permits: artist_registry::Permits,
+    label: String,
+    held: Arc<tokio::sync::Mutex<Option<artist_registry::Seat>>>,
+}
+
+/// How often a run waiting to retake its seat re-checks the pool.
+///
+/// A seat frees when a child run ends, which is a human-timescale event, so a
+/// quarter second of latency is invisible and the poll costs a directory scan.
+const RETAKE_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+impl PermitSlot {
+    /// Claim a seat, or report that every one is taken. Non-blocking, so a
+    /// fan-out beyond the limit fails immediately and says so rather than
+    /// queueing invisibly.
+    async fn claim(
+        permits: artist_registry::Permits,
+        label: String,
+    ) -> Result<Self, DelegateError> {
+        let seat = Self::acquire(&permits, &label)
+            .await?
+            .ok_or_else(|| DelegateError::Failed("subagent concurrency limit reached".into()))?;
+        Ok(Self {
+            permits,
+            label,
+            held: Arc::new(tokio::sync::Mutex::new(Some(seat))),
+        })
+    }
+
+    /// Take a seat off the pool without blocking the runtime.
+    ///
+    /// The pool is a locked directory, so acquiring can block on another
+    /// process's scan. That is microseconds in practice and never awaited
+    /// work, but it is still a blocking syscall and does not belong on a
+    /// reactor thread.
+    async fn acquire(
+        permits: &artist_registry::Permits,
+        label: &str,
+    ) -> Result<Option<artist_registry::Seat>, DelegateError> {
+        let permits = permits.clone();
+        let label = label.to_owned();
+        tokio::task::spawn_blocking(move || permits.try_acquire(&label))
+            .await
+            .map_err(|error| DelegateError::Failed(format!("seat pool join failed: {error}")))?
+            .map_err(|error| DelegateError::Failed(format!("seat pool unavailable: {error}")))
+    }
+
+    pub(crate) async fn yield_seat(&self) {
+        *self.held.lock().await = None;
+    }
+
+    /// Waits, rather than failing: the caller holds nothing at this point, and
+    /// every child eventually finishes and releases, so progress is guaranteed.
+    ///
+    /// Polls rather than parks because the pool now spans processes and there
+    /// is no cross-process wakeup to wait on. Dropping this future — which is
+    /// what cancelling the turn does — abandons the wait cleanly.
+    pub(crate) async fn retake(&self) {
+        loop {
+            match Self::acquire(&self.permits, &self.label).await {
+                Ok(Some(seat)) => {
+                    *self.held.lock().await = Some(seat);
+                    return;
+                }
+                Ok(None) => tokio::time::sleep(RETAKE_POLL).await,
+                // A pool we cannot reach must not wedge the run forever. The
+                // seat is lost for this run rather than the run being lost.
+                Err(_) => return,
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Delegate {
     provider: SavedProvider,
     tools: ToolBundle,
-    /// The main-agent context to seed a `fork=true` delegate with. Shared via
+    /// The spawning context to seed a `fork=true` delegate with. Shared via
     /// `Arc` so constructing a Delegate each run/retry is a cheap refcount bump;
     /// the history is only deep-cloned if the model actually forks.
     context: Arc<Vec<Message>>,
@@ -39,49 +130,59 @@ pub(crate) struct Delegate {
     disabled_tools: Vec<String>,
     profiles: crate::profiles::Profiles,
     events: UnboundedSender<PromptEvent>,
-}
-
-pub(crate) struct DelegateRuntime {
-    pub handles: SessionHandles,
-    pub events: UnboundedSender<PromptEvent>,
+    /// Carried so a nested subagent is built from the same environment its
+    /// spawner had, rather than a narrower one assembled here.
+    memory: Option<crate::memory::MemoryWriter>,
+    canvas: Option<Arc<artist_canvas::server::Lazy>>,
+    dynamic: Vec<PortableDynamicTool>,
+    /// The seat held by the run that owns this tool. `None` at the session
+    /// root, which holds none.
+    parent_permit: Option<PermitSlot>,
+    /// Whose todo list a child spawned through this tool may read. The list
+    /// belonging to the run that owns the tool — which is the conversation at
+    /// the session root, and the spawning subagent's actor once nested. Taking
+    /// the session id at every depth would show a grandchild the root's list
+    /// instead of the one its own instructions were written against.
+    spawner: String,
 }
 
 struct DelegateRun {
     actor: String,
     background: bool,
+    permit: PermitSlot,
 }
 
 impl DelegateRun {
-    fn new(task_id: Option<String>) -> Self {
+    fn new(task_id: Option<String>, permit: PermitSlot) -> Self {
         let background = task_id.is_some();
         Self {
             actor: task_id.unwrap_or_else(|| artist_tools::short_id("a")),
             background,
+            permit,
         }
     }
 }
 
 impl Delegate {
-    pub fn new(
-        provider: SavedProvider,
-        tools: ToolBundle,
-        context: Arc<Vec<Message>>,
-        resources: Resources,
-        runtime: DelegateRuntime,
-        disabled_tools: Vec<String>,
-        profiles: crate::profiles::Profiles,
-    ) -> Self {
-        let jobs = DelegateJobs::for_project(tools.project_root());
+    /// Built from the environment its spawner was built from, so a nested
+    /// subagent inherits the same subsystems rather than a hand-copied subset.
+    pub(crate) fn new(env: &crate::tool_set::ToolEnv, delegation: &DelegationEnv) -> Self {
+        let jobs = DelegateJobs::for_project(env.bundle.project_root());
         Self {
-            provider,
-            tools,
-            context,
+            provider: delegation.provider.clone(),
+            tools: env.bundle.clone(),
+            context: Arc::clone(&delegation.context),
             jobs,
-            resources,
-            handles: runtime.handles,
-            disabled_tools,
-            profiles,
-            events: runtime.events,
+            resources: env.resources.clone(),
+            handles: delegation.handles.clone(),
+            disabled_tools: env.disabled.clone(),
+            profiles: delegation.profiles.clone(),
+            events: delegation.events.clone(),
+            memory: env.memory.clone(),
+            canvas: env.canvas.clone(),
+            dynamic: env.dynamic.clone(),
+            parent_permit: delegation.parent_permit.clone(),
+            spawner: env.todo_owner.clone(),
         }
     }
 
@@ -116,6 +217,9 @@ pub(crate) struct DelegateArgs {
     fork: Option<bool>,
     background: Option<bool>,
     task_id: Option<String>,
+    /// Several tasks to wait on at once. The motivating shape is a fan-out:
+    /// spawn five researchers, then sleep until all five reports are in.
+    task_ids: Option<Vec<String>>,
     wait_ms: Option<u64>,
 }
 
@@ -145,7 +249,7 @@ impl PortableTool for Delegate {
             "agent":{"type":"string","enum":self.profiles.names(),"description":"Configured subagent role."},
             "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
             "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
-            "taskId":{"type":"string","description":"Task identifier returned when a subagent is started; required for status, read, wait, and cancel."},
+            "taskIds":{"type":"array","items":{"type":"string"},"description":"Several task ids to wait on at once; the call returns when all of them have settled."},"taskId":{"type":"string","description":"Task identifier returned when a subagent is started; required for status, read, wait, and cancel."},
             "waitMs":{"type":"integer","minimum":1,"maximum":30000,"description":"Maximum time to wait for a background task state change."}
         },"additionalProperties":false})
     }
@@ -153,12 +257,35 @@ impl PortableTool for Delegate {
     async fn call(&self, args: DelegateArgs) -> Result<String, DelegateError> {
         let mode = args
             .mode
-            .as_deref()
-            .unwrap_or(if args.background.unwrap_or(false) {
-                "start"
-            } else {
-                "run"
+            .clone()
+            .unwrap_or_else(|| {
+                if args.background.unwrap_or(false) {
+                    "start"
+                } else {
+                    "run"
+                }
+                .to_owned()
             });
+        // Only the modes that block this run on a child give up its seat. A
+        // background `start` returns immediately and the child claims a seat of
+        // its own, so the spawner keeps working and keeps its own.
+        let yielded = match mode.as_str() {
+            "run" | "wait" => self.parent_permit.clone(),
+            _ => None,
+        };
+        if let Some(slot) = &yielded {
+            slot.yield_seat().await;
+        }
+        let result = self.run_mode(&mode, args).await;
+        if let Some(slot) = &yielded {
+            slot.retake().await;
+        }
+        result
+    }
+}
+
+impl Delegate {
+    async fn run_mode(&self, mode: &str, args: DelegateArgs) -> Result<String, DelegateError> {
         match mode {
             "run" => {
                 let prompt = required(args.prompt, "prompt")?;
@@ -172,7 +299,12 @@ impl PortableTool for Delegate {
             }
             "start" => {
                 let prompt = required(args.prompt, "prompt")?;
-                let delegate = self.clone();
+                // A background child is not something this run waits on, so it
+                // must not hold this run's seat: it claims its own, and this
+                // one is freed when its own run ends rather than when the
+                // detached job does.
+                let mut delegate = self.clone();
+                delegate.parent_permit = None;
                 let task_prompt = prompt.clone();
                 let role = args.agent.unwrap_or_else(|| "default".into());
                 let task_role = role.clone();
@@ -201,11 +333,43 @@ impl PortableTool for Delegate {
                 .read(&required(args.task_id, "taskId")?)
                 .await
                 .map_err(DelegateError::Failed),
-            "wait" => self
-                .jobs
-                .wait(&required(args.task_id, "taskId")?, args.wait_ms)
-                .await
-                .map_err(DelegateError::Failed),
+            "wait" => {
+                // One wait primitive, whether the caller named one task or
+                // twenty. Shipping a separate multi-wait would be a second
+                // mechanism that has to agree with this one and eventually
+                // would not — the failure this crate's tool registry exists to
+                // prevent.
+                let ids = match (args.task_ids, args.task_id) {
+                    (Some(ids), _) if !ids.is_empty() => ids,
+                    (_, Some(id)) => vec![id],
+                    _ => return Err(DelegateError::Failed("taskId is required".into())),
+                };
+                if let [single] = ids.as_slice() {
+                    return self
+                        .jobs
+                        .wait(single, args.wait_ms)
+                        .await
+                        .map_err(DelegateError::Failed);
+                }
+                // Concurrently, and bounded by one shared budget: waiting on
+                // five tasks should take as long as the slowest, not as long as
+                // the sum, and a caller that asked to wait 30s means 30s
+                // overall rather than per task.
+                let results = futures::future::join_all(
+                    ids.iter().map(|id| self.jobs.wait(id, args.wait_ms)),
+                )
+                .await;
+                let reports: Vec<Value> = ids
+                    .iter()
+                    .zip(results)
+                    .map(|(id, result)| match result {
+                        Ok(report) => serde_json::from_str(&report)
+                            .unwrap_or_else(|_| json!({"taskId": id, "status": "unknown"})),
+                        Err(error) => json!({"taskId": id, "status": "failed", "error": error}),
+                    })
+                    .collect();
+                Ok(Value::Array(reports).to_string())
+            }
             "cancel" => self
                 .jobs
                 .cancel(&required(args.task_id, "taskId")?)
@@ -232,17 +396,18 @@ impl Delegate {
         fork: bool,
         task_id: Option<String>,
     ) -> Result<String, DelegateError> {
-        let run = DelegateRun::new(task_id);
         let profile = self
             .profiles
             .get(profile_name)
             .map_err(DelegateError::Failed)?;
-        let _permit = self
-            .profiles
-            .semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| DelegateError::Failed("subagent concurrency limit reached".into()))?;
+        let run = DelegateRun::new(
+            task_id,
+            PermitSlot::claim(
+                self.profiles.permits.clone(),
+                format!("{profile_name}:{}", self.handles.conversation_id),
+            )
+            .await?,
+        );
         let breaker = crate::fallback::Breaker::global();
         let mut skipped = Vec::new();
         let mut last_error = None;
@@ -445,77 +610,20 @@ impl Delegate {
             .as_ref()
             .map(artist_computer::SurfaceRegistry::for_delegate);
 
-        let registered_tools = || {
-            let mut tools: Vec<PortableDynamicTool> = Vec::new();
-            if role.permits("read") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.read.clone()));
-            }
-            if role.permits("find") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.find.clone()));
-            }
-            if role.permits("grep") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.grep.clone()));
-            }
-            if role.permits("skill") {
-                tools.push(crate::tool_prompt::dynamic(self.resources.skill_tool()));
-            }
-            if role.permits("todo") {
-                // A child owns its own list and may read its parent's, but not
-                // write to it: concurrent siblings sharing one list would race
-                // with no obvious merge.
-                tools.push(crate::tool_prompt::dynamic(crate::todo::TodoTool::new(
-                    self.handles.todos.clone(),
-                    recorder.clone(),
-                    actor.clone(),
-                    Some(self.handles.conversation_id.clone()),
-                )));
-            }
-            if role.permits("bash") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.bash.clone()));
-            }
-            if role.permits("edit") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.edit.clone()));
-            }
-            if role.permits("write") {
-                tools.push(crate::tool_prompt::dynamic(child_tools.write.clone()));
-            }
-            // A subagent driving a GUI gets a display of its own, never the
-            // parent's: one stage is one seat, and siblings sharing it would
-            // serialize behind the input lease into uselessness. Whether a
-            // subagent may do this at all is a profile decision like any other
-            // — the read-only built-ins deny it through their allow list, and a
-            // project profile can grant it deliberately.
-            if let Some(surfaces) = &child_computer
-                && role.permits("computer")
-            {
-                // The delegate's own lineage recorder, so `artist computer log`
-                // attributes a subagent's actions to the subagent.
-                tools.push(crate::tool_prompt::dynamic(
-                    artist_computer::ComputerTool::with_recorder(
-                        surfaces.clone(),
-                        recorder.clone(),
-                        self.handles.attachments.clone(),
-                    ),
-                ));
-            }
-            crate::tool_prompt::retain_enabled(&mut tools, &self.disabled_tools);
-            // A subagent needs drift reporting more than the parent does, not
-            // less: it runs concurrently with whoever spawned it, in the same
-            // worktree, so files moving underneath it is the normal case.
-            let drift = Some(child_tools.edit.0.drift_watch());
-            let guarded: Vec<rig_core::tool::PortableDynamicTool> = tools
-                .into_iter()
-                .map(|tool| crate::tool_prompt::guard(tool, drift.clone()))
-                .collect();
-            guarded
-        };
         let (base, _) = crate::prompt_config::base_prompt();
+        // Held for the life of the run: a subagent is not a resumable session,
+        // so its name goes back to the roster the moment the run ends. Without
+        // that a fan-out would drain the roster at the rate it spawns children.
+        // Placed last in the prompt for the same reason as at the root — every
+        // byte above it is shared between siblings and can cache across them.
+        let identity = crate::identity::for_run(&run.actor);
         let policy = format!(
-            "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}",
+            "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}{}",
             role.name,
             role.instructions,
             self.resources.prompt_section(),
-            self.tools.project_root().display()
+            self.tools.project_root().display(),
+            identity.prompt_block(),
         );
 
         let mut seed_history = if fork {
@@ -578,14 +686,70 @@ impl Delegate {
                 builder = builder.additional_params(params);
             }
             let tool_meta = ToolMeta::default();
+            // Rebuilt per attempt from the *current* seed, so a nested child
+            // spawned after a TTSR retry inherits the reminder-injected history
+            // rather than the stale original turn — the same rule the session
+            // root follows for its own delegates.
+            let nested_context = Arc::new({
+                let mut context = seed_history.clone();
+                context.push(seed_prompt.clone());
+                context
+            });
+            let env = tool_set::ToolEnv {
+                bundle: child_tools.clone(),
+                // The delegate's own lineage recorder, so `artist computer log`
+                // attributes a subagent's actions to the subagent.
+                recorder: recorder.clone(),
+                resources: self.resources.clone(),
+                todos: self.handles.todos.clone(),
+                // A child owns its own list and may read its parent's, but not
+                // write to it: concurrent siblings sharing one list would race
+                // with no obvious merge.
+                todo_owner: actor.clone(),
+                todo_parent: Some(self.spawner.clone()),
+                attachments: self.handles.attachments.clone(),
+                // A subagent driving a GUI gets a display of its own, never the
+                // parent's: one stage is one seat, and siblings sharing it
+                // would serialize behind the input lease into uselessness.
+                // Whether it may do this at all is a profile decision like any
+                // other — the read-only built-ins deny it through their allow
+                // list, and a project profile can grant it deliberately.
+                computer: child_computer.clone(),
+                memory: self.memory.clone(),
+                canvas: self.canvas.clone(),
+                // See `ToolEnv::handoff`: a subagent's run is its return value,
+                // so there is no session beneath it to hand on.
+                handoff: None,
+                delegation: Some(DelegationEnv {
+                    provider: provider.clone(),
+                    context: nested_context,
+                    handles: self.handles.clone(),
+                    events: self.events.clone(),
+                    profiles: self.profiles.clone(),
+                    parent_permit: Some(run.permit.clone()),
+                }),
+                // A subagent is addressable too: it has a name for the run's
+                // lifetime, so a sibling or its parent can reach it while it
+                // works rather than only when it returns.
+                inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
+                dynamic: self.dynamic.clone(),
+                disabled: self.disabled_tools.clone(),
+            };
             let agent = builder
                 .dynamic_tools(
-                    registered_tools()
+                    tool_set::build(role, &env)
                         .into_iter()
                         .map(rig_agent::tool::DynamicTool::from)
                         .collect(),
                 )
                 .add_hook(CaptureHook::new(tool_meta.clone()))
+                // A subagent reads its own mail at its own turn boundaries. It
+                // carries no user-steering handle: steering is the user talking
+                // to the session, and a child is not the session.
+                .add_hook(crate::steering::SteeringHook {
+                    steering: crate::SteeringHandle::default(),
+                    inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
+                })
                 .add_hook(TtsrHook(Arc::clone(&ttsr)))
                 .default_max_turns(usize::MAX)
                 .build();
@@ -596,6 +760,8 @@ impl Delegate {
                     .level
                     .map(|level| level.as_str().to_owned())
                     .or_else(|| provider.reasoning_effort.clone()),
+                agent: Some(identity.name.clone()),
+                actor: Some(identity.actor.clone()),
             });
 
             let mut stream = agent
@@ -651,10 +817,22 @@ impl Delegate {
                     Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                         last_turn_had_text_delta = !turn_text.is_empty();
                         turn_text.clear();
+                        // Under the child's own lineage, so a fan-out's cache
+                        // behaviour is attributable per subagent rather than
+                        // summed into the parent's.
+                        run_recorder.record(artist_session::RunUsage {
+                            provider: format!("{:?}", provider.provider).to_lowercase(),
+                            model: model.to_owned(),
+                            input_tokens: call.usage.input_tokens,
+                            output_tokens: call.usage.output_tokens,
+                            total_tokens: call.usage.total_tokens,
+                            cached_input_tokens: call.usage.cached_input_tokens,
+                        });
                         self.emit_child(
                             &actor,
                             PromptEvent::CompletionUsage {
                                 total_tokens: call.usage.total_tokens,
+                                cached_input_tokens: call.usage.cached_input_tokens,
                             },
                         );
                     }
@@ -882,7 +1060,18 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::{DelegateRun, delegate_context_window};
+    use super::{DelegateRun, PermitSlot, delegate_context_window};
+
+    /// A seat from a pool of this test's own, so identity allocation is tested
+    /// without also standing up the project-wide concurrency limit.
+    async fn seat(pool: &tempfile::TempDir) -> PermitSlot {
+        PermitSlot::claim(
+            artist_registry::Registry::at(pool.path()).permits(1),
+            "test".into(),
+        )
+        .await
+        .expect("a fresh pool has a seat")
+    }
 
     #[test]
     fn model_override_does_not_inherit_main_context_window() {
@@ -897,19 +1086,40 @@ mod identity_tests {
         assert_eq!(delegate_context_window("small", None, Some(100_000)), None);
     }
 
-    #[test]
-    fn background_run_reuses_reserved_task_id() {
-        let run = DelegateRun::new(Some("a-reserved-task".into()));
+    #[tokio::test]
+    async fn background_run_reuses_reserved_task_id() {
+        let pool = tempfile::tempdir().unwrap();
+        let run = DelegateRun::new(Some("a-reserved-task".into()), seat(&pool).await);
 
         assert_eq!(run.actor, "a-reserved-task");
         assert!(run.background);
     }
 
-    #[test]
-    fn foreground_run_allocates_one_actor_id() {
-        let run = DelegateRun::new(None);
+    #[tokio::test]
+    async fn foreground_run_allocates_one_actor_id() {
+        let pool = tempfile::tempdir().unwrap();
+        let run = DelegateRun::new(None, seat(&pool).await);
 
         assert!(run.actor.starts_with("a-"));
         assert!(!run.background);
+    }
+
+    /// The seat pool is the project's, not the process's: a second holder
+    /// pointed at the same directory sees the first one's seat. This is the
+    /// property the on-disk pool exists for, and the one an in-process
+    /// semaphore silently did not have.
+    #[tokio::test]
+    async fn a_seat_is_visible_to_another_holder_of_the_same_project() {
+        let pool = tempfile::tempdir().unwrap();
+        let held = seat(&pool).await;
+
+        let contender = artist_registry::Registry::at(pool.path()).permits(1);
+        assert!(
+            contender.try_acquire("other-process").unwrap().is_none(),
+            "the limit is the project's"
+        );
+
+        held.yield_seat().await;
+        assert!(contender.try_acquire("other-process").unwrap().is_some());
     }
 }

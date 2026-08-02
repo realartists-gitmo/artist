@@ -215,7 +215,10 @@ export function Card({ title, actions, children, style, ...rest }) {
     <section
       style={{
         border: "1px solid var(--a-border)", borderRadius: "var(--a-radius)",
-        background: "var(--a-bg)", overflow: "hidden", ...style,
+        // `--a-card`, not `--a-bg`: the page carries artist's tint and a card
+        // is what stays clean on top of it. While both were `--a-bg` a card
+        // was distinguished from the page by its hairline alone.
+        background: "var(--a-card)", overflow: "hidden", ...style,
       }}
     >
       {(title || actions) && (
@@ -295,7 +298,16 @@ export function Skeleton({ lines = 3 }) {
 export function Button({ variant, tone, size = "md", children, style, ...rest }) {
   const palette = {
     default: { background: "var(--a-subtle)", color: "var(--a-fg)", border: "1px solid var(--a-border)" },
-    accent: { background: "var(--a-accent)", color: "var(--a-accent-fg)", border: "1px solid transparent" },
+    // The one control filled at full strength, and the only place the
+    // terminal's blue itself is painted — the same `#C6E2E7` in both schemes,
+    // which is what dark mode was already doing and light mode was not. On the
+    // light ground the fill is only 1.2:1 against the page, so the rim is not
+    // decoration: it is what carries the control's boundary.
+    accent: {
+      background: "var(--a-accent-fill)",
+      color: "var(--a-accent-fill-fg)",
+      border: "1px solid var(--a-accent-fill-edge)",
+    },
     // Destructive actions are outlined, not filled. A filled red button is the
     // loudest thing on the page, so it pulls the eye and the cursor toward the
     // one action that cannot be taken back; the outline still reads as danger
@@ -344,7 +356,7 @@ export function Input({ label, hint, style, ...rest }) {
         className="a-focus"
         style={{
           padding: `${sp(2)} ${sp(2)}`, borderRadius: "var(--a-radius)",
-          border: "1px solid var(--a-border)", background: "var(--a-bg)",
+          border: "1px solid var(--a-border)", background: "var(--a-card)",
           color: "var(--a-fg)", font: `${TEXT.body} var(--a-font)`, ...style,
         }}
         {...rest}
@@ -366,7 +378,7 @@ export function Textarea({ label, hint, style, rows = 5, ...rest }) {
         className="a-focus"
         style={{
           padding: space("inner"), borderRadius: "var(--a-radius)",
-          border: "1px solid var(--a-border)", background: "var(--a-bg)",
+          border: "1px solid var(--a-border)", background: "var(--a-card)",
           color: "var(--a-fg)", font: `${TEXT.body} var(--a-mono)`,
           resize: "vertical", ...style,
         }}
@@ -388,7 +400,7 @@ export function Select({ label, options = [], style, ...rest }) {
           className="a-focus"
           style={{
             padding: sp(2), borderRadius: "var(--a-radius)", border: "1px solid var(--a-border)",
-            background: "var(--a-bg)", color: "var(--a-fg)", font: `${TEXT.body} var(--a-font)`,
+            background: "var(--a-card)", color: "var(--a-fg)", font: `${TEXT.body} var(--a-font)`,
             width: "100%", ...style,
           }}
           {...rest}
@@ -432,6 +444,14 @@ export function Badge({ variant, tone, children, style, ...rest }) {
     default: "var(--a-muted)", ok: "var(--a-ok)", warn: "var(--a-warn)",
     danger: "var(--a-danger)", accent: "var(--a-accent)",
   }[chosen] ?? "var(--a-muted)";
+  // Tinted rather than outlined. Four outlined pills in a table row were the
+  // loudest thing on the page — an outline draws its hue at full strength
+  // around the whole shape, where a tint states it once and quietly. This is
+  // the pairing `--a-{name}` and `--a-{name}-surface` exist to guarantee.
+  const surface = {
+    ok: "var(--a-ok-surface)", warn: "var(--a-warn-surface)",
+    danger: "var(--a-danger-surface)", accent: "var(--a-accent-surface)",
+  }[chosen] ?? "var(--a-subtle)";
   return (
     <span
       // A badge is the state of the thing beside it, and colour alone does not
@@ -440,7 +460,8 @@ export function Badge({ variant, tone, children, style, ...rest }) {
       role={chosen === "default" ? undefined : "status"}
       style={{
         display: "inline-block", padding: `2px ${sp(2)}`, borderRadius: 999,
-        border: `1px solid ${color}`, color, fontSize: TEXT.micro, fontWeight: 500,
+        background: surface, border: "1px solid transparent",
+        color, fontSize: TEXT.micro, fontWeight: 500,
         whiteSpace: "nowrap", ...style,
       }}
     >
@@ -507,7 +528,7 @@ export function Dialog({ open, title, onClose, children, actions }) {
         aria-modal="true"
         onClick={(event) => event.stopPropagation()}
         style={{
-          background: "var(--a-bg)", border: "1px solid var(--a-border)",
+          background: "var(--a-card)", border: "1px solid var(--a-border)",
           borderRadius: "var(--a-radius)", maxWidth: 560, width: "100%",
           maxHeight: "85vh", overflow: "auto",
         }}
@@ -549,7 +570,10 @@ export function Toaster() {
         <div
           key={item.id}
           style={{
-            background: "var(--a-subtle)", border: "1px solid var(--a-border)",
+            // Tinted like an Alert, for the same reason: a toast is the same
+            // statement, made somewhere else on the page.
+            background: item.tone === "danger" ? "var(--a-danger-surface)" : "var(--a-accent-surface)",
+            border: "1px solid var(--a-border)",
             borderLeft: `3px solid ${item.tone === "danger" ? "var(--a-danger)" : "var(--a-accent)"}`,
             borderRadius: "var(--a-radius)", padding: `${space("inner")} ${space("card")}`, fontSize: TEXT.body,
             maxWidth: 380,
@@ -648,7 +672,7 @@ export function AskDock() {
               className="a-focus"
               style={{
                 textAlign: "left", padding: sp(3), borderRadius: "var(--a-radius)",
-                cursor: "pointer", background: "var(--a-bg)",
+                cursor: "pointer", background: "var(--a-card)",
                 border: `1px solid ${picked.includes(option.label) ? "var(--a-accent)" : "var(--a-border)"}`,
                 boxShadow: picked.includes(option.label) ? "0 0 0 1px var(--a-accent)" : "none",
                 color: "var(--a-fg)",
@@ -1448,13 +1472,20 @@ export function Alert({ variant, tone, title, children, ...rest }) {
     default: "var(--a-accent)", accent: "var(--a-accent)", info: "var(--a-accent)",
     ok: "var(--a-ok)", warn: "var(--a-warn)", danger: "var(--a-danger)",
   }[chosen] ?? "var(--a-accent)";
+  // Every variant used to fill with the same `--a-subtle` grey, so a warning
+  // and a confirmation were the same colour and the 3px stripe was doing all
+  // the work. The tints have existed in the ramps the whole time.
+  const surface = {
+    ok: "var(--a-ok-surface)", warn: "var(--a-warn-surface)",
+    danger: "var(--a-danger-surface)",
+  }[chosen] ?? "var(--a-accent-surface)";
 
   return (
     <div
       role={chosen === "danger" || chosen === "warn" ? "alert" : "status"}
       style={{
-        borderRadius: "var(--a-radius)", border: "1px solid var(--a-border)",
-        borderLeft: `3px solid ${accent}`, background: "var(--a-subtle)",
+        borderRadius: "var(--a-radius)", border: "1px solid transparent",
+        borderLeft: `3px solid ${accent}`, background: surface,
         padding: `${space("inner")} ${space("card")}`, fontSize: TEXT.body,
       }}
     >

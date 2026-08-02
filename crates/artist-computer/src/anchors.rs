@@ -94,6 +94,15 @@ pub struct AnchorBook {
     digests: HashMap<Binding, [u8; 32]>,
     /// The nodes the currently issued anchors name.
     live: HashMap<String, Node>,
+    /// The same anchors in the order the surface reported them.
+    ///
+    /// Kept because document order is real information every backend gives us
+    /// and a `HashMap` throws away. It is what lets a label be paired with the
+    /// value *beside* it — the common shape of a form or a spec table, where
+    /// "Total" and "$42.00" are two sibling nodes and nothing but their
+    /// adjacency relates them. Geometry cannot substitute: a PTY row and many
+    /// CDP nodes have no bounds at all.
+    order: Vec<String>,
     /// Anchors that named something and no longer do.
     ///
     /// The allocator frees a handle as soon as its element disappears, which is
@@ -136,6 +145,7 @@ impl AnchorBook {
         let mut entries = Vec::with_capacity(nodes.len());
         let mut digests = HashMap::with_capacity(nodes.len());
         let mut live = HashMap::with_capacity(nodes.len());
+        let mut order = Vec::with_capacity(nodes.len());
 
         for (node, anchor) in nodes.iter().zip(anchors) {
             // Re-issued to a live element, so it is no longer a tombstone.
@@ -151,6 +161,7 @@ impl AnchorBook {
             };
             digests.insert(node.binding.clone(), digest);
             live.insert(anchor.clone(), node.clone());
+            order.push(anchor.clone());
             entries.push(Entry {
                 anchor,
                 node: node.clone(),
@@ -182,6 +193,7 @@ impl AnchorBook {
 
         self.digests = digests;
         self.live = live;
+        self.order = order;
 
         // A navigation replaces every binding, so a "delta" becomes every new
         // node as `+` *and* every old one as `-`: two renders of two different
@@ -196,9 +208,8 @@ impl AnchorBook {
         // Measured against whichever screen had more on it: a page that goes
         // from 500 nodes to 3 has churned just as completely as the reverse.
         let population = nodes.len().max(previous_population).max(1);
-        let replaced = !full
-            && !first
-            && (churned as f32 / population as f32) >= CHURN_PROMOTES_TO_FULL;
+        let replaced =
+            !full && !first && (churned as f32 / population as f32) >= CHURN_PROMOTES_TO_FULL;
 
         let full = full || first || replaced;
         if !full {
@@ -240,6 +251,18 @@ impl AnchorBook {
     pub fn anchors(&self) -> impl Iterator<Item = (&String, &Node)> {
         self.live.iter()
     }
+
+    /// The same set, in the order the surface reported it.
+    ///
+    /// Prefer this anywhere the *relationship between neighbours* carries
+    /// meaning. [`anchors`](Self::anchors) walks a `HashMap` and its order
+    /// varies between identical calls, which is fine for a population count and
+    /// wrong for anything that reads two adjacent elements together.
+    pub fn in_order(&self) -> impl Iterator<Item = (&String, &Node)> {
+        self.order
+            .iter()
+            .filter_map(|anchor| self.live.get(anchor).map(|node| (anchor, node)))
+    }
 }
 
 /// Give repeated bindings distinct identities before they reach the allocator.
@@ -280,7 +303,10 @@ mod tests {
     #[test]
     fn first_observation_is_full_and_marks_nothing_as_changed() {
         let mut book = AnchorBook::new();
-        let observed = book.observe(&snapshot(vec![button("a", "Save"), button("b", "Cancel")]), false);
+        let observed = book.observe(
+            &snapshot(vec![button("a", "Save"), button("b", "Cancel")]),
+            false,
+        );
 
         assert!(observed.full, "first contact must render the whole surface");
         assert_eq!(observed.entries.len(), 2);
@@ -332,10 +358,7 @@ mod tests {
             .collect();
         assert_eq!(
             changes,
-            vec![
-                ("b", Some(Change::Changed)),
-                ("c", Some(Change::Added)),
-            ],
+            vec![("b", Some(Change::Changed)), ("c", Some(Change::Added)),],
             "an unchanged node must not appear in a delta"
         );
     }

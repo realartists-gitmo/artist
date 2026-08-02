@@ -7,9 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
-# Pattern compilation for ast_query / ast_rewrite. Pinned to the version
-# artist-ast uses so the tree carries one copy.
-ast-grep-core = "0.42.1"
 # Everything except `search` and `cli`. Retrieval is artist-memory's job, so
 # the embedder, HTTP stack and model loader stay out of the tree; `ranking`
 # comes along for free with `impact`/`context` and costs no dependencies.
@@ -26,6 +23,8 @@ dashmap = "6"
 dirs = "6"
 fff-search = "0.10.1"
 globset = "0.4"
+# Unit discovery honours .gitignore, so build output never becomes a "crate".
+ignore = "0.4"
 nix = { version = "0.31", features = ["signal"] }
 hashline-tools = { path = "../hashline-tools" }
 portable-pty = "0.9"
@@ -37,6 +36,7 @@ serde_json = "1"
 similar = "3"
 tempfile = "3"
 thiserror = "2"
+tokio-util = "0.7"
 tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 

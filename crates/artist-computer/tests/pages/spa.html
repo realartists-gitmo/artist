@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Lazy list</title>
+<h1>Orders</h1>
+<button id="load">Load orders</button>
+<ul id="orders"></ul>
+<p id="status">idle</p>
+<script>
+  // The shape a file:// fixture cannot produce: a click starts a *network*
+  // request, and the content that matters appears only after it resolves. A
+  // settle predicate keyed on document.readyState is already `complete` here
+  // and would report the page quiet while the list is still empty.
+  document.getElementById('load').addEventListener('click', async () => {
+    document.getElementById('status').textContent = 'loading';
+    await fetch('/slow.json').then(r => r.json()).then(data => {
+      const list = document.getElementById('orders');
+      for (const order of data.orders) {
+        const item = document.createElement('li');
+        item.textContent = order;
+        list.appendChild(item);
+      }
+      document.getElementById('status').textContent = 'loaded';
+    });
+  });
+</script>

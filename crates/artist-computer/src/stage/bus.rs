@@ -35,6 +35,13 @@ const READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct StageBus {
     session_address: String,
     a11y_address: Option<String>,
+    /// This stage's private directory.
+    ///
+    /// Held because the accessibility daemons need it in their *environment*,
+    /// not just ours: `at-spi-bus-launcher` derives its socket path from
+    /// `$XDG_RUNTIME_DIR`, so two stages that let it inherit the user's would
+    /// write to the same path and the second would silently displace the first.
+    runtime_dir: std::path::PathBuf,
     children: Vec<tokio::process::Child>,
 }
 
@@ -83,14 +90,32 @@ impl StageBus {
                 "--nopidfile",
                 &format!("--address=unix:path={}", socket.display()),
             ])
+            // The daemon's environment is inherited by every service it
+            // *activates*, and that is the leak. `org.a11y.Bus` has a
+            // `.service` file, so the first `GetAddress` on this bus can start
+            // a second `at-spi-bus-launcher` through activation — before ours
+            // has claimed the name — and an activated launcher carrying the
+            // user's `XDG_RUNTIME_DIR` answers with the user's accessibility
+            // bus at `/run/user/1000/at-spi/bus`. The stage then attaches to
+            // the user's a11y bus and can see the user's own applications,
+            // which is precisely the isolation this whole module exists to
+            // provide. It is a race, so it presents as an occasional
+            // "Server GUID mismatch" under load rather than as a constant
+            // failure — the worst possible shape for a correctness bug.
+            .env("XDG_RUNTIME_DIR", runtime_dir)
+            //
+            // Same reason, different channel: `at-spi-bus-launcher` will read
+            // the `AT_SPI_BUS` property off the X root window when it has a
+            // display, and the user's root window names the user's bus. The
+            // stage's own X display is handed to launched applications, never
+            // to these daemons.
+            .env_remove("DISPLAY")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
-                StepError::Backend(format!(
-                    "start dbus-daemon (is dbus installed?): {error}"
-                ))
+                StepError::Backend(format!("start dbus-daemon (is dbus installed?): {error}"))
             })?;
 
         let stdout = child
@@ -101,11 +126,8 @@ impl StageBus {
         let address = {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut line = String::new();
-            match tokio::time::timeout(
-                READY_TIMEOUT,
-                BufReader::new(stdout).read_line(&mut line),
-            )
-            .await
+            match tokio::time::timeout(READY_TIMEOUT, BufReader::new(stdout).read_line(&mut line))
+                .await
             {
                 Ok(Ok(_)) => line.trim().to_owned(),
                 Ok(Err(error)) => {
@@ -131,20 +153,33 @@ impl StageBus {
         Ok(Self {
             session_address: address,
             a11y_address: None,
+            runtime_dir: runtime_dir.to_owned(),
             children: vec![child],
         })
     }
 
     async fn start_accessibility(&mut self) -> Result<(), StepError> {
-        let launcher = ["/usr/lib/at-spi-bus-launcher", "/usr/libexec/at-spi-bus-launcher"]
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists())
-            .ok_or_else(|| StepError::Backend("at-spi-bus-launcher not found".into()))?;
+        let launcher = [
+            "/usr/lib/at-spi-bus-launcher",
+            "/usr/libexec/at-spi-bus-launcher",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .ok_or_else(|| StepError::Backend("at-spi-bus-launcher not found".into()))?;
 
         self.children.push(
             tokio::process::Command::new(launcher)
                 .arg("--launch-immediately")
                 .env("DBUS_SESSION_BUS_ADDRESS", &self.session_address)
+                // Without this the launcher puts its socket at the *user's*
+                // runtime path, which every stage shares. Two stages then race,
+                // and the loser's stored address reaches the winner's daemon —
+                // surfacing as "D-Bus handshake failed: Server GUID mismatch"
+                // and silently dropping that stage a rung.
+                .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+                // See `start_session_bus`: with a display, the launcher takes
+                // the bus address off the X root window instead of creating one.
+                .env_remove("DISPLAY")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
@@ -155,14 +190,18 @@ impl StageBus {
         let address = self.await_a11y_address().await?;
         self.a11y_address = Some(address);
 
-        let registryd = ["/usr/lib/at-spi2-registryd", "/usr/libexec/at-spi2-registryd"]
-            .into_iter()
-            .find(|path| std::path::Path::new(path).exists())
-            .ok_or_else(|| StepError::Backend("at-spi2-registryd not found".into()))?;
+        let registryd = [
+            "/usr/lib/at-spi2-registryd",
+            "/usr/libexec/at-spi2-registryd",
+        ]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+        .ok_or_else(|| StepError::Backend("at-spi2-registryd not found".into()))?;
         self.children.push(
             tokio::process::Command::new(registryd)
                 .arg("--use-gnome-session=no")
                 .env("DBUS_SESSION_BUS_ADDRESS", &self.session_address)
+                .env("XDG_RUNTIME_DIR", &self.runtime_dir)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
@@ -282,6 +321,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_accessibility_bus_is_the_stages_own_and_never_the_users() {
+        // The bug this pins was invisible in every other test. `org.a11y.Bus`
+        // has a D-Bus `.service` file, so asking a bus for it *starts* a
+        // launcher if none has claimed the name — and an activated launcher
+        // inherits the **daemon's** environment. A stage daemon carrying the
+        // user's `XDG_RUNTIME_DIR` therefore answered with the user's own
+        // accessibility bus, and the stage attached to it: the agent could see
+        // the user's applications, and the tree it called private was not.
+        //
+        // It raced with our explicitly-spawned launcher, so it only lost under
+        // load, and it surfaced as an intermittent "Server GUID mismatch"
+        // rather than as anything resembling a leak.
+        if !dbus_available() {
+            eprintln!("skipping: dbus-daemon is not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        // `start_session_bus`, deliberately not `start`: with no launcher of
+        // ours running, the query below has no choice but to take the
+        // activation path — which is the path that was wrong. Going through
+        // `start` would race our own launcher against activation, and our
+        // launcher usually wins, so the test would pass either way and pin
+        // nothing. (Checked: it does.)
+        let bus = match StageBus::start_session_bus(dir.path()).await {
+            Ok(bus) => bus,
+            Err(error) => {
+                eprintln!("skipping: no bus here ({error})");
+                return;
+            }
+        };
+        let address = match bus.query_a11y_address().await {
+            Ok(address) => address,
+            Err(error) => {
+                eprintln!("skipping: at-spi is not installed on this machine ({error})");
+                return;
+            }
+        };
+
+        let path = address
+            .strip_prefix("unix:path=")
+            .and_then(|rest| rest.split(',').next())
+            .expect("an a11y address is a unix socket path");
+        assert!(
+            std::path::Path::new(path).starts_with(dir.path()),
+            "the stage's accessibility bus must live inside its own runtime \
+             directory ({}), but it is at {path} — which means the stage is \
+             attached to somebody else's a11y bus",
+            dir.path().display()
+        );
+    }
+
+    #[tokio::test]
     async fn the_bus_dies_with_the_stage() {
         if !dbus_available() {
             eprintln!("skipping: dbus-daemon is not installed");
@@ -303,6 +394,7 @@ mod tests {
         let bus = StageBus {
             session_address: "unix:path=/tmp/fake".into(),
             a11y_address: Some("unix:path=/tmp/fake-a11y".into()),
+            runtime_dir: std::path::PathBuf::from("/tmp/fake-stage"),
             children: Vec::new(),
         };
         let mut env = StageEnv::default();
@@ -312,7 +404,10 @@ mod tests {
             env.get("DBUS_SESSION_BUS_ADDRESS"),
             Some("unix:path=/tmp/fake")
         );
-        assert_eq!(env.get("AT_SPI_BUS_ADDRESS"), Some("unix:path=/tmp/fake-a11y"));
+        assert_eq!(
+            env.get("AT_SPI_BUS_ADDRESS"),
+            Some("unix:path=/tmp/fake-a11y")
+        );
         // Each of these is load-bearing for a different toolkit; a missing one
         // shows up as an empty tree rather than as an error.
         assert_eq!(env.get("GTK_A11Y"), Some("atspi"));

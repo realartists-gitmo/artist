@@ -92,7 +92,10 @@ pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
             SessionEvent::CanvasOpened(canvas) => {
                 items.push(ReplayItem::Tool {
                     name: "canvas".to_owned(),
-                    preview: format!("opened {} · reopen with /canvas {}", canvas.slug, canvas.slug),
+                    preview: format!(
+                        "opened {} · reopen with /canvas {}",
+                        canvas.slug, canvas.slug
+                    ),
                 });
             }
             SessionEvent::RuleFired(fired) => {

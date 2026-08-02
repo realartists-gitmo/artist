@@ -18,35 +18,44 @@
 
 pub mod ask;
 mod attachments;
+pub mod capabilities;
+pub mod chain;
 pub mod compaction;
 mod conversation_replay;
 mod convert;
 pub mod decay;
 mod event;
+mod file_handles;
 mod history;
+pub mod inline_images;
 mod log;
 mod memory;
 mod provider_context;
 mod recorder;
 mod replay;
 
-pub use attachments::AttachmentStore;
+pub use ask::{Answer, AskRegistry, Question, QuestionOption};
+pub use attachments::{AttachmentStore, content_digest};
+pub use capabilities::ProviderCapabilities;
+pub use chain::{ChainState, Send as ChainSend};
 pub use convert::{
     assistant_to_blocks, blocks_to_assistant, blocks_to_user, externalize_images,
     referenced_attachments, rehydrate_images, store_tool_image, tool_image_from_block,
     user_to_blocks,
 };
-pub use ask::{Answer, AskRegistry, Question, QuestionOption};
 pub use event::{
     AskAnswered, AskPosted, CanvasCreated, CanvasOpened, CanvasState, ComputerActed,
-    ComputerElided, ComputerObserved, ComputerStageClosed, ComputerStageOpened, ComputerStep,
-    ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished, DelegateStarted,
-    Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE, MemoryWritten, ModelTurn,
-    ProviderContext, RuleFired, RuleInjection, RuleRetroFindings, RunFinished, RunStarted,
-    SCHEMA_VERSION, SessionCreated, SessionEvent, SteeringDelivered, TodoItem, TodoStatus,
-    TodoUpdated, ToolOutcomeRecord, ToolResultEvent, TurnUser,
+    ComputerElided, ComputerLaunched, ComputerObserved, ComputerStageClosed, ComputerStageOpened,
+    ComputerStep, ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished,
+    DelegateStarted, Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE,
+    MemoryWritten, ModelTurn, ProviderContext, RuleFired, RuleInjection, RuleRetroFindings,
+    RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated, SessionEvent,
+    SteeringDelivered, TodoItem, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
+    TurnUser,
 };
+pub use file_handles::HandleLedger;
 pub use history::{HistoryOptions, build as build_history};
+pub use inline_images::InlineImage;
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use memory::SessionMemory;
 pub use provider_context::{PROVIDER_CONTEXT_SCHEMA, ProviderContextHandle};

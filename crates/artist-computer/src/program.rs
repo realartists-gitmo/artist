@@ -116,7 +116,9 @@ pub enum Step {
     ///
     /// Without this, a second URL cost an entire browser launch: a new process,
     /// a new profile, and up to 35 s of connect-and-map polling.
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     /// Browser history, one entry at a time.
     ///
     /// Braced rather than unit variants so the wire form is `{"back":{}}` — the
@@ -282,9 +284,7 @@ pub enum StepError {
         claimed: String,
         actual: String,
     },
-    #[error(
-        "{anchor} is {role:?} {name:?}, which does not accept `{action}` on this surface"
-    )]
+    #[error("{anchor} is {role:?} {name:?}, which does not accept `{action}` on this surface")]
     Unsupported {
         anchor: String,
         role: String,
@@ -365,7 +365,10 @@ pub(crate) fn normalize(value: &str) -> String {
     // Access-key markers only. `&` never occurs in a real name, but `_` does —
     // stripping it everywhere made `delete_all` and `deleteall` the same string,
     // and identifiers are exactly where a one-character difference matters.
-    let stripped: String = folded.chars().filter(|character| *character != '&').collect();
+    let stripped: String = folded
+        .chars()
+        .filter(|character| *character != '&')
+        .collect();
     let trimmed = stripped
         .trim()
         .trim_end_matches('…')

@@ -56,10 +56,7 @@ pub struct DecayOutcome {
 /// Returns `None` when nothing changed, so the caller can skip writing a
 /// snapshot at all — decay runs before every turn and most turns have nothing
 /// to do.
-pub fn decay_observations(
-    messages: &mut [Message],
-    policy: &DecayPolicy,
-) -> Option<DecayOutcome> {
+pub fn decay_observations(messages: &mut [Message], policy: &DecayPolicy) -> Option<DecayOutcome> {
     if policy.keep_recent == 0 {
         return None;
     }
@@ -167,9 +164,11 @@ fn non_observation_text(block: &ToolResultContent) -> Option<String> {
 }
 
 fn is_already_elided(content: &rig_core::OneOrMany<ToolResultContent>) -> bool {
-    content
-        .iter()
-        .any(|block| block.as_text().is_some_and(|text| text.contains("elided=\"true\"")))
+    content.iter().any(|block| {
+        block
+            .as_text()
+            .is_some_and(|text| text.contains("elided=\"true\""))
+    })
 }
 
 fn result_bytes(content: &rig_core::OneOrMany<ToolResultContent>) -> usize {
@@ -312,7 +311,10 @@ mod tests {
     #[test]
     fn nothing_happens_while_within_the_keep_window() {
         let mut messages = history(3);
-        assert_eq!(decay_observations(&mut messages, &DecayPolicy::default()), None);
+        assert_eq!(
+            decay_observations(&mut messages, &DecayPolicy::default()),
+            None
+        );
     }
 
     #[test]
@@ -342,9 +344,11 @@ mod tests {
                     content
                         .iter()
                         .filter_map(|item| match item {
-                            UserContent::ToolResult(result) => {
-                                Some((result.id.clone(), result.call_id.clone(), result.content.len()))
-                            }
+                            UserContent::ToolResult(result) => Some((
+                                result.id.clone(),
+                                result.call_id.clone(),
+                                result.content.len(),
+                            )),
                             _ => None,
                         })
                         .collect::<Vec<_>>(),
@@ -365,9 +369,11 @@ mod tests {
                     content
                         .iter()
                         .filter_map(|item| match item {
-                            UserContent::ToolResult(result) => {
-                                Some((result.id.clone(), result.call_id.clone(), result.content.len()))
-                            }
+                            UserContent::ToolResult(result) => Some((
+                                result.id.clone(),
+                                result.call_id.clone(),
+                                result.content.len(),
+                            )),
                             _ => None,
                         })
                         .collect::<Vec<_>>(),
@@ -457,7 +463,10 @@ mod tests {
 
         // A second pass has nothing left to do: already-elided results are
         // recognized and skipped, so re-running cannot cascade.
-        assert_eq!(decay_observations(&mut messages, &DecayPolicy::default()), None);
+        assert_eq!(
+            decay_observations(&mut messages, &DecayPolicy::default()),
+            None
+        );
         assert_eq!(messages, once);
     }
 

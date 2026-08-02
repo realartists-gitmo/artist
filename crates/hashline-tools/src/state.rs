@@ -40,6 +40,12 @@ impl StateStore {
                     last_seen_at INTEGER NOT NULL
                 );
 
+                -- `prefixes_json` is a fossil: it holds the flattened
+                -- `PathAnchors` map, and nothing in it has been a hash prefix
+                -- since anchors became mnemonics. Renaming the column would
+                -- need a migration step this store does not have (every table
+                -- is `CREATE TABLE IF NOT EXISTS`), and an existing database
+                -- would simply stop loading. The name stays; see `PathAnchors`.
                 CREATE TABLE IF NOT EXISTS anchor_states (
                     agent_id TEXT NOT NULL,
                     canonical_path TEXT NOT NULL,
@@ -86,6 +92,12 @@ impl StateStore {
                     last_seen_at INTEGER NOT NULL
                 );
 
+                -- `prefixes_json` is a fossil: it holds the flattened
+                -- `PathAnchors` map, and nothing in it has been a hash prefix
+                -- since anchors became mnemonics. Renaming the column would
+                -- need a migration step this store does not have (every table
+                -- is `CREATE TABLE IF NOT EXISTS`), and an existing database
+                -- would simply stop loading. The name stays; see `PathAnchors`.
                 CREATE TABLE IF NOT EXISTS anchor_states (
                     agent_id TEXT NOT NULL,
                     canonical_path TEXT NOT NULL,
@@ -145,14 +157,14 @@ impl StateStore {
         while let Some(row) = rows.next().map_err(sql_error)? {
             let path: String = row.get(0).map_err(sql_error)?;
             let json: String = row.get(1).map_err(sql_error)?;
-            let prefixes = serde_json::from_str(&json).map_err(|error| {
+            let anchors = serde_json::from_str(&json).map_err(|error| {
                 HashlineError::new(
                     HashlineErrorCode::Internal,
                     format!("invalid persisted anchor state for {path}: {error}"),
                     false,
                 )
             })?;
-            result.insert(path, prefixes);
+            result.insert(path, anchors);
         }
         Ok(result)
     }
@@ -174,8 +186,8 @@ impl StateStore {
                 params![agent_id.0],
             )
             .map_err(sql_error)?;
-        for (path, prefixes) in state {
-            let json = serde_json::to_string(prefixes).map_err(|error| {
+        for (path, anchors) in state {
+            let json = serde_json::to_string(anchors).map_err(|error| {
                 HashlineError::new(HashlineErrorCode::Internal, error.to_string(), false)
             })?;
             transaction

@@ -1,0 +1,4 @@
+# The OCR weights are ~21 MB of binary and are fetched, not committed.
+# `scripts/fetch-ocr-models.sh` puts them here.
+*.onnx
+*.txt

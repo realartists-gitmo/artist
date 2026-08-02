@@ -40,6 +40,34 @@ pub struct Settings {
     pub computer: ComputerSettings,
     #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
+    #[serde(default, skip_serializing_if = "StatefulnessSettings::is_empty")]
+    pub statefulness: StatefulnessSettings,
+}
+
+/// Optional per-layer statefulness values.
+///
+/// Each enables a provider-side handle that replaces content artist would
+/// otherwise restate on every request. All are off unless a layer says
+/// otherwise: every one creates a durable, billed artifact on the user's
+/// provider account, which is not something to inherit by default.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StatefulnessSettings {
+    /// Continue a provider-held conversation rather than restating history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chaining: Option<bool>,
+    /// Reference the system prompt by id rather than sending its text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_prompt: Option<bool>,
+    /// Hold the system prompt in a Gemini explicit context cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_cache: Option<bool>,
+}
+
+impl StatefulnessSettings {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Optional per-layer computer-use values.
@@ -59,11 +87,25 @@ pub struct ComputerSettings {
     /// Which `Stage` backend to use. Absent means "pick the best available".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
-    /// The isolated display's size, as `WIDTHxHEIGHT`.
+    /// The isolated display's size: `WIDTHxHEIGHT`, or a preset name.
     ///
     /// Worth configuring: viewport size changes what an application shows, so a
     /// responsive page lays out differently and a list renders a different
     /// number of rows.
+    ///
+    /// Presets are `desktop`, `laptop`, `tablet` and `mobile`.
+    ///
+    /// **When a narrow viewport is worth it, and when it is a trap.** A mobile
+    /// viewport is reported elsewhere as a token saving, and it is one — a
+    /// responsive site renders far fewer nodes. But it buys that by *hiding*
+    /// things: navigation collapses into a menu, columns stack, secondary
+    /// actions move behind a disclosure. Every one of those is a round trip the
+    /// agent now has to spend to reach something that was previously on screen,
+    /// and round trips are the dominant cost of driving a UI. So it pays when
+    /// the task is a narrow path through a site that has a real mobile layout,
+    /// and it costs when the task is exploratory or the application merely
+    /// squashes rather than reflows. Default to `desktop`; reach for `mobile`
+    /// when you know the shape of the task in advance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
 }
@@ -107,9 +149,29 @@ impl Default for ComputerConfig {
 /// settings load: a typo in an optional display size should not stop the agent
 /// from starting.
 fn parse_screen(value: &str) -> Option<(i32, i32)> {
-    let (width, height) = value.trim().split_once(['x', 'X'])?;
+    let value = value.trim();
+    // Presets first, so `mobile` is not read as a malformed `WIDTHxHEIGHT`.
+    // The sizes are ordinary CSS viewports rather than device pixels: what
+    // decides a responsive layout is the logical width, and the stage runs at
+    // scale 1 so the two are the same here.
+    if let Some(size) = SCREEN_PRESETS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(value))
+        .map(|(_, size)| *size)
+    {
+        return Some(size);
+    }
+    let (width, height) = value.split_once(['x', 'X'])?;
     Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
 }
+
+/// Named viewports, so a setting can say what it means.
+pub const SCREEN_PRESETS: &[(&str, (i32, i32))] = &[
+    ("desktop", (1920, 1080)),
+    ("laptop", (1440, 900)),
+    ("tablet", (820, 1180)),
+    ("mobile", (390, 844)),
+];
 
 /// Optional per-layer memory values.
 ///
@@ -273,6 +335,8 @@ pub struct EffectiveSettings {
     /// The full set of tool names the agent may not use — the union of the
     /// global `disabled_tools` and every layer's `permissions.deny`.
     pub denied_tools: Vec<String>,
+    /// Which provider-side handles this session may use.
+    pub statefulness: artist_agent::Statefulness,
 }
 
 impl EffectiveSettings {
@@ -381,6 +445,23 @@ impl EffectiveSettings {
                 denied_tools.push(name.clone());
             }
         }
+        // Project layer wins over global, and absent means off. Deliberately
+        // no override layer: these are not the sort of switch to flip from a
+        // command line, since each one creates something durable on the user's
+        // provider account.
+        let statefulness = artist_agent::Statefulness::default()
+            .with_chaining(pick(
+                project.statefulness.chaining,
+                global.statefulness.chaining,
+            ))
+            .with_stored_prompt(pick(
+                project.statefulness.stored_prompt,
+                global.statefulness.stored_prompt,
+            ))
+            .with_gemini_cache(pick(
+                project.statefulness.gemini_cache,
+                global.statefulness.gemini_cache,
+            ));
         Self {
             model,
             reasoning_effort,
@@ -388,6 +469,7 @@ impl EffectiveSettings {
             memory,
             computer,
             denied_tools,
+            statefulness,
         }
     }
 
@@ -410,6 +492,11 @@ impl EffectiveSettings {
 /// `<config_root>/settings.toml` and the project file at
 /// `<project>/.artist/settings.toml`, folding in `base_denied` (the global
 /// `disabled_tools`) and any CLI/session `overrides`.
+/// Nearest layer that expressed an opinion, defaulting to off.
+fn pick(project: Option<bool>, global: Option<bool>) -> bool {
+    project.or(global).unwrap_or(false)
+}
+
 pub fn load_effective(
     config_root: &Path,
     project: &Path,
@@ -555,6 +642,92 @@ mod tests {
         assert_eq!(effective.denied_tools, ["edit", "bash", "write"]);
     }
 
+    /// Absent means off. Every one of these creates a durable, billed artifact
+    /// on the user's provider account, so silence must never be consent.
+    #[test]
+    fn statefulness_is_off_when_no_layer_mentions_it() {
+        let effective = EffectiveSettings::resolve(
+            &Settings::default(),
+            &Settings::default(),
+            &Overrides::default(),
+            &[],
+        );
+        assert_eq!(effective.statefulness, artist_agent::Statefulness::default());
+        assert!(!effective.statefulness.chaining);
+        assert!(!effective.statefulness.stored_prompt);
+        assert!(!effective.statefulness.gemini_cache);
+    }
+
+    #[test]
+    fn a_global_opt_in_reaches_the_session() {
+        let global = from_str("[statefulness]\nchaining = true\n");
+        let effective = EffectiveSettings::resolve(
+            &global,
+            &Settings::default(),
+            &Overrides::default(),
+            &[],
+        );
+        assert!(effective.statefulness.chaining);
+        // Enabling one must not enable the others: they need different
+        // endpoints and carry different risks.
+        assert!(!effective.statefulness.stored_prompt);
+        assert!(!effective.statefulness.gemini_cache);
+    }
+
+    /// The nearest layer wins, in both directions — including a project that
+    /// turns something off which the user enabled globally. A project that
+    /// cannot opt out is not a layer.
+    #[test]
+    fn the_project_layer_overrides_the_global_one() {
+        let global = from_str("[statefulness]\nchaining = true\nstored_prompt = true\n");
+        let project = from_str("[statefulness]\nchaining = false\ngemini_cache = true\n");
+        let effective =
+            EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+
+        assert!(!effective.statefulness.chaining, "project must be able to opt out");
+        // Untouched by the project layer, so the global opinion stands.
+        assert!(effective.statefulness.stored_prompt);
+        assert!(effective.statefulness.gemini_cache);
+    }
+
+    /// The same resolution, through the on-disk path callers actually use.
+    #[test]
+    fn statefulness_resolves_through_both_settings_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&config_root).unwrap();
+        std::fs::create_dir_all(project.join(".artist")).unwrap();
+        std::fs::write(
+            config_root.join("settings.toml"),
+            "[statefulness]\nchaining = true\nstored_prompt = true\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".artist/settings.toml"),
+            "[statefulness]\nstored_prompt = false\n",
+        )
+        .unwrap();
+
+        let effective =
+            load_effective(&config_root, &project, &Overrides::default(), &[]).unwrap();
+
+        assert!(effective.statefulness.chaining, "global opinion survives");
+        assert!(
+            !effective.statefulness.stored_prompt,
+            "project opinion overrides global"
+        );
+        assert!(!effective.statefulness.gemini_cache);
+    }
+
+    /// An unknown key under `[statefulness]` must be an error rather than a
+    /// silent no-op: a typo in a security-relevant switch that reads as
+    /// "enabled" while behaving as "disabled" is the worst of both.
+    #[test]
+    fn a_misspelled_statefulness_key_is_rejected() {
+        assert!(toml::from_str::<Settings>("[statefulness]\nchainning = true\n").is_err());
+    }
+
     #[test]
     fn empty_settings_serializes_to_nothing() {
         // A default Settings must not emit stray empty tables/keys.
@@ -620,5 +793,41 @@ mod tests {
         );
         assert_eq!(effective.computer, ComputerConfig::default());
         assert_eq!(effective.computer.keep_recent_observations, 3);
+    }
+
+    #[test]
+    fn a_screen_preset_resolves_to_a_real_viewport() {
+        assert_eq!(parse_screen("mobile"), Some((390, 844)));
+        assert_eq!(parse_screen("Desktop"), Some((1920, 1080)));
+        assert_eq!(parse_screen("  tablet "), Some((820, 1180)));
+    }
+
+    #[test]
+    fn an_explicit_size_still_works_and_beats_nothing_named() {
+        assert_eq!(parse_screen("1280x800"), Some((1280, 800)));
+        assert_eq!(parse_screen("1280X800"), Some((1280, 800)));
+        // A preset name is checked first, so it is never read as a malformed
+        // WIDTHxHEIGHT and silently discarded.
+        assert!(parse_screen("laptop").is_some());
+    }
+
+    #[test]
+    fn a_nonsense_screen_setting_falls_back_rather_than_failing_the_load() {
+        // A typo in an optional display size must not stop the agent starting.
+        assert_eq!(parse_screen("enormous"), None);
+        assert_eq!(parse_screen("1920"), None);
+        assert_eq!(parse_screen("axb"), None);
+    }
+
+    #[test]
+    fn every_preset_is_a_size_the_stage_will_accept() {
+        // The stage clamps to 320..=7680 by 240..=4320; a preset outside that
+        // would silently become a different screen than the one named.
+        for (name, (width, height)) in SCREEN_PRESETS {
+            assert!(
+                (320..=7680).contains(width) && (240..=4320).contains(height),
+                "preset {name} is outside what the stage will allocate"
+            );
+        }
     }
 }

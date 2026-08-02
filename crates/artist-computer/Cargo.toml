@@ -10,8 +10,11 @@ description = "Generalized computer use: one observation contract over every app
 # The compositor is the heaviest thing in the tree to build and needs libgbm,
 # libEGL and a DRM render node. Gating it keeps the PTY, CDP and adapter rungs
 # — and the whole test suite — usable on a machine without any of that.
-default = ["stage-wayland"]
+default = ["stage-wayland", "ocr"]
 stage-wayland = ["dep:smithay", "dep:calloop"]
+# Text localization on rung 3. Separately gated because it carries ~20 MB of
+# model weights, and a build that never drives a GUI has no use for them.
+ocr = ["dep:rten", "dep:rten-tensor", "dep:rten-onnx"]
 
 [dependencies]
 anyhow = "1"
@@ -19,6 +22,14 @@ artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
 async-trait = "0.1"
 atspi-proxies = "0.13"
+
+# Rung 3 text localization. The same pure-Rust CPU runtime artist-memory uses
+# for embeddings — it loads ONNX directly, so PP-OCR needs no conversion step
+# and no C++ toolchain.
+rten = { version = "0.24", optional = true }
+rten-tensor = { version = "0.24", optional = true }
+# Graph inspection only, for the `inspect-ocr-graph` example.
+rten-onnx = { version = "0.24", optional = true }
 base64 = "0.23"
 blake3 = "1"
 # Must match the calloop smithay itself uses, or the XWayland event source
@@ -38,6 +49,12 @@ portable-pty = "0.9"
 rig-core = "0.41.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The viewer is a Wayland *client* on the user's real display, importing the
+# stage's render target as a dmabuf. Client and server in one crate is unusual
+# but correct here: they share the buffer type, and the whole design is that the
+# thing drawn into and the thing shown are the same memory.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 smithay = { version = "0.7", default-features = false, features = [
     "backend_egl",
     "backend_gbm",
@@ -54,9 +71,12 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"
+# So the fixture client can allocate a real GPU buffer and hand it over as a
+# dmabuf. Advertising `zwp_linux_dmabuf` is easy to get wrong in a way no
+# registry assertion catches — the global is there, the import fails, and the
+# client shows a blank window. Only a client that actually allocates proves it.
+# Already in the graph as smithay's own allocator, so this costs no build time.
+gbm = "0.18"
 tokio = { version = "1", features = ["rt-multi-thread"] }
-# A Wayland client of our own is the highest-leverage test fixture in the crate:
-# it lets the compositor be exercised — windows, input, frame callbacks — with
-# no GUI, no real application, and no display of any kind.
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+# The test fixture drives the compositor with a client of our own; the same two
+# crates now also carry the viewer, so they are ordinary dependencies above.

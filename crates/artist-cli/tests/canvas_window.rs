@@ -121,7 +121,9 @@ async fn a_window_opens_renders_and_records_where_it_was() {
         "width was not measured from the window: {saved}"
     );
     assert!(
-        saved["height"].as_f64().is_some_and(|height| height >= 320.0),
+        saved["height"]
+            .as_f64()
+            .is_some_and(|height| height >= 320.0),
         "height was not measured from the window: {saved}"
     );
     assert!(

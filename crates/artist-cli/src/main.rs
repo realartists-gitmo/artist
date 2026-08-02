@@ -130,15 +130,39 @@ async fn run() -> Result<()> {
             }
         }
         Some(Command::Memory(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
-            let project = std::env::current_dir().context("find current project directory")?;
-            memory_command(config_root, &project, args.action).await?;
+            memory_command(config_root, args.action).await?;
         }
         Some(Command::Computer(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
             let project = std::env::current_dir().context("find current project directory")?;
             let sessions = SessionStore::new(config_root);
             match args.action {
+                args::ComputerCommand::Doctor { fix } => {
+                    let report = artist_computer::doctor::run();
+                    print!("{}", artist_computer::doctor::render(&report));
+                    if fix {
+                        println!();
+                        print!("{}", artist_computer::doctor::repair(&report));
+                        // Deliberately not re-running the checks and reporting
+                        // success here: a repair that claims to have worked
+                        // should be confirmed by a fresh run, not by the code
+                        // that just performed it.
+                    }
+                    // A blocker is worth a non-zero exit so a setup script can
+                    // branch on it without parsing the text.
+                    if !report.can_start_a_stage() {
+                        std::process::exit(1);
+                    }
+                }
                 args::ComputerCommand::Log { id } => {
                     computer_log(&sessions, &project, id.as_deref())?
+                }
+                args::ComputerCommand::Serve { socket } => computer_serve(socket).await?,
+                args::ComputerCommand::Call { json, socket } => computer_call(&json, socket)?,
+                args::ComputerCommand::Export { id, out } => {
+                    computer_export(&sessions, &project, id.as_deref(), out.as_deref())?
+                }
+                args::ComputerCommand::Replay { file, launch, heal } => {
+                    computer_replay(&file, launch.as_deref(), heal).await?
                 }
                 args::ComputerCommand::Distill { id, include_failed } => {
                     computer_distill(&sessions, &project, id.as_deref(), include_failed)?
@@ -375,7 +399,7 @@ async fn execute_prompt(
                     .find(|model| Some(&model.slug) == session_provider.model.as_ref())
                     .and_then(|model| model.effective_context_window())
             });
-    let durable_memory = open_memory(config_root, &project, &effective.memory).await;
+    let durable_memory = open_memory(config_root, &effective.memory).await;
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
         rules,
@@ -403,6 +427,12 @@ async fn execute_prompt(
         computer: None,
         // No canvas in a one-shot run, so nothing reads this registry.
         tools: artist_agent::ToolRegistryHandle::new(),
+        // A one-shot run is one session, and these handles are built once for
+        // it — so constructing the freezer here is the session scope.
+        prefix: artist_agent::prefix::PrefixFreezer::for_session(),
+        chain: artist_session::ChainState::new(),
+        capabilities: artist_session::ProviderCapabilities::for_session(),
+        statefulness: effective.statefulness,
     };
     extension_control.set_steering(Some(steering));
     extensions
@@ -770,6 +800,333 @@ fn computer_log(
 ///
 /// Failed programs are excluded by default: a macro built from steps that did
 /// not work is worse than no macro.
+/// Replay a distilled macro against a freshly launched application.
+///
+/// Blocking on purpose: this is a one-shot command, not part of the agent loop,
+/// so it builds its own runtime rather than borrowing one.
+/// Write the computer-use trajectory of a session as one JSON document.
+///
+/// Deliberately lossless and deliberately *not* the macro format. A macro drops
+/// everything that was not needed to repeat the task — observations, timings,
+/// failures, the anchors themselves — because carrying them would make replay
+/// brittle. A trajectory keeps them, because the things a harness scores and a
+/// fine-tune learns from are exactly what replay throws away: what the screen
+/// looked like, what was tried, and what happened next.
+/// Where a served session listens, unless told otherwise.
+fn computer_socket(given: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    if let Some(path) = given {
+        return Ok(path);
+    }
+    let runtime = std::env::var("XDG_RUNTIME_DIR")
+        .context("XDG_RUNTIME_DIR is not set; pass --socket")?;
+    Ok(std::path::Path::new(&runtime).join("artist-computer.sock"))
+}
+
+/// Hold one computer-use session open, taking tool calls over a socket.
+///
+/// One connection is one call: read a line of JSON, run it, write the reply,
+/// close. Deliberately not a persistent protocol — the state that matters lives
+/// in the registry, not in the connection, so a caller can be anything that can
+/// run a command and nothing is lost if it dies mid-task.
+async fn computer_serve(socket: Option<std::path::PathBuf>) -> Result<()> {
+    use rig_core::tool::PortableTool;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let path = computer_socket(socket)?;
+    // A stale socket from a crashed serve would otherwise make every later
+    // start fail with "address in use" and no hint as to why.
+    if path.exists() {
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            anyhow::bail!("another `artist computer serve` is already listening on {}", path.display());
+        }
+        std::fs::remove_file(&path)?;
+    }
+    // Tokio's listener, not std's: `main` is already inside a runtime, so
+    // building a second one and calling `block_on` panics with "cannot start a
+    // runtime from within a runtime". That is not a detail — the same mistake
+    // was sitting latent in `computer_replay`, which had never been run far
+    // enough to hit it.
+    let listener = tokio::net::UnixListener::bind(&path)
+        .with_context(|| format!("bind {}", path.display()))?;
+
+    let project = std::env::current_dir().context("current directory")?;
+    let registry = artist_computer::SurfaceRegistry::for_project(
+        &project,
+        artist_computer::host::DEFAULT_SCREEN,
+    );
+    let tool = artist_computer::ComputerTool::new(registry);
+
+    println!("listening on {}", path.display());
+    println!("drive it with: artist computer call '{{\"mode\":\"surfaces\"}}'");
+    println!("watch it with: artist computer call '{{\"mode\":\"watch\"}}'");
+
+    loop {
+        let (mut connection, _) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("accept: {error}");
+                continue;
+            }
+        };
+        let mut line = String::new();
+        {
+            let mut reader = BufReader::new(&mut connection);
+            if reader.read_line(&mut line).await.is_err() {
+                continue;
+            }
+        }
+        let reply = match serde_json::from_str::<artist_computer::ComputerArgs>(line.trim()) {
+            Ok(parsed) => match tool.call(parsed).await {
+                Ok(output) => output.render(),
+                // Errors are returned as text rather than as a transport
+                // failure: a model sees tool errors as content, so a rig that
+                // hid them behind a non-zero exit would be testing something
+                // other than what a model reads.
+                Err(error) => format!("ERROR: {error}"),
+            },
+            Err(error) => format!("ERROR: that is not valid `computer` arguments: {error}"),
+        };
+        let _ = connection.write_all(reply.as_bytes()).await;
+        let _ = connection.flush().await;
+        let _ = connection.shutdown().await;
+    }
+}
+
+/// Send one tool call to a running `serve` and print what comes back.
+fn computer_call(json: &str, socket: Option<std::path::PathBuf>) -> Result<()> {
+    use std::io::{Read, Write};
+
+    let path = computer_socket(socket)?;
+    let mut connection = std::os::unix::net::UnixStream::connect(&path).with_context(|| {
+        format!(
+            "no session at {}. Start one with `artist computer serve`.",
+            path.display()
+        )
+    })?;
+    // Validated here as well as in the server, so a typo is caught without a
+    // round trip and without the server having to describe it.
+    serde_json::from_str::<serde_json::Value>(json).context("the argument is not valid JSON")?;
+
+    connection.write_all(json.trim().as_bytes())?;
+    connection.write_all(b"\n")?;
+    connection.flush()?;
+    connection.shutdown(std::net::Shutdown::Write).ok();
+
+    let mut reply = String::new();
+    connection.read_to_string(&mut reply)?;
+    print!("{reply}");
+    if !reply.ends_with('\n') {
+        println!();
+    }
+    // A tool error is content, not a failed command — but a script driving this
+    // still wants to branch on it.
+    if reply.starts_with("ERROR:") {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn computer_export(
+    sessions: &SessionStore,
+    project: &std::path::Path,
+    id: Option<&str>,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    let id = match id {
+        Some(id) => id.to_owned(),
+        None => sessions
+            .list()?
+            .into_iter()
+            .filter(|session| session.project == project)
+            .max_by_key(|session| session.created_at_ms)
+            .map(|session| session.id)
+            .context("no sessions for this project")?,
+    };
+    let (_, events) = sessions.peek(&id)?;
+
+    let mut steps = Vec::new();
+    for envelope in &events {
+        let entry = match envelope.event() {
+            artist_session::SessionEvent::ComputerObserved(observed) => serde_json::json!({
+                "kind": "observed",
+                "at_ms": envelope.ts,
+                "call": observed.internal_call_id,
+                "surface": observed.surface,
+                "epoch": observed.epoch,
+                "rung": observed.rung,
+                "full": observed.full,
+                "nodes": observed.nodes,
+                "bytes": observed.bytes,
+                // The digest, not the pixels: a trajectory stays a document you
+                // can read, and `artist computer frame <sha>` writes the image
+                // out when one is actually wanted.
+                "image": observed.image,
+            }),
+            artist_session::SessionEvent::ComputerActed(acted) => serde_json::json!({
+                "kind": "acted",
+                "at_ms": envelope.ts,
+                "call": acted.internal_call_id,
+                "surface": acted.surface,
+                "epoch": acted.epoch,
+                "steps": acted.steps.iter().map(|step| serde_json::json!({
+                    "action": step.action,
+                    "anchor": step.anchor,
+                    // Both halves of the cross-check, because a mismatch between
+                    // them is the most informative thing in a failed run.
+                    "claimed_label": step.label,
+                    "resolved_name": step.resolved_name,
+                    "payload": step.payload,
+                    "outcome": step.outcome,
+                })).collect::<Vec<_>>(),
+                "settled_ms": acted.settled_ms,
+                "expect": acted.expect,
+                "expect_met": acted.expect_met,
+                "failed_step": acted.failed_step,
+            }),
+            artist_session::SessionEvent::ComputerStageOpened(opened) => serde_json::json!({
+                "kind": "stage_opened",
+                "at_ms": envelope.ts,
+                "stage": opened.stage,
+                "backend": opened.backend,
+                "display": opened.display,
+            }),
+            artist_session::SessionEvent::ComputerStageClosed(closed) => serde_json::json!({
+                "kind": "stage_closed",
+                "at_ms": envelope.ts,
+                "stage": closed.stage,
+                "reason": closed.reason,
+            }),
+            _ => continue,
+        };
+        steps.push(entry);
+    }
+
+    let document = serde_json::json!({
+        "format": "artist.computer.trajectory/1",
+        "session": id,
+        "project": project.display().to_string(),
+        "steps": steps,
+    });
+    let text = serde_json::to_string_pretty(&document)?;
+
+    match out {
+        Some(path) => {
+            std::fs::write(path, text.as_bytes())
+                .with_context(|| format!("write {}", path.display()))?;
+            // Said plainly rather than silently: an export that wrote nothing
+            // because the session had no computer use looks identical to a
+            // successful one from the shell.
+            eprintln!(
+                "wrote {} step(s) to {}",
+                steps_len(&document),
+                path.display()
+            );
+        }
+        None => println!("{text}"),
+    }
+    Ok(())
+}
+
+fn steps_len(document: &serde_json::Value) -> usize {
+    document
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0)
+}
+
+async fn computer_replay(
+    file: &std::path::Path,
+    launch: Option<&str>,
+    heal: bool,
+) -> Result<()> {
+    use artist_computer::macros::{Healing, Macro};
+
+    let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    let recorded: Macro =
+        serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?;
+
+    // The macro's own launch, unless one was given. A macro that records how to
+    // bring up its own subject is a complete artifact; one that does not needs
+    // telling, and saying which is which beats failing with "missing argument".
+    let (program, args) = match launch {
+        Some(given) => {
+            let mut words = given.split_whitespace().map(str::to_owned);
+            let program = words.next().context("--launch is empty")?;
+            (program, words.collect::<Vec<String>>())
+        }
+        None => {
+            let recorded = recorded.launch.clone().with_context(|| {
+                format!(
+                    "{} does not record how to start the application it was run against \
+                     (it predates that being recorded). Pass --launch \"<command>\".",
+                    file.display()
+                )
+            })?;
+            (recorded.program, recorded.args)
+        }
+    };
+
+    // Already inside `main`'s runtime; building a second one here panics.
+    {
+        let project = std::env::current_dir().context("current directory")?;
+        let registry = artist_computer::SurfaceRegistry::for_project(
+            &project,
+            artist_computer::host::DEFAULT_SCREEN,
+        );
+        let launched = registry
+            .host()
+            .launch(&program, &args, None)
+            .await
+            .map_err(|error| anyhow::anyhow!("launch {program}: {error}"))?;
+        let id = registry.attach_with_declines(launched.surface, launched.declined);
+        let attached = registry
+            .get(&id)
+            .context("the surface vanished immediately after attaching")?;
+
+        let mut book = attached.book.lock().await;
+        let outcome = artist_computer::macros::replay(
+            attached.surface.as_ref(),
+            &mut book,
+            &recorded,
+            if heal {
+                Healing::Allowed
+            } else {
+                Healing::Never
+            },
+        )
+        .await;
+
+        match outcome {
+            Ok(done) => {
+                println!(
+                    "replayed {} of {} program(s)",
+                    done.completed,
+                    recorded.programs.len()
+                );
+                // Printed even on success, because a healed replay succeeding is
+                // exactly when nobody would otherwise look.
+                if let Some(note) = done.note() {
+                    print!("{note}");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // A drift is the macro doing its job, not a crash: the interface
+                // moved and it stopped rather than clicking something else.
+                eprintln!("{error}");
+                if !heal {
+                    eprintln!(
+                        "If this interface merely renames things, `--heal` will \
+                         re-derive the target and tell you what it substituted."
+                    );
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 fn computer_distill(
     sessions: &SessionStore,
     project: &std::path::Path,
@@ -830,8 +1187,27 @@ fn computer_distill(
         println!("no replayable programs in session {id}");
         return Ok(());
     }
+    // The last graphical launch in the session. "Last" rather than "first"
+    // because a session that opened several things ends up working in the most
+    // recent one, and that is what the recorded programs act on.
+    let launch = events
+        .iter()
+        .filter_map(|envelope| match envelope.event() {
+            artist_session::SessionEvent::ComputerLaunched(launched) => {
+                Some(artist_computer::macros::MacroLaunch {
+                    program: launched.program,
+                    args: launched.args,
+                    cwd: launched.cwd,
+                    gui: launched.gui,
+                })
+            }
+            _ => None,
+        })
+        .next_back();
+
     let distilled = artist_computer::macros::Macro {
         session: id,
+        launch,
         programs,
     };
     println!("{}", serde_json::to_string_pretty(&distilled)?);
@@ -1126,17 +1502,42 @@ fn project_state_dir(
 /// a missing embedding model or an unreadable database should cost recall, not
 /// the ability to work. The reason it is disabled by default is the same one —
 /// silently degrading to lexical-only recall would read as memory being broken.
+///
+/// Does the open failure mean someone else holds the store?
+///
+/// Matched on the message because the lock failure surfaces from RocksDB as a
+/// C++ status string through two layers of wrapping, with no typed error to
+/// match on. Getting this wrong only costs a less specific warning, never
+/// correctness — both branches degrade to the same "no memory".
+fn is_locked(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("lock") || text.contains("no locks available") || text.contains("resource busy")
+}
+
 async fn open_memory(
     config_root: &std::path::Path,
-    project: &std::path::Path,
     settings: &settings::MemoryConfig,
 ) -> Option<artist_agent::memory::MemoryHandle> {
     if !settings.enabled {
         return None;
     }
-    let state_dir = project_state_dir(config_root, project).ok()?;
-    let memory = match artist_memory::Memory::open(config_root, &state_dir).await {
+    let memory = match artist_memory::Memory::open(config_root).await {
         Ok(memory) => memory,
+        // RocksDB takes an exclusive lock on the store directory. Memory is one
+        // undivided store now, so *any* other running artist holds it, not just
+        // one in this project — which makes the collision far more likely than
+        // it used to be, and worth saying plainly rather than emitting a
+        // generic warning that reads like a bug and scrolls away unread.
+        Err(error) if is_locked(&error) => {
+            eprintln!(
+                "warning: another artist already has memory open, so this session is \
+                 running WITHOUT memory.\n         \
+                 Facts written here will not be saved and past facts will not be recalled.\n         \
+                 Store: {}",
+                artist_memory::facts_path(config_root).display()
+            );
+            return None;
+        }
         Err(error) => {
             eprintln!("warning: memory disabled, could not open the store: {error}");
             return None;
@@ -1173,25 +1574,18 @@ async fn open_memory(
 /// `open_memory`: they must work when the subsystem is disabled in settings or
 /// when no embedding model is installed, since that is exactly when you want to
 /// inspect or rescue what is there.
-async fn memory_command(
-    config_root: &std::path::Path,
-    project: &std::path::Path,
-    action: args::MemoryCommand,
-) -> Result<()> {
+async fn memory_command(config_root: &std::path::Path, action: args::MemoryCommand) -> Result<()> {
     use args::MemoryCommand;
-    let state_dir = project_state_dir(config_root, project)?;
-    let memory = artist_memory::Memory::open(config_root, &state_dir)
+    let memory = artist_memory::Memory::open(config_root)
         .await
         .context("opening the memory store")?;
 
     match action {
         MemoryCommand::List => {
-            for (label, store) in [("project", memory.project()), ("global", memory.global())] {
-                let facts = store.live_facts().await?;
-                println!("{label}: {} fact(s)", facts.len());
-                for fact in facts {
-                    println!("  [{}] ({}) {}", fact.id, fact.origin, fact.text);
-                }
+            let facts = memory.store().live_facts().await?;
+            println!("{} fact(s)", facts.len());
+            for fact in facts {
+                println!("  [{}] ({}) {}", fact.id, fact.origin, fact.text);
             }
         }
         MemoryCommand::Search { query } => {
@@ -1203,37 +1597,30 @@ async fn memory_command(
                 println!("No memories matched.");
             }
             for hit in hits {
-                println!(
-                    "[{}] ({}, {:.4}) {}",
-                    hit.id,
-                    hit.scope.as_str(),
-                    hit.score,
-                    hit.text
-                );
+                println!("[{}] ({:.4}) {}", hit.id, hit.score, hit.text);
             }
         }
         MemoryCommand::Export => {
-            println!("{}", memory.project().export_json().await?);
+            println!("{}", memory.store().export_json().await?);
         }
         MemoryCommand::Import { path } => {
             let payload =
                 std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
-            memory.project().import_json(payload).await?;
+            memory.store().import_json(payload).await?;
             println!("Imported and reindexed.");
         }
         MemoryCommand::Reindex => {
-            memory.project().reindex().await?;
+            memory.store().reindex().await?;
             println!("Rebuilt every index.");
         }
         MemoryCommand::Verify => {
-            for (label, store) in [("project", memory.project()), ("global", memory.global())] {
-                println!(
-                    "{label}: schema v{:?}, {} live fact(s), {} chunk(s)",
-                    store.schema_version().await?,
-                    store.fact_count().await?,
-                    store.chunk_count().await?,
-                );
-            }
+            let store = memory.store();
+            println!(
+                "schema v{:?}, {} live fact(s), {} chunk(s)",
+                store.schema_version().await?,
+                store.fact_count().await?,
+                store.chunk_count().await?,
+            );
         }
     }
     Ok(())

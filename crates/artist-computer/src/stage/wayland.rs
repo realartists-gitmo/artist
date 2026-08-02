@@ -21,19 +21,52 @@
 //! receive `wl_surface.frame` after a commit will draw exactly one frame and
 //! then appear to hang — and it looks like a client bug, not a compositor one.
 //! They are sent after every render, and there is a test for it.
+//!
+//! **Globals are a compatibility surface, not a feature list.** A client
+//! decides what it is capable of by looking at the registry, and a missing
+//! global is not a graceful degradation — it is usually a hard exit or a
+//! silent fall back to a slower path. Three of the ones here are load-bearing
+//! for that reason:
+//!
+//! * `zwp_linux_dmabuf` is how a GPU client hands us a texture it already has.
+//!   Without it Chromium, any Vulkan or GL application, and Waydroid's Android
+//!   surfaces either read back through shared memory every frame or refuse to
+//!   start. It is advertised at version 4 with a feedback tranche naming our
+//!   render node, so a client allocates on the device we can actually import
+//!   from rather than guessing.
+//! * `wl_output` is how a client learns the screen exists. Toolkits that find
+//!   no output pick a default size, skip scale setup, and in several cases
+//!   never map a window at all — which reads from the outside as "the stage is
+//!   broken", not "an optional global is absent".
+//! * `xdg_decoration` lets us *insist* on server-side decorations. A client
+//!   drawing its own titlebar puts a close button on the stage that no rung
+//!   knows the geometry of, and the agent would be one stray click from
+//!   destroying the window it is working in.
+//!
+//! `wp_viewporter` and `wp_presentation` are the quieter two: the first because
+//! clients that scale their own buffers commit a viewport and expect it
+//! honoured, the second because a client that asks for presentation feedback
+//! and never receives it can throttle itself waiting. Advertising a global we
+//! do not service would be worse than not advertising it, so feedback is
+//! answered on every render.
 
 use std::sync::{Arc, Mutex};
 
 use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::surface::{
     WaylandSurfaceRenderElement, render_elements_from_surface_tree,
 };
-use smithay::backend::renderer::gles::{GlesRenderbuffer, GlesRenderer};
+use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{draw_render_elements, on_commit_buffer_handler};
-use smithay::backend::renderer::{Bind, Color32F, Frame as RenderFrame, Offscreen, Renderer};
+use smithay::backend::renderer::{Bind, Color32F, Frame as RenderFrame, ImportDma, Renderer};
+use smithay::desktop::utils::{OutputPresentationFeedback, take_presentation_feedback_surface_tree};
 use smithay::input::{Seat, SeatHandler, SeatState};
+use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Scale, Subpixel};
+use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::{wl_buffer, wl_seat, wl_surface};
 use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
@@ -43,16 +76,25 @@ use smithay::wayland::compositor::{
     CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
     with_surface_tree_downward,
 };
+use smithay::wayland::dmabuf::{
+    DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+};
+use smithay::wayland::output::{OutputHandler, OutputManagerState};
+use smithay::wayland::presentation::{PresentationState, Refresh};
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::viewporter::ViewporterState;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::model::{Frame, Rect};
@@ -71,6 +113,44 @@ use crate::stage::{
 /// shows; the *number* of outputs is not.
 const DEFAULT_WIDTH: i32 = 1920;
 const DEFAULT_HEIGHT: i32 = 1080;
+
+/// The refresh rate the stage reports, in mHz — 60 Hz.
+///
+/// Nothing here is actually paced by it: rendering happens when a client
+/// commits damage and not otherwise. It is reported because a client that reads
+/// a refresh of zero may treat the output as disabled, and because presentation
+/// feedback carries the figure a client uses to decide how far ahead to draw.
+const STAGE_REFRESH_MHZ: i32 = 60_000;
+
+/// `CLOCK_MONOTONIC`, the clock presentation timestamps are on.
+///
+/// It is the only one that cannot step backwards, which is exactly the property
+/// a client pacing itself off these timestamps depends on.
+const CLOCK_MONOTONIC: u32 = 1;
+
+/// How many buffers the stage cycles through.
+///
+/// Three, not two. Two is enough to stop a viewer seeing a frame *being drawn*,
+/// but not enough to stop the stage drawing into one the compositor is *still
+/// displaying* — it has only one other choice, and if that one is held there is
+/// nowhere to go. A third gives the renderer somewhere to be while the
+/// compositor finishes with the other two, which is what removes the last of
+/// the tearing under rapid damage such as pointer motion.
+pub const RENDER_BUFFERS: usize = 3;
+
+/// The stage's buffers, which one holds a finished frame, and which are still
+/// held by a viewer.
+///
+/// `held` is written by the viewer and read by the compositor thread: a bit per
+/// buffer, set when it is attached and cleared on `wl_buffer.release`. Without
+/// it the renderer has no way to know a buffer is on screen, which is exactly
+/// how a half-drawn frame reached the display.
+type RenderTargets = (
+    [Dmabuf; RENDER_BUFFERS],
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]>,
+);
+type RenderTargetReply = tokio::sync::oneshot::Sender<RenderTargets>;
 
 /// Commands the proxy sends to the compositor thread.
 enum StageCommand {
@@ -98,6 +178,8 @@ enum StageCommand {
     ),
     /// The stage's X11 display number, once XWayland is ready.
     X11Display(tokio::sync::oneshot::Sender<Option<u32>>),
+    /// Both render buffers and the index of the one holding a finished frame.
+    RenderTarget(RenderTargetReply),
     Shutdown,
 }
 
@@ -130,6 +212,30 @@ struct StageState {
     shm_state: ShmState,
     seat_state: SeatState<Self>,
     data_device_state: DataDeviceState,
+    dmabuf_state: DmabufState,
+    /// The dmabuf global's identity, compared in [`DmabufHandler::dmabuf_imported`]
+    /// so a buffer offered against some other global is refused rather than
+    /// imported into the wrong renderer.
+    dmabuf_global: DmabufGlobal,
+    /// Held only to keep their globals alive. Dropping either withdraws the
+    /// global from the registry, which for a client that already bound it is a
+    /// protocol error rather than a graceful loss of a feature.
+    _xdg_decoration_state: XdgDecorationState,
+    _viewporter_state: ViewporterState,
+    _presentation_state: PresentationState,
+    _output_manager_state: OutputManagerState,
+    /// The stage's single virtual screen. Surfaces are entered onto it as they
+    /// appear, because a client that has never received `wl_surface.enter` does
+    /// not know which output it is on and cannot pick a scale.
+    output: Output,
+    /// The renderer lives in the state rather than beside it because a dmabuf
+    /// import is a *protocol* event: the client asks, and we have to answer with
+    /// the renderer before replying. Every other user of it goes through a
+    /// disjoint field borrow.
+    renderer: GlesRenderer,
+    /// Presentation feedback is sequenced, and a client that sees the counter
+    /// go backwards is entitled to treat it as a compositor fault.
+    frame_sequence: u64,
     seat: Seat<Self>,
     windows: Vec<Managed>,
     next_key: u64,
@@ -244,16 +350,25 @@ impl XdgShellHandler for StageState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let (width, height) = (self.width, self.height);
-        // Server-side decorations are not negotiated here, so a toplevel is
-        // simply given the whole stage. A client that draws its own titlebar
-        // would otherwise put controls we have no geometry for.
+        // A toplevel is simply given the whole stage, undecorated. The mode is
+        // set in the *initial* configure rather than waiting for the client to
+        // ask through xdg-decoration: a client that never binds that global
+        // would otherwise still draw its own titlebar, and this is the one
+        // configure every client is guaranteed to read.
         surface.with_pending_state(|state| {
             state.size = Some((width, height).into());
+            state.decoration_mode = Some(DecorationMode::ServerSide);
             state
                 .states
                 .set(smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated);
         });
         surface.send_configure();
+
+        // Put the surface on the output. A client that has not been told which
+        // output it is on cannot resolve its scale, and several toolkits will
+        // sit waiting for that before they draw anything at all — which looks
+        // from here like a window that never maps.
+        self.output.enter(surface.wl_surface());
 
         self.next_key += 1;
         let key = WindowKey(self.next_key);
@@ -275,6 +390,9 @@ impl XdgShellHandler for StageState {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        // Paired with the `enter` above so the output does not accumulate a
+        // dead weak reference per window for the life of the stage.
+        self.output.leave(surface.wl_surface());
         self.windows.retain(|window| window.toplevel != surface);
         self.dirty = true;
     }
@@ -321,11 +439,85 @@ impl ShmHandler for StageState {
     }
 }
 
+impl OutputHandler for StageState {}
+
+impl DmabufHandler for StageState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(&mut self, global: &DmabufGlobal, dmabuf: Dmabuf, notifier: ImportNotifier) {
+        // The import is attempted *now*, not deferred to the first render.
+        // A client that is told its buffer was accepted and then gets a blank
+        // window has no way to recover; one that is told the import failed
+        // falls back to shared memory and keeps working. Answering honestly
+        // here is the difference between a slow client and a broken one.
+        if global != &self.dmabuf_global {
+            notifier.failed();
+            return;
+        }
+        match self.renderer.import_dmabuf(&dmabuf, None) {
+            Ok(_) => {
+                let _ = notifier.successful::<StageState>();
+            }
+            Err(error) => {
+                eprintln!("artist: stage refused a client dmabuf: {error}");
+                notifier.failed();
+            }
+        }
+    }
+}
+
+impl XdgDecorationHandler for StageState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        force_server_side_decorations(&toplevel);
+    }
+
+    /// The client's preference is read and then overruled, deliberately.
+    ///
+    /// A client-drawn titlebar is pixels the compositor has no geometry for:
+    /// its close button does not appear at any rung, so the agent cannot avoid
+    /// it and cannot deliberately use it either. Server-side means the stage
+    /// owns the whole window frame, which here is no frame at all — the
+    /// toplevel gets the entire output.
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        force_server_side_decorations(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        force_server_side_decorations(&toplevel);
+    }
+}
+
+fn force_server_side_decorations(toplevel: &ToplevelSurface) {
+    toplevel.with_pending_state(|state| {
+        state.decoration_mode = Some(DecorationMode::ServerSide);
+    });
+    // Unconditional, and `send_pending_configure` would be the bug here.
+    // The mode is already `ServerSide` from the initial configure, so "has the
+    // pending state changed?" answers *no* in the ordinary case — a client
+    // binds xdg-decoration after its first configure, asks for client-side,
+    // and smithay suppresses the reply because nothing changed. The client is
+    // then left waiting for a configure the protocol promises it, and settles
+    // on its own default. This cost a test.
+    //
+    // Before the initial configure there is nothing to do: the mode is in the
+    // pending state and the initial configure will carry it.
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_configure();
+    }
+}
+
 delegate_compositor!(StageState);
 delegate_xdg_shell!(StageState);
+delegate_xdg_decoration!(StageState);
 delegate_shm!(StageState);
 delegate_seat!(StageState);
 delegate_data_device!(StageState);
+delegate_dmabuf!(StageState);
+delegate_output!(StageState);
+delegate_viewporter!(StageState);
+delegate_presentation!(StageState);
 
 #[derive(Default)]
 struct StageClientState {
@@ -350,9 +542,7 @@ impl ClientData for StageClientState {
 ///   nothing there would let a settle predicate conclude the screen had gone
 ///   quiet while it was in fact fully repainting.
 fn surface_damage(surface: &wl_surface::WlSurface, full_screen: Rect) -> Vec<Rect> {
-    use smithay::wayland::compositor::{
-        BufferAssignment, Damage as SurfaceDamage, with_states,
-    };
+    use smithay::wayland::compositor::{BufferAssignment, Damage as SurfaceDamage, with_states};
 
     let (rects, painted) = with_states(surface, |states| {
         let mut cached = states.cached_state.get::<SurfaceAttributes>();
@@ -568,6 +758,21 @@ impl StageWayland {
         self.ask(StageCommand::X11Display).await.ok().flatten()
     }
 
+    /// The buffer the stage draws into, for a viewer to import.
+    ///
+    /// A handle to the very memory the compositor renders into, not a copy: a
+    /// viewer that imports this and attaches it to a surface on the user's own
+    /// display is showing the stage with no readback, no encode and no transfer.
+    /// That is only possible because the target is allocated through GBM — an
+    /// opaque `GlesRenderbuffer` could not leave the process at all.
+    ///
+    /// **The frame it holds is whatever was drawn last.** There is no implicit
+    /// synchronisation here; a viewer redraws on the stage's damage signal,
+    /// which is the same signal the settle predicates use.
+    pub async fn render_target(&self) -> Option<RenderTargets> {
+        self.ask(StageCommand::RenderTarget).await.ok()
+    }
+
     /// Merge in the bus environment (and anything else) before launching apps.
     pub fn extend_env(&mut self, extra: &StageEnv) {
         for (key, value) in extra.iter() {
@@ -709,8 +914,21 @@ impl Stage for StageWayland {
 /// surface at all: open the DRM render device, wrap it in GBM, make an EGL
 /// display from that, and take a context. Everything is drawn into an offscreen
 /// buffer that only ever leaves as a capture.
-fn make_renderer() -> Result<GlesRenderer, String> {
+///
+/// The device's `dev_t` comes back with the renderer because dmabuf feedback
+/// has to name it. A client picks its allocator from that number, so getting it
+/// wrong on a multi-GPU machine means every buffer it hands us is one we cannot
+/// import — and the failure appears as a client that renders nothing rather
+/// than as a device mismatch.
+/// The stage's buffer allocator.
+///
+/// `GbmAllocator` rather than the bare `GbmDevice`: the allocation flags belong
+/// with the allocator, and every buffer the stage makes wants the same ones.
+type StageGbm = smithay::backend::allocator::gbm::GbmAllocator<smithay::backend::drm::DrmDeviceFd>;
+
+fn make_renderer() -> Result<(GlesRenderer, StageGbm, u64), String> {
     use smithay::backend::allocator::gbm::GbmDevice;
+    use std::os::linux::fs::MetadataExt;
 
     let candidates = ["/dev/dri/renderD128", "/dev/dri/renderD129"];
     let mut last = String::from("no DRM render node found");
@@ -718,10 +936,24 @@ fn make_renderer() -> Result<GlesRenderer, String> {
         if !std::path::Path::new(path).exists() {
             continue;
         }
-        let file = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
             Ok(file) => file,
             Err(error) => {
                 last = format!("open {path}: {error}");
+                continue;
+            }
+        };
+        // Read the device id from the open handle, not the path: the two can
+        // differ if the node is replaced between the open and the stat, and the
+        // fd is what the renderer is actually bound to.
+        let device = match file.metadata() {
+            Ok(metadata) => metadata.st_rdev(),
+            Err(error) => {
+                last = format!("stat {path}: {error}");
                 continue;
             }
         };
@@ -733,6 +965,16 @@ fn make_renderer() -> Result<GlesRenderer, String> {
                 continue;
             }
         };
+        // Cloned rather than moved: `EGLDisplay::new` consumes the device, and
+        // the stage needs it afterwards to allocate a render target that can be
+        // *exported*. A `GlesRenderbuffer` cannot be — it is an opaque GL object
+        // — so a viewer on the user's display would have no way to receive the
+        // frame except a full readback and re-encode per frame, which is the
+        // whole cost this avoids.
+        let allocator = smithay::backend::allocator::gbm::GbmAllocator::new(
+            gbm.clone(),
+            smithay::backend::allocator::gbm::GbmBufferFlags::RENDERING,
+        );
         let display = match unsafe { EGLDisplay::new(gbm) } {
             Ok(display) => display,
             Err(error) => {
@@ -748,9 +990,37 @@ fn make_renderer() -> Result<GlesRenderer, String> {
             }
         };
         return unsafe { GlesRenderer::new(context) }
+            .map(|renderer| (renderer, allocator, device))
             .map_err(|error| format!("gles renderer on {path}: {error}"));
     }
     Err(last)
+}
+
+/// Allocate the stage's render target as an exportable GPU buffer.
+///
+/// Two steps that have to stay together: GBM allocates it, and `export` turns it
+/// into a `Dmabuf` — a set of file descriptors another process can import. The
+/// renderer binds the `Dmabuf` rather than the `GbmBuffer`, so the thing being
+/// drawn into and the thing handed out are the same memory, not a copy of it.
+fn allocate_target(allocator: &mut StageGbm, width: i32, height: i32) -> Result<Dmabuf, String> {
+    use smithay::backend::allocator::Modifier;
+    use smithay::backend::allocator::gbm::GbmBufferFlags;
+
+    let buffer = allocator
+        .create_buffer_with_flags(
+            width as u32,
+            height as u32,
+            Fourcc::Abgr8888,
+            &[Modifier::Linear],
+            // `RENDERING` alone. Mesa's iris rejects `WRITE` and `LINEAR` as
+            // flags outright when a modifier is named, which is the same trap
+            // the dmabuf client test hit from the other side.
+            GbmBufferFlags::RENDERING,
+        )
+        .map_err(|error| format!("allocate a {width}x{height} render target: {error}"))?;
+    buffer
+        .export()
+        .map_err(|error| format!("export the render target as a dmabuf: {error}"))
 }
 
 /// The compositor thread body.
@@ -771,7 +1041,7 @@ fn run_compositor(
     };
     let mut handle = display.handle();
 
-    let mut renderer = match make_renderer() {
+    let (renderer, mut allocator, render_device) = match make_renderer() {
         Ok(renderer) => renderer,
         Err(error) => {
             let _ = ready.send(Err(format!(
@@ -782,6 +1052,96 @@ fn run_compositor(
         }
     };
 
+    // The render target, allocated through GBM and exported as a dmabuf.
+    //
+    // Linear explicitly. A tiled buffer renders and reads back fine, but the
+    // point of exporting is that another process imports it, and linear is the
+    // one layout every consumer can accept. The stage is not fill-rate bound —
+    // it renders on damage, not at 60 Hz — so the tiling loss costs nothing
+    // measurable here and buys a zero-copy path out.
+    // *Two* targets, not one, and this is not an optimisation — it is a
+    // correctness fix. A viewer attaches one of these to a surface on the
+    // user's compositor, which then scans it out whenever it likes. Drawing
+    // into that same buffer means the compositor can sample a half-drawn frame,
+    // which showed up on screen as black geometry flashing over a window while
+    // it was being typed into. So the stage draws into the *back* buffer and
+    // publishes the finished one; a viewer only ever attaches a completed
+    // frame.
+    let mut allocated = Vec::with_capacity(RENDER_BUFFERS);
+    for _ in 0..RENDER_BUFFERS {
+        match allocate_target(&mut allocator, width, height) {
+            Ok(target) => allocated.push(target),
+            Err(error) => {
+                let _ = ready.send(Err(format!("stage render target: {error}")));
+                return;
+            }
+        }
+    }
+    let mut targets: [Dmabuf; RENDER_BUFFERS] = allocated
+        .try_into()
+        .expect("allocated exactly RENDER_BUFFERS");
+    let held: Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]> =
+        Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicBool::new(false)
+        }));
+    // Which of the two holds a finished frame. Shared with the viewer as an
+    // atomic rather than sent per frame: the viewer reads it on each repaint,
+    // so publishing is a single store and costs the compositor nothing.
+    let front = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut back = 1usize;
+
+    // The formats we advertise are the formats this renderer can genuinely
+    // import — asked of it directly rather than hardcoded, because the answer
+    // depends on the driver and the EGL extensions actually present. A
+    // hardcoded list is a promise the import path then breaks one client at a
+    // time.
+    let dmabuf_formats: Vec<_> = renderer.dmabuf_formats().iter().copied().collect();
+    let mut dmabuf_state = DmabufState::new();
+    let dmabuf_global = match DmabufFeedbackBuilder::new(render_device, dmabuf_formats).build() {
+        Ok(feedback) => {
+            dmabuf_state.create_global_with_default_feedback::<StageState>(&handle, &feedback)
+        }
+        Err(error) => {
+            // Version 3 is a real fallback rather than a failure: it carries the
+            // same format list without the device hint, which is all a
+            // single-GPU machine needs anyway.
+            eprintln!("artist: stage dmabuf feedback unavailable ({error}); advertising v3");
+            dmabuf_state.create_global::<StageState>(
+                &handle,
+                renderer
+                    .dmabuf_formats()
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+
+    let output = Output::new(
+        "artist-stage".to_owned(),
+        PhysicalProperties {
+            // A virtual screen has no physical size, but reporting zero makes
+            // clients that compute DPI divide by it. These are the millimetres
+            // of a common 24" panel, which yields an ordinary ~96 DPI.
+            size: (530, 300).into(),
+            subpixel: Subpixel::Unknown,
+            make: "artist".to_owned(),
+            model: "stage".to_owned(),
+        },
+    );
+    let mode = OutputMode {
+        size: (width, height).into(),
+        refresh: STAGE_REFRESH_MHZ,
+    };
+    let _output_global = output.create_global::<StageState>(&handle);
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        Some((0, 0).into()),
+    );
+    output.set_preferred(mode);
+
     let mut seat_state = SeatState::new();
     let seat = seat_state.new_wl_seat(&handle, "artist-stage");
     let mut state = StageState {
@@ -791,6 +1151,19 @@ fn run_compositor(
         shm_state: ShmState::new::<StageState>(&handle, Vec::new()),
         seat_state,
         data_device_state: DataDeviceState::new::<StageState>(&handle),
+        dmabuf_state,
+        dmabuf_global,
+        _xdg_decoration_state: XdgDecorationState::new::<StageState>(&handle),
+        _viewporter_state: ViewporterState::new::<StageState>(&handle),
+        // CLOCK_MONOTONIC. Presentation timestamps must be on the clock the
+        // client is told about, and it is the only one that does not step.
+        _presentation_state: PresentationState::new::<StageState>(&handle, CLOCK_MONOTONIC),
+        // With xdg-output, so clients get the output's logical geometry and
+        // name rather than inferring them from the mode.
+        _output_manager_state: OutputManagerState::new_with_xdg_output::<StageState>(&handle),
+        output,
+        renderer,
+        frame_sequence: 0,
         seat,
         windows: Vec::new(),
         next_key: 0,
@@ -827,27 +1200,18 @@ fn run_compositor(
     };
     let _ = ready.send(Ok(socket_name));
 
-    let size: Size<i32, smithay::utils::Buffer> = (width, height).into();
-    let mut target: GlesRenderbuffer = match renderer.create_buffer(Fourcc::Abgr8888, size) {
-        Ok(buffer) => buffer,
-        Err(error) => {
-            eprintln!("artist: stage offscreen buffer failed: {error}");
-            return;
-        }
-    };
-
     // XWayland needs a calloop `LoopHandle`, so the loop is calloop-driven —
     // but it deliberately keeps the same poll-and-service shape rather than
     // becoming fully event-driven. Blocking on readiness would starve the
     // command channel, which is not a pollable source here.
-    let mut event_loop: calloop::EventLoop<'static, StageState> = match calloop::EventLoop::try_new()
-    {
-        Ok(loop_) => loop_,
-        Err(error) => {
-            eprintln!("artist: stage event loop failed: {error}");
-            return;
-        }
-    };
+    let mut event_loop: calloop::EventLoop<'static, StageState> =
+        match calloop::EventLoop::try_new() {
+            Ok(loop_) => loop_,
+            Err(error) => {
+                eprintln!("artist: stage event loop failed: {error}");
+                return;
+            }
+        };
     start_xwayland(&handle, &event_loop.handle(), runtime_dir);
 
     let start = std::time::Instant::now();
@@ -867,16 +1231,36 @@ fn run_compositor(
                 &mut state,
                 &keyboard,
                 &pointer,
-                &mut renderer,
-                &mut target,
+                Buffers {
+                    targets: &mut targets,
+                    back,
+                    front: &front,
+                    held: &held,
+                },
                 command,
             );
         }
 
         if state.dirty {
             state.dirty = false;
-            match render(&mut renderer, &mut target, &mut state, start) {
-                Ok(()) => state.render_error = None,
+            // Choose somewhere to draw that is neither on screen nor still held
+            // by the viewer. Falling back to the current `back` when everything
+            // is held costs a torn frame in a situation that should not arise;
+            // refusing to draw at all would freeze the stage, which is worse.
+            back = (0..RENDER_BUFFERS)
+                .find(|index| {
+                    *index != front.load(std::sync::atomic::Ordering::Acquire)
+                        && !held[*index].load(std::sync::atomic::Ordering::Acquire)
+                })
+                .unwrap_or(back);
+            match render(&mut state, &mut targets[back], start) {
+                Ok(()) => {
+                    // Published only once the draw has finished and its fence
+                    // has been waited on, so what a viewer attaches is never
+                    // mid-frame.
+                    front.store(back, std::sync::atomic::Ordering::Release);
+                    state.render_error = None;
+                }
                 Err(error) => {
                     // Stay dirty so the next pass retries — a transient GL
                     // error should cost a frame, not the session. The 4 ms
@@ -931,16 +1315,18 @@ fn start_xwayland(
         }
     };
 
-    let inserted = loop_handle.insert_source(xwayland, move |event, _, state: &mut StageState| {
-        match event {
-            XWaylandEvent::Ready { display_number, .. } => {
-                state.x11_display = Some(display_number);
-            }
-            XWaylandEvent::Error => {
-                state.x11_display = None;
-            }
-        }
-    });
+    let inserted =
+        loop_handle.insert_source(
+            xwayland,
+            move |event, _, state: &mut StageState| match event {
+                XWaylandEvent::Ready { display_number, .. } => {
+                    state.x11_display = Some(display_number);
+                }
+                XWaylandEvent::Error => {
+                    state.x11_display = None;
+                }
+            },
+        );
     if let Err(error) = inserted {
         eprintln!("artist: stage XWayland source failed ({error})");
     }
@@ -948,14 +1334,29 @@ fn start_xwayland(
     std::mem::drop(client);
 }
 
+/// The render buffers and their bookkeeping, kept together because they are
+/// only ever meaningful together: a buffer without knowing whether it is on
+/// screen or held is a buffer you cannot safely draw into.
+struct Buffers<'a> {
+    targets: &'a mut [Dmabuf; RENDER_BUFFERS],
+    back: usize,
+    front: &'a Arc<std::sync::atomic::AtomicUsize>,
+    held: &'a Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]>,
+}
+
 fn handle_command(
     state: &mut StageState,
     keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
     pointer: &smithay::input::pointer::PointerHandle<StageState>,
-    renderer: &mut GlesRenderer,
-    target: &mut GlesRenderbuffer,
+    buffers: Buffers<'_>,
     command: StageCommand,
 ) {
+    let Buffers {
+        targets,
+        back,
+        front,
+        held,
+    } = buffers;
     match command {
         StageCommand::Windows(reply) => {
             let windows = state
@@ -998,8 +1399,6 @@ fn handle_command(
         }
         StageCommand::Capture(window, reply) => {
             let full = state.full_screen();
-            // The window key was being destructured and thrown away, so every
-            // caller asking for one window silently got the whole screen.
             let region = match window {
                 None => Ok(full),
                 Some(key) => match state.window(key) {
@@ -1014,12 +1413,43 @@ fn handle_command(
                 if let Some(error) = &state.render_error {
                     return Err(format!("the stage could not render: {error}"));
                 }
-                capture(renderer, target, full, region)
+                // For one window, recomposite with *only that window's* surface
+                // tree before reading back. Cropping the finished screen is not
+                // enough: every toplevel here is given the whole output, so the
+                // crop is the whole screen and a rung-3 surface would read every
+                // application's text as though it were its own.
+                if window.is_some() {
+                    // Drawn into the back buffer and read straight back, never
+                    // published: this is a partial composite of one window and
+                    // a viewer showing it would be showing a lie.
+                    draw(state, &mut targets[back], window)?;
+                    // The buffer now holds one window. Whatever is on screen
+                    // next has to be composited again from scratch, or the other
+                    // windows stay missing until something else happens to
+                    // damage them.
+                    state.dirty = true;
+                }
+                // One window reads what was just drawn; the whole screen reads
+                // the last *finished* frame rather than whatever the back
+                // buffer happens to hold mid-draw.
+                let index = if window.is_some() {
+                    back
+                } else {
+                    front.load(std::sync::atomic::Ordering::Acquire)
+                };
+                capture(&mut state.renderer, &mut targets[index], full, region)
             });
             let _ = reply.send(result);
         }
         StageCommand::X11Display(reply) => {
             let _ = reply.send(state.x11_display);
+        }
+        StageCommand::RenderTarget(reply) => {
+            // A clone of the handle, not of the memory: `Dmabuf` is a set of
+            // file descriptors behind an `Arc`, so a viewer importing this is
+            // reading the very pixels the compositor draws — which is the whole
+            // point of allocating it through GBM rather than as a renderbuffer.
+            let _ = reply.send((targets.clone(), Arc::clone(front), Arc::clone(held)));
         }
         StageCommand::Shutdown => state.running = false,
     }
@@ -1257,35 +1687,96 @@ fn deliver_text(
 /// error should cost one frame, not freeze every client on the stage
 /// permanently.
 fn render(
-    renderer: &mut GlesRenderer,
-    target: &mut GlesRenderbuffer,
     state: &mut StageState,
+    target: &mut Dmabuf,
     start: std::time::Instant,
 ) -> Result<(), String> {
-    let outcome = draw(renderer, target, state);
+    let outcome = draw(state, target, None);
 
     // After every render, without exception. See the module docs.
-    let time = start.elapsed().as_millis() as u32;
+    let elapsed = start.elapsed();
+    let time = elapsed.as_millis() as u32;
     for window in &state.windows {
         send_frames(window.toplevel.wl_surface(), time);
     }
+    answer_presentation_feedback(state, elapsed, outcome.is_ok());
     outcome
 }
 
+/// Settle every outstanding `wp_presentation` request from this frame.
+///
+/// Advertising the global obliges us to reply to each request exactly once. A
+/// client that asked for feedback and never hears back may hold off committing
+/// its next frame — so a compositor that offers the global and then stays
+/// silent is worse for that client than one that never offered it.
+///
+/// A failed render reports `discarded` rather than `presented`. The distinction
+/// is the whole content of the protocol: `presented` asserts those pixels
+/// reached a screen at that timestamp, and saying so about a frame that never
+/// drew would corrupt exactly the pacing this is for.
+fn answer_presentation_feedback(state: &mut StageState, elapsed: std::time::Duration, drawn: bool) {
+    let mut feedback = OutputPresentationFeedback::new(&state.output);
+    let output = state.output.clone();
+    for window in &state.windows {
+        take_presentation_feedback_surface_tree(
+            window.toplevel.wl_surface(),
+            &mut feedback,
+            // One output, and every surface is on it — so this is not a lookup
+            // so much as a statement of the stage's shape.
+            |_, _| Some(output.clone()),
+            // Nothing here is scanned out directly; the composite always goes
+            // through the renderer into the offscreen buffer.
+            |_, _| wp_presentation_feedback::Kind::empty(),
+        );
+    }
+
+    if !drawn {
+        feedback.discarded();
+        return;
+    }
+    state.frame_sequence += 1;
+    feedback.presented::<_, smithay::utils::Monotonic>(
+        elapsed,
+        Refresh::fixed(std::time::Duration::from_nanos(
+            1_000_000_000_000 / STAGE_REFRESH_MHZ as u64,
+        )),
+        state.frame_sequence,
+        wp_presentation_feedback::Kind::empty(),
+    );
+}
+
+/// Draw the stage, or one window of it.
+///
+/// `only` restricts the composite to a single window's surface tree, which is
+/// what makes per-window capture mean anything. Cropping the finished composite
+/// is not enough: every toplevel on this stage is given the whole output, so a
+/// crop of the screen is the screen — and a rung-3 surface reading text off it
+/// would read *every* application's text, not its own.
 fn draw(
-    renderer: &mut GlesRenderer,
-    target: &mut GlesRenderbuffer,
     state: &mut StageState,
+    target: &mut Dmabuf,
+    only: Option<WindowKey>,
 ) -> Result<(), String> {
-    let size: Size<i32, smithay::utils::Physical> = (state.width, state.height).into();
+    // Disjoint field borrows: the renderer is taken mutably while the window
+    // list is read. This is why the renderer lives in the state at all — a
+    // dmabuf import has to reach it from a protocol handler — and it costs
+    // nothing here beyond naming the two halves.
+    let StageState {
+        renderer,
+        windows,
+        width,
+        height,
+        ..
+    } = state;
+    let size: Size<i32, smithay::utils::Physical> = (*width, *height).into();
     let full = Rectangle::from_size(size);
 
     let mut framebuffer = renderer
         .bind(target)
         .map_err(|error| format!("bind for render: {error}"))?;
-    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = state
-        .windows
+    let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = windows
         .iter()
+        .filter(|window| only.is_none_or(|key| window.key == key))
         .flat_map(|window| {
             render_elements_from_surface_tree(
                 renderer,
@@ -1328,7 +1819,7 @@ fn draw(
 /// error rather than a smaller picture.
 fn capture(
     renderer: &mut GlesRenderer,
-    target: &mut GlesRenderbuffer,
+    target: &mut Dmabuf,
     screen: Rect,
     wanted: Rect,
 ) -> Result<Frame, String> {

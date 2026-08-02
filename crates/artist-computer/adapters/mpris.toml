@@ -1,0 +1,36 @@
+# Media players, through MPRIS.
+#
+# The clearest case the ladder exists for. Pausing a track by driving a GUI
+# means finding a window, finding a button in it, and clicking a coordinate that
+# moves when the album art changes. Every MPRIS player answers the same D-Bus
+# method, and the answer is the same whether the player is visible, minimised,
+# or on another workspace.
+#
+# `--dest` here is the well-known name for the player itself; the matcher below
+# covers the common ones. A player not listed is still driveable by writing four
+# lines into your own adapters directory, which is the whole point of the format.
+name = "mpris"
+match_app_id = [
+  "*spotify*", "*vlc*", "*mpv*", "*rhythmbox*", "*clementine*",
+  "*strawberry*", "*elisa*", "*lollypop*", "*audacious*", "*celluloid*",
+]
+
+[[action]]
+name = "playpause"
+description = "Toggle play/pause without touching the window."
+dbus = { service = "org.mpris.MediaPlayer2.{value}", path = "/org/mpris/MediaPlayer2", interface = "org.mpris.MediaPlayer2.Player", method = "PlayPause" }
+
+[[action]]
+name = "next"
+description = "Skip to the next track."
+dbus = { service = "org.mpris.MediaPlayer2.{value}", path = "/org/mpris/MediaPlayer2", interface = "org.mpris.MediaPlayer2.Player", method = "Next" }
+
+[[action]]
+name = "previous"
+description = "Go back to the previous track."
+dbus = { service = "org.mpris.MediaPlayer2.{value}", path = "/org/mpris/MediaPlayer2", interface = "org.mpris.MediaPlayer2.Player", method = "Previous" }
+
+[[action]]
+name = "stop"
+description = "Stop playback."
+dbus = { service = "org.mpris.MediaPlayer2.{value}", path = "/org/mpris/MediaPlayer2", interface = "org.mpris.MediaPlayer2.Player", method = "Stop" }

@@ -18,13 +18,18 @@
 //!   emits nodes and consumes steps; everything model-facing lives above it.
 
 pub mod anchors;
+pub mod doctor;
+pub mod extract;
 pub mod host;
 pub mod keys;
 pub mod ladder;
 pub mod macros;
 pub mod model;
+#[cfg(feature = "ocr")]
+pub mod ocr;
 pub mod program;
 pub mod render;
+pub mod search;
 pub mod stage;
 pub mod surface;
 pub mod tool;
@@ -33,4 +38,4 @@ pub use anchors::{AnchorBook, AnchorError, Change, Entry, Observation};
 pub use model::{Binding, Caps, Frame, Node, NodeState, Rect, Role, Rung, Snapshot, SurfaceId};
 pub use program::{Program, Settle, SettleKind, SettleOutcome, Step, StepError, Target};
 pub use surface::{ProgramReport, StepReport, Surface, run_program};
-pub use tool::{ComputerTool, SurfaceRegistry};
+pub use tool::{ComputerArgs, ComputerTool, Restorable, SurfaceRegistry};

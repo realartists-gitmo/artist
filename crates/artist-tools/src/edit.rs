@@ -110,9 +110,22 @@ impl PortableTool for EditTool {
             .map(|line| format!("{}: {}", line.anchor, line.text))
             .collect::<Vec<_>>()
             .join("\n");
+        // Who calls what was just changed. Reported unasked because asking
+        // requires already suspecting there are callers — see `crate::annotate`.
+        let changed: Vec<usize> = result
+            .result
+            .lines
+            .iter()
+            .filter(|line| !before_lines.contains(line.text.as_str()))
+            .map(|line| line.line_number)
+            .collect();
+        let impact = crate::annotate::after_commit(&self.0, &target, &changed)
+            .await
+            .unwrap_or_default();
+
         Ok(output::head(
             format!(
-                "Applied edit to {}.\n\nMnemonic updates:\n{}\n\nDiff:\n{}",
+                "Applied edit to {}.\n\nMnemonic updates:\n{}\n\nDiff:\n{}{impact}",
                 args.path, updates, diff
             ),
             output::OUTPUT_CAP,

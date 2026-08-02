@@ -55,6 +55,11 @@ pub enum Confidence {
     /// Multiple candidates, no disambiguation possible. Kept for grep-like
     /// fallback; off by default in `callers --include-ambiguous`.
     Ambiguous,
+    /// No candidates anywhere in the project: stdlib, a dependency, or a trait
+    /// method whose implementation is not visible. Distinct from `Ambiguous`,
+    /// which means the opposite problem — too many candidates rather than none.
+    /// Conflating the two is what made `callees` read as broken.
+    External,
 }
 
 impl Confidence {
@@ -63,6 +68,7 @@ impl Confidence {
             Self::Exact => "Exact",
             Self::Inferred => "Inferred",
             Self::Ambiguous => "Ambiguous",
+            Self::External => "External",
         }
     }
 }

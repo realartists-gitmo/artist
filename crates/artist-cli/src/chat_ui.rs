@@ -305,6 +305,14 @@ struct SubmitContext<'a> {
     disabled_tools: &'a [String],
     compaction: crate::settings::CompactionConfig,
     computer_settings: crate::settings::ComputerConfig,
+    /// Cloned from the session-lived state on [`ChatContext`], never built
+    /// here: this struct is rebuilt for every submission.
+    prefix: artist_agent::prefix::PrefixFreezer,
+    chain: artist_session::ChainState,
+    capabilities: artist_session::ProviderCapabilities,
+    /// Resolved from the layered settings once, then carried; `Copy`, so this
+    /// is a value rather than a borrow of the settings.
+    statefulness: artist_agent::Statefulness,
     show_splash: bool,
     rules_engine: &'a RulesEngine,
     rules_handle: &'a RulesHandle,
@@ -459,6 +467,14 @@ struct ChatContext<'a> {
     tool_registry: &'a artist_agent::ToolRegistryHandle,
     /// Driveable surfaces for computer use, shared across every turn.
     computer: artist_computer::SurfaceRegistry,
+    /// The session's frozen system prompt. Lives here, not on the per-turn
+    /// context below, because a freezer built per turn freezes nothing.
+    prefix: artist_agent::prefix::PrefixFreezer,
+    /// Provider-side conversation position and refused capabilities. Same
+    /// reason as the freezer: a provider client is rebuilt every turn, so
+    /// anything it should remember between turns has to be held out here.
+    chain: artist_session::ChainState,
+    capabilities: artist_session::ProviderCapabilities,
 }
 
 pub struct ChatResources<'a> {
@@ -607,6 +623,9 @@ pub async fn run(
                     canvas: resources.canvas,
                     canvas_control: resources.canvas_control,
                     tool_registry: resources.tool_registry,
+                    prefix: artist_agent::prefix::PrefixFreezer::for_session(),
+                    chain: artist_session::ChainState::new(),
+                    capabilities: artist_session::ProviderCapabilities::for_session(),
                     // Adapters are discovered per project and the screen size
                     // comes from `[computer] screen`; both were previously
                     // resolved and then never reached the registry.
@@ -919,14 +938,24 @@ async fn run_loop(
         .store_path
         .parent()
         .unwrap_or_else(|| Path::new("."));
-    let durable_memory =
-        crate::open_memory(config_root, context.project, &context.settings.memory).await;
+    let durable_memory = crate::open_memory(config_root, &context.settings.memory).await;
     // Reconcile against the log so a rewound session does not recall facts the
     // user has already taken back.
     if let Some(handle) = &durable_memory {
-        let report = handle.memory().project().reconcile(&resumed_events).await;
-        if let Err(error) = report {
-            eprintln!("warning: could not reconcile memory with the session log: {error}");
+        let embedder = handle.embedder().map(|e| e.model_id()).unwrap_or_default();
+        match handle
+            .memory()
+            .store()
+            .reconcile(&resumed_events, embedder)
+            .await
+        {
+            Ok(report) if report.restored > 0 => {
+                eprintln!("memory: restored {} fact(s) from the log", report.restored);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("warning: could not reconcile memory with the session log: {error}")
+            }
         }
         if context.settings.memory.index_code {
             handle.spawn_code_index(context.project.to_path_buf());
@@ -1383,6 +1412,10 @@ async fn run_loop(
                         canvas_control: context.canvas_control,
                         tool_registry: context.tool_registry,
                         computer: context.computer.clone(),
+                        prefix: context.prefix.clone(),
+                        chain: context.chain.clone(),
+                        capabilities: context.capabilities.clone(),
+                        statefulness: context.settings.statefulness,
                         provider: session_provider.as_ref().expect("provider initialized"),
                         sessions: context.sessions,
                         project: context.project,
@@ -2256,7 +2289,8 @@ async fn submit(
     // Decay first: reclaimed observation context counts toward the compaction
     // threshold below, and dropping a few stale screenshots is far cheaper than
     // summarizing the conversation.
-    match crate::compaction::decay(active, context.provider, context.computer_settings.clone()).await
+    match crate::compaction::decay(active, context.provider, context.computer_settings.clone())
+        .await
     {
         Ok(Some(decayed)) => *history = decayed,
         Ok(None) => {}
@@ -2413,12 +2447,13 @@ async fn submit(
         // `enabled = false` means the tool is not offered at all, rather than
         // offered and failing: a mode the model discovers by trying it is worse
         // than one that was never there.
-        computer: context
-            .computer_settings
-            .enabled
-            .then_some(task_computer),
+        computer: context.computer_settings.enabled.then_some(task_computer),
         handoff_depth: context.handoff_depth,
         tools: context.tool_registry.clone(),
+        prefix: context.prefix.clone(),
+        chain: context.chain.clone(),
+        capabilities: context.capabilities.clone(),
+        statefulness: context.statefulness,
     };
     let task = tokio::spawn(async move {
         artist_agent::stream_chat_as(
@@ -2787,7 +2822,11 @@ async fn submit(
                             transcript_gap = true;
                         }
                     }
-                    artist_agent::PromptEvent::CompletionUsage { total_tokens } => {
+                    // Cache effectiveness rides the session log (`run.usage`)
+                    // rather than the footer: it is a per-account, per-model
+                    // question answered across runs, which a live counter
+                    // cannot show.
+                    artist_agent::PromptEvent::CompletionUsage { total_tokens, .. } => {
                         if total_tokens > 0 {
                             status.used_tokens = Some(total_tokens);
                             status.session_tokens += total_tokens;

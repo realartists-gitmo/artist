@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Start</title>
+<h1>Start page</h1>
+<a href="/second.html" id="go">Continue to step two</a>
+<script>
+  // A navigation that begins slightly *after* the click, so a settle predicate
+  // that samples immediately sees the old document and reports it quiet. This
+  // is the race that makes "click, then observe" return the previous page.
+  document.getElementById('go').addEventListener('click', (event) => {
+    event.preventDefault();
+    setTimeout(() => { window.location = '/second.html'; }, 120);
+  });
+</script>

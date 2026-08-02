@@ -47,7 +47,103 @@ pub struct MacroStep {
 pub struct Macro {
     #[serde(default)]
     pub session: String,
+    /// How to bring up the thing these programs were run against.
+    ///
+    /// Without it a macro records *what was done* but not *what to do it to* —
+    /// the surface id it carries belonged to a session that is gone, so
+    /// replaying needed the program named by hand every time. Absent on macros
+    /// distilled before the launch was recorded, which is why it is optional
+    /// rather than required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<MacroLaunch>,
     pub programs: Vec<MacroProgram>,
+}
+
+/// The command that produced the surface a macro was recorded against.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct MacroLaunch {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Whether it ran on the graphical stage or a terminal.
+    #[serde(default)]
+    pub gui: bool,
+}
+
+impl MacroLaunch {
+    /// The command line, for showing a person what will run.
+    pub fn command(&self) -> String {
+        if self.args.is_empty() {
+            self.program.clone()
+        } else {
+            format!("{} {}", self.program, self.args.join(" "))
+        }
+    }
+}
+
+/// Whether replay may re-derive a target whose label no longer matches exactly.
+///
+/// Off by default, and that is the whole design. A macro exists because a path
+/// was worked out once and is trusted to be the same path; silently accepting a
+/// *different* element because its name is similar turns a trusted script into a
+/// guess, and the guess runs unattended. Turning it on says "this interface
+/// rewords things, and I would rather it kept going and told me".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Healing {
+    /// A label that does not match exactly stops the macro.
+    #[default]
+    Never,
+    /// A label may be re-derived, and every time it is, it is reported.
+    Allowed,
+}
+
+/// One target that was re-derived rather than matched.
+///
+/// Reported, never merely counted. Adam's own note on the rejected
+/// selector-with-index item was that Stagehand's healing is the acceptable
+/// version of that instinct *because it re-derives the target and says it did* —
+/// so a healing that happened quietly would be the rejected thing wearing a
+/// different name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Healed {
+    pub program: usize,
+    pub step: usize,
+    /// What the macro was recorded against.
+    pub wanted: String,
+    /// What it ran against instead.
+    pub used: String,
+}
+
+/// What a replay did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Replayed {
+    pub completed: usize,
+    /// Empty on a clean replay. Non-empty means the interface has moved and the
+    /// macro is living on tolerance — worth re-recording before it moves again.
+    pub healed: Vec<Healed>,
+}
+
+impl Replayed {
+    /// A line for the person who ran this, when anything was re-derived.
+    pub fn note(&self) -> Option<String> {
+        if self.healed.is_empty() {
+            return None;
+        }
+        let mut out = format!(
+            "{} step(s) ran against a renamed element:\n",
+            self.healed.len()
+        );
+        for healed in &self.healed {
+            out.push_str(&format!(
+                "  program {} step {}: recorded {:?}, ran {:?}\n",
+                healed.program, healed.step, healed.wanted, healed.used
+            ));
+        }
+        out.push_str("Re-record this macro; it is running on tolerance.\n");
+        Some(out)
+    }
 }
 
 /// Why a macro stopped.
@@ -80,8 +176,9 @@ pub async fn replay(
     surface: &dyn Surface,
     book: &mut AnchorBook,
     recorded: &Macro,
-) -> Result<usize, ReplayError> {
-    let mut completed = 0;
+    healing: Healing,
+) -> Result<Replayed, ReplayError> {
+    let mut done = Replayed::default();
 
     for (index, program) in recorded.programs.iter().enumerate() {
         let snapshot = surface
@@ -107,13 +204,31 @@ pub async fn replay(
                         step: step_index,
                         label: String::new(),
                     })?;
-                    let anchor = find_anchor(&observed, &label).ok_or_else(|| {
-                        ReplayError::Drifted {
+                    let found =
+                        find_anchor(&observed, &label).ok_or_else(|| ReplayError::Drifted {
                             program: index,
                             step: step_index,
                             label: label.clone(),
+                        })?;
+                    // An inexact match is a decision, not a detail. With healing
+                    // off it stops the macro exactly as a missing element does,
+                    // because "something a bit like it" is not what was recorded.
+                    if let Some(used) = found.renamed {
+                        if healing == Healing::Never {
+                            return Err(ReplayError::Drifted {
+                                program: index,
+                                step: step_index,
+                                label: label.clone(),
+                            });
                         }
-                    })?;
+                        done.healed.push(Healed {
+                            program: index,
+                            step: step_index,
+                            wanted: label.clone(),
+                            used,
+                        });
+                    }
+                    let anchor = found.anchor;
                     let target = Target {
                         anchor,
                         label: Some(label),
@@ -156,9 +271,9 @@ pub async fn replay(
                 source: error,
             });
         }
-        completed += 1;
+        done.completed += 1;
     }
-    Ok(completed)
+    Ok(done)
 }
 
 /// Find the anchor for an element that calls itself `label`.
@@ -173,14 +288,23 @@ pub async fn replay(
 /// plausible candidates in tree order is the silent-wrong-target failure this
 /// whole design exists to prevent; ambiguity is a miss, and the macro reports a
 /// missing anchor rather than guessing.
-fn find_anchor(observed: &crate::anchors::Observation, label: &str) -> Option<String> {
+struct Found {
+    anchor: String,
+    /// The element's current name, when it is not what was recorded.
+    renamed: Option<String>,
+}
+
+fn find_anchor(observed: &crate::anchors::Observation, label: &str) -> Option<Found> {
     let wanted = crate::program::normalize(label);
     if let Some(entry) = observed
         .entries
         .iter()
         .find(|entry| crate::program::normalize(&entry.node.name) == wanted && !wanted.is_empty())
     {
-        return Some(entry.anchor.clone());
+        return Some(Found {
+            anchor: entry.anchor.clone(),
+            renamed: None,
+        });
     }
 
     let mut loose = observed.entries.iter().filter(|entry| {
@@ -188,7 +312,10 @@ fn find_anchor(observed: &crate::anchors::Observation, label: &str) -> Option<St
             && check_label("replay", Some(label), &entry.node).is_ok()
     });
     let first = loose.next()?;
-    loose.next().is_none().then(|| first.anchor.clone())
+    loose.next().is_none().then(|| Found {
+        anchor: first.anchor.clone(),
+        renamed: Some(first.node.name.clone()),
+    })
 }
 
 #[cfg(test)]
@@ -255,6 +382,7 @@ mod tests {
     fn recorded(labels: &[&str]) -> Macro {
         Macro {
             session: "s".into(),
+            launch: None,
             programs: vec![MacroProgram {
                 surface: "fake:1".into(),
                 steps: labels
@@ -275,11 +403,17 @@ mod tests {
     async fn a_macro_replays_against_a_fresh_observation() {
         let surface = Fake::new(&["Compose", "Save", "Cancel"]);
         let mut book = AnchorBook::new();
-        let done = replay(&surface, &mut book, &recorded(&["Compose", "Save"]))
-            .await
-            .unwrap();
+        let done = replay(
+            &surface,
+            &mut book,
+            &recorded(&["Compose", "Save"]),
+            Healing::Never,
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(done, 1);
+        assert_eq!(done.completed, 1);
+        assert!(done.healed.is_empty(), "an exact replay heals nothing");
         assert_eq!(
             *surface.clicked.lock().unwrap(),
             vec!["Compose".to_owned(), "Save".to_owned()],
@@ -301,7 +435,10 @@ mod tests {
             );
         }
         assert_eq!(
-            replay(&surface, &mut book, &recorded(&["Save"])).await.unwrap(),
+            replay(&surface, &mut book, &recorded(&["Save"]), Healing::Never)
+                .await
+                .unwrap()
+                .completed,
             1
         );
     }
@@ -312,9 +449,14 @@ mod tests {
         // rather than click whatever occupies that spot now.
         let surface = Fake::new(&["Compose", "Cancel"]);
         let mut book = AnchorBook::new();
-        let error = replay(&surface, &mut book, &recorded(&["Compose", "Send"]))
-            .await
-            .unwrap_err();
+        let error = replay(
+            &surface,
+            &mut book,
+            &recorded(&["Compose", "Send"]),
+            Healing::Never,
+        )
+        .await
+        .unwrap_err();
 
         match error {
             ReplayError::Drifted { step, label, .. } => {
@@ -347,5 +489,113 @@ mod tests {
         );
         assert!(find_anchor(&observed, "Save").is_some());
         assert!(find_anchor(&observed, "Delete").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_renamed_element_stops_a_macro_unless_healing_is_asked_for() {
+        // "Save" became "Save draft". Containment would match it, and that is
+        // precisely why the default must not: a macro is trusted because it is
+        // the path that was worked out, and quietly running against a different
+        // element turns a script back into a guess — unattended.
+        let surface = Fake::new(&["Save draft"]);
+        let mut book = AnchorBook::new();
+        let error = replay(&surface, &mut book, &recorded(&["Save"]), Healing::Never)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ReplayError::Drifted { .. }), "{error:?}");
+        assert!(
+            surface.clicked.lock().unwrap().is_empty(),
+            "nothing may run before the macro is known to resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn healing_runs_the_step_and_reports_exactly_what_it_substituted() {
+        let surface = Fake::new(&["Save draft"]);
+        let mut book = AnchorBook::new();
+        let done = replay(&surface, &mut book, &recorded(&["Save"]), Healing::Allowed)
+            .await
+            .unwrap();
+
+        assert_eq!(done.completed, 1);
+        assert_eq!(
+            done.healed,
+            vec![Healed {
+                program: 0,
+                step: 0,
+                wanted: "Save".into(),
+                used: "Save draft".into(),
+            }],
+            "a healing that is not reported is the silent retarget we rejected"
+        );
+        let note = done.note().expect("a healed replay has something to say");
+        assert!(note.contains("Save draft"), "{note}");
+        assert!(note.contains("Re-record"), "{note}");
+    }
+
+    #[tokio::test]
+    async fn healing_refuses_to_choose_between_two_candidates() {
+        // Two elements both plausibly "Save". Picking one is the
+        // silent-wrong-target failure the whole design exists to prevent, and
+        // healing is not a licence to reintroduce it.
+        let surface = Fake::new(&["Save draft", "Save and close"]);
+        let mut book = AnchorBook::new();
+        let error = replay(&surface, &mut book, &recorded(&["Save"]), Healing::Allowed)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ReplayError::Drifted { .. }), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn a_clean_replay_has_nothing_to_say() {
+        let surface = Fake::new(&["Save"]);
+        let mut book = AnchorBook::new();
+        let done = replay(&surface, &mut book, &recorded(&["Save"]), Healing::Allowed)
+            .await
+            .unwrap();
+        assert!(done.note().is_none());
+    }
+
+    #[test]
+    fn a_macro_carries_how_to_start_what_it_was_run_against() {
+        // The gap this closes: a macro used to record what was done but not
+        // what to do it to, so replaying always needed the program named by
+        // hand and the artifact was only half an artifact.
+        let launch = MacroLaunch {
+            program: "chromium".into(),
+            args: vec!["https://example.com".into()],
+            cwd: None,
+            gui: true,
+        };
+        assert_eq!(launch.command(), "chromium https://example.com");
+
+        let recorded = Macro {
+            session: "s1".into(),
+            launch: Some(launch),
+            programs: Vec::new(),
+        };
+        let text = serde_json::to_string(&recorded).unwrap();
+        assert_eq!(serde_json::from_str::<Macro>(&text).unwrap(), recorded);
+    }
+
+    #[test]
+    fn a_macro_from_before_the_launch_was_recorded_still_loads() {
+        // Older distilled macros have no `launch` key at all. Refusing to parse
+        // them would make an schema addition break every artifact already on
+        // disk.
+        let old = r#"{"session":"s1","programs":[]}"#;
+        let parsed: Macro = serde_json::from_str(old).expect("old macros must still load");
+        assert!(parsed.launch.is_none());
+    }
+
+    #[test]
+    fn a_launch_with_no_arguments_is_just_the_program() {
+        let launch = MacroLaunch {
+            program: "gedit".into(),
+            args: Vec::new(),
+            cwd: None,
+            gui: true,
+        };
+        assert_eq!(launch.command(), "gedit");
     }
 }

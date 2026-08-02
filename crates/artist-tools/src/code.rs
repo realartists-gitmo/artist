@@ -3,13 +3,16 @@
 //! These wrap `artist-ast`'s analysis engine. Two conventions differ from
 //! upstream and are worth stating once here rather than in every tool:
 //!
-//! - **Shape output is anchored.** `code_map` addresses declarations by
-//!   mnemonic anchor, not line number, so the model can go straight from an
-//!   outline to `edit` without an intervening `read`. Everything else reports
-//!   file positions, because a cross-file graph answer is a place to *look*,
-//!   not a place to edit.
-//! - **Nothing writes.** `ast_rewrite` previews only; applying goes through the
-//!   existing edit path, which is where atomicity and the anchor ledger live.
+//! - **Every location is anchored.** `artist-ast` reports `file:line` the way a
+//!   compiler does; nothing here passes that on. Same-file output carries the
+//!   anchor alone, cross-file output carries `path@anchor` — see [`crate::locate`],
+//!   which also explains why naming a line in an unread file issues handles for
+//!   it. A line number is invalidated by the next insert above it; an anchor is
+//!   not, so a location the model is told about stays one it can act on.
+//! - **Nothing writes without being asked.** `ast_rewrite` previews by default,
+//!   and its apply path goes through the coordinator so the anchor ledger sees
+//!   the change. Its preview anchors removals only: the additions have not been
+//!   written, so no handle exists for them.
 
 use crate::{ToolError, Workspace, outline, output};
 use hashline_tools::ReadFileRequest;
@@ -37,9 +40,6 @@ pub struct CodeMapTool(pub Workspace);
 #[serde(rename_all = "camelCase")]
 pub struct CodeMapArgs {
     path: String,
-    /// `full` keeps every declaration the budget allows; `digest` shows only
-    /// top-level shape.
-    mode: Option<String>,
     budget: Option<usize>,
     include_private: Option<bool>,
 }
@@ -63,7 +63,6 @@ impl PortableTool for CodeMapTool {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Project-relative or absolute path to one source file."},
-                "mode": {"enum": ["full", "digest"], "description": "digest shows top-level shape only."},
                 "budget": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "Target row count. Unfolding stops once reached."},
                 "includePrivate": {"type": "boolean"}
             },
@@ -98,21 +97,24 @@ impl PortableTool for CodeMapTool {
             .await?;
         let anchors = outline::anchor_map(&read.result.lines);
 
-        let digest = args.mode.as_deref() == Some("digest");
         let opts = outline::OutlineOptions {
-            // A digest is the top level and nothing more, so a budget equal to
-            // the root declaration count keeps the unfold from descending.
-            budget: if digest {
-                parsed.declarations.len().max(1)
-            } else {
-                args.budget.unwrap_or(120)
-            },
+            budget: args.budget.unwrap_or(120),
             ceiling: args.budget.map_or(240, |b| b * 2),
             include_private: args.include_private.unwrap_or(true),
         };
-        let body = outline::render(&parsed.declarations, &anchors, &opts);
+        let body = outline::render(&parsed.declarations, &anchors, &opts, parsed.language);
+        // `code_map` issues anchors just as `read` does, so it is equally a
+        // first observation — hooking only `read` would let an outline-then-edit
+        // path skip the note entirely.
+        let note = if self.0.first_observation(&target) {
+            crate::annotate::first_touch(&self.0, &target)
+                .await
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         Ok(output::head(
-            format!("{} ({})\n\n{body}", args.path, parsed.language),
+            format!("{} ({})\n\n{body}{note}", args.path, parsed.language),
             output::OUTPUT_CAP,
         ))
     }
@@ -237,20 +239,72 @@ impl PortableTool for CodeSurfaceTool {
 
     async fn call(&self, args: CodeSurfaceArgs) -> Result<String, ToolError> {
         let target = scope(&self.0, args.path.as_deref())?;
-        let opts = artist_ast::surface::SurfaceOptions::default();
-        let entries = artist_ast::surface::resolve_surface(&target, &opts)
-            .map_err(|e| ToolError::Message(format!("surface: {e}")))?;
-        let mode = if args.tree.unwrap_or(false) {
-            artist_ast::surface::OutputMode::Tree
-        } else {
-            artist_ast::surface::OutputMode::Flat
+        let tree = args.tree.unwrap_or(false);
+        let include_chain = args.include_chain.unwrap_or(false);
+        let opts = artist_ast::surface::SurfaceOptions {
+            include_chain,
+            ..Default::default()
         };
-        let body = artist_ast::surface::render::render(
-            &entries,
-            mode,
-            args.include_chain.unwrap_or(false),
-        );
-        Ok(output::head(body, output::OUTPUT_CAP))
+        let mut entries = artist_ast::surface::resolve_surface(&target, &opts)
+            .map_err(|e| ToolError::Message(format!("surface: {e}")))?;
+        // Grouping only reads as grouping if entries from one module arrive
+        // together; the resolver orders by discovery, not by path.
+        if tree {
+            entries.sort_by(|a, b| a.qualified_path.cmp(&b.qualified_path));
+        }
+        // Rendered here rather than by the vendored renderer so each export
+        // reports an anchor. This is the command where that matters most: the
+        // whole point of resolving `pub use` chains is that it lands on the
+        // real definition, which is by construction somewhere the model has not
+        // read.
+        // Both knobs are applied here rather than left to `SurfaceOptions`,
+        // whose `output` and `include_chain` steer the vendored renderers this
+        // command deliberately does not use. They were deserialized and then
+        // read by nothing: the schema described what they did, the model could
+        // set them, and the output never moved.
+        let mut locator = crate::locate::Locator::new(&self.0);
+        let mut out = String::new();
+        let mut module = String::new();
+        for entry in &entries {
+            let at = locator
+                .locate(&entry.source_path, entry.source_line as u32)
+                .await;
+            // Under `tree`, each entry is printed under its module heading and
+            // shortened to its own name — the module path is the heading, so
+            // repeating it on every row is the thing grouping was asked to fix.
+            let name = if tree {
+                let (parent, leaf) = entry
+                    .qualified_path
+                    .rsplit_once("::")
+                    .or_else(|| entry.qualified_path.rsplit_once('.'))
+                    .unwrap_or(("", entry.qualified_path.as_str()));
+                if parent != module {
+                    module = parent.to_owned();
+                    out.push_str(&format!(
+                        "\n{}\n",
+                        if module.is_empty() { "(root)" } else { &module }
+                    ));
+                }
+                format!("  {leaf}")
+            } else {
+                entry.qualified_path.clone()
+            };
+            let chain = if include_chain && !entry.re_export_chain.is_empty() {
+                let hops: Vec<&str> = entry
+                    .re_export_chain
+                    .iter()
+                    .map(|hop| hop.module_path.as_str())
+                    .collect();
+                format!("  via {}", hops.join(" -> "))
+            } else {
+                String::new()
+            };
+            out.push_str(&format!("{name}  {} ({}){chain}\n", entry.kind, at.render()));
+        }
+        if out.trim().is_empty() {
+            out.push_str("(no public surface found)\n");
+        }
+        Ok(output::head(out, output::OUTPUT_CAP))
     }
 }
 
@@ -301,15 +355,13 @@ impl PortableTool for CodeImplementsTool {
         if hits.is_empty() {
             return Ok(format!("no implementations of '{}' found", args.target));
         }
+        let mut locator = crate::locate::Locator::new(&self.0);
         let mut out = format!("implementations of {} ({})\n", args.target, hits.len());
         for h in &hits {
-            out.push_str(&format!(
-                "  {}:{} {} {}\n",
-                self.0.display(Path::new(&h.path)),
-                h.start_line,
-                h.kind,
-                h.name
-            ));
+            let at = locator
+                .locate(Path::new(&h.path), h.start_line as u32)
+                .await;
+            out.push_str(&format!("  {} {} ({})\n", h.kind, h.name, at.render()));
         }
         Ok(output::head(out, output::OUTPUT_CAP))
     }
@@ -382,7 +434,12 @@ impl PortableTool for CodeDepsTool {
             );
             artist_ast::deps::render::render_reverse_deps_text(&graph.deps, &file, &hits)
         } else {
-            let hits = artist_ast::deps::traverse::forward(&graph.deps, &file, depth);
+            let hits = artist_ast::deps::traverse::forward_limited(
+                &graph.deps,
+                &file,
+                depth,
+                args.limit.unwrap_or(200),
+            );
             artist_ast::deps::render::render_deps_text(&graph.deps, &file, &hits, true)
         };
         Ok(output::head(body, output::OUTPUT_CAP))
@@ -493,19 +550,54 @@ impl PortableTool for CodeCallsTool {
         let root = artist_ast::project_root::find_root_for(&target)
             .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
         let depth = args.depth.unwrap_or(1).min(5);
-        let body = if args.direction.as_deref() == Some("callees") {
-            artist_ast::calls::mcp::run_callees_text(&args.symbol, &root, depth, true, false)
-        } else {
-            artist_ast::calls::mcp::run_callers_text(
-                &args.symbol,
-                &root,
-                depth,
-                args.limit.unwrap_or(200),
-                true,
-                false,
-            )
+        let limit = args.limit.unwrap_or(200);
+        let graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
+            .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
+        let calls = graph
+            .calls
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("call graph is empty".into()))?;
+        let targets = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.symbol);
+        let Some(target) = targets.first() else {
+            return Ok(format!(
+                "no symbol matches '{}' (try a more specific suffix like 'Type.method')",
+                args.symbol
+            ));
         };
-        Ok(output::head(body, output::OUTPUT_CAP))
+
+        // Rendered here so each edge reports an anchor rather than a line.
+        let mut locator = crate::locate::Locator::new(&self.0);
+        let mut out = String::new();
+        if args.direction.as_deref() == Some("callees") {
+            let hits = artist_ast::calls::traverse::callees(calls, target, depth);
+            out.push_str(&format!("{} callee(s) of {}\n", hits.len(), target.0));
+            for hit in hits.iter().take(limit) {
+                let at = locator
+                    .locate(Path::new(&hit.edge.file), hit.edge.line)
+                    .await;
+                out.push_str(&format!(
+                    "  {} ({}) {}\n",
+                    hit.edge.target.display(),
+                    at.render(),
+                    hit.edge.confidence.as_str()
+                ));
+            }
+        } else {
+            let hits = artist_ast::calls::traverse::callers(calls, target, depth, limit, |_| true);
+            out.push_str(&format!("{} caller(s) of {}\n", hits.len(), target.0));
+            for hit in hits.iter().take(limit) {
+                let at = locator
+                    .locate(Path::new(&hit.edge.file), hit.edge.line)
+                    .await;
+                out.push_str(&format!(
+                    "  {} ({}) {}\n",
+                    hit.edge.source.0,
+                    at.render(),
+                    hit.edge.confidence.as_str()
+                ));
+            }
+        }
+        Ok(output::head(out, output::OUTPUT_CAP))
     }
 }
 
@@ -550,14 +642,53 @@ impl PortableTool for CodeTraceTool {
         let target = scope(&self.0, args.path.as_deref())?;
         let root = artist_ast::project_root::find_root_for(&target)
             .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
-        let body = artist_ast::calls::mcp::run_trace_text(
-            &args.from,
-            &args.to,
-            &root,
-            args.depth.unwrap_or(12).min(20),
-            false,
+        let graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
+            .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
+        let calls = graph
+            .calls
+            .as_ref()
+            .ok_or_else(|| ToolError::Message("call graph is empty".into()))?;
+        let froms = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.from);
+        let tos = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.to);
+        if froms.is_empty() || tos.is_empty() {
+            let missing = if froms.is_empty() {
+                &args.from
+            } else {
+                &args.to
+            };
+            return Ok(format!("no callable symbol matches '{missing}'"));
+        }
+
+        let depth = args.depth.unwrap_or(12).min(20);
+        let Some(found) = artist_ast::calls::trace::find_path(calls, &froms, &tos, depth) else {
+            return Ok(format!(
+                "no static call path from '{}' to '{}' within {depth} hops.\n\
+                 The chain may break at dynamic dispatch — a trait object, a callback, \
+                 a handler registered at runtime — which this cannot follow.",
+                args.from, args.to
+            ));
+        };
+
+        // Each hop is a place the model may want to act, so it gets an anchor
+        // like every other cross-file answer.
+        let mut locator = crate::locate::Locator::new(&self.0);
+        let mut out = format!(
+            "{} → {} ({} hop(s))\n",
+            args.from,
+            args.to,
+            found.hops.len()
         );
-        Ok(output::head(body, output::OUTPUT_CAP))
+        out.push_str(&format!("  {}\n", found.start.0));
+        for hop in &found.hops {
+            let at = locator.locate(Path::new(&hop.via.file), hop.via.line).await;
+            out.push_str(&format!(
+                "  → {} ({}) {}\n",
+                hop.qn.0,
+                at.render(),
+                hop.via.confidence.as_str()
+            ));
+        }
+        Ok(output::head(out, output::OUTPUT_CAP))
     }
 }
 
@@ -572,8 +703,58 @@ pub struct AstQueryTool(pub Workspace);
 pub struct AstQueryArgs {
     pattern: String,
     path: Option<String>,
+    glob: Option<String>,
     lang: Option<String>,
     limit: Option<usize>,
+}
+
+/// Compile a pattern, treating one built from a syntax error as no pattern.
+///
+/// `Pattern::try_new` accepts `fn (` and returns a pattern rooted at an ERROR
+/// node, which matches nothing. Taking that as a successful compile is what
+/// made a typo indistinguishable from an honest miss.
+fn compile_usable(pattern: &str, lang: artist_ast::run::SupportLang) -> Option<artist_ast::run::Pattern> {
+    let compiled = artist_ast::run::compile(pattern, lang).ok()?;
+    (!artist_ast::run::pattern_is_malformed(&compiled)).then_some(compiled)
+}
+
+/// Say which of the three empty outcomes this was.
+///
+/// "No matches" answers a question the model did not ask. It wants to know
+/// whether to fix the pattern, widen the scope, or believe the result — and
+/// those are three different states that rendered as one sentence.
+fn empty_search(
+    pattern: &str,
+    lang: Option<&str>,
+    searched: usize,
+    seen: &std::collections::BTreeSet<String>,
+    parsed: &std::collections::BTreeSet<String>,
+    skipped: usize,
+) -> String {
+    let langs = |set: &std::collections::BTreeSet<String>| {
+        set.iter().cloned().collect::<Vec<_>>().join(", ")
+    };
+    if seen.is_empty() {
+        return match lang {
+            Some(name) => format!(
+                "nothing to search: no {name} file is in scope. Widen path or glob, or omit lang."
+            ),
+            None => "nothing to search: no file in scope has a language with an adapter.".to_owned(),
+        };
+    }
+    if parsed.is_empty() {
+        return format!(
+            "`{pattern}` does not parse as a single node in {}, so nothing was searched.\n\n\
+             {PATTERN_HELP}",
+            langs(seen)
+        );
+    }
+    format!(
+        "no structural matches for `{pattern}` in {searched} {} of {}{}.",
+        if searched == 1 { "file" } else { "files" },
+        langs(parsed),
+        skipped_note(skipped)
+    )
 }
 
 const PATTERN_HELP: &str = "`$NAME` captures one node, `$_` matches one without binding, `$$$NAME` \
@@ -602,7 +783,8 @@ impl PortableTool for AstQueryTool {
             "properties": {
                 "pattern": {"type": "string", "description": "e.g. `$FUNC($$$ARGS)` or `if ($COND) { $$$BODY }`"},
                 "path": {"type": "string"},
-                "lang": {"type": "string", "description": "Auto-detected per file when omitted."},
+                "glob": {"type": "string", "description": "Filter the scope by path pattern, as in find and grep."},
+                "lang": {"type": "string", "description": "Restrict the search to files of this language. Detected per file when omitted."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200}
             },
             "required": ["pattern"],
@@ -612,35 +794,73 @@ impl PortableTool for AstQueryTool {
 
     async fn call(&self, args: AstQueryArgs) -> Result<String, ToolError> {
         let root = scope(&self.0, args.path.as_deref())?;
+        let want = requested_lang(args.lang.as_deref())?;
         let limit = args.limit.unwrap_or(50).min(200);
-        let files = artist_ast::walk_paths(&[root], None);
+        // Scoped the same way `find` and `grep` are. A structural search that
+        // could not be narrowed to `**/*.test.ts` while its two neighbours
+        // could was a hole in a surface the model learns as one thing.
+        let files = artist_ast::walk_paths(&[root], args.glob.as_deref());
+        // A structural search is usually the prelude to a change, so every hit
+        // is a place the model is about to act on. Line numbers here were the
+        // last raw `path:line` left in the surface.
+        let mut locator = crate::locate::Locator::new(&self.0);
         let mut out = String::new();
         let mut found = 0usize;
+        let mut skipped = 0usize;
+
+        // Compile once per language, not once per file. `run::search` compiles
+        // on every call, and the vendored `search_with_pattern` exists to avoid
+        // exactly that: "use this variant in loops where the same pattern is
+        // applied to many files with the same language". A workspace walk is
+        // ~400 files here, so this was ~400 redundant compilations.
+        let mut compiled: std::collections::HashMap<String, Option<artist_ast::run::Pattern>> =
+            std::collections::HashMap::new();
+
+        // Three different reasons a structural search comes back empty, and
+        // three different things to do about them. They used to render the
+        // same sentence, so a malformed pattern was indistinguishable from a
+        // correct one over a tree with no hits.
+        let mut searched = 0usize;
+        let mut langs_seen: std::collections::BTreeSet<String> = Default::default();
+        let mut langs_parsed: std::collections::BTreeSet<String> = Default::default();
 
         for file in &files {
             if found >= limit {
                 break;
             }
-            let Some(lang) = lang_for(&args.lang, file) else {
+            let Some(lang) = lang_for(want, file) else {
                 continue;
             };
-            let Ok(source) = std::fs::read_to_string(file) else {
+            langs_seen.insert(format!("{lang:?}").to_lowercase());
+            let pattern = compiled
+                .entry(format!("{lang:?}"))
+                .or_insert_with(|| compile_usable(&args.pattern, lang));
+            // A pattern that does not parse in *this* language is normal in a
+            // mixed tree — only report it if it parsed nowhere.
+            let Some(pattern) = pattern.as_ref() else {
                 continue;
             };
-            let matches = match artist_ast::run::search(&source, lang, &args.pattern) {
+            langs_parsed.insert(format!("{lang:?}").to_lowercase());
+            let Some(source) = readable_source(file) else {
+                skipped += 1;
+                continue;
+            };
+            searched += 1;
+            let matches = match artist_ast::run::search_with_pattern(&source, lang, pattern) {
                 Ok(m) => m,
-                // A pattern that does not parse in *this* language is normal in
-                // a mixed tree — only report it if nothing matches anywhere.
-                Err(_) => continue,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
             };
             for m in matches {
                 if found >= limit {
                     break;
                 }
+                let at = locator.locate(file, m.start_line as u32).await;
                 out.push_str(&format!(
-                    "{}:{}: {}\n",
-                    self.0.display(file),
-                    m.start_line,
+                    "{} {}\n",
+                    at.render(),
                     m.matched_text.lines().next().unwrap_or("").trim()
                 ));
                 found += 1;
@@ -648,10 +868,13 @@ impl PortableTool for AstQueryTool {
         }
 
         if found == 0 {
-            return Ok(format!(
-                "no structural matches for `{}`.\n\nIf that is unexpected, check the pattern parses \
-                 as one node in the target language.",
-                args.pattern
+            return Ok(empty_search(
+                &args.pattern,
+                args.lang.as_deref(),
+                searched,
+                &langs_seen,
+                &langs_parsed,
+                skipped,
             ));
         }
         Ok(output::head(
@@ -670,7 +893,11 @@ pub struct AstRewriteArgs {
     pattern: String,
     replacement: String,
     path: Option<String>,
+    glob: Option<String>,
     lang: Option<String>,
+    /// Write the previewed changes. Defaults to false: the model sees the diff
+    /// first and opts in, rather than discovering the write after the fact.
+    apply: Option<bool>,
 }
 
 impl PortableTool for AstRewriteTool {
@@ -683,8 +910,10 @@ impl PortableTool for AstRewriteTool {
         format!(
             "Preview a structural rewrite across many files — the multi-file codemod case edit \
              cannot do, since edit works on one path at a time. Captures from the pattern substitute \
-             into the replacement. This previews only and never writes: review the diff, then apply \
-             the changes with edit. {PATTERN_HELP}"
+             into the replacement. Previews by default and writes nothing: read the diff, then \
+             re-run with apply=true to commit exactly those changes, or apply them selectively with \
+             edit. An apply re-checks every file and refuses if anything moved since the preview. \
+             {PATTERN_HELP}"
         )
     }
 
@@ -695,7 +924,12 @@ impl PortableTool for AstRewriteTool {
                 "pattern": {"type": "string"},
                 "replacement": {"type": "string", "description": "Empty string deletes the matched node."},
                 "path": {"type": "string"},
-                "lang": {"type": "string"}
+                "glob": {"type": "string", "description": "Filter the scope by path pattern, as in find and grep."},
+                "lang": {"type": "string", "description": "Restrict the rewrite to files of this language. Detected per file when omitted."},
+                "apply": {
+                    "type": "boolean",
+                    "description": "Write the previewed changes. Defaults to false. Anchors for written files change, so re-read or re-outline before editing them."
+                }
             },
             "required": ["pattern", "replacement"],
             "additionalProperties": false
@@ -703,65 +937,357 @@ impl PortableTool for AstRewriteTool {
     }
 
     async fn call(&self, args: AstRewriteArgs) -> Result<String, ToolError> {
+        let (plan, skipped) = self.plan(&args)?;
+
+        if plan.is_empty() {
+            return Ok(format!(
+                "no structural matches for `{}`{} — nothing to rewrite.",
+                args.pattern,
+                skipped_note(skipped)
+            ));
+        }
+
+        if !args.apply.unwrap_or(false) {
+            let (diffs, shown) = render_plan(&self.0, &plan).await;
+            return Ok(output::head(
+                format!(
+                    "PREVIEW — {} file(s) would change. Nothing has been written.\n\
+                     Re-run with apply=true to write these exact changes, or apply them \
+                     selectively with edit.\n{}\n{}",
+                    plan.len(),
+                    unshown_note(shown, plan.len(), false),
+                    diffs
+                ),
+                output::OUTPUT_CAP,
+            ));
+        }
+
+        self.apply(&args, plan).await
+    }
+}
+
+/// One file's proposed rewrite.
+struct PlannedRewrite {
+    path: PathBuf,
+    before: String,
+    after: String,
+}
+
+/// Render a preview with an anchor gutter.
+///
+/// `DiffStyle::Explicit` and an empty `after` set, both deliberately. The
+/// removal rows carry the *pre-edit* anchors — the handles the model is holding
+/// right now — which is what lets it apply a subset of the preview through
+/// `edit` instead of taking the whole rewrite. The additions deliberately get
+/// no anchor: this text has not been written, so no handle has been issued for
+/// it, and showing one would invite an edit against a handle that does not
+/// exist.
+/// Room the diffs may take, leaving the surrounding prose its own space.
+///
+/// Bounded here rather than by truncating the finished string: a diff cut at an
+/// arbitrary byte tells the model output was lost but not *what*, and the thing
+/// it needs to know is how many files it is approving unseen.
+const PLAN_DIFF_BUDGET: usize = output::OUTPUT_CAP - 4096;
+
+/// Render as many file diffs as fit, and say how many that was.
+async fn render_plan(ws: &Workspace, plan: &[PlannedRewrite]) -> (String, usize) {
+    let mut out = String::new();
+    let mut shown = 0usize;
+    for change in plan {
+        let diff = similar::TextDiff::from_lines(&change.before, &change.after)
+            .unified_diff()
+            .context_radius(2)
+            .to_string();
+        let display = ws.display(&change.path);
+        let before = ws
+            .files
+            .read_file(
+                &ws.actor,
+                hashline_tools::ReadFileRequest {
+                    path: display.clone(),
+                    start_line: 1,
+                    max_lines: None,
+                },
+            )
+            .await
+            .map(|r| r.result.lines)
+            .unwrap_or_default();
+        let rendered =
+            output::anchored_diff_styled(&diff, &before, &[], output::DiffStyle::Explicit);
+        let section = format!("--- {display}\n{rendered}\n");
+        // Always render one, so a single pathological file cannot produce a
+        // preview with nothing in it.
+        if shown > 0 && out.len() + section.len() > PLAN_DIFF_BUDGET {
+            break;
+        }
+        out.push_str(&section);
+        shown += 1;
+    }
+    (out, shown)
+}
+
+/// Say plainly when the diff shown is not the whole change.
+///
+/// The count of affected files already led the preview, so scope was never
+/// hidden — but nothing said the unshown files are written too. A model that
+/// approves what it can see, on output that stops without explaining itself,
+/// is consenting to less than it is authorising.
+fn unshown_note(shown: usize, total: usize, applied: bool) -> String {
+    if shown >= total {
+        return String::new();
+    }
+    let hidden = total - shown;
+    if applied {
+        format!("\nDiffs shown for {shown} of {total}; the other {hidden} were written too.\n")
+    } else {
+        format!(
+            "\nDiffs shown for {shown} of {total}. apply=true writes all {total}, \
+             including the {hidden} not shown below.\n"
+        )
+    }
+}
+
+impl AstRewriteTool {
+    /// Compute the rewrite for every matching file without touching disk.
+    fn plan(&self, args: &AstRewriteArgs) -> Result<(Vec<PlannedRewrite>, usize), ToolError> {
         let root = scope(&self.0, args.path.as_deref())?;
-        let files = artist_ast::walk_paths(&[root], None);
-        let mut out = String::new();
-        let mut changed_files = 0usize;
+        let want = requested_lang(args.lang.as_deref())?;
+
+        // Refuse before touching the tree when the replacement names a capture
+        // the pattern never binds. Such a metavariable expands to nothing, so
+        // `target($N)` -> `renamed($Z)` writes `renamed()` and drops the
+        // argument at every site — a typo whose only symptom is a diff that
+        // looks deliberate.
+        let bound = artist_ast::run::metavariables(&args.pattern);
+        let used = artist_ast::run::metavariables(&args.replacement);
+        let unbound: Vec<&String> = used.difference(&bound).collect();
+        if !unbound.is_empty() {
+            let names = unbound
+                .iter()
+                .map(|n| format!("${n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let known = if bound.is_empty() {
+                "the pattern binds none".to_owned()
+            } else {
+                format!(
+                    "the pattern binds {}",
+                    bound
+                        .iter()
+                        .map(|n| format!("${n}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            return Err(ToolError::Message(format!(
+                "the replacement uses {names}, which {known}. An unbound metavariable \
+                 expands to nothing, so this would silently delete code at every match. \
+                 Nothing was written."
+            )));
+        }
+        // Scoped the same way `find` and `grep` are. A structural search that
+        // could not be narrowed to `**/*.test.ts` while its two neighbours
+        // could was a hole in a surface the model learns as one thing.
+        let files = artist_ast::walk_paths(&[root], args.glob.as_deref());
+        let mut plan = Vec::new();
+        let mut skipped = 0usize;
+        // Compile once per language rather than once per file — see the same
+        // note in `ast_query`.
+        let mut compiled: std::collections::HashMap<String, Option<artist_ast::run::Pattern>> =
+            std::collections::HashMap::new();
 
         for file in &files {
-            let Some(lang) = lang_for(&args.lang, file) else {
+            let Some(lang) = lang_for(want, file) else {
                 continue;
             };
-            let Ok(source) = std::fs::read_to_string(file) else {
+            let pattern = compiled
+                .entry(format!("{lang:?}"))
+                .or_insert_with(|| compile_usable(&args.pattern, lang));
+            let Some(pattern) = pattern.as_ref() else {
                 continue;
             };
-            let compiled = match ast_grep_pattern(&args.pattern, lang) {
-                Ok(p) => p,
-                Err(e) => return Err(ToolError::Message(e)),
+            let Some(source) = readable_source(file) else {
+                skipped += 1;
+                continue;
             };
             let rewritten =
-                artist_ast::run::rewrite_with_pattern(&source, lang, &compiled, &args.replacement)
+                artist_ast::run::rewrite_with_pattern(&source, lang, pattern, &args.replacement)
                     .map_err(ToolError::Message)?;
             let Some(rewritten) = rewritten else { continue };
             if rewritten == source {
                 continue;
             }
-            changed_files += 1;
-            let diff = similar::TextDiff::from_lines(&source, &rewritten)
-                .unified_diff()
-                .context_radius(2)
-                .to_string();
-            out.push_str(&format!("--- {}\n{diff}\n", self.0.display(file)));
+            // A replacement template is arbitrary text, so nothing so far has
+            // required the result to be code. Refuse the whole run rather than
+            // the file: a codemod that lands on some paths and breaks others
+            // leaves the tree in a state nobody asked for, and the model has
+            // already been shown a preview that looked fine.
+            let before = artist_ast::run::syntax_errors(&source, lang);
+            let after = artist_ast::run::syntax_errors(&rewritten, lang);
+            if after > before {
+                return Err(ToolError::Message(format!(
+                    "the replacement does not parse as {lang:?}: rewriting {} would introduce \
+                     {} syntax error(s). Nothing was written — check the replacement is valid \
+                     code in the target language.",
+                    self.0.display(file),
+                    after - before
+                )));
+            }
+            plan.push(PlannedRewrite {
+                path: file.clone(),
+                before: source,
+                after: rewritten,
+            });
+        }
+        Ok((plan, skipped))
+    }
+
+    /// Re-plan, verify nothing moved, then write through the hashline ledger.
+    async fn apply(
+        &self,
+        args: &AstRewriteArgs,
+        preview: Vec<PlannedRewrite>,
+    ) -> Result<String, ToolError> {
+        // Stale-preview check. The preview the model reasoned about was computed
+        // moments ago against a tree that may since have changed — by a
+        // concurrent agent, a formatter, or a rebase. Re-plan and refuse if the
+        // shape differs at all, rather than writing a change nobody approved.
+        let (fresh, _) = self.plan(args)?;
+        if fresh.len() != preview.len() {
+            return Err(ToolError::Message(format!(
+                "the working tree changed since the preview: {} file(s) matched then, {} now. \
+                 Nothing was written — re-run the preview.",
+                preview.len(),
+                fresh.len()
+            )));
+        }
+        for (a, b) in preview.iter().zip(fresh.iter()) {
+            if a.path != b.path || a.before != b.before || a.after != b.after {
+                return Err(ToolError::Message(format!(
+                    "{} changed since the preview. Nothing was written — re-run the preview.",
+                    self.0.display(&a.path)
+                )));
+            }
         }
 
-        if changed_files == 0 {
-            return Ok(format!(
-                "no structural matches for `{}` — nothing to rewrite.",
-                args.pattern
-            ));
+        // Write through the coordinator so the anchor ledger is updated with the
+        // new content. Writing the file directly would leave every anchor issued
+        // for it pointing at text that no longer exists, with nothing to tell the
+        // model its handles went stale.
+        //
+        // `ContentHash` makes each write a compare-and-swap against the exact
+        // bytes the preview was computed from, so a file that moved between the
+        // re-plan above and this loop fails at the coordinator rather than being
+        // silently overwritten.
+        let mut written = Vec::new();
+        for change in &fresh {
+            let display = self.0.display(&change.path);
+            self.0
+                .files
+                .write_file(
+                    &self.0.actor,
+                    display.clone(),
+                    change.after.clone(),
+                    hashline_tools::WriteCondition::ContentHash {
+                        hash: hashline_tools::content_hash(change.before.as_bytes()),
+                    },
+                )
+                .await?;
+            self.0.refresh_index(&change.path);
+            written.push(display);
         }
+
+        // A codemod is the operation most likely to move the architecture —
+        // it is the only one that edits many files at once — and it was the
+        // one path that reported nothing. The delta absorbs what it reports,
+        // so touching twenty files in one crate still yields one note.
+        let mut aftermath = String::new();
+        for change in &fresh {
+            if let Some(note) = crate::annotate::after_commit(&self.0, &change.path, &[]).await {
+                aftermath.push_str(&note);
+            }
+        }
+
+        let (diffs, shown) = render_plan(&self.0, &fresh).await;
         Ok(output::head(
             format!(
-                "PREVIEW ONLY — {changed_files} file(s) would change. Nothing has been written. \
-                 Apply the changes you want with edit.\n\n{out}"
+                "Applied to {} file(s). Anchors for these files have changed — re-read or \
+                 re-outline before editing them.\n\n{}\n{}\n{}{aftermath}",
+                written.len(),
+                written
+                    .iter()
+                    .map(|p| format!("  {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                unshown_note(shown, fresh.len(), true),
+                diffs
             ),
             output::OUTPUT_CAP,
         ))
     }
 }
 
-fn ast_grep_pattern(
-    pattern: &str,
-    lang: artist_ast::run::SupportLang,
-) -> Result<ast_grep_core::Pattern, String> {
-    ast_grep_core::Pattern::try_new(pattern, lang).map_err(|e| format!("invalid pattern: {e}"))
+/// Qualify an empty result by what was never looked at.
+///
+/// "No matches" is a claim about the project; what these tools can honestly
+/// report is a claim about the files they read. Oversized blobs, files that
+/// fail to parse, and languages with no grammar are all passed over silently,
+/// and a model told there are no matches will stop looking. Naming the gap
+/// turns a false conclusion into a next step.
+fn skipped_note(skipped: usize) -> String {
+    match skipped {
+        0 => String::new(),
+        1 => " (1 file was skipped: too large, or it did not parse)".to_owned(),
+        n => format!(" ({n} files were skipped: too large, or they did not parse)"),
+    }
+}
+
+/// Read a file for pattern matching, or skip it if it is too big to be source.
+///
+/// The walker filters by extension alone, so a minified bundle, a generated
+/// parser table or a checked-in data blob under a `.js` or `.py` name is a
+/// candidate as far as it is concerned. `artist-ast` exports the cap for
+/// exactly this and applies it in its own CLI; both tools here were reading
+/// whatever they were handed, in a loop, across an entire scope.
+fn readable_source(file: &Path) -> Option<String> {
+    let size = std::fs::metadata(file).ok()?.len();
+    if size > artist_ast::run::RUN_MAX_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(file).ok()
 }
 
 /// Resolve the language for a file, honouring an explicit override.
-fn lang_for(explicit: &Option<String>, file: &Path) -> Option<artist_ast::run::SupportLang> {
+/// Resolve `lang` once, refusing a name no grammar answers to.
+///
+/// Previously an unrecognised name silently matched nothing, which reads
+/// exactly like a correct query over a tree with no hits.
+fn requested_lang(lang: Option<&str>) -> Result<Option<artist_ast::run::SupportLang>, ToolError> {
+    let Some(name) = lang else { return Ok(None) };
+    artist_ast::run::cli::parse_lang(name)
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::Message(format!(
+                "unknown language `{name}`. Omit lang to detect it from each file's extension."
+            ))
+        })
+}
+
+/// The language to parse `file` as, or `None` to skip it.
+///
+/// An explicit `lang` *narrows* to files of that language. It used to force
+/// the grammar onto every file in scope instead, so `lang=rust` over a mixed
+/// tree parsed the Markdown as Rust and reported structural matches inside
+/// prose — a request to narrow the search returned more results than no
+/// request at all.
+fn lang_for(
+    explicit: Option<artist_ast::run::SupportLang>,
+    file: &Path,
+) -> Option<artist_ast::run::SupportLang> {
+    let detected = artist_ast::run::detect_lang(file);
     match explicit {
-        Some(l) => artist_ast::run::cli::parse_lang(l),
-        None => artist_ast::run::detect_lang(file),
+        Some(want) => detected.filter(|found| *found == want),
+        None => detected,
     }
 }
 
@@ -826,8 +1352,52 @@ impl PortableTool for CodeImpactTool {
             json: false,
             pretty: false,
         };
-        let body = artist_ast::impact::report_text(&args.symbol, &root, &opts)
-            .map_err(ToolError::Message)?;
-        Ok(output::head(body, output::OUTPUT_CAP))
+        // Rendered here rather than by `report_text`, so every location comes
+        // back as an anchor the model can edit through instead of a line number
+        // that the next insert invalidates.
+        let reports =
+            artist_ast::impact::report(&args.symbol, &root, &opts).map_err(ToolError::Message)?;
+        let mut locator = crate::locate::Locator::new(&self.0);
+        let mut out = String::new();
+        for report in &reports {
+            let target = locator
+                .locate(Path::new(&report.target_file), report.target_line)
+                .await;
+            out.push_str(&format!(
+                "{} {} ({})\n",
+                report.target_kind,
+                report
+                    .target_qn
+                    .split("::")
+                    .last()
+                    .unwrap_or(&report.target_qn),
+                target.render()
+            ));
+            let Some(sections) = &report.sections else {
+                continue;
+            };
+            for section in sections {
+                if section.entries.is_empty() {
+                    continue;
+                }
+                out.push_str(&format!("\n  {}\n", section.title));
+                for entry in &section.entries {
+                    let at = locator.locate(Path::new(&entry.file), entry.line).await;
+                    let confidence = entry
+                        .confidence
+                        .as_deref()
+                        .map(|c| format!(" {c}"))
+                        .unwrap_or_default();
+                    out.push_str(&format!(
+                        "    {} {} ({}){}\n",
+                        entry.kind,
+                        entry.qn.split("::").last().unwrap_or(&entry.qn),
+                        at.render(),
+                        confidence
+                    ));
+                }
+            }
+        }
+        Ok(output::head(out, output::OUTPUT_CAP))
     }
 }

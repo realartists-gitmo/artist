@@ -10,10 +10,15 @@ mod delegate_jobs;
 #[cfg(test)]
 mod delegate_tests;
 mod fallback;
+pub mod gemini_cache;
 pub mod handoff;
+mod identity;
 pub mod mcp;
+mod message_tools;
+mod messaging;
 pub mod memory;
 pub mod openai_responses;
+pub mod prefix;
 pub mod profiles;
 mod prompt_config;
 mod provider_retry;
@@ -24,13 +29,16 @@ mod ttsr;
 mod ttsr_tests;
 
 pub use resources::AvailableSkill;
+mod statefulness;
 mod steering;
 
 mod thinking;
 pub mod todo;
 mod tool_prompt;
 pub mod tool_registry;
+mod tool_set;
 
+pub use statefulness::Statefulness;
 pub use steering::SteeringHandle;
 pub use tool_registry::ToolRegistryHandle;
 
@@ -109,6 +117,10 @@ pub enum PromptEvent {
     },
     CompletionUsage {
         total_tokens: u64,
+        /// Input tokens the provider served from its prompt cache. Zero also
+        /// means "the provider told us nothing", so a display should read it as
+        /// absence of evidence rather than a measured miss.
+        cached_input_tokens: u64,
     },
     /// A stream rule matched: the run aborted, the reminder was injected,
     /// and the run is retrying from the same point. The UI should clear any
@@ -191,6 +203,21 @@ pub struct SessionHandles {
     /// The tools registered for the current attempt, published so surfaces
     /// outside the loop — a canvas today — invoke exactly what the model can.
     pub tools: ToolRegistryHandle,
+    /// The session's frozen system prompt, held here because prompt-cache
+    /// stability is a property of the session rather than of any one turn.
+    /// See [`prefix`] for why this is a store rather than a convention.
+    pub prefix: prefix::PrefixFreezer,
+    /// Where the provider-side conversation stands, when one is being held for
+    /// us. Session-scoped because a provider client is rebuilt every turn, and
+    /// a chain that reset each turn would never save anything.
+    pub chain: artist_session::ChainState,
+    /// Which provider-side handles this session may use. Every one is off by
+    /// default; see [`statefulness`] for why this is passed in rather than read
+    /// from the environment.
+    pub statefulness: Statefulness,
+    /// Capabilities this endpoint has already refused, so a missing files or
+    /// prompts endpoint costs one probe per session rather than one per turn.
+    pub capabilities: artist_session::ProviderCapabilities,
 }
 
 impl Default for SessionHandles {
@@ -213,6 +240,10 @@ impl Default for SessionHandles {
             computer: None,
             handoff_depth: 0,
             tools: ToolRegistryHandle::new(),
+            prefix: prefix::PrefixFreezer::for_session(),
+            chain: artist_session::ChainState::new(),
+            capabilities: artist_session::ProviderCapabilities::for_session(),
+            statefulness: Statefulness::default(),
         }
     }
 }
@@ -576,9 +607,27 @@ async fn attempt(
     }
     match RigClient::build(resolved)? {
         RigClient::ArtistOpenAi(client) => {
-            let client = client
+            let mut client = client
                 .with_provider_context(lineage.to_owned(), handles.provider_context.clone())
                 .with_effective_context_window(handles.effective_context_window);
+            // Beside the session's attachments, because it is the same content
+            // under the same address — one says where the bytes are locally,
+            // the other says what the provider calls them. Session-scoped for
+            // now; a project-scoped ledger would additionally spare re-uploads
+            // of an image that recurs across sessions.
+            //
+            // Absent for inert handles, which record nothing and so have
+            // nowhere to keep this; those sessions simply keep inlining.
+            if let Some(attachments) = &handles.attachments {
+                client = client.with_handles(artist_session::HandleLedger::new(
+                    attachments.dir().with_file_name("file-handles"),
+                ));
+            }
+            let client = client.with_session_state(
+                handles.chain.clone(),
+                handles.capabilities.clone(),
+                handles.statefulness,
+            );
             run_with!(client)
         }
         RigClient::Copilot(client) => run_with!(client),
@@ -691,6 +740,49 @@ where
         .await
         .context("load conversation memory")?;
     let durable_history_len = seed_history.len();
+
+    // Built once per turn and hoisted out of the retry loop below, because it
+    // is the prompt-cache prefix: rebuilding it per attempt gave a TTSR retry
+    // the chance to change it, and rebuilding it per turn gave that chance to
+    // anyone editing an AGENTS.md mid-session.
+    //
+    // Every profile is composed on the shared prompt: the body says what is
+    // different about this profile, not what is true of every agent.
+    let (base, base_diagnostics) = prompt_config::base_prompt();
+    let persona = if profile.instructions.trim().is_empty() {
+        base
+    } else {
+        format!("{base}\n\n{}", profile.instructions)
+    };
+    let prompt_diagnostics = profiles
+        .diagnostics()
+        .iter()
+        .chain(base_diagnostics.iter())
+        .chain(resources.diagnostics().iter())
+        .map(|d| format!("<diagnostic>{}</diagnostic>", d))
+        .collect::<String>();
+    // Frozen, not merely computed once: hoisting stops today's churn, but only
+    // the freezer stops a future edit from reintroducing it. See `prefix`.
+    // Identity is true of every agent in every mode, so it belongs in the
+    // system prompt rather than a user turn — and it goes *last*, after every
+    // byte that is shared between agents. Prompt caching is a prefix match, so
+    // a name placed any earlier gives each agent its own prefix and none of
+    // them ever share a cached prompt. That costs most in exactly the case we
+    // care about: a fan-out of subagents spawned together off one base prompt.
+    let identity = identity::for_session(&handles.conversation_id, &handles.conversation_id);
+    let frozen_prompt = handles.prefix.freeze(
+        &prefix::key(&handles.conversation_id, &profile.name),
+        format!(
+            "{}\n\n{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}{}",
+            persona,
+            prompt_diagnostics,
+            resources.prompt_section(),
+            profiles.catalog(),
+            tools.project_root().display(),
+            identity.prompt_block(),
+        ),
+    );
+
     let mut seed_prompt = user_message(input);
     // Skill instructions depend on what the user just typed, so ride them on
     // the user turn instead of folding them into the (otherwise stable)
@@ -731,6 +823,55 @@ where
         && let Message::User { content } = &mut seed_prompt
     {
         content.insert(0, UserContent::text(report));
+    }
+    // The system prompt is frozen for the session, so an instruction file
+    // edited mid-session cannot reach the model through the preamble. It rides
+    // the user turn instead — the same trade the three injections above make,
+    // and the reason freezing costs nothing: the content still arrives, just on
+    // the channel where arriving is free.
+    if let Some(note) = frozen_prompt.superseded_note()
+        && let Message::User { content } = &mut seed_prompt
+    {
+        content.insert(0, UserContent::text(note));
+    }
+    // The shape of the project, once, on the turn that opens the session.
+    //
+    // Rides the user turn rather than the preamble for the reason everything
+    // else here does — but with a second benefit specific to this: a message
+    // already in the history cannot be rewritten, so "frozen for the session"
+    // stops being a rule someone has to remember and becomes a property of
+    // where it lives. Architectural drift is reported afterwards as a delta
+    // rather than by reissuing this.
+    //
+    // `seed_history` is empty only on the first turn, which makes that the
+    // trigger without any separate bookkeeping.
+    //
+    // Bounded like memory recall is: on a large repository this may have to
+    // build the dependency graph from cold, and orientation is never worth
+    // stalling the first thing the user asked for.
+    if seed_history.is_empty() {
+        let root = tools.project_root().to_path_buf();
+        // The request is in hand here, so a project too large to show whole
+        // shows the parts it is about rather than an arbitrary top slice.
+        let focus = input.text.clone();
+        let built = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || {
+                artist_tools::skeleton::build_for(
+                    &root,
+                    artist_tools::skeleton::DEFAULT_BUDGET,
+                    &focus,
+                )
+                .map(|skeleton| skeleton.render())
+            }),
+        )
+        .await;
+        if let Ok(Ok(Some(shape))) = built
+            && !shape.is_empty()
+            && let Message::User { content } = &mut seed_prompt
+        {
+            content.insert(0, UserContent::text(shape));
+        }
     }
     // Observes the model's own output: schedules recall on a stated decision,
     // injects what has landed on the next completion call, and captures a fact
@@ -804,6 +945,35 @@ where
             };
         }
 
+        // One client for the out-of-band cache calls; the provider client rig
+        // builds does not expose its own.
+        let gemini_http = reqwest::Client::new();
+        // Gemini has no conversation chaining, but it can hold the preamble.
+        // Referencing it by name takes the largest resent item out of the
+        // request entirely — and with it, any way for the preamble to differ
+        // between turns. Falls back to sending it inline whenever a cache
+        // cannot be had.
+        let cached_context = if matches!(provider.provider, llm_provider::ProviderKind::Gemini) {
+            let api_key = match &provider.credentials {
+                llm_provider::Credentials::ApiKey { api_key } => api_key.expose(),
+                _ => "",
+            };
+            let ledger = handles.attachments.as_ref().map(|attachments| {
+                artist_session::HandleLedger::new(attachments.dir().with_file_name("file-handles"))
+            });
+            gemini_cache::GeminiCache {
+                http: &gemini_http,
+                base_url: provider.base_url.as_str(),
+                api_key: &api_key,
+                ledger: ledger.as_ref(),
+                capabilities: &handles.capabilities,
+            }
+            .ensure(model, frozen_prompt.as_str(), handles.statefulness.gemini_cache)
+            .await
+        } else {
+            None
+        };
+
         let mut builder = client.agent(model);
         // These fields belong to the ChatGPT subscription transport. Keep them
         // off OpenAI Responses and Chat Completions requests, whose accepted
@@ -818,163 +988,58 @@ where
         ) {
             builder = builder.additional_params(params);
         }
-        let mut registered: Vec<rig_core::tool::PortableDynamicTool> = Vec::new();
-        for (name, tool) in [
-            ("bash", tool_prompt::dynamic(tools.bash.clone())),
-            ("read", tool_prompt::dynamic(tools.read.clone())),
-            ("find", tool_prompt::dynamic(tools.find.clone())),
-            ("grep", tool_prompt::dynamic(tools.grep.clone())),
-            ("edit", tool_prompt::dynamic(tools.edit.clone())),
-            ("write", tool_prompt::dynamic(tools.write.clone())),
-            ("skill", tool_prompt::dynamic(resources.skill_tool())),
-            ("code_map", tool_prompt::dynamic(tools.code_map.clone())),
-            ("code_show", tool_prompt::dynamic(tools.code_show.clone())),
-            (
-                "code_surface",
-                tool_prompt::dynamic(tools.code_surface.clone()),
-            ),
-            (
-                "code_implements",
-                tool_prompt::dynamic(tools.code_implements.clone()),
-            ),
-            ("code_deps", tool_prompt::dynamic(tools.code_deps.clone())),
-            (
-                "code_cycles",
-                tool_prompt::dynamic(tools.code_cycles.clone()),
-            ),
-            ("code_calls", tool_prompt::dynamic(tools.code_calls.clone())),
-            ("code_trace", tool_prompt::dynamic(tools.code_trace.clone())),
-            (
-                "code_impact",
-                tool_prompt::dynamic(tools.code_impact.clone()),
-            ),
-            ("ast_query", tool_prompt::dynamic(tools.ast_query.clone())),
-            (
-                "ast_rewrite",
-                tool_prompt::dynamic(tools.ast_rewrite.clone()),
-            ),
-        ] {
-            if profile.permits(name) {
-                registered.push(tool);
-            }
+        if let Some(name) = &cached_context {
+            builder = builder.additional_params(gemini_cache::reference(name));
         }
-        if profile.permits("todo") {
-            registered.push(tool_prompt::dynamic(todo::TodoTool::new(
-                handles.todos.clone(),
-                handles.recorder.clone(),
-                handles.conversation_id.clone(),
-                None,
-            )));
-        }
-        if let Some(writer) = memory_writer.clone().filter(|_| profile.permits("memory")) {
-            registered.push(tool_prompt::dynamic(memory::MemoryTool::new(writer)));
-        }
-        // Code retrieval rides on the memory index, so it is only offered when
-        // that index exists — a search tool with nothing to search would be a
-        // failure the model discovers by calling it.
-        if let Some(writer) = memory_writer.clone() {
-            let root = tools.project_root().to_path_buf();
-            if profile.permits("code_search") {
-                registered.push(tool_prompt::dynamic(code_search::CodeSearchTool::new(
-                    writer.handle().clone(),
-                    root.clone(),
-                )));
-            }
-            if profile.permits("code_related") {
-                registered.push(tool_prompt::dynamic(code_search::CodeRelatedTool::new(
-                    writer.handle().clone(),
-                    root,
-                )));
-            }
-        }
-        // Only offered when a surface registry exists. A computer tool with no
-        // way to reach a display would be a mode the model discovers by
-        // failing, which is worse than the tool simply not being there.
-        if let Some(surfaces) = handles
-            .computer
-            .as_ref()
-            .filter(|_| profile.permits("computer"))
-        {
-            registered.push(tool_prompt::dynamic(
-                artist_computer::ComputerTool::with_recorder(
-                    surfaces.clone(),
-                    handles.recorder.clone(),
-                    handles.attachments.clone(),
-                ),
-            ));
-        }
-        if profile.permits("handoff") && profiles.names().len() > 1 {
-            registered.push(tool_prompt::dynamic(handoff::HandoffTool::new(
-                pending_handoff.clone(),
-                profiles.clone(),
-                profile.name.clone(),
-            )));
-        }
-        // Offered wherever a session could serve one. The server itself does
-        // not exist until the model asks for something that needs it, so the
-        // common case — a session that never touches a canvas — binds no port.
-        if let Some(canvas) = tool_context.canvas.filter(|_| profile.permits("canvas")) {
-            registered.push(tool_prompt::dynamic(canvas::CanvasTool::new(
-                tools.project_root().to_path_buf(),
-                std::sync::Arc::clone(canvas),
-                handles.recorder.clone(),
-            )));
-        }
-        if profile.permits("subagent") {
-            registered.push(tool_prompt::dynamic(delegate::Delegate::new(
-                provider.clone(),
-                tools.clone(),
-                fork_context,
-                resources.clone(),
-                delegate::DelegateRuntime {
-                    handles: handles.clone(),
-                    events: subagent_events_tx.clone(),
-                },
-                tool_context.disabled.to_vec(),
-                profiles.clone(),
-            )));
-        }
-        registered.extend(mcp_tools.iter().cloned());
-        if let Some(extensions) = tool_context.extensions {
-            registered.extend(extensions.tools());
-        }
-        // MCP and extension tools are addressable by the same glob policy, so a
-        // profile can trim a bloated server down to the handful it needs.
-        registered.retain(|tool| profile.permits(tool.name()));
-        tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
-        // Every tool learns to report files that moved underneath the model,
-        // in the one place they all pass through — so this cannot be forgotten
-        // by a tool added later, and it covers changes the harness did not make.
-        let drift = Some(tools.edit.0.drift_watch());
-        let registered: Vec<_> = registered
-            .into_iter()
-            .map(|tool| tool_prompt::guard(tool, drift.clone()))
-            .collect();
+        // One environment, one policy pass — see [`tool_set`]. The subagent path
+        // builds its own `ToolEnv` and calls the same function, which is what
+        // stops the two surfaces from drifting apart again.
+        let env = tool_set::ToolEnv {
+            bundle: tools.clone(),
+            recorder: handles.recorder.clone(),
+            resources: resources.clone(),
+            todos: handles.todos.clone(),
+            todo_owner: handles.conversation_id.clone(),
+            todo_parent: None,
+            attachments: handles.attachments.clone(),
+            computer: handles.computer.clone(),
+            memory: memory_writer.clone(),
+            // The canvas server does not exist until the model asks for
+            // something that needs it, so a session that never touches one
+            // binds no port; absent entirely in one-shot and headless paths.
+            canvas: tool_context.canvas.cloned(),
+            handoff: Some(tool_set::HandoffEnv {
+                pending: pending_handoff.clone(),
+                profiles: profiles.clone(),
+                current: profile.name.clone(),
+            }),
+            delegation: Some(tool_set::DelegationEnv {
+                provider: provider.clone(),
+                context: Arc::clone(&fork_context),
+                handles: handles.clone(),
+                events: subagent_events_tx.clone(),
+                profiles: profiles.clone(),
+                // The session root holds no seat on the delegation semaphore:
+                // it is not itself a delegate, so it has none to yield.
+                parent_permit: None,
+            }),
+            inbox: Some(messaging::Inbox::new(identity.name.clone())),
+            dynamic: mcp_tools
+                .iter()
+                .cloned()
+                .chain(
+                    tool_context
+                        .extensions
+                        .map(artist_extensions::Manager::tools)
+                        .unwrap_or_default(),
+                )
+                .collect(),
+            disabled: tool_context.disabled.to_vec(),
+        };
+        let registered = tool_set::build(profile, &env);
         // Publish what the model actually got, so a canvas cannot reach a tool
         // the profile denied nor miss one it allowed.
         handles.tools.publish(registered.clone());
-        // Every profile is composed on the shared prompt: the body says what is
-        // different about this profile, not what is true of every agent.
-        let (base, base_diagnostics) = prompt_config::base_prompt();
-        let persona = if profile.instructions.trim().is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{}", profile.instructions)
-        };
-        let prompt_diagnostics = profiles
-            .diagnostics()
-            .iter()
-            .chain(base_diagnostics.iter())
-            .map(|d| format!("<diagnostic>{}</diagnostic>", d))
-            .collect::<String>();
-        let system_prompt = format!(
-            "{}\n\n{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}",
-            persona,
-            prompt_diagnostics,
-            resources.prompt_section(),
-            profiles.catalog(),
-            tools.project_root().display()
-        );
         let persistence = conversation::PersistenceStatus::default();
         let attempt_memory = conversation::AttemptMemory::new(
             Arc::clone(&handles.memory),
@@ -984,7 +1049,14 @@ where
             persistence.clone(),
         );
         let agent = builder
-            .preamble(&system_prompt)
+            // Gemini rejects a request carrying both a cached prefix and a
+            // system instruction, and sending it anyway would forfeit the
+            // saving the cache exists for.
+            .preamble(if cached_context.is_some() {
+                ""
+            } else {
+                frozen_prompt.as_str()
+            })
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
             .dynamic_tools(
@@ -993,7 +1065,10 @@ where
                     .map(rig_agent::tool::DynamicTool::from)
                     .collect(),
             )
-            .add_hook(steering::SteeringHook(handles.steering.clone()))
+            .add_hook(steering::SteeringHook {
+                steering: handles.steering.clone(),
+                inbox: Some(messaging::Inbox::new(identity.name.clone())),
+            })
             .add_hook(CaptureHook::new(tool_meta.clone()))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
             .add_hook(memory_hook.clone())
@@ -1008,6 +1083,8 @@ where
                 .level
                 .map(|level| level.as_str().to_owned())
                 .or_else(|| provider.reasoning_effort.clone()),
+            agent: Some(identity.name.clone()),
+            actor: Some(identity.actor.clone()),
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
@@ -1180,8 +1257,21 @@ where
                     name: tool_call.function.name,
                 }),
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                    // Recorded per call, not per run: fallback can move a run
+                    // onto a different candidate mid-flight, and caches are
+                    // model-scoped, so the cache answer is a property of the
+                    // attempt rather than of the run.
+                    run_recorder.record(artist_session::RunUsage {
+                        provider: format!("{:?}", provider.provider).to_lowercase(),
+                        model: model.to_owned(),
+                        input_tokens: call.usage.input_tokens,
+                        output_tokens: call.usage.output_tokens,
+                        total_tokens: call.usage.total_tokens,
+                        cached_input_tokens: call.usage.cached_input_tokens,
+                    });
                     emit!(PromptEvent::CompletionUsage {
                         total_tokens: call.usage.total_tokens,
+                        cached_input_tokens: call.usage.cached_input_tokens,
                     });
                 }
                 Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {

@@ -122,16 +122,13 @@ impl AskRegistry {
             });
         }
         let (respond, receive) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("ask registry poisoned")
-            .insert(
-                question.id.clone(),
-                Waiting {
-                    question,
-                    respond: Some(respond),
-                },
-            );
+        self.pending.lock().expect("ask registry poisoned").insert(
+            question.id.clone(),
+            Waiting {
+                question,
+                respond: Some(respond),
+            },
+        );
         receive
     }
 
@@ -321,6 +318,9 @@ mod tests {
             .describe(),
             "A, B — and also C"
         );
-        assert_eq!(Answer::dismissed("q").describe(), "(dismissed without choosing)");
+        assert_eq!(
+            Answer::dismissed("q").describe(),
+            "(dismissed without choosing)"
+        );
     }
 }

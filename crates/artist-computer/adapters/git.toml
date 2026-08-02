@@ -1,0 +1,35 @@
+# A git GUI, replaced by git.
+#
+# The case the design doc names first: driving a GUI to do what a command line
+# does in one call. Staging a file through a graphical client means locating a
+# tree row and a checkbox; `git add` takes a path. The GUI's own state follows,
+# because it is watching the repository the same as anything else.
+#
+# Deliberately read-and-stage only. Nothing here commits, pushes or rewrites
+# history: those are the operations where being wrong is expensive, and the
+# agent has an unsandboxed shell for them anyway — with the guardrails that
+# apply to it rather than the ones that do not apply here.
+name = "git"
+match_app_id = [
+  "*gitg*", "*gitk*", "*git-cola*", "*sublime_merge*", "*smartgit*", "*gittyup*",
+]
+
+[[action]]
+name = "status"
+description = "What has changed, as porcelain output."
+cli = { argv = ["git", "status", "--porcelain=v1", "--branch"] }
+
+[[action]]
+name = "diff"
+description = "The unstaged diff, or one path's if given."
+cli = { argv = ["git", "diff", "--", "{value}"] }
+
+[[action]]
+name = "stage"
+description = "Stage a path."
+cli = { argv = ["git", "add", "--", "{value}"] }
+
+[[action]]
+name = "log"
+description = "Recent history, one line each."
+cli = { argv = ["git", "log", "--oneline", "-n", "20"] }

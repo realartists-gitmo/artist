@@ -102,11 +102,7 @@ async fn node_for(
     // without it, checking a checkbox or disabling a submit button changes
     // nothing in the digest, so the model sees no `~` line and cannot tell
     // whether its click landed.
-    let state = proxy
-        .get_state()
-        .await
-        .map(state_from)
-        .unwrap_or_default();
+    let state = proxy.get_state().await.map(state_from).unwrap_or_default();
 
     Ok(Node::new(binding, role, name.trim())
         .with_depth(depth)

@@ -93,7 +93,7 @@ impl PortableTool for CodeSearchTool {
         let top_k = args.limit.unwrap_or(10).min(50);
         let vector = self.handle.query_vector(&args.query).await;
         let candidates = MemoryCandidates::fetch(
-            self.handle.memory().project(),
+            self.handle.memory().store(),
             &args.query,
             &vector,
             top_k * FETCH_MULTIPLIER,
@@ -184,7 +184,7 @@ impl PortableTool for CodeRelatedTool {
 
         let vector = self.handle.query_vector(&query).await;
         let candidates = MemoryCandidates::fetch(
-            self.handle.memory().project(),
+            self.handle.memory().store(),
             &query,
             &vector,
             top_k * FETCH_MULTIPLIER,

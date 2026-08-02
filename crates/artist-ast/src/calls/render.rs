@@ -275,6 +275,10 @@ fn colorize_confidence(c: Confidence) -> String {
         Confidence::Exact => label.green().to_string(),
         Confidence::Inferred => label.yellow().to_string(),
         Confidence::Ambiguous => label.red().dimmed().to_string(),
+        // Not a failure to report — the callee is simply outside the project.
+        // Dimmed rather than red so it reads as background, which is what a
+        // `collect()` in the middle of a method chain actually is.
+        Confidence::External => label.dimmed().to_string(),
     }
 }
 

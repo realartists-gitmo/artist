@@ -45,6 +45,7 @@ impl Envelope {
 pub enum SessionEvent {
     SessionCreated(SessionCreated),
     RunStarted(RunStarted),
+    RunUsage(RunUsage),
     RunFinished(RunFinished),
     TurnUser(TurnUser),
     ModelTurn(ModelTurn),
@@ -69,6 +70,7 @@ pub enum SessionEvent {
     AskPosted(AskPosted),
     AskAnswered(AskAnswered),
     MemoryWritten(MemoryWritten),
+    ComputerLaunched(ComputerLaunched),
     ComputerStageOpened(ComputerStageOpened),
     ComputerStageClosed(ComputerStageClosed),
     ComputerObserved(ComputerObserved),
@@ -123,6 +125,7 @@ macro_rules! event_kinds {
 event_kinds!(
     (SessionCreated, SessionCreated, "session.created"),
     (RunStarted, RunStarted, "run.started"),
+    (RunUsage, RunUsage, "run.usage"),
     (RunFinished, RunFinished, "run.finished"),
     (TurnUser, TurnUser, "turn.user"),
     (ModelTurn, ModelTurn, "model.turn"),
@@ -169,6 +172,7 @@ event_kinds!(
         ComputerStageClosed,
         "computer.stage_closed"
     ),
+    (ComputerLaunched, ComputerLaunched, "computer.launched"),
     (ComputerObserved, ComputerObserved, "computer.observed"),
     (ComputerActed, ComputerActed, "computer.acted"),
     (ComputerElided, ComputerElided, "computer.elided"),
@@ -198,6 +202,26 @@ pub struct ComputerStageClosed {
 /// Deliberately metadata only: the node text already reaches the model as the
 /// tool result, and duplicating it here would make the log grow with every look
 /// at an unchanged screen. `image` names the frame in the attachment store.
+/// A program was started on a surface.
+///
+/// Recorded because without it a distilled macro says *what was done* but not
+/// *what to do it to*: the surface id it carries belonged to a session that is
+/// gone, and there was no other record of the command. Replaying then needed the
+/// program supplied by hand, which made the artifact half an artifact.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ComputerLaunched {
+    /// The surface the launch produced.
+    pub surface: String,
+    /// The program, as invoked.
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// True for a graphical launch onto the stage, false for a terminal.
+    pub gui: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ComputerObserved {
     /// Correlates to the tool row, the attachment, and `artist computer log`.
@@ -263,10 +287,13 @@ pub struct ComputerElided {
 /// with [`TodoUpdated`].
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct MemoryWritten {
-    pub fact_id: i64,
-    /// `global` for preferences that follow the user between checkouts,
-    /// `project` for facts scoped to this repository.
-    pub scope: String,
+    /// The **proposition** id — 32 hex digits of the content hash.
+    ///
+    /// Not the observation. `replaces:` is a claim that a *belief* is wrong,
+    /// which is a statement about the proposition; retiring one peer's
+    /// observation while four others stayed live would be incoherent. Hex
+    /// rather than a pair of integers because the log is read by people.
+    pub fact_id: String,
     pub subject: String,
     pub predicate: String,
     pub object: String,
@@ -274,9 +301,24 @@ pub struct MemoryWritten {
     pub text: String,
     /// Which write point produced this: `tool`, `correction`, `output`, `commit`.
     pub origin: String,
-    /// Set when this write retires an earlier fact.
+    /// Set when this write retires an earlier belief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub superseded: Option<i64>,
+    pub superseded: Option<String>,
+    /// The vector, so a peer replaying this log can index the fact without
+    /// re-deriving it.
+    ///
+    /// It used to be omitted as "derivable", which held while the only replayer
+    /// was the machine that wrote it. Once logs replicate it stops holding:
+    /// deriving costs a forward pass at ~6-7 sequences/sec, so a peer import
+    /// turns into an hours-long re-embed of things already embedded once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub embedding: Vec<f32>,
+    /// Which embedding space [`Self::embedding`] belongs to.
+    ///
+    /// Without it the vector is unusable on any machine that might be running a
+    /// different model: same width, different space, silently wrong neighbours.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub embedder: String,
 }
 
 /// A canvas was scaffolded into the project.
@@ -409,6 +451,51 @@ pub struct RunStarted {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// The agent's display name, and the actor id it renders.
+    ///
+    /// Both, because the name is only a rendering: recording the pair lets a
+    /// reader resolve a name in a transcript back to the lineage that produced
+    /// it without consulting the roster, which by then may have released the
+    /// name to someone else. Equal values mean the roster was exhausted and the
+    /// agent is going by its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// What one completion call cost, and how much of it the provider served from
+/// its prompt cache.
+///
+/// Recorded per call rather than per run because the cache answer changes
+/// within a run: a fallback to another candidate lands on a different model,
+/// and caches are model-scoped, so that attempt starts cold.
+///
+/// `cached_input_tokens` is the only signal either provider gives that caching
+/// is working at all. Both the minimum cacheable prefix and its TTL are
+/// undocumented at runtime — no API reports them — so the question worth asking
+/// is not "what is the threshold" but "did this prefix cache", which this
+/// answers on every call for free. A sustained zero across requests that share
+/// a prefix means either the prefix is under the provider's minimum or
+/// something is invalidating it; both have the same fix, so the number is more
+/// useful than the threshold would be.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RunUsage {
+    /// The account that served this call, which is not necessarily the one the
+    /// run started on — fallback moves between candidates.
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Input tokens the provider served from cache. Zero when the provider
+    /// reports no cache detail, which is indistinguishable from a genuine miss
+    /// — read it as "no evidence of a hit", not as a measured zero.
+    #[serde(default)]
+    pub cached_input_tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -652,6 +739,45 @@ mod tests {
             kind: kind.into(),
             payload,
         }
+    }
+
+    /// The cache figure is the reason this event exists, and a zero is a
+    /// meaningful reading rather than a default to be skipped — so it has to
+    /// survive the round trip even when it is zero.
+    #[test]
+    fn usage_round_trips_including_a_zero_cache_reading() {
+        for cached in [0, 4096] {
+            let event = SessionEvent::from(RunUsage {
+                provider: "openai".into(),
+                model: "gpt-test".into(),
+                input_tokens: 8192,
+                output_tokens: 256,
+                total_tokens: 8448,
+                cached_input_tokens: cached,
+            });
+            let stored = envelope(event.kind(), event.payload());
+            let parsed: Envelope = serde_json::from_str(&serde_json::to_string(&stored).unwrap())
+                .expect("usage envelopes parse");
+            assert_eq!(parsed.event(), event, "cached_input_tokens={cached}");
+        }
+    }
+
+    /// A log written before `run.usage` existed replays as a usage record with
+    /// no cache evidence, rather than as an unknown kind.
+    #[test]
+    fn usage_tolerates_a_payload_written_before_the_cache_field() {
+        let stored = envelope("run.usage", serde_json::json!({"provider": "x", "model": "y"}));
+        assert_eq!(
+            stored.event(),
+            SessionEvent::from(RunUsage {
+                provider: "x".into(),
+                model: "y".into(),
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cached_input_tokens: 0,
+            })
+        );
     }
 
     #[test]

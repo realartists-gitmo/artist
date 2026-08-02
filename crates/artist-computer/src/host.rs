@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::ladder::adapters::AdapterSet;
 use crate::ladder::{Probe, select};
+use crate::model::Rung;
 use crate::program::StepError;
 use crate::stage::bus::StageBus;
 use crate::surface::Surface;
@@ -124,16 +125,67 @@ struct StageHandle {
     runtime_dir: PathBuf,
 }
 
+/// Why one rung could not drive a surface, and what would change that.
+///
+/// The reason alone is not worth much — Adam's note on this was exact: an
+/// attributed decline is only useful *"as a way of motivating FIXING the better
+/// routes, rather than just accepting the first wall."* So a decline carries a
+/// remedy whenever one exists. "rung 0 declined" is a shrug; "no adapter matches
+/// `zenity` — write one at `~/.artist/computer/adapters/zenity.toml`" is a task.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decline {
+    pub rung: Rung,
+    pub reason: String,
+    /// What would promote this surface to that rung. `None` when nothing would
+    /// — a program that is genuinely not a browser will never be rung 1, and
+    /// pretending otherwise would be busywork dressed as a to-do.
+    pub remedy: Option<String>,
+}
+
+impl Decline {
+    fn new(rung: Rung, reason: impl Into<String>, remedy: Option<&str>) -> Self {
+        Self {
+            rung,
+            reason: reason.into(),
+            remedy: remedy.map(str::to_owned),
+        }
+    }
+
+    /// One line, with the remedy attached when there is one.
+    pub fn line(&self) -> String {
+        match &self.remedy {
+            Some(remedy) => format!(
+                "rung {} declined ({}) — {remedy}",
+                self.rung.as_u8(),
+                self.reason
+            ),
+            None => format!("rung {} declined ({})", self.rung.as_u8(), self.reason),
+        }
+    }
+}
+
+/// A surface, plus the rungs that could not have it.
+pub struct Launched {
+    pub surface: Arc<dyn Surface>,
+    /// Empty when the best possible rung was reached.
+    pub declined: Vec<Decline>,
+}
+
+impl Launched {
+    fn plain(surface: Arc<dyn Surface>) -> Self {
+        Self {
+            surface,
+            declined: Vec::new(),
+        }
+    }
+}
+
 impl Host {
     pub fn new(state_dir: Option<PathBuf>, adapters: AdapterSet) -> Self {
         Self::sized(state_dir, adapters, DEFAULT_SCREEN)
     }
 
-    pub fn sized(
-        state_dir: Option<PathBuf>,
-        adapters: AdapterSet,
-        screen: (i32, i32),
-    ) -> Self {
+    pub fn sized(state_dir: Option<PathBuf>, adapters: AdapterSet, screen: (i32, i32)) -> Self {
         Self {
             state_dir,
             adapters,
@@ -201,8 +253,12 @@ impl Host {
         // because a toolkit decides whether to run its a11y bridge at startup
         // and never revisits it.
         let bus = StageBus::start(&runtime_dir).await?;
-        let mut wayland =
-            StageWayland::start_sized(StageId(id.clone()), &runtime_dir, self.screen.0, self.screen.1)?;
+        let mut wayland = StageWayland::start_sized(
+            StageId(id.clone()),
+            &runtime_dir,
+            self.screen.0,
+            self.screen.1,
+        )?;
         let mut env = crate::stage::StageEnv::default();
         bus.apply_to(&mut env);
         wayland.extend_env(&env);
@@ -234,7 +290,7 @@ impl Host {
         program: &str,
         args: &[String],
         cwd: Option<&std::path::Path>,
-    ) -> Result<Arc<dyn Surface>, StepError> {
+    ) -> Result<Launched, StepError> {
         use crate::stage::{AppCommand, Stage};
 
         self.ensure_stage().await?;
@@ -258,7 +314,8 @@ impl Host {
                 Arc::new(adapter.clone()),
             )
             .with_env(stage.env().iter().map(|(k, v)| (k.clone(), v.clone())));
-            return Ok(Arc::new(surface));
+            // Rung 0 is the top of the ladder; nothing was passed over.
+            return Ok(Launched::plain(Arc::new(surface)));
         }
 
         let chromium = is_chromium(program);
@@ -276,6 +333,19 @@ impl Host {
                 .arg("--remote-debugging-port=0")
                 .arg(format!("--user-data-dir={}", profile.display()))
                 .arg("--force-renderer-accessibility")
+                // Without this Chromium guesses its display backend, fails with
+                // "The platform failed to initialize", and exits before writing
+                // `DevToolsActivePort` — so the connect times out and the whole
+                // browser rung is unreachable. It presented as "browser never
+                // wrote DevToolsActivePort", which reads like a timing problem
+                // and is not.
+                //
+                // This was hidden because the one test covering the path was
+                // skipping for an unrelated reason: `tempfile::tempdir()`
+                // respects the umask, so its state directory was mode 0755 and
+                // the stage refused it. Two silent failures stacked, and the
+                // suite was green.
+                .arg("--ozone-platform=wayland")
                 .arg("--no-first-run")
                 .arg("--no-default-browser-check");
         }
@@ -302,7 +372,14 @@ impl Host {
             self.pending_chrome.lock().await.replace(Arc::new(
                 crate::surface::cdp::CdpChrome::new(artist_tools::short_id("browser"), browser),
             ));
-            return Ok(Arc::new(surface));
+            return Ok(Launched {
+                surface: Arc::new(surface),
+                declined: vec![Decline::new(
+                    Rung::Programmatic,
+                    format!("no adapter matches {program:?}"),
+                    Some(adapter_remedy(program).as_str()),
+                )],
+            });
         }
 
         // Otherwise let the probe decide between accessibility and pixels.
@@ -318,33 +395,103 @@ impl Host {
         };
         let attachment = select(&probe, &self.adapters);
 
-        // Rung 2. The application is on the stage's *private* a11y bus, which is
-        // what makes attribution exact: only what the agent launched is on it,
-        // so an accessible found by pid belongs unambiguously to this window
-        // rather than to whatever the user happens to have open.
+        // Down the ladder, recording why each rung declined. A bare
+        // "unsupported" tells the reader nothing; "no adapter matches this
+        // program" is a to-do with a template attached.
+        let mut declined: Vec<Decline> = Vec::new();
+        if self.adapters.for_app(program).is_none() {
+            declined.push(Decline::new(
+                Rung::Programmatic,
+                format!("no adapter matches {program:?}"),
+                Some(adapter_remedy(program).as_str()),
+            ));
+        }
+        if !chromium {
+            // No remedy: a program that is not Chromium-based will never speak
+            // CDP, and inventing a to-do here would be noise in every report.
+            declined.push(Decline::new(Rung::Engine, "not a Chromium process", None));
+        }
+
+        // Rung 2. The application is on the stage's *private* a11y bus, which
+        // is what makes attribution exact: only what the agent launched is on
+        // it, so an accessible found by pid belongs unambiguously to this
+        // window rather than to whatever the user happens to have open.
         if let Some(address) = &a11y_address {
             match attach_accessible(address, app.pid).await {
-                Ok(surface) => return Ok(Arc::new(surface)),
-                Err(error) => {
-                    // Not fatal on its own — plenty of applications expose no
-                    // usable tree — but the reason belongs in the error below
-                    // rather than being swallowed.
-                    return Err(StepError::Backend(format!(
-                        "launched {program} (pid {}), and the probe chose rung {:?}, but no \
-                         structural surface could be attached: {error}. The window is on the \
-                         stage and can be captured; if this application has no accessibility \
-                         support, write a rung-0 adapter for it.",
-                        app.pid, attachment.rung
-                    )));
+                Ok(surface) => {
+                    return Ok(Launched {
+                        surface: Arc::new(surface),
+                        declined,
+                    });
                 }
+                Err(error) => declined.push(Decline::new(
+                    Rung::Accessibility,
+                    error.to_string(),
+                    Some(A11Y_REMEDY),
+                )),
+            }
+        } else {
+            declined.push(Decline::new(
+                Rung::Accessibility,
+                "this stage has no accessibility bus",
+                Some("run `artist computer doctor`; the at-spi packages are probably missing"),
+            ));
+        }
+
+        // Rung 3. Not a dead end any more: the harness reads the screen, finds
+        // the text and mints the anchors, so the model names things exactly as
+        // it does everywhere else and never sees a coordinate.
+        #[cfg(feature = "ocr")]
+        if let Some(window) = window.as_ref() {
+            match crate::ocr::Ocr::load_default() {
+                Ok(ocr) => {
+                    // Landing here means a *better* rung was available in
+                    // principle and could not be reached. Silence would make
+                    // that indistinguishable from "this really is a pixel
+                    // application", which is the difference between a bug to
+                    // fix and a limitation to accept.
+                    if !declined.is_empty() {
+                        eprintln!(
+                            "artist: {program} fell to rung 3 (pixels); {}",
+                            declined
+                                .iter()
+                                .map(Decline::line)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        );
+                    }
+                    let surface = crate::surface::screen::ScreenSurface::new(
+                        artist_tools::short_id("screen"),
+                        Arc::clone(&stage),
+                        window.key,
+                        ocr,
+                    );
+                    return Ok(Launched {
+                        surface: Arc::new(surface),
+                        declined,
+                    });
+                }
+                Err(error) => declined.push(Decline::new(
+                    Rung::Pixels,
+                    error.to_string(),
+                    Some("text recognition weights are missing; `artist computer doctor` says where they go"),
+                )),
             }
         }
 
+        // Every rung reported why, rather than one bare "unsupported". The
+        // difference matters: "no adapter matches this program" is a to-do with
+        // a template attached, while "something went wrong" is a dead end.
         Err(StepError::Backend(format!(
-            "launched {program} (pid {}), but this stage has no accessibility bus, so there is \
-             nothing to observe structurally. Install at-spi2-core, or write a rung-0 adapter \
-             for this application.",
-            app.pid
+            "launched {program} (pid {}), but nothing can drive it. The probe wanted rung {:?}; \
+             {}.",
+            app.pid,
+            attachment.rung,
+            declined
+                .iter()
+                .map(Decline::line)
+                .collect::<Vec<_>>()
+                .join("; ")
         )))
     }
 
@@ -354,10 +501,26 @@ impl Host {
         _program: &str,
         _args: &[String],
         _cwd: Option<&std::path::Path>,
-    ) -> Result<Arc<dyn Surface>, StepError> {
+    ) -> Result<Launched, StepError> {
         Err(StepError::Backend(
             "this build has no stage backend; only terminal surfaces are available".into(),
         ))
+    }
+
+    /// The running Wayland stage, starting one if needed.
+    ///
+    /// Exposed for the viewer, which needs the concrete type: only this stage
+    /// can export a render target, and a `dyn Stage` returning `None` for the
+    /// other implementations would be pretending otherwise.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    pub async fn wayland_stage(
+        &self,
+    ) -> Result<Arc<crate::stage::wayland::StageWayland>, StepError> {
+        self.ensure_stage().await?;
+        let slot = self.stage.lock().await;
+        slot.as_ref()
+            .map(|handle| Arc::clone(&handle.wayland))
+            .ok_or_else(|| StepError::Backend("stage vanished".into()))
     }
 
     /// Shut the stage down, if one is running.
@@ -484,9 +647,20 @@ async fn attach_accessible(
 
 /// Whether a candidate tree has enough in it to be worth attaching to.
 ///
-/// A bridge often registers before it has anything to expose. Attaching then
-/// gives the model a blank surface and no way to tell that from an application
-/// that genuinely has no controls.
+/// A toolkit registers its accessibility bridge before it has built a tree, so
+/// attaching too early gives the model a blank surface it cannot distinguish
+/// from an application that genuinely has no controls. This is the guard against
+/// that — and it has to measure *usefulness*, not size.
+///
+/// It originally required eight nodes, which was a number carried over from the
+/// design sketch with nothing behind it. A live test found the cost: a `zenity
+/// --info` dialog has **six** — a window, a label, its text and a button — and
+/// was rejected as a stub despite being perfectly driveable. The launch then
+/// spent fifteen seconds retrying before falling down a rung.
+///
+/// What actually separates a stub from a real tree is not node count but whether
+/// anything in it can be *named and acted on*. A freshly-registered bridge
+/// exposes an application root and nothing else.
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
 async fn usable_tree(surface: &crate::surface::atspi::AtspiSurface) -> bool {
     use crate::surface::Surface;
@@ -494,20 +668,14 @@ async fn usable_tree(surface: &crate::surface::atspi::AtspiSurface) -> bool {
     let Ok(snapshot) = surface.snapshot().await else {
         return false;
     };
-    snapshot.nodes.len() >= MIN_TREE_NODES
-        && snapshot
-            .nodes
-            .iter()
-            .any(|node| node.role.is_interactive() || !node.actions.is_empty())
+    snapshot.nodes.iter().any(|node| {
+        !node.name.trim().is_empty() && (node.role.is_interactive() || !node.actions.is_empty())
+    })
 }
 
 /// How long to wait for a toolkit to put its accessibility tree on the bus.
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
 const A11Y_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// The smallest tree that counts as an attachment rather than a stub.
-#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
-const MIN_TREE_NODES: usize = 8;
 
 /// Whether a window's process is the one we launched, or a descendant of it.
 ///
@@ -543,7 +711,9 @@ fn parent_pid(pid: i32) -> Option<i32> {
     after_name.split_whitespace().nth(1)?.parse().ok()
 }
 
-async fn first_page(browser: &chromiumoxide::Browser) -> Result<chromiumoxide::Page, StepError> {
+pub(crate) async fn first_page(
+    browser: &chromiumoxide::Browser,
+) -> Result<chromiumoxide::Page, StepError> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         if let Ok(pages) = browser.pages().await
@@ -557,6 +727,25 @@ async fn first_page(browser: &chromiumoxide::Browser) -> Result<chromiumoxide::P
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
+
+/// The remedy for a missing rung-0 adapter: name the file to write.
+///
+/// A path the reader can act on beats a category. This is the single highest-value
+/// remedy in the ladder, because rung 0 is where the real wins are — a D-Bus call
+/// instead of a window.
+fn adapter_remedy(program: &str) -> String {
+    format!(
+        "write an adapter at `$ARTIST_CONFIG_DIR/computer/adapters/{}.toml` if this \
+         program has a D-Bus, CLI or localhost-HTTP interface — rung 0 is faster and \
+         far more reliable than driving its window",
+        program.rsplit('/').next().unwrap_or(program)
+    )
+}
+
+/// Why an accessibility tree is usually missing, in the order worth checking.
+const A11Y_REMEDY: &str = "the toolkit may not have been told accessibility is on — \
+     check `artist computer doctor`, and note that GTK needs GTK_A11Y=atspi, Qt needs \
+     QT_ACCESSIBILITY=1, and Electron needs --force-renderer-accessibility";
 
 #[cfg(test)]
 mod tests {

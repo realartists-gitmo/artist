@@ -28,7 +28,9 @@ impl Modifiers {
 
     /// The CDP `Input.dispatchKeyEvent` modifier bitmask.
     pub fn cdp_bits(&self) -> i64 {
-        (self.alt as i64) | ((self.ctrl as i64) << 1) | ((self.meta as i64) << 2)
+        (self.alt as i64)
+            | ((self.ctrl as i64) << 1)
+            | ((self.meta as i64) << 2)
             | ((self.shift as i64) << 3)
     }
 }
@@ -148,10 +150,7 @@ impl Key {
             Self::End => ("End".into(), 35),
             Self::PageUp => ("PageUp".into(), 33),
             Self::PageDown => ("PageDown".into(), 34),
-            Self::Char(character) => (
-                character.to_string(),
-                character.to_ascii_uppercase() as i64,
-            ),
+            Self::Char(character) => (character.to_string(), character.to_ascii_uppercase() as i64),
         }
     }
 
@@ -179,6 +178,43 @@ impl Key {
         };
         Some(code)
     }
+}
+
+/// The name of a key, from the evdev code a compositor reported.
+///
+/// The inverse of [`Key::evdev`], and it exists for the viewer: the user's
+/// compositor hands us raw evdev codes, and the stage speaks names. Translating
+/// to a keysym in between is what makes a viewer type the wrong character on a
+/// non-US layout — the stage owns the keymap, so the code is passed through as a
+/// name it can look up itself.
+///
+/// `None` for anything not in the stage's vocabulary, which the caller drops
+/// rather than approximating.
+pub fn name_for_evdev(code: u32) -> Option<String> {
+    let named = match code {
+        1 => "Escape",
+        14 => "BackSpace",
+        15 => "Tab",
+        28 => "Enter",
+        57 => "Space",
+        102 => "Home",
+        103 => "Up",
+        104 => "PageUp",
+        105 => "Left",
+        106 => "Right",
+        107 => "End",
+        108 => "Down",
+        109 => "PageDown",
+        111 => "Delete",
+        _ => {
+            // Printable keys are found by searching the forward table rather
+            // than by keeping a second one. Two tables drift; one cannot.
+            return ('\u{20}'..='\u{7e}')
+                .find(|character| evdev_for_char(*character) == Some(code))
+                .map(|character| character.to_string());
+        }
+    };
+    Some(named.to_owned())
 }
 
 /// evdev keycode for a printable character on a US layout, unshifted.
@@ -337,7 +373,12 @@ mod tests {
     #[test]
     fn unknown_names_are_errors_rather_than_silent_approximations() {
         assert!(parse("SuperTurbo").is_err());
-        assert!(parse("hyper+a").unwrap_err().to_string().contains("modifier"));
+        assert!(
+            parse("hyper+a")
+                .unwrap_err()
+                .to_string()
+                .contains("modifier")
+        );
         assert!(parse("").is_err());
     }
 
@@ -354,9 +395,18 @@ mod tests {
 
     #[test]
     fn terminal_bytes_honour_modifiers() {
-        assert_eq!(terminal_bytes(&parse("ctrl+c").unwrap()).unwrap(), vec![0x03]);
-        assert_eq!(terminal_bytes(&parse("ctrl+d").unwrap()).unwrap(), vec![0x04]);
-        assert_eq!(terminal_bytes(&parse("alt+b").unwrap()).unwrap(), vec![0x1b, b'b']);
+        assert_eq!(
+            terminal_bytes(&parse("ctrl+c").unwrap()).unwrap(),
+            vec![0x03]
+        );
+        assert_eq!(
+            terminal_bytes(&parse("ctrl+d").unwrap()).unwrap(),
+            vec![0x04]
+        );
+        assert_eq!(
+            terminal_bytes(&parse("alt+b").unwrap()).unwrap(),
+            vec![0x1b, b'b']
+        );
         assert_eq!(terminal_bytes(&parse("Enter").unwrap()).unwrap(), b"\r");
         assert_eq!(terminal_bytes(&parse("Up").unwrap()).unwrap(), b"\x1b[A");
     }
@@ -387,5 +437,36 @@ mod tests {
         assert_eq!(Key::Enter.dom(), ("Enter".into(), 13));
         assert_eq!(Key::Up.dom(), ("ArrowUp".into(), 38));
         assert_eq!(Key::Char('a').dom().0, "a");
+    }
+
+    #[test]
+    fn evdev_codes_round_trip_back_to_names_the_stage_understands() {
+        // The viewer receives codes and must hand back something `parse`
+        // accepts, or a human's keystroke is silently dropped.
+        for name in [
+            "Escape", "Tab", "Enter", "Space", "Home", "Up", "Left", "Right", "Down", "Delete",
+            "a", "z", "0", "9",
+        ] {
+            let chord = parse(name).expect(name);
+            let code = chord.key.evdev().expect(name);
+            let back = name_for_evdev(code).expect(name);
+            assert!(
+                parse(&back).is_ok(),
+                "{name} became code {code} became {back:?}, which does not parse"
+            );
+            assert_eq!(
+                parse(&back).unwrap().key.evdev(),
+                Some(code),
+                "{name} did not survive the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_evdev_code_is_dropped_rather_than_guessed() {
+        // A key the stage has no name for must not become an approximation:
+        // sending the wrong key is worse than sending none.
+        assert_eq!(name_for_evdev(0), None);
+        assert_eq!(name_for_evdev(9999), None);
     }
 }

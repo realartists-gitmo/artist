@@ -1,11 +1,12 @@
 //! Rung 3: pixels, and the set-of-mark overlay.
 //!
-//! **Observation only, deliberately.** Minting anchors from a quantized pixel
-//! grid is coordinates wearing a hat: it reintroduces every failure the anchor
-//! design exists to prevent, without the identity that makes an anchor
-//! meaningful. A surface that reaches this rung with no tree at all reports "no
-//! actionable surface" — a loud, honest failure the model can act on, rather
-//! than a picture it is invited to guess at.
+//! This module is the *drawing* half of rung 3; the acting half is
+//! [`crate::surface::screen`]. The split is worth knowing about, because the
+//! original design said this rung could never act, and the reason it can now is
+//! narrow: coordinates are dangerous when the **model** supplies them, not when
+//! the harness derives them. `annotate` puts anchors on a picture so the two
+//! channels share one vocabulary; `ScreenSurface` finds the anchors in the first
+//! place.
 //!
 //! What this rung *is* good for is showing the model a frame annotated with the
 //! **same anchors** as the structured view. Most implementations keep two
@@ -50,10 +51,7 @@ fn put(frame: &mut Frame, x: i64, y: i64, colour: [u8; 4]) {
 
 fn draw_box(frame: &mut Frame, bounds: Rect, colour: [u8; 4]) {
     let (x0, y0) = (i64::from(bounds.x), i64::from(bounds.y));
-    let (x1, y1) = (
-        x0 + i64::from(bounds.width),
-        y0 + i64::from(bounds.height),
-    );
+    let (x1, y1) = (x0 + i64::from(bounds.width), y0 + i64::from(bounds.height));
     for thickness in 0..i64::from(BOX_THICKNESS) {
         for x in x0..x1 {
             put(frame, x, y0 + thickness, colour);
@@ -110,12 +108,14 @@ mod tests {
     #[test]
     fn a_box_is_drawn_around_a_node_with_bounds() {
         let frame = blank(100, 100);
-        let observation = observed(vec![Node::new("a", Role::Button, "Save").with_bounds(Rect {
-            x: 20,
-            y: 30,
-            width: 40,
-            height: 20,
-        })]);
+        let observation = observed(vec![Node::new("a", Role::Button, "Save").with_bounds(
+            Rect {
+                x: 20,
+                y: 30,
+                width: 40,
+                height: 20,
+            },
+        )]);
 
         let marked = annotate(&frame, &observation);
         // Top-left corner of the box.
@@ -177,12 +177,14 @@ mod tests {
         // observation text calls an element is what the overlay marks.
         let mut book = AnchorBook::new();
         let observation = book.observe(
-            &Snapshot::new(vec![Node::new("a", Role::Button, "Save").with_bounds(Rect {
-                x: 1,
-                y: 20,
-                width: 10,
-                height: 10,
-            })]),
+            &Snapshot::new(vec![Node::new("a", Role::Button, "Save").with_bounds(
+                Rect {
+                    x: 1,
+                    y: 20,
+                    width: 10,
+                    height: 10,
+                },
+            )]),
             false,
         );
         let text = crate::render::observation("win:1", &observation, Some("ab12cd"));

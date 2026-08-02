@@ -144,7 +144,7 @@ impl FileCoordinator {
             .await
             .with_context(|| format!("failed to read {normalized}"))?;
         let content_hash = content_hash(&bytes);
-        let state = manager.export_issued_prefixes();
+        let state = manager.export_anchor_state();
         drop(manager);
         self.state
             .replace_anchor_state(&actor.id, &state)
@@ -221,7 +221,7 @@ impl FileCoordinator {
                 max_lines: None,
             })
             .await?;
-        let state = manager.export_issued_prefixes();
+        let state = manager.export_anchor_state();
         drop(manager);
         let hash = content_hash(content.as_bytes());
         self.note_writer(&normalized, actor, &hash).await;
@@ -276,7 +276,7 @@ impl FileCoordinator {
 
         let mut manager = manager.lock().await;
         manager.forget_path(&path)?;
-        let state = manager.export_issued_prefixes();
+        let state = manager.export_anchor_state();
         drop(manager);
         if let Err(error) = self.state.replace_anchor_state(&actor.id, &state).await {
             eprintln!("failed to persist anchor cleanup after deleting {path}: {error}");
@@ -301,7 +301,7 @@ impl FileCoordinator {
         let bytes = fs::read(&normalized)
             .await
             .with_context(|| format!("failed to read {normalized} after edit"))?;
-        let state = manager.export_issued_prefixes();
+        let state = manager.export_anchor_state();
         drop(manager);
         let hash = content_hash(&bytes);
         self.note_writer(&normalized, actor, &hash).await;
@@ -456,7 +456,7 @@ impl FileCoordinator {
             .await
             .map_err(anyhow::Error::msg)?;
         let mut manager = FileToolManager::with_config(self.config.clone());
-        manager.import_issued_prefixes(persisted);
+        manager.import_anchor_state(persisted);
         let manager = Arc::new(Mutex::new(manager));
         let mut managers = self.managers.lock().await;
         Ok(managers

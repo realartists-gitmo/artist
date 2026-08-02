@@ -41,6 +41,23 @@ pub struct Workspace {
     pub(crate) files: FileCoordinator,
     pub(crate) actor: AgentIdentity,
     pub(crate) index: SharedFilePicker,
+    /// Paths already observed this session, so the first-touch note fires once.
+    ///
+    /// Shared across clones because `with_actor` hands subagents a new
+    /// `Workspace` over the same project — two agents in one session should not
+    /// each be told separately that a file has thirty importers.
+    seen: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+    /// The architecture as it stood when this session first looked.
+    ///
+    /// Shared across clones for the same reason `seen` is: the project shape is
+    /// a property of the session, and a subagent must not be told a dependency
+    /// is new because it happens to hold a different handle. `None` until first
+    /// use, and stays `None` for a project with nothing to describe.
+    architecture: Arc<std::sync::Mutex<Option<crate::skeleton::Baseline>>>,
+    /// Units this session has already been introduced to. Shared for the same
+    /// reason `seen` is, and separate from it because a unit is entered once
+    /// however many of its files get opened.
+    entered: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Workspace {
@@ -109,6 +126,9 @@ impl Workspace {
             files,
             actor: AgentIdentity::from_id(actor).map_err(anyhow::Error::msg)?,
             index: picker,
+            seen: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            architecture: Arc::new(std::sync::Mutex::new(None)),
+            entered: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         })
     }
 
@@ -166,6 +186,59 @@ impl Workspace {
         // conclusion, and it closes the window where a write lands inside the
         // same mtime tick the cached records were stamped with.
         artist_ast::graph_cache::shared::forget(self.root());
+    }
+
+    /// True the first time `path` is observed this session.
+    ///
+    /// Records on the way out, so a caller that asks is committing to having
+    /// shown whatever the answer gates. Cheap enough to call on every read.
+    /// Architectural changes this edit caused, or empty when it caused none.
+    ///
+    /// The baseline is captured on first use rather than at open: a session
+    /// that never edits anything should not pay to discover the shape of the
+    /// project, and the first edit is early enough to be a true "before".
+    pub(crate) fn architecture_delta(&self, file: &Path) -> Vec<String> {
+        let Ok(mut held) = self.architecture.lock() else {
+            return Vec::new();
+        };
+        if held.is_none() {
+            *held = crate::skeleton::baseline(self.root());
+        }
+        held.as_mut()
+            .map(|baseline| baseline.observe(self.root(), file))
+            .unwrap_or_default()
+    }
+
+    /// An introduction to this file's unit, the first time the session goes
+    /// there. `None` afterwards, and for a project with no architecture.
+    /// [`Self::region_note`], reachable from the integration tests.
+    ///
+    /// The real method is crate-private because nothing outside the annotation
+    /// hook should be firing it — calling it consumes the one introduction a
+    /// unit gets.
+    #[doc(hidden)]
+    pub fn region_note_for_test(&self, file: &Path) -> Option<String> {
+        self.region_note(file)
+    }
+
+    pub(crate) fn region_note(&self, file: &Path) -> Option<String> {
+        let mut held = self.architecture.lock().ok()?;
+        if held.is_none() {
+            *held = crate::skeleton::baseline(self.root());
+        }
+        let baseline = held.as_ref()?;
+        let unit = baseline.unit_of(file)?;
+        if !self.entered.lock().ok()?.insert(unit.clone()) {
+            return None;
+        }
+        baseline.region_note(file)
+    }
+
+    pub(crate) fn first_observation(&self, path: &Path) -> bool {
+        self.seen
+            .lock()
+            .map(|mut seen| seen.insert(path.to_path_buf()))
+            .unwrap_or(false)
     }
 
     pub fn display(&self, path: &Path) -> String {

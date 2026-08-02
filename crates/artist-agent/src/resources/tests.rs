@@ -128,3 +128,83 @@ async fn skill_tool_activates_and_rejects_resource_traversal() {
             .unwrap();
     assert!(tool.call(escape).await.is_err());
 }
+
+/// The scan used to walk build output. A Rust `target/` holds tens of thousands
+/// of entries, which consumed the whole traversal budget before the source tree
+/// was reached — so a real instruction file went missing, and *which* files
+/// survived depended on `read_dir` ordering rather than on the tree.
+#[test]
+fn build_output_does_not_crowd_out_real_instructions() {
+    let root = tempfile::tempdir().unwrap();
+    write(&root.path().join(".gitignore"), "target\n");
+    write(&root.path().join("crates/app/AGENTS.md"), "the real one");
+    // Enough to have exhausted the old 5,000-entry budget on its own.
+    for index in 0..6_000 {
+        write(
+            &root.path().join(format!("target/debug/deps/artifact{index}.rlib")),
+            "",
+        );
+    }
+
+    let mut diagnostics = Vec::new();
+    let found = agents::nested(root.path(), &mut diagnostics);
+
+    assert_eq!(found.len(), 1, "found: {found:?}");
+    assert!(found[0].ends_with("crates/app/AGENTS.md"), "{found:?}");
+}
+
+/// A gitignored `AGENTS.md` is not a project instruction — it is scratch, or
+/// vendored, or a fixture. Including it silently changed the system prompt.
+#[test]
+fn gitignored_instructions_are_skipped() {
+    let root = tempfile::tempdir().unwrap();
+    write(&root.path().join(".gitignore"), "vendor\n");
+    write(&root.path().join("vendor/dep/AGENTS.md"), "not ours");
+    write(&root.path().join("src/AGENTS.md"), "ours");
+
+    let mut diagnostics = Vec::new();
+    let found = agents::nested(root.path(), &mut diagnostics);
+
+    assert_eq!(found.len(), 1, "found: {found:?}");
+    assert!(found[0].ends_with("src/AGENTS.md"), "{found:?}");
+}
+
+/// Order feeds the system prompt, so it has to come from the tree rather than
+/// from whatever order the filesystem returned entries in this time.
+#[test]
+fn the_order_is_the_trees_order() {
+    let root = tempfile::tempdir().unwrap();
+    for name in ["zebra", "alpha", "middle"] {
+        write(&root.path().join(name).join("AGENTS.md"), name);
+    }
+
+    let mut diagnostics = Vec::new();
+    let first = agents::nested(root.path(), &mut diagnostics);
+    let second = agents::nested(root.path(), &mut diagnostics);
+
+    assert_eq!(first, second);
+    let names: Vec<_> = first
+        .iter()
+        .map(|path| path.parent().unwrap().file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(names, ["alpha", "middle", "zebra"]);
+}
+
+/// An instruction file too large to load used to fail in silence: the
+/// diagnostic was collected and then never read by anything.
+#[test]
+fn a_failure_to_load_instructions_is_surfaced() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join(".git")).unwrap();
+    write(&root.path().join("AGENTS.md"), &"x".repeat(200 * 1024));
+
+    let resources = Resources::discover(root.path());
+    assert!(
+        resources
+            .diagnostics()
+            .iter()
+            .any(|d| d.contains("exceeds")),
+        "diagnostics: {:?}",
+        resources.diagnostics()
+    );
+}

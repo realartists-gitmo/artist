@@ -20,8 +20,6 @@
 //! one thing the Stage exists to prevent. The browser is started by
 //! `Stage::spawn` with the stage environment and *connected to* here.
 
-
-
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -81,6 +79,134 @@ pub async fn connect(user_data_dir: &std::path::Path) -> Result<Browser, StepErr
     // all traffic, so it is spawned and kept alive for the browser's lifetime.
     tokio::spawn(async move { while handler.next().await.is_some() {} });
     Ok(browser)
+}
+
+/// Connect to a browser the user already has open.
+///
+/// The whole value of this is credentials. The stage's browser starts with an
+/// empty profile: no sessions, no cookies, no saved passwords, and every task
+/// that touches a logged-in site begins at a login page. A browser the user
+/// already has open is already logged into everything they use — which is
+/// exactly the reasoning behind sharing `$HOME` rather than sandboxing it.
+///
+/// **This is the one place the isolation property does not hold, and it is not
+/// a leak — it is what was asked for.** A user attaching to their own browser
+/// has said so explicitly by launching it with a debugging port; that is not a
+/// thing that happens by accident. The stage's guarantees about focus and input
+/// still hold, because a CDP page is driven by protocol message and never
+/// through the seat. What does *not* hold is the private accessibility tree:
+/// this browser is the user's, its tabs are the user's, and closing one closes
+/// theirs.
+///
+/// Endpoint rather than profile directory, because a running browser's
+/// `DevToolsActivePort` may not be readable by us and the port is the thing the
+/// user actually knows.
+pub async fn attach_to_endpoint(endpoint: &str) -> Result<Browser, StepError> {
+    // A bare port, because that is the thing a person actually knows. They
+    // started the browser with `--remote-debugging-port=9222`; nobody knows the
+    // websocket path, and requiring it would mean digging through
+    // `chrome://inspect` before the agent could do anything. Resolved here
+    // rather than at the tool boundary so every caller gets it.
+    let endpoint = if let Ok(port) = endpoint.trim().parse::<u16>() {
+        &resolve_port(port).await?
+    } else {
+        endpoint
+    };
+
+    // Loopback only, for the same reason adapters are: a debugging endpoint is
+    // total control of a browser, and a remote one is somebody else's.
+    let host_ok = endpoint
+        .strip_prefix("ws://")
+        .map(|rest| {
+            rest.starts_with("127.0.0.1:")
+                || rest.starts_with("localhost:")
+                || rest.starts_with("[::1]:")
+        })
+        .unwrap_or(false);
+    if !host_ok {
+        return Err(StepError::Backend(format!(
+            "{endpoint:?} is not a loopback ws:// devtools endpoint. Attaching means \
+             taking control of a browser, and that is only offered for one on this machine."
+        )));
+    }
+
+    let (browser, mut handler) = Browser::connect(endpoint).await.map_err(|error| {
+        StepError::Backend(format!(
+            "connect to {endpoint}: {error}. Start the browser with \
+             --remote-debugging-port=<port> and pass the ws:// url it prints."
+        ))
+    })?;
+    tokio::spawn(async move { while handler.next().await.is_some() {} });
+    Ok(browser)
+}
+
+/// Turn a debugging port into the browser's websocket endpoint.
+///
+/// `GET /json/version` carries `webSocketDebuggerUrl`. Read with a hand-rolled
+/// request and a hard read limit rather than an HTTP client: Chromium's DevTools
+/// endpoint holds the connection open regardless of `Connection: close`, so a
+/// read-to-end never returns — the same trap that made `connect` read
+/// `DevToolsActivePort` from disk instead.
+async fn resolve_port(port: u16) -> Result<String, StepError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .map_err(|error| {
+            StepError::Backend(format!(
+                "nothing is listening on port {port}: {error}. Start the browser with \
+                 --remote-debugging-port={port} and try again."
+            ))
+        })?;
+    socket
+        .write_all(b"GET /json/version HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .map_err(|error| {
+            StepError::Backend(format!("ask port {port} for its endpoint: {error}"))
+        })?;
+
+    // Bounded read, bounded wait. Both matter: this is talking to something we
+    // have not identified yet, and it may not be a browser at all.
+    let mut body = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let read = tokio::time::timeout_at(deadline, socket.read(&mut chunk))
+            .await
+            .map_err(|_| {
+                StepError::Backend(format!(
+                    "port {port} did not answer like a devtools endpoint"
+                ))
+            })?
+            .map_err(|error| StepError::Backend(format!("read from port {port}: {error}")))?;
+        if read == 0 || body.len() > 64 * 1024 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+        if body.windows(4).any(|window| window == b"}\r\n\r") || body.ends_with(b"}") {
+            break;
+        }
+    }
+
+    let text = String::from_utf8_lossy(&body);
+    let json = text
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or(&text);
+    let parsed: serde_json::Value = serde_json::from_str(json.trim()).map_err(|_| {
+        StepError::Backend(format!(
+            "port {port} is listening but is not a browser devtools endpoint"
+        ))
+    })?;
+    parsed
+        .get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            StepError::Backend(format!(
+                "the devtools endpoint on port {port} named no websocket url"
+            ))
+        })
 }
 
 /// The set of requests a page currently has outstanding.
@@ -553,6 +679,107 @@ fn role_for(role: &str) -> Role {
     }
 }
 
+/// Whether a node is something text can be typed into.
+///
+/// Roles rather than a capability probe, because the answer is needed *before*
+/// dispatch — the point is to refuse with a useful message rather than let the
+/// browser refuse with an unhelpful one. `Other` is allowed through: a custom
+/// element with a role we do not model may still be an editable host, and
+/// guessing "no" there would make the tool refuse things that work.
+fn accepts_text(node: &Node) -> bool {
+    matches!(
+        node.role,
+        Role::TextBox | Role::ComboBox | Role::Other(_) | Role::Window
+    )
+}
+
+/// Every frame below the root, depth-first.
+///
+/// Used to ask for each frame's accessibility tree in turn. Returns an empty
+/// list rather than an error when the frame tree cannot be read: a page with no
+/// frames is the common case and indistinguishable from a failure here, and
+/// neither is worth failing an observation over.
+async fn child_frames(
+    page: &chromiumoxide::Page,
+) -> Vec<chromiumoxide::cdp::browser_protocol::page::FrameId> {
+    use chromiumoxide::cdp::browser_protocol::page::{FrameTree, GetFrameTreeParams};
+
+    let Ok(tree) = page.execute(GetFrameTreeParams::default()).await else {
+        return Vec::new();
+    };
+
+    fn walk(node: &FrameTree, out: &mut Vec<chromiumoxide::cdp::browser_protocol::page::FrameId>) {
+        for child in node.child_frames.iter().flatten() {
+            out.push(child.frame.id.clone());
+            walk(child, out);
+        }
+    }
+
+    let mut frames = Vec::new();
+    walk(&tree.result.frame_tree, &mut frames);
+    frames
+}
+
+/// The accessibility nodes in document order.
+///
+/// `getFullAXTree` returns them **breadth-first**: every child of the root, then
+/// every grandchild. So a page of `<h2>Refund policy</h2><p>…</p><h2>Delivery…`
+/// arrives as *heading, heading, heading, text, text, text* — and anything that
+/// reads a node together with its neighbour reads the wrong neighbour.
+///
+/// That broke `extract` in a way no unit test could see, because the synthetic
+/// snapshots those tests build are already in document order: a heading's
+/// "section" was whatever followed it, which in breadth-first order is the next
+/// heading, so every section came out empty. Found by asking a real page for its
+/// refund policy and getting one sentence of it.
+///
+/// Walked from the root through `child_ids`, so the order is the document's.
+/// Nodes unreachable from the root are appended rather than dropped — an
+/// unreachable node is still a node, and losing one silently would be a worse
+/// bug than mis-ordering it.
+fn document_order(
+    nodes: &[chromiumoxide::cdp::browser_protocol::accessibility::AxNode],
+) -> Vec<&chromiumoxide::cdp::browser_protocol::accessibility::AxNode> {
+    use std::collections::HashMap;
+
+    let by_id: HashMap<_, _> = nodes.iter().map(|node| (&node.node_id, node)).collect();
+    let mut ordered = Vec::with_capacity(nodes.len());
+    let mut seen = std::collections::HashSet::new();
+
+    // The root is the node nothing claims as a child. Falling back to the first
+    // node keeps a malformed tree usable rather than empty.
+    let children: std::collections::HashSet<_> = nodes
+        .iter()
+        .flat_map(|node| node.child_ids.iter().flatten())
+        .collect();
+    let roots: Vec<_> = nodes
+        .iter()
+        .filter(|node| !children.contains(&node.node_id))
+        .collect();
+
+    let mut stack: Vec<_> = roots.into_iter().rev().collect();
+    while let Some(node) = stack.pop() {
+        if !seen.insert(&node.node_id) {
+            continue;
+        }
+        ordered.push(node);
+        // Reversed onto the stack so they pop in the order the document has
+        // them; without this every sibling list comes out backwards.
+        for child in node.child_ids.iter().flatten().rev() {
+            if let Some(child) = by_id.get(child) {
+                stack.push(child);
+            }
+        }
+    }
+
+    for node in nodes {
+        if !seen.contains(&node.node_id) {
+            ordered.push(node);
+        }
+    }
+    ordered
+}
+
 /// Pull the accessibility tree and normalize it into nodes.
 ///
 /// `backendDOMNodeId` is the binding: stable for the life of the element, which
@@ -561,13 +788,40 @@ fn role_for(role: &str) -> Role {
 async fn ax_nodes(page: &chromiumoxide::Page) -> Result<Vec<Node>, StepError> {
     use chromiumoxide::cdp::browser_protocol::accessibility::GetFullAxTreeParams;
 
-    let tree = page
-        .execute(GetFullAxTreeParams::default())
-        .await
-        .map_err(|error| StepError::Backend(format!("accessibility tree: {error}")))?;
+    // Every frame, not just the root one. `getFullAXTree` defaults to the root
+    // frame's document, so an `<iframe>` contributes only *itself* — the frame
+    // element — and nothing inside it. That silently hides the contents of every
+    // payment widget, embedded editor, consent dialog and OAuth flow on the web:
+    // the tree looks healthy, the button is simply not in it, and the model
+    // concludes the page does not have one.
+    //
+    // Found by a test that put a button in an iframe and looked for it. The
+    // `file://` fixtures could not have found it, because a frame loaded from
+    // another path is another origin.
+    let mut trees = Vec::new();
+    match page.execute(GetFullAxTreeParams::default()).await {
+        Ok(tree) => trees.push(tree),
+        Err(error) => {
+            return Err(StepError::Backend(format!("accessibility tree: {error}")));
+        }
+    }
+    for frame in child_frames(page).await {
+        // A frame that fails is skipped rather than fatal: a cross-origin frame
+        // may be a separate target we cannot read, and losing one frame's
+        // contents is far better than losing the page.
+        if let Ok(tree) = page
+            .execute(GetFullAxTreeParams::builder().frame_id(frame).build())
+            .await
+        {
+            trees.push(tree);
+        }
+    }
 
     let mut nodes = Vec::new();
-    for ax in &tree.result.nodes {
+    for ax in trees
+        .iter()
+        .flat_map(|tree| document_order(&tree.result.nodes))
+    {
         if ax.ignored {
             continue;
         }
@@ -700,11 +954,8 @@ impl Surface for CdpPage {
             .await
             .map_err(|error| StepError::Backend(format!("capture screenshot: {error}")))?;
 
-        let png = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &shot.data,
-        )
-        .map_err(|error| StepError::Backend(format!("decode screenshot: {error}")))?;
+        let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &shot.data)
+            .map_err(|error| StepError::Backend(format!("decode screenshot: {error}")))?;
 
         Ok(Some(
             crate::model::Frame::from_png(&png).map_err(StepError::Backend)?,
@@ -745,8 +996,8 @@ impl Surface for CdpPage {
                     .and_then(|value| value.as_str().map(str::to_owned))
                     .unwrap_or_default();
 
-                let quiet = ready == "complete"
-                    && inflight.lock().unwrap().len() as u32 <= IDLE_INFLIGHT;
+                let quiet =
+                    ready == "complete" && inflight.lock().unwrap().len() as u32 <= IDLE_INFLIGHT;
 
                 if quiet {
                     let since = *stable_since.get_or_insert_with(std::time::Instant::now);
@@ -783,6 +1034,23 @@ impl Surface for CdpPage {
                 self.click_backend_node(id).await
             }
             Step::Type { text, clear, .. } => {
+                // Refused here rather than by the browser. A page labels its
+                // input with a `<label>`, and in document order that label's
+                // text comes *first* — so naming "Email" and typing into the
+                // first match hits the label, not the field. CDP answers that
+                // with `Error -32000: Node is not an Element`, which tells the
+                // model nothing it can act on. This says what the element is
+                // and what to do instead.
+                if let Some(target) = node
+                    && !accepts_text(target)
+                {
+                    return Err(StepError::Unsupported {
+                        anchor: target.binding.as_str().to_owned(),
+                        role: target.role.label().to_owned(),
+                        name: target.name.clone(),
+                        action: "type",
+                    });
+                }
                 let id = backend_id(node)?;
                 self.focus_backend_node(id).await?;
                 if *clear {
@@ -839,12 +1107,16 @@ impl Surface for CdpPage {
             // rather than a missing feature, and says so.
             Step::Invoke { target, action } => Err(StepError::Unsupported {
                 anchor: target.anchor.clone(),
-                role: node.map(|node| node.role.label().to_owned()).unwrap_or_default(),
+                role: node
+                    .map(|node| node.role.label().to_owned())
+                    .unwrap_or_default(),
                 name: node.map(|node| node.name.clone()).unwrap_or_default(),
                 action: "invoke",
             })
             .map_err(|error| match error {
-                StepError::Unsupported { anchor, role, name, .. } => StepError::Backend(format!(
+                StepError::Unsupported {
+                    anchor, role, name, ..
+                } => StepError::Backend(format!(
                     "{anchor} ({role} {name:?}) has no action {action:?} — page elements are \
                      driven with click, type, key and scroll"
                 )),
@@ -1083,10 +1355,10 @@ impl CdpPage {
     }
 
     async fn press_key(&self, key: &str) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchKeyEventParams, DispatchKeyEventType,
         };
-        use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 
         let chord = crate::keys::parse(key)?;
         let (dom_key, code) = chord.key.dom();
@@ -1143,5 +1415,93 @@ mod tests {
         // Unknown roles pass through rather than being flattened away, so the
         // model still learns what the page called it.
         assert_eq!(role_for("figure"), Role::Other("figure".into()));
+    }
+
+    #[tokio::test]
+    async fn attaching_is_offered_only_for_a_browser_on_this_machine() {
+        // A devtools endpoint is total control of a browser. A remote one is
+        // somebody else's browser, and there is no version of that request that
+        // is what the user meant.
+        for refused in [
+            "ws://example.com:9222/devtools/browser/abc",
+            "ws://10.0.0.5:9222/devtools/browser/abc",
+            "wss://127.0.0.1:9222/devtools/browser/abc",
+            "http://127.0.0.1:9222/",
+            "127.0.0.1:9222",
+        ] {
+            let error = attach_to_endpoint(refused).await.unwrap_err().to_string();
+            assert!(
+                error.contains("loopback"),
+                "{refused} should be refused as non-loopback, got: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_loopback_endpoint_with_nothing_behind_it_says_how_to_start_one() {
+        // Port 1 is never a devtools endpoint, so this exercises the connect
+        // failure rather than the host check — and the message has to name the
+        // flag, because "connection refused" tells a user nothing they can act on.
+        let error = attach_to_endpoint("ws://127.0.0.1:1/devtools/browser/x")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("loopback"), "wrong branch: {error}");
+        assert!(
+            error.contains("--remote-debugging-port"),
+            "the recovery must be named: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_port_with_nothing_on_it_says_what_to_start() {
+        // Port 1 is never a devtools endpoint. The message has to name the flag,
+        // because "connection refused" tells a user nothing they can act on.
+        let error = attach_to_endpoint("1").await.unwrap_err().to_string();
+        assert!(error.contains("--remote-debugging-port"), "{error}");
+        assert!(error.contains("nothing is listening"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_bare_port_is_accepted_where_a_url_would_be() {
+        // The usability point: nobody knows their devtools websocket path, but
+        // everybody knows the port they typed. Reaching the "nothing listening"
+        // branch proves the port form was parsed rather than rejected as a
+        // malformed url.
+        let error = attach_to_endpoint("65535").await.unwrap_err().to_string();
+        assert!(
+            !error.contains("loopback"),
+            "a bare port must not be read as a non-loopback url: {error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod typeable_tests {
+    use super::*;
+
+    #[test]
+    fn a_label_is_not_a_field() {
+        // The mistake this catches: a page labels its input with a `<label>`,
+        // and in document order that label's text comes *first*. Naming "Email"
+        // and typing into the first match hits the label. The browser answers
+        // `Node is not an Element`, which tells the model nothing.
+        assert!(!accepts_text(&Node::new("t", Role::Text, "Email")));
+        assert!(!accepts_text(&Node::new("h", Role::Heading, "Email")));
+        assert!(!accepts_text(&Node::new("b", Role::Button, "Send")));
+        assert!(!accepts_text(&Node::new("l", Role::Link, "Email us")));
+    }
+
+    #[test]
+    fn the_things_text_actually_goes_into_are_allowed() {
+        assert!(accepts_text(&Node::new("f", Role::TextBox, "Email")));
+        assert!(accepts_text(&Node::new("c", Role::ComboBox, "Country")));
+        // A custom element with a role we do not model may still be an editable
+        // host; guessing "no" there would refuse things that work.
+        assert!(accepts_text(&Node::new(
+            "x",
+            Role::Other("textbox-ish".into()),
+            "Notes"
+        )));
     }
 }

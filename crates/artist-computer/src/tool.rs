@@ -36,6 +36,57 @@ use crate::surface::{ProgramReport, Surface, run_program};
 pub struct Attached {
     pub surface: Arc<dyn Surface>,
     pub book: Mutex<AnchorBook>,
+    /// The rungs that could not drive this surface, each with a remedy where
+    /// one exists. Kept so the model is told not just *what* is driving a
+    /// surface but what better route was passed over and how to open it — a
+    /// decline is only worth reporting if it motivates a fix.
+    pub declined: Vec<crate::host::Decline>,
+}
+
+/// A surface that can be brought back after this process exits.
+///
+/// **Only one kind genuinely survives.** The stage is killed on `Drop` — that is
+/// the whole teardown guarantee, and weakening it so surfaces could outlive the
+/// harness would trade a property worth far more. So a browser we *launched* is
+/// gone, and what is remembered about it is a recipe to start it again, not a
+/// handle to something still running. A browser the user attached to is
+/// different: it is not ours, we never started it, and it is still there.
+///
+/// Naming that difference is the point. "Remember open apps across a restart"
+/// sounds like one feature and is two, and only one of them is free.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Restorable {
+    /// A browser we did not start. Re-attaching reaches the same browser.
+    Attached { endpoint: String },
+    /// A program we ran on the stage. Restoring means launching it again, with
+    /// whatever state that program keeps for itself.
+    Launched {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+}
+
+impl Restorable {
+    /// How to describe it to someone deciding whether to bring it back.
+    pub fn line(&self) -> String {
+        match self {
+            Self::Attached { endpoint } => {
+                format!("the browser at {endpoint} (still running; attaching reaches it again)")
+            }
+            Self::Launched { program, args, .. } => {
+                let rest = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", args.join(" "))
+                };
+                format!("{program}{rest} (gone with the stage; restoring starts it again)")
+            }
+        }
+    }
 }
 
 /// Every surface this session can drive, plus the display they run on.
@@ -51,6 +102,20 @@ pub struct SurfaceRegistry {
     /// `attach` would silently replace the first's surface while the first
     /// caller still holds its id.
     opening: Arc<DashSet<String>>,
+    /// The window onto the stage, once someone has opened one.
+    ///
+    /// Held here rather than on the host because the seat is *shared*: the
+    /// human-activity count has to be readable exactly where a program reports,
+    /// which is here.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    viewer: Arc<tokio::sync::Mutex<Option<crate::stage::viewer::Viewer>>>,
+    /// Whether the model has been told a person is driving too.
+    ///
+    /// Said once, not once per program. A note on every report while someone is
+    /// using the viewer is pure context bloat — the fact does not change, and
+    /// repeating it teaches the model to skip the end of the message, which is
+    /// exactly where the note that *does* matter appears.
+    human_announced: Arc<std::sync::atomic::AtomicBool>,
     /// The graphical half. Shared so a stage opened on one turn is still there
     /// on the next.
     host: Arc<crate::host::Host>,
@@ -123,9 +188,42 @@ impl SurfaceRegistry {
         Self {
             surfaces: Arc::new(DashMap::new()),
             opening: Arc::new(DashSet::new()),
+            #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+            viewer: Arc::new(tokio::sync::Mutex::new(None)),
+            human_announced: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             host: Arc::new(crate::host::Host::sized(state_dir, adapters, screen)),
             input: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// How many times a person has acted through the viewer.
+    ///
+    /// Zero when nobody is watching, which is the overwhelmingly common case.
+    pub async fn human_actions(&self) -> u64 {
+        #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+        {
+            return self
+                .viewer
+                .lock()
+                .await
+                .as_ref()
+                .map(|viewer| viewer.human().count())
+                .unwrap_or(0);
+        }
+        #[cfg(not(all(target_os = "linux", feature = "stage-wayland")))]
+        0
+    }
+
+    /// Open a window on the user's display showing the stage.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    pub async fn open_viewer(&self) -> Result<(), StepError> {
+        let mut slot = self.viewer.lock().await;
+        if slot.is_some() {
+            return Ok(());
+        }
+        let stage = self.host.wayland_stage().await?;
+        *slot = Some(crate::stage::viewer::Viewer::open(stage).await?);
+        Ok(())
     }
 
     /// Take the stage's input lease for the duration of a program.
@@ -175,16 +273,67 @@ impl SurfaceRegistry {
     }
 
     pub fn attach(&self, surface: Arc<dyn Surface>) -> String {
+        self.attach_with_declines(surface, Vec::new())
+    }
+
+    /// Attach a surface together with the rungs that could not have it.
+    pub fn attach_with_declines(
+        &self,
+        surface: Arc<dyn Surface>,
+        declined: Vec<crate::host::Decline>,
+    ) -> String {
         let id = surface.id().as_str().to_owned();
         self.surfaces.insert(
             id.clone(),
             Arc::new(Attached {
                 surface,
                 book: Mutex::new(AnchorBook::new()),
+                declined,
             }),
         );
         self.opening.remove(&id);
         id
+    }
+
+    /// Remember a surface so a later session can offer to bring it back.
+    ///
+    /// Best-effort by design: failing to write this must never fail the launch
+    /// that triggered it. A surface the agent is holding right now matters more
+    /// than the note about it.
+    pub fn remember(&self, restorable: Restorable) {
+        let Some(path) = self.restore_file() else {
+            return;
+        };
+        let mut all = self.restorable();
+        if all.contains(&restorable) {
+            return;
+        }
+        all.push(restorable);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&all) {
+            let _ = std::fs::write(&path, text);
+        }
+    }
+
+    /// What a previous session left behind.
+    pub fn restorable(&self) -> Vec<Restorable> {
+        self.restore_file()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Drop the record. Called when the user has dealt with it either way.
+    pub fn forget_restorable(&self) {
+        if let Some(path) = self.restore_file() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn restore_file(&self) -> Option<std::path::PathBuf> {
+        self.host.state_dir().map(|dir| dir.join("restorable.json"))
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Attached>> {
@@ -281,6 +430,27 @@ pub struct ComputerArgs {
     /// Launch into the isolated display rather than onto a terminal.
     #[serde(default)]
     gui: bool,
+    /// For `find`: what to look for.
+    #[serde(default)]
+    query: Option<String>,
+    /// For `zoom`: the element to look at closely.
+    #[serde(default)]
+    anchor: Option<String>,
+    /// For `extract`: the labels to read values for.
+    #[serde(default)]
+    fields: Option<Vec<String>>,
+    /// For `attach`: a devtools websocket url on this machine.
+    #[serde(default)]
+    endpoint: Option<String>,
+    /// How much to report after a program runs.
+    ///
+    /// `delta` is the default and is right almost always. `none` exists because
+    /// a program whose outcome the model already predicted still pays for an
+    /// observation it will not read — and `expect` being mandatory means silence
+    /// still carries a *verified* assertion, which is why we can offer this
+    /// where a harness without `expect` should not.
+    #[serde(default)]
+    observe: Option<String>,
     #[serde(flatten)]
     program: Option<Program>,
 }
@@ -301,6 +471,11 @@ Modes:
 - `launch` — start a program on a new surface and observe it. Terminal programs (`htop`, `vim notes.md`) run on a PTY; pass `gui: true` for a browser or desktop application, which runs on an isolated display of its own and never touches the user's screen or keyboard. For a plain command whose output you just want to read, `bash` is simpler.
 - `observe` — read a surface. The first look returns everything; later looks return only what CHANGED (`+` added, `~` changed, `-` gone). Pass `full: true` to re-read everything.
 - `do` — run a short program of steps against a surface.
+- `find` — search a surface for an element by name, and get back just the matches with their anchors. Far cheaper than `observe` on a busy screen: use it when you know what you are looking for.
+- `extract` — read the VALUES of named fields: `{"mode":"extract","surface":…,"fields":["Total","Delivery date"]}`. Use this whenever you want data off a page rather than a picture of it. You get the answers and the page stays out of this conversation, which `observe` cannot do. Each answer says where it came from — `field` (the labelled element held it), `inline` (it was in the same string), `next` (it was the text beside the label), `section` (the label was a heading, so you get the text under it) — and `next` is the one worth a second look before you rely on it. `section` is how to read prose cheaply: ask for the heading and summarise what comes back, rather than observing the whole page to find it.
+- `attach` — drive a browser the user ALREADY has open, given its `endpoint`: the port they started it with (`"9222"`), or a full `ws://` devtools url. If they have not started one that way, ask them to relaunch it with `--remote-debugging-port=9222` — do not do it for them, it would close their windows. Unlike `launch`, this browser has their sessions and logins, so a task on a signed-in site starts signed in. It is also theirs: its tabs are their tabs, and closing one closes theirs. Prefer `launch` unless the task needs their session.
+- `watch` — open a window on the user's own screen showing the display you are working on. Use it when the user asks to see what you are doing, or when you are stuck and want them able to help. They can act in it while you keep working; you will be told when they do.
+- `zoom` — one named element at full resolution, when the text is too small to read in a screenshot.
 - `screenshot` — a picture of a surface, alongside the usual structured view. Use it only when the structured view cannot answer the question — a chart, a canvas, a rendering fault, "does this look right". It costs far more context than `observe` and you still cannot act on a coordinate.
 - `close` — release a surface.
 
@@ -314,6 +489,8 @@ Every step that names an anchor must also carry a `label`: your own copy of that
 - `{"still":{"anchor":"kv7","label":"Save"}}` — this exact element should still be there and still be called that
 
 If an anchor is rejected as stale, do not retry it and do not guess another — `observe` that surface again to get current anchors.
+
+When you already know what a program will do, pass `"observe":"none"` to skip the description afterwards. It is safe because `expect` is checked either way, and a failure always reports in full.
 
 Steps stop at the first failure, and a guardrail can abort the whole program before ANY step runs. So put an irreversible step (delete, send, pay, confirm) in its own single-step call, after the rest has already succeeded.
 
@@ -348,12 +525,17 @@ Example:
         json!({
             "type": "object",
             "properties": {
-                "mode": {"enum": ["surfaces", "launch", "observe", "do", "screenshot", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
+                "mode": {"enum": ["surfaces", "launch", "attach", "watch", "observe", "find", "extract", "do", "zoom", "screenshot", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
                 "surface": {"type": "string", "description": "Surface id, from `surfaces`."},
                 "command": {"type": "string", "description": "For `launch`: the command to run, e.g. `htop`, `vim notes.md`, or `chromium https://example.com`."},
                 "cwd": {"type": "string", "description": "For `launch`: the working directory."},
                 "gui": {"type": "boolean", "default": false, "description": "For `launch`: run the program on the isolated display instead of a terminal. Use this for browsers and desktop applications."},
                 "full": {"type": "boolean", "default": false, "description": "Return the whole surface rather than a delta."},
+                "query": {"type": "string", "description": "For `find`: the element name to search for."},
+                "anchor": {"type": "string", "description": "For `zoom`: the element to look at closely."},
+                "fields": {"type": "array", "items": {"type": "string"}, "description": "For `extract`: the labels to read, e.g. [\"Total\", \"Delivery date\"]. Answers arrive without the surface."},
+                "endpoint": {"type": "string", "description": "For `attach`: the debugging port the user's browser was started with, e.g. \"9222\". A full ws:// devtools url also works."},
+                "observe": {"enum": ["delta", "none"], "default": "delta", "description": "For `do`: how much to report afterwards. `none` skips the observation when you already know what the program did — a failure still reports in full."},
                 "steps": {
                     "type": "array",
                     "description": "Actions, run in order, stopping at the first failure.",
@@ -469,12 +651,34 @@ Example:
                         return Err(StepError::Backend("`command` is empty".into()));
                     }
                     let program = words.remove(0);
-                    let surface = self
+                    let launched = self
                         .registry
                         .host()
-                        .launch(&program, &words, args.cwd.as_deref().map(std::path::Path::new))
+                        .launch(
+                            &program,
+                            &words,
+                            args.cwd.as_deref().map(std::path::Path::new),
+                        )
                         .await?;
-                    let id = self.registry.attach(surface);
+                    let id = self
+                        .registry
+                        .attach_with_declines(launched.surface, launched.declined);
+                    self.registry.remember(Restorable::Launched {
+                        program: program.clone(),
+                        args: words.clone(),
+                        cwd: args.cwd.clone(),
+                    });
+                    // Recorded so a distilled macro can say what to run itself
+                    // against. Without it the macro is half an artifact: the
+                    // steps survive the session, and the thing they were done
+                    // to does not.
+                    self.recorder.record(artist_session::ComputerLaunched {
+                        surface: id.clone(),
+                        program: program.clone(),
+                        args: words.clone(),
+                        cwd: args.cwd.clone(),
+                        gui: true,
+                    });
                     // A browser yields two surfaces at two rungs; attach the
                     // chrome half too so tabs are addressable.
                     if let Some(extra) = self.registry.host().take_pending_surface().await {
@@ -489,9 +693,7 @@ Example:
                     // earlier surface under a caller still holding its id.
                     let id = surface_id("term").as_str().to_owned();
                     if !self.registry.claim(&id) {
-                        return Err(StepError::Backend(format!(
-                            "{id} is already being opened"
-                        )));
+                        return Err(StepError::Backend(format!("{id} is already being opened")));
                     }
                     let surface = crate::surface::pty::PtySurface::spawn(
                         id.clone(),
@@ -517,6 +719,156 @@ Example:
                 Ok(ToolOutput::text(format!(
                     "launched {command:?} as {id}\n\n{rendered}"
                 )))
+            }
+            "find" => {
+                let id = self.require_surface(&args)?;
+                let query = args.query.clone().ok_or_else(|| {
+                    StepError::Backend("`find` needs a `query` to look for".into())
+                })?;
+                let attached = self.attached(&id)?;
+                let mut book = attached.book.lock().await;
+
+                // A surface nobody has looked at yet has no anchors to search.
+                // Populating it here rather than returning nothing keeps `find`
+                // usable as a first call.
+                if book.epoch() == 0 {
+                    let snapshot = attached.surface.snapshot_full().await?;
+                    book.observe(&snapshot, true);
+                }
+                let hits = crate::search::find(&book, &query);
+                let total = book.anchors().count();
+                Ok(ToolOutput::text(crate::search::render(
+                    &id, &query, &hits, total,
+                )))
+            }
+            "extract" => {
+                let id = self.require_surface(&args)?;
+                let fields = args
+                    .fields
+                    .clone()
+                    .filter(|fields| !fields.is_empty())
+                    .ok_or_else(|| {
+                        StepError::Backend(
+                            "`extract` needs `fields`: the labels to read, e.g. [\"Total\"]".into(),
+                        )
+                    })?;
+                let attached = self.attached(&id)?;
+                let mut book = attached.book.lock().await;
+
+                // Same reasoning as `find`: a surface nobody has looked at yet
+                // has nothing to read, and populating it here keeps `extract`
+                // usable as a first call. It searches the current epoch rather
+                // than re-observing, so it never consumes a shell's output out
+                // from under the model.
+                if book.epoch() == 0 {
+                    let snapshot = attached.surface.snapshot_full().await?;
+                    book.observe(&snapshot, true);
+                }
+                let found = crate::extract::extract(&book, &fields);
+                Ok(ToolOutput::text(crate::extract::render(&id, &found)))
+            }
+            "zoom" => {
+                let id = self.require_surface(&args)?;
+                let anchor = args.anchor.clone().ok_or_else(|| {
+                    StepError::Backend("`zoom` needs an `anchor` to look at".into())
+                })?;
+                let attached = self.attached(&id)?;
+                let bounds = {
+                    let book = attached.book.lock().await;
+                    let node = book.resolve(&anchor).map_err(StepError::Anchor)?;
+                    node.bounds.ok_or_else(|| {
+                        StepError::Backend(format!(
+                            "{anchor} has no position on screen, so there is nothing to zoom to"
+                        ))
+                    })?
+                };
+
+                let Some(frame) = attached.surface.pixels().await? else {
+                    return Err(StepError::Backend(format!(
+                        "{id} has no picture to zoom into — it is a {} surface",
+                        attached.surface.rung().label()
+                    )));
+                };
+                // Padded, because a control read at its exact bounds loses the
+                // context that makes it legible — the label beside it, the state
+                // of its neighbours.
+                let region = pad(bounds, ZOOM_PADDING, &frame);
+                let cropped = crop(&frame, region);
+                let png = cropped.to_png().map_err(StepError::Backend)?;
+                let digest = self.store_image(&png)?;
+
+                Ok(ToolOutput::content(
+                    rig_core::OneOrMany::many([
+                        rig_core::completion::message::ToolResultContent::text(format!(
+                            "{}\n{}×{} view of {anchor}",
+                            render::sentinel(&id, 0, false, digest.as_deref()),
+                            cropped.width,
+                            cropped.height
+                        )),
+                        rig_core::completion::message::ToolResultContent::image_base64(
+                            base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &png,
+                            ),
+                            Some(rig_core::completion::message::ImageMediaType::PNG),
+                            None,
+                        ),
+                    ])
+                    .expect("two blocks"),
+                ))
+            }
+            "attach" => {
+                let endpoint = args.endpoint.clone().ok_or_else(|| {
+                    StepError::Backend(
+                        "`attach` needs an `endpoint`: the port the user's browser was \
+                         started with, e.g. \"9222\" from --remote-debugging-port=9222. \
+                         Ask them for it; a full ws:// devtools url works too."
+                            .into(),
+                    )
+                })?;
+                let browser = Arc::new(crate::surface::cdp::attach_to_endpoint(&endpoint).await?);
+                let page = crate::host::first_page(&browser).await?;
+                let surface = crate::surface::cdp::CdpPage::attach_owned(
+                    artist_tools::short_id("tab"),
+                    page,
+                    Arc::clone(&browser),
+                )
+                .await?;
+                let id = self.registry.attach(Arc::new(surface));
+                // The chrome half too, so tabs are addressable — same as a
+                // launched browser. A user who attached wants their tabs.
+                let chrome = self
+                    .registry
+                    .attach(Arc::new(crate::surface::cdp::CdpChrome::new(
+                        artist_tools::short_id("browser"),
+                        browser,
+                    )));
+                // The one kind that genuinely survives us.
+                self.registry.remember(Restorable::Attached {
+                    endpoint: endpoint.clone(),
+                });
+                Ok(ToolOutput::text(format!(
+                    "attached to the browser at {endpoint}\n  {id}\tthe active tab\n  \
+                     {chrome}\ttab management\n\nThis is the user's own browser, not an \
+                     isolated one: its tabs, sessions and logins are theirs, and closing a \
+                     tab closes theirs."
+                )))
+            }
+            "watch" => {
+                #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+                {
+                    self.registry.open_viewer().await?;
+                    Ok(ToolOutput::text(
+                        "a window showing this display is now open on the user's screen. \n\
+                         They can click and type in it while you keep working — you share \
+                         the screen rather than owning it, and you will be told when they \
+                         act during one of your programs.",
+                    ))
+                }
+                #[cfg(not(all(target_os = "linux", feature = "stage-wayland")))]
+                Err(StepError::Backend(
+                    "this build has no graphical stage to watch".into(),
+                ))
             }
             "close" => {
                 let id = self.require_surface(&args)?;
@@ -561,9 +913,44 @@ Example:
                 // surfaces could deadlock taking them in opposite orders.
                 let _input = self.registry.input_lease().await;
                 let mut book = attached.book.lock().await;
+                // Taken *inside* the input lease, so it counts only what a
+                // person did while this program was running. Outside it, a
+                // click from before the lease was granted would be attributed
+                // to the program and explain a failure it did not cause.
+                let human_before = self.registry.human_actions().await;
                 let report = run_program(attached.surface.as_ref(), &mut book, &program).await?;
                 self.record_program(&id, &program, &report);
-                Ok(ToolOutput::text(render_report(&id, &report)))
+
+                // `none` is only safe because `expect` is mandatory: staying
+                // quiet still carries an assertion the harness verified. A
+                // failure always reports in full regardless — silence about a
+                // program that went wrong is the one thing this must never do.
+                let quiet = args.observe.as_deref() == Some("none")
+                    && report.error.is_none()
+                    && report.expect_met != Some(false);
+                let mut rendered = if quiet {
+                    render_outcome_only(&id, &report)
+                } else {
+                    render_report(&id, &report)
+                };
+                // The cost of a shared seat, paid here. A person acting during
+                // the program means this observation contains something no step
+                // caused, and `expect` may have failed for a reason the model
+                // cannot see anywhere on the surface. Saying so turns an
+                // inexplicable failure into an explained one — without it, a
+                // shared seat quietly makes the agent look broken.
+                // Reported when it *explains* something, or once when it is
+                // news. An `expect` that failed while a person was acting is
+                // the case this exists for and is always worth the words; a
+                // program that succeeded needs them once at most.
+                let human = self.registry.human_actions().await - human_before;
+                if human > 0
+                    && let Some(note) =
+                        human_note(human, report.expect_met, &self.registry.human_announced)
+                {
+                    rendered.push_str(&note);
+                }
+                Ok(ToolOutput::text(rendered))
             }
             // Rung 3, and deliberately opt-in. A picture costs far more context
             // than the structured view and cannot be acted on — there is no way
@@ -596,18 +983,23 @@ Example:
                     digest.clone(),
                 );
 
-                Ok(ToolOutput::content(rig_core::OneOrMany::many([
-                    rig_core::completion::message::ToolResultContent::text(format!(
-                        "{rendered}\n{}×{} picture of {id}",
-                        frame.width, frame.height
-                    )),
-                    rig_core::completion::message::ToolResultContent::image_base64(
-                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png),
-                        Some(rig_core::completion::message::ImageMediaType::PNG),
-                        None,
-                    ),
-                ])
-                .expect("two blocks")))
+                Ok(ToolOutput::content(
+                    rig_core::OneOrMany::many([
+                        rig_core::completion::message::ToolResultContent::text(format!(
+                            "{rendered}\n{}×{} picture of {id}",
+                            frame.width, frame.height
+                        )),
+                        rig_core::completion::message::ToolResultContent::image_base64(
+                            base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &png,
+                            ),
+                            Some(rig_core::completion::message::ImageMediaType::PNG),
+                            None,
+                        ),
+                    ])
+                    .expect("two blocks"),
+                ))
             }
             other => Err(StepError::Backend(format!(
                 "unknown mode {other:?}; expected surfaces, launch, observe, do, screenshot or close"
@@ -723,28 +1115,78 @@ impl ComputerTool {
     /// clicking one and reading the error, at the cost of a round trip every
     /// time. Saying it up front is strictly cheaper.
     fn render_surfaces(&self) -> String {
-        let mut rows: Vec<(String, String, u8, String)> = self
-            .registry
-            .surfaces
-            .iter()
-            .map(|entry| {
-                let surface = &entry.value().surface;
-                (
-                    entry.key().clone(),
-                    surface.title(),
-                    surface.rung().as_u8(),
-                    verbs(&surface.caps()),
-                )
-            })
-            .collect();
-        if rows.is_empty() {
-            return "no surfaces are open".to_owned();
+        struct Row {
+            id: String,
+            title: String,
+            rung: u8,
+            rung_label: &'static str,
+            verbs: String,
+            /// Only the declines that carry a remedy, and only for rungs better
+            /// than the one driving. A decline nobody can act on is noise, and a
+            /// decline *below* the chosen rung is not a decline at all.
+            fixable: Vec<String>,
         }
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
-        rows.into_iter()
-            .map(|(id, title, rung, verbs)| format!("{id}\trung {rung}\t{title}\t[{verbs}]"))
-            .collect::<Vec<_>>()
-            .join("\n")
+
+        let mut rows: Vec<Row> =
+            self.registry
+                .surfaces
+                .iter()
+                .map(|entry| {
+                    let attached = entry.value();
+                    let surface = &attached.surface;
+                    let chosen = surface.rung().as_u8();
+                    Row {
+                        id: entry.key().clone(),
+                        title: surface.title(),
+                        rung: chosen,
+                        rung_label: surface.rung().label(),
+                        verbs: verbs(&surface.caps()),
+                        fixable: attached
+                            .declined
+                            .iter()
+                            .filter(|decline| decline.rung.as_u8() < chosen)
+                            .filter_map(|decline| {
+                                decline.remedy.as_ref().map(|remedy| {
+                                    format!("rung {} — {remedy}", decline.rung.as_u8())
+                                })
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+        if rows.is_empty() {
+            // Not just "nothing here": a previous session's surfaces are the
+            // most likely reason someone is looking, and silence would make a
+            // resumed session look like a fresh one.
+            let remembered = self.registry.restorable();
+            if remembered.is_empty() {
+                return "no surfaces are open".to_owned();
+            }
+            let mut out = String::from("no surfaces are open. A previous session had:\n");
+            for entry in &remembered {
+                out.push_str(&format!("  · {}\n", entry.line()));
+            }
+            out.push_str(
+                "Use `attach` for one that is still running, or `launch` to start one again.",
+            );
+            return out;
+        }
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let mut out = String::new();
+        for row in &rows {
+            out.push_str(&format!(
+                "{}\trung {} ({})\t{}\t[{}]\n",
+                row.id, row.rung, row.rung_label, row.title, row.verbs
+            ));
+            // The point of reporting a decline is to get the better route
+            // opened, not to explain why we settled. So it is phrased as work
+            // available, and only when there is work that would actually help.
+            for fix in &row.fixable {
+                out.push_str(&format!("  ↑ could be cheaper: {fix}\n"));
+            }
+        }
+        out.trim_end().to_owned()
     }
 }
 
@@ -784,6 +1226,101 @@ fn split_command(command: &str) -> Vec<String> {
     }
     words
 }
+/// Tell the model a person was driving too.
+///
+/// Only ever appended when something actually happened, because a line on every
+/// report saying "nobody touched anything" is noise that trains the model to
+/// stop reading the end of the message.
+fn human_note(
+    actions: u64,
+    expect_met: Option<bool>,
+    announced: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    use std::sync::atomic::Ordering;
+
+    let failed = expect_met == Some(false);
+    // A failure always gets the explanation, however many times it happens:
+    // each one is a separate anomaly that needs accounting for. Success gets it
+    // once, because "someone else is here" is a fact, not an event, and
+    // restating a fact every turn is how a model learns to stop reading.
+    if !failed && announced.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    announced.store(true, Ordering::Relaxed);
+
+    let plural = if actions == 1 { "" } else { "s" };
+    if !failed {
+        return Some(format!(
+            "\nThe user is working on this screen too ({actions} action{plural} during that \
+             program). You share it rather than owning it; things may move under you.\n"
+        ));
+    }
+    Some(format!(
+        "\nA person acted on this surface {actions} time{plural} while your program ran, and \
+         that is the likely reason your expectation did not hold — the screen changed for a \
+         reason no step of yours caused. Observe before deciding anything went wrong.\n"
+    ))
+}
+
+/// A program's outcome with no observation attached.
+///
+/// Still says what happened and whether the expectation held — the model needs
+/// to know its hypothesis was checked, and a bare "ok" would make `expect`
+/// unverifiable from the outside.
+fn render_outcome_only(surface: &str, report: &ProgramReport) -> String {
+    let steps = report.steps.len();
+    let expect = match report.expect_met {
+        Some(true) => "expect: met",
+        Some(false) => "expect: NOT met",
+        None => "expect: not checked",
+    };
+    format!(
+        "{steps} step(s) on {surface} — ok. {expect}. \
+         (observation suppressed; call observe on {surface} to see the screen)\n"
+    )
+}
+
+/// How much context to keep around a zoomed element, in pixels.
+///
+/// A control cropped to its exact bounds loses what makes it legible — the label
+/// beside it, whether the thing above is checked. The point of zooming is to read
+/// something, not to isolate it.
+const ZOOM_PADDING: i32 = 24;
+
+/// Grow a rectangle, clipped to the frame.
+fn pad(bounds: crate::model::Rect, margin: i32, frame: &crate::model::Frame) -> crate::model::Rect {
+    let left = (bounds.x - margin).max(0);
+    let top = (bounds.y - margin).max(0);
+    let right = (bounds.x + bounds.width as i32 + margin).min(frame.width as i32);
+    let bottom = (bounds.y + bounds.height as i32 + margin).min(frame.height as i32);
+    crate::model::Rect {
+        x: left,
+        y: top,
+        width: (right - left).max(1) as u32,
+        height: (bottom - top).max(1) as u32,
+    }
+}
+
+/// Copy a region out of a frame at full resolution.
+///
+/// No scaling anywhere: the entire value of this call is that the pixels are not
+/// shrunk, so a caller that resized here would have reimplemented `screenshot`.
+fn crop(frame: &crate::model::Frame, region: crate::model::Rect) -> crate::model::Frame {
+    let mut rgba = Vec::with_capacity((region.width * region.height * 4) as usize);
+    for y in 0..region.height {
+        let source_y = region.y as u32 + y;
+        let start = ((source_y * frame.width + region.x as u32) * 4) as usize;
+        let end = start + (region.width * 4) as usize;
+        match frame.rgba.get(start..end) {
+            Some(row) => rgba.extend_from_slice(row),
+            // A row past the end of the buffer is a clipping bug rather than a
+            // reason to hand back a truncated image; pad so the frame stays
+            // rectangular and the mistake is visible instead of corrupting.
+            None => rgba.extend(std::iter::repeat_n(0u8, (region.width * 4) as usize)),
+        }
+    }
+    crate::model::Frame::new(region.width, region.height, rgba)
+}
 
 /// The step verbs a surface actually accepts.
 fn verbs(caps: &crate::model::Caps) -> String {
@@ -818,8 +1355,20 @@ pub fn render_report(surface: &str, report: &crate::surface::ProgramReport) -> S
             .as_deref()
             .or(step.resolved_name.as_deref())
             .unwrap_or("");
+        // The payload as well as the target, because for several steps the
+        // payload *is* the step. A `key` names no element, so it used to render
+        // as `key ""` — the model could not tell from its own report which key
+        // it had pressed. A `type` showed the field and not the text, which is
+        // worse: it looks complete.
+        let detail = match (target.is_empty(), step.payload.as_deref()) {
+            (true, Some(payload)) => format!("{payload:?}"),
+            (false, Some(payload)) if step.action == "type" => {
+                format!("{target:?} ← {payload:?}")
+            }
+            _ => format!("{target:?}"),
+        };
         out.push_str(&format!(
-            "{}. {} {target:?} — {}\n",
+            "{}. {} {detail} — {}\n",
             index + 1,
             step.action,
             step.outcome
@@ -961,7 +1510,10 @@ mod tests {
         let args = serde_json::from_value(json!({"mode": "observe", "surface": "nope"})).unwrap();
         let error = tool.call(args).await.unwrap_err().to_string();
         assert!(error.contains("no surface"));
-        assert!(error.contains("pty:1"), "the error must be actionable: {error}");
+        assert!(
+            error.contains("pty:1"),
+            "the error must be actionable: {error}"
+        );
     }
 
     #[tokio::test]
@@ -1038,7 +1590,10 @@ mod tests {
         )
         .await;
 
-        assert!(launched.contains("ALPHA"), "less should have painted: {launched}");
+        assert!(
+            launched.contains("ALPHA"),
+            "less should have painted: {launched}"
+        );
         let id = launched
             .split_whitespace()
             .find(|word| word.starts_with("term"))
@@ -1098,22 +1653,16 @@ mod tests {
         let registry = SurfaceRegistry::new();
         let held = registry.input_lease().await;
         assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(50),
-                registry.input_lease()
-            )
-            .await
-            .is_err(),
+            tokio::time::timeout(std::time::Duration::from_millis(50), registry.input_lease())
+                .await
+                .is_err(),
             "a second program must wait for the first to finish with the seat"
         );
         drop(held);
         assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(50),
-                registry.input_lease()
-            )
-            .await
-            .is_ok(),
+            tokio::time::timeout(std::time::Duration::from_millis(50), registry.input_lease())
+                .await
+                .is_ok(),
             "the lease must be released when a program ends"
         );
     }
@@ -1127,9 +1676,11 @@ mod tests {
         let child = parent.for_delegate();
 
         // Surfaces do not leak between them.
-        parent.attach(Arc::new(
-            crate::surface::pty::PtySurface::detached("pty:parent", 4, 20),
-        ));
+        parent.attach(Arc::new(crate::surface::pty::PtySurface::detached(
+            "pty:parent",
+            4,
+            20,
+        )));
         assert!(parent.get("pty:parent").is_some());
         assert!(
             child.get("pty:parent").is_none(),
@@ -1327,5 +1878,510 @@ mod tests {
         registry.abandon("term:1");
         assert!(!registry.is_claimed("term:1"));
         assert!(registry.claim("term:1"));
+    }
+
+    #[tokio::test]
+    async fn find_returns_usable_anchors_without_rendering_the_surface() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+
+        // No prior observe: `find` must be usable as a first call.
+        let found = call(
+            &tool,
+            json!({"mode": "find", "surface": id, "query": "READY"}),
+        )
+        .await;
+
+        assert!(found.contains("READY"), "{found}");
+        assert!(found.contains("<find"), "{found}");
+        // And it is a shortlist, not a screen dump.
+        assert!(
+            found.lines().count() < 8,
+            "find must be cheaper than observing: {found}"
+        );
+
+        // The anchor it handed back has to resolve, or the tool whose job is to
+        // produce a usable token produced an unusable one.
+        let anchor = found
+            .lines()
+            .find(|line| line.contains("READY"))
+            .and_then(|line| line.rsplit('(').next())
+            .map(|tail| tail.trim_end_matches([')', ' ']).to_owned())
+            .expect("a match carries an anchor");
+
+        let acted = call(
+            &tool,
+            json!({
+                "mode": "do", "surface": id,
+                "steps": [{"click": {"anchor": anchor, "label": "READY"}}],
+                "settle": {"until": "none"},
+                "expect": {"appears": "READY"}
+            }),
+        )
+        .await;
+        assert!(
+            !acted.contains("never issued") && !acted.contains("stale"),
+            "an anchor from find must resolve: {acted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_says_what_to_do_when_nothing_matches() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let found = call(
+            &tool,
+            json!({"mode": "find", "surface": id, "query": "Nonexistent"}),
+        )
+        .await;
+        assert!(found.contains("nothing on this surface matches"), "{found}");
+        assert!(found.contains("observe"), "{found}");
+    }
+
+    #[tokio::test]
+    async fn find_without_a_query_says_so() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let args = serde_json::from_value(json!({"mode": "find", "surface": id})).unwrap();
+        let error = tool.call(args).await.unwrap_err().to_string();
+        assert!(error.contains("query"), "{error}");
+    }
+
+    /// A receipt-shaped screen: one inline field, one label-then-value pair,
+    /// and a line that must not come back.
+    fn registry_with_receipt() -> (SurfaceRegistry, String) {
+        let registry = SurfaceRegistry::new();
+        let surface = PtySurface::detached("pty:1", 8, 40).with_title("receipt");
+        surface.feed(b"\x1b[?1049h");
+        surface.feed(b"\x1b[1;1HOrder 4471 for Wilhelmina Otarski");
+        surface.feed(b"\x1b[2;1HTotal: $42.00");
+        surface.feed(b"\x1b[3;1HDelivery date");
+        surface.feed(b"\x1b[4;1H2026-08-14");
+        let id = registry.attach(Arc::new(surface));
+        (registry, id)
+    }
+
+    #[tokio::test]
+    async fn extract_answers_the_question_and_leaves_the_page_behind() {
+        let (registry, id) = registry_with_receipt();
+        let tool = ComputerTool::new(registry);
+
+        // No prior observe: usable as a first call, like `find`.
+        let out = call(
+            &tool,
+            json!({"mode": "extract", "surface": id, "fields": ["Total", "Delivery date"]}),
+        )
+        .await;
+
+        assert!(out.contains("$42.00"), "{out}");
+        assert!(out.contains("2026-08-14"), "{out}");
+
+        // The whole point. `observe` would have put the customer's name into
+        // the conversation for good; this answers two questions and puts none
+        // of the surface anywhere.
+        assert!(
+            !out.contains("Wilhelmina") && !out.contains("4471"),
+            "extract must not drag the rest of the page into context: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_reports_a_field_that_is_not_there() {
+        let (registry, id) = registry_with_receipt();
+        let tool = ComputerTool::new(registry);
+        let out = call(
+            &tool,
+            json!({"mode": "extract", "surface": id, "fields": ["Total", "Tracking number"]}),
+        )
+        .await;
+
+        assert!(out.contains("$42.00"), "{out}");
+        assert!(out.contains("Tracking number = not found"), "{out}");
+        // A miss has to name its recovery, or the model's only move is to
+        // `observe` — which is the cost this mode exists to avoid.
+        assert!(out.contains("find"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn extract_without_fields_says_so() {
+        let (registry, id) = registry_with_receipt();
+        let tool = ComputerTool::new(registry);
+        for args in [
+            json!({"mode": "extract", "surface": id}),
+            json!({"mode": "extract", "surface": id, "fields": []}),
+        ] {
+            let args = serde_json::from_value(args).unwrap();
+            let error = tool.call(args).await.unwrap_err().to_string();
+            assert!(error.contains("fields"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn observe_none_suppresses_the_screen_but_never_the_outcome() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        call(&tool, json!({"mode": "observe", "surface": id})).await;
+
+        let quiet = call(
+            &tool,
+            json!({
+                "mode": "do", "surface": id, "observe": "none",
+                "steps": [{"key": "Enter"}],
+                "settle": {"until": "none"},
+                "expect": {"appears": "READY"}
+            }),
+        )
+        .await;
+
+        // The assertion still has to be reported — otherwise `expect` becomes
+        // unverifiable from outside and the safety argument for allowing
+        // silence collapses.
+        assert!(quiet.contains("expect: met"), "{quiet}");
+        assert!(
+            !quiet.contains("<observation"),
+            "the screen must be suppressed: {quiet}"
+        );
+        assert!(
+            quiet.contains("observe"),
+            "the way back must be named: {quiet}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_reports_in_full_even_when_asked_to_stay_quiet() {
+        // The one thing `none` must never do.
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        call(&tool, json!({"mode": "observe", "surface": id})).await;
+
+        let failed = call(
+            &tool,
+            json!({
+                "mode": "do", "surface": id, "observe": "none",
+                "steps": [{"click": {"anchor": "nosuchanchor", "label": "Nope"}}],
+                "settle": {"until": "none"},
+                "expect": {"appears": "READY"}
+            }),
+        )
+        .await;
+        assert!(
+            failed.contains("<observation") || failed.contains("failed step"),
+            "a failure must never be suppressed: {failed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn zoom_needs_something_with_a_position() {
+        let (registry, id) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let observation = call(&tool, json!({"mode": "observe", "surface": id})).await;
+        let anchor = observation
+            .lines()
+            .find(|line| line.contains("READY"))
+            .and_then(|line| line.rsplit('(').next())
+            .map(|tail| tail.trim_end_matches([')', ' ']).to_owned())
+            .expect("an anchor");
+
+        // A terminal row has no bounds, so this must say so rather than
+        // cropping the origin and returning a plausible-looking black square.
+        let args = serde_json::from_value(json!({"mode": "zoom", "surface": id, "anchor": anchor}))
+            .unwrap();
+        let error = tool.call(args).await.unwrap_err().to_string();
+        assert!(
+            error.contains("no position") || error.contains("no picture"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn cropping_keeps_the_pixels_it_was_given() {
+        // Full resolution is the entire point; a crop that resampled would have
+        // reimplemented `screenshot`.
+        let mut rgba = vec![0u8; 20 * 20 * 4];
+        // Mark one pixel at (12, 8).
+        let offset = ((8 * 20 + 12) * 4) as usize;
+        rgba[offset..offset + 4].copy_from_slice(&[9, 8, 7, 0xFF]);
+        let frame = crate::model::Frame::new(20, 20, rgba);
+
+        let region = crate::model::Rect {
+            x: 10,
+            y: 6,
+            width: 6,
+            height: 6,
+        };
+        let cropped = crop(&frame, region);
+        assert_eq!((cropped.width, cropped.height), (6, 6));
+        assert_eq!(cropped.pixel(2, 2), Some((9, 8, 7, 0xFF)));
+    }
+
+    #[test]
+    fn padding_a_zoom_never_leaves_the_frame() {
+        let frame = crate::model::Frame::new(100, 100, vec![0; 100 * 100 * 4]);
+        let corner = crate::model::Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        let padded = pad(corner, ZOOM_PADDING, &frame);
+        assert_eq!((padded.x, padded.y), (0, 0));
+
+        let far = crate::model::Rect {
+            x: 90,
+            y: 90,
+            width: 10,
+            height: 10,
+        };
+        let padded = pad(far, ZOOM_PADDING, &frame);
+        assert!(padded.x + padded.width as i32 <= 100);
+        assert!(padded.y + padded.height as i32 <= 100);
+    }
+
+    #[tokio::test]
+    async fn attach_without_an_endpoint_says_how_to_get_one() {
+        let (registry, _) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let args = serde_json::from_value(json!({"mode": "attach"})).unwrap();
+        let error = tool.call(args).await.unwrap_err().to_string();
+        assert!(error.contains("endpoint"), "{error}");
+        // The recovery has to name the flag; "needs an endpoint" leaves a user
+        // with no idea where one comes from.
+        assert!(error.contains("--remote-debugging-port"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_a_browser_that_is_not_on_this_machine() {
+        let (registry, _) = registry_with_terminal();
+        let tool = ComputerTool::new(registry);
+        let args = serde_json::from_value(
+            json!({"mode": "attach", "endpoint": "ws://example.com:9222/devtools/browser/x"}),
+        )
+        .unwrap();
+        let error = tool.call(args).await.unwrap_err().to_string();
+        assert!(error.contains("loopback"), "{error}");
+    }
+
+    #[test]
+    fn the_description_warns_that_an_attached_browser_is_the_users_own() {
+        // `launch` gets an isolated profile; `attach` does not, and the model
+        // has to know that closing a tab closes the user's tab.
+        let tool = ComputerTool::new(SurfaceRegistry::new());
+        let description = tool.description();
+        assert!(description.contains("attach"), "{description}");
+        assert!(
+            description.contains("their tabs") || description.contains("theirs"),
+            "the description must say whose browser it is: {description}"
+        );
+    }
+
+    #[test]
+    fn a_remembered_surface_says_whether_it_is_still_there() {
+        // The two kinds are not the same promise, and conflating them would
+        // have the model "reattach" to a browser that died with the stage.
+        let attached = Restorable::Attached {
+            endpoint: "ws://127.0.0.1:9222/devtools/browser/x".into(),
+        };
+        assert!(
+            attached.line().contains("still running"),
+            "{}",
+            attached.line()
+        );
+
+        let launched = Restorable::Launched {
+            program: "chromium".into(),
+            args: vec!["https://example.com".into()],
+            cwd: None,
+        };
+        assert!(
+            launched.line().contains("gone with the stage"),
+            "{}",
+            launched.line()
+        );
+        assert!(launched.line().contains("https://example.com"));
+    }
+
+    #[test]
+    fn restorables_round_trip_through_the_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            SurfaceRegistry::with_host(dir.path(), crate::ladder::adapters::AdapterSet::default());
+
+        assert!(registry.restorable().is_empty());
+        let entry = Restorable::Attached {
+            endpoint: "ws://127.0.0.1:9222/devtools/browser/x".into(),
+        };
+        registry.remember(entry.clone());
+        assert_eq!(registry.restorable(), vec![entry.clone()]);
+
+        // Recording the same surface twice must not grow the list — a session
+        // that reattaches on every turn would otherwise accumulate duplicates
+        // forever.
+        registry.remember(entry.clone());
+        assert_eq!(registry.restorable().len(), 1);
+
+        registry.forget_restorable();
+        assert!(registry.restorable().is_empty());
+    }
+
+    #[test]
+    fn an_empty_registry_still_mentions_what_a_previous_session_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            SurfaceRegistry::with_host(dir.path(), crate::ladder::adapters::AdapterSet::default());
+        assert_eq!(
+            ComputerTool::new(registry.clone()).render_surfaces(),
+            "no surfaces are open"
+        );
+
+        registry.remember(Restorable::Launched {
+            program: "chromium".into(),
+            args: Vec::new(),
+            cwd: None,
+        });
+        let rendered = ComputerTool::new(registry).render_surfaces();
+        assert!(rendered.contains("previous session"), "{rendered}");
+        assert!(rendered.contains("chromium"), "{rendered}");
+        // And it names both recoveries, since which one applies depends on the
+        // kind and the model should not have to guess.
+        assert!(
+            rendered.contains("attach") && rendered.contains("launch"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_registry_with_no_state_directory_simply_remembers_nothing() {
+        // No panic, no error path: a machine without $XDG_RUNTIME_DIR still
+        // drives terminals and browsers, and losing the restore note is the
+        // correct amount of degradation.
+        let registry = SurfaceRegistry::new();
+        registry.remember(Restorable::Attached {
+            endpoint: "ws://127.0.0.1:9222/x".into(),
+        });
+        let _ = registry.restorable();
+    }
+
+    #[test]
+    fn a_shared_seat_explains_an_expectation_that_did_not_hold() {
+        // The whole reason human actions are counted. Without this the model
+        // re-observes, finds a screen matching nothing it did, and concludes
+        // its own step misfired.
+        let announced = std::sync::atomic::AtomicBool::new(false);
+        let note = human_note(1, Some(false), &announced).expect("a failure is always explained");
+        assert!(note.contains("A person acted"), "{note}");
+        assert!(note.contains("likely reason"), "{note}");
+        assert!(note.contains("no step of yours caused"), "{note}");
+    }
+
+    #[test]
+    fn every_failure_is_explained_however_many_there_are() {
+        // Each one is a separate anomaly needing its own accounting, so unlike
+        // the presence notice this is never suppressed.
+        let announced = std::sync::atomic::AtomicBool::new(false);
+        for _ in 0..5 {
+            assert!(
+                human_note(1, Some(false), &announced).is_some(),
+                "a failure must always be explained"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_being_present_is_said_once_and_then_dropped() {
+        // The bloat this prevents: a paragraph on every report while someone is
+        // using the viewer. The fact does not change, and repeating it teaches
+        // the model to skip the end of the message — which is exactly where the
+        // note that *does* matter appears.
+        let announced = std::sync::atomic::AtomicBool::new(false);
+        let first = human_note(2, Some(true), &announced).expect("the first time is news");
+        assert!(first.contains("2 actions"), "{first}");
+        assert!(!first.contains("likely reason"), "no causal claim: {first}");
+
+        for _ in 0..10 {
+            assert!(
+                human_note(1, Some(true), &announced).is_none(),
+                "presence must be reported once, not every program"
+            );
+        }
+
+        // And a later failure still gets explained, even after the quiet ones.
+        assert!(human_note(1, Some(false), &announced).is_some());
+    }
+
+    #[tokio::test]
+    async fn nobody_watching_costs_nothing_and_says_nothing() {
+        // The overwhelmingly common case: no viewer, no count, no line. A note
+        // on every report saying "nobody touched anything" would train the
+        // model to stop reading the end of the message.
+        let (registry, id) = registry_with_terminal();
+        assert_eq!(registry.human_actions().await, 0);
+
+        let tool = ComputerTool::new(registry);
+        call(&tool, json!({"mode": "observe", "surface": id})).await;
+        let acted = call(
+            &tool,
+            json!({
+                "mode": "do", "surface": id,
+                "steps": [{"key": "Enter"}],
+                "settle": {"until": "none"},
+                "expect": {"appears": "READY"}
+            }),
+        )
+        .await;
+        assert!(!acted.contains("A person acted"), "{acted}");
+    }
+
+    #[test]
+    fn a_step_report_says_what_was_actually_sent() {
+        // Found by driving the tool as a model: `key` names no element, so the
+        // report rendered `key ""` and the model could not tell from its own
+        // report which key it had pressed. `type` was worse — it showed the
+        // field and not the text, so it looked complete while omitting the one
+        // thing that mattered.
+        use crate::surface::{ProgramReport, StepReport};
+
+        let report = ProgramReport {
+            steps: vec![
+                StepReport {
+                    action: "key",
+                    anchor: None,
+                    label: None,
+                    resolved_name: None,
+                    payload: Some("Enter".into()),
+                    outcome: "ok".into(),
+                },
+                StepReport {
+                    action: "type",
+                    anchor: Some("kv7".into()),
+                    label: Some("Search".into()),
+                    resolved_name: Some("Search".into()),
+                    payload: Some("hello".into()),
+                    outcome: "ok".into(),
+                },
+                StepReport {
+                    action: "click",
+                    anchor: Some("ab1".into()),
+                    label: Some("Send".into()),
+                    resolved_name: Some("Send".into()),
+                    payload: None,
+                    outcome: "ok".into(),
+                },
+            ],
+            settled: None,
+            expect_met: Some(true),
+            failed_step: None,
+            error: None,
+            observation: AnchorBook::new().observe(&crate::model::Snapshot::new(Vec::new()), true),
+        };
+
+        let rendered = render_report("term:1", &report);
+        assert!(rendered.contains(r#"key "Enter""#), "{rendered}");
+        assert!(
+            rendered.contains(r#"type "Search" ← "hello""#),
+            "{rendered}"
+        );
+        // A click's payload is nothing, so it must not gain a stray arrow.
+        assert!(rendered.contains(r#"click "Send" — ok"#), "{rendered}");
+        assert!(!rendered.contains(r#"click "Send" ←"#), "{rendered}");
     }
 }

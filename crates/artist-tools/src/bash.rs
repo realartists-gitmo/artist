@@ -195,7 +195,53 @@ impl PortableTool for BashTool {
     }
 }
 impl BashTool {
+    /// Run a foreground command, coalescing it with an identical one already in
+    /// flight when the command is a tree job.
+    ///
+    /// Only the foreground path reaches the coalescer, and every request from
+    /// it is [`Mode::Blocking`]. Artist's background bash mode starts a
+    /// *persistent session* rather than a detached build — a different thing
+    /// with a different return shape — so there is currently no caller that can
+    /// supersede without blocking, and the no-starvation bound holds trivially.
+    /// `Mode::Background` exists for when a detached build path lands; it is
+    /// the rule that keeps the bound once one does.
     async fn exec(&self, args: BashArgs) -> Result<String, ToolError> {
+        let Some(command) = args.command.clone() else {
+            return Err(ToolError::Message("command is required".into()));
+        };
+        let Some(job) = crate::tree_jobs::classify(&command, self.workspace.root()) else {
+            return self.exec_once(args, None).await;
+        };
+
+        let shared = crate::coalesce::global()
+            .run(&job, crate::coalesce::Mode::Blocking, |cancel| async move {
+                self.exec_once(args, Some(cancel))
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(ToolError::Message)?;
+
+        // Say when a result covers more than the caller's own work. A model
+        // that reads "failed" needs to know the failure may be in another
+        // agent's edits, not its own — misattribution is the failure mode of a
+        // shared result, not staleness.
+        Ok(if shared.waiters > 1 || shared.superseded_earlier {
+            format!(
+                "note: this run was shared with {} concurrent request(s) on this worktree, so \
+                 its result may include changes made by other agents\n{}",
+                shared.waiters, shared.value
+            )
+        } else {
+            shared.value
+        })
+    }
+
+    async fn exec_once(
+        &self,
+        args: BashArgs,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<String, ToolError> {
         let command = args
             .command
             .ok_or_else(|| ToolError::Message("command is required".into()))?;
@@ -220,8 +266,22 @@ impl BashTool {
         let mut stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
         let timeout_secs = args.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
-        let (status, exit_code) = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(result) => {
+        // Supersession is why the token is here: a newer request for the same
+        // command means this build is producing artifacts for a tree state that
+        // has already moved on, so it is killed rather than left to finish and
+        // write fingerprints that no longer match the source.
+        let waited = match &cancel {
+            Some(token) => {
+                tokio::select! {
+                    result = tokio::time::timeout(timeout, child.wait()) => result,
+                    () = token.cancelled() => Ok(Err(std::io::Error::other("superseded"))),
+                }
+            }
+            None => tokio::time::timeout(timeout, child.wait()).await,
+        };
+        let superseded = cancel.as_ref().is_some_and(|token| token.is_cancelled());
+        let (status, exit_code) = match waited {
+            Ok(result) if !superseded => {
                 let status = result?;
                 (
                     if status.success() {
@@ -232,7 +292,7 @@ impl BashTool {
                     status.code(),
                 )
             }
-            Err(_) => {
+            _ => {
                 #[cfg(unix)]
                 if let Some(pid) = child.id() {
                     let _ = nix::sys::signal::killpg(
@@ -241,7 +301,10 @@ impl BashTool {
                     );
                 }
                 let _ = child.kill().await;
-                ("timedOut", None)
+                // A superseded run is not a timeout, and must not read as one:
+                // the caller is about to be carried onto a newer run, and
+                // "timedOut" would tell the model its command was too slow.
+                (if superseded { "superseded" } else { "timedOut" }, None)
             }
         };
         // Bound the wait for the pipes to close: a daemonizing grandchild that
@@ -563,7 +626,11 @@ impl BashTool {
             .unwrap_or("")
             .to_owned();
         *cursor = output.len();
-        Ok(output::tail_compressed(text, max.min(50 * 1024)).0)
+        // Plain truncation for now. `output::tail_compressed` is written,
+        // reversible and tested, but compression is parked: on realistic mixed
+        // agent output it bought ~7%, and the encoder underneath needs a
+        // clearer fidelity story before it goes near tool results.
+        Ok(output::tail(text, max.min(50 * 1024)).0)
     }
 }
 

@@ -7,7 +7,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 #[cfg(test)]
 use crate::mnemonic_anchors::pack_binding;
-use crate::mnemonic_anchors::{binding_full, reconcile_handles};
+use crate::mnemonic_anchors::{PathAnchors, binding_full, reconcile_handles};
 
 /// Encode a 64-bit hash as 13 lowercase Crockford Base32 characters.
 fn hash_to_base32(mut hash: u64) -> String {
@@ -431,7 +431,7 @@ pub struct EditResult {
     pub total_lines: usize,
 }
 
-/// Compound key for a pending stale-prefix confirmation
+/// Compound key for a pending stale-anchor confirmation
 /// waiting for an exact retry.
 type PendingKey = (String, String, String, String);
 
@@ -455,9 +455,14 @@ impl Default for FileToolConfig {
 #[derive(Clone)]
 pub struct FileToolManager {
     config: FileToolConfig,
-    /// Per-path mappings of model-facing mnemonic anchor → packed hidden hash binding.
-    /// Legacy visible hash-prefix bindings remain readable during migration.
-    issued_prefixes: HashMap<String, HashMap<String, String>>,
+    /// Per-path anchor state: handles issued to the model, plus each
+    /// namespace's allocator cursor.
+    ///
+    /// Named `issued_prefixes` until recently, from a scheme where the visible
+    /// anchor was a prefix of the content hash. Nothing here has been a prefix
+    /// since anchors became mnemonics; the persisted column is still called
+    /// `prefixes_json` because the store has no schema migration.
+    issued_anchors: HashMap<String, PathAnchors>,
     last_read_view: HashMap<String, FileView>,
     /// Parallel to `last_read_view`: what disk looked like when that view was
     /// taken. Separate rather than a field on `FileView` because views are
@@ -466,7 +471,14 @@ pub struct FileToolManager {
     read_stamps: HashMap<String, ReadStamp>,
     /// Source of `ReadStamp::touched`. Bumped per view recorded.
     touch_counter: u64,
-    /// Set of pending stale-prefix confirmation keys.
+    /// Per-path slot → logical clock at which that slot was last released.
+    /// Feeds the allocator's preference for slots that have been cold longest.
+    freed_slots: HashMap<String, HashMap<usize, u64>>,
+    /// Monotonic source for `freed_slots`, bumped once per reconcile that frees
+    /// anything. Deliberately separate from `touch_counter`: reads and releases
+    /// are different events and comparing them would be meaningless.
+    slot_clock: u64,
+    /// Set of pending stale-anchor confirmation keys.
     pending_confirmations: HashSet<PendingKey>,
     /// Content-addressed cache of parsed views, keyed by (is_rust, xxh3 of the
     /// text). Building a `FileView` reparses with tree-sitter for `.rs` files —
@@ -491,10 +503,12 @@ impl FileToolManager {
     pub fn with_config(config: FileToolConfig) -> Self {
         Self {
             config,
-            issued_prefixes: HashMap::new(),
+            issued_anchors: HashMap::new(),
             last_read_view: HashMap::new(),
             read_stamps: HashMap::new(),
             touch_counter: 0,
+            freed_slots: HashMap::new(),
+            slot_clock: 0,
             pending_confirmations: HashSet::new(),
             view_cache: HashMap::new(),
         }
@@ -651,15 +665,23 @@ impl FileToolManager {
         normalize_path(path, &self.config)
     }
 
-    pub fn export_issued_prefixes(&self) -> HashMap<String, HashMap<String, String>> {
-        self.issued_prefixes.clone()
+    /// Flatten to the persisted shape: one `handle -> value` map per path with
+    /// the allocator cursors under reserved keys. That format is fixed by what
+    /// is already in `anchor_states.prefixes_json`.
+    pub fn export_anchor_state(&self) -> HashMap<String, HashMap<String, String>> {
+        self.issued_anchors
+            .iter()
+            .map(|(path, anchors)| (path.clone(), anchors.to_flat()))
+            .collect()
     }
 
-    pub fn import_issued_prefixes(
-        &mut self,
-        issued_prefixes: HashMap<String, HashMap<String, String>>,
-    ) {
-        self.issued_prefixes = issued_prefixes;
+    /// Inverse of [`export_anchor_state`](Self::export_anchor_state): split the
+    /// reserved cursor keys back out of each flat map.
+    pub fn import_anchor_state(&mut self, persisted: HashMap<String, HashMap<String, String>>) {
+        self.issued_anchors = persisted
+            .into_iter()
+            .map(|(path, flat)| (path, PathAnchors::from_flat(flat)))
+            .collect();
         self.pending_confirmations.clear();
         self.last_read_view.clear();
         // Stamps track views. Keeping one without the other would leave the
@@ -686,10 +708,84 @@ impl FileToolManager {
             .iter()
             .map(|line| line.full_hash.clone())
             .collect();
-        let existing = self.issued_prefixes.remove(path).unwrap_or_default();
-        let (state, visible) = reconcile_handles(&existing, &full_hashes, reclaim_dead);
-        self.issued_prefixes.insert(path.to_string(), state);
+        let existing = self.issued_anchors.remove(path).unwrap_or_default();
+        let prefs = self.slot_preference(path);
+        let (state, visible) = reconcile_handles(&existing, &full_hashes, reclaim_dead, &prefs);
+        self.record_freed_slots(path, &existing.bindings, &state.bindings);
+        self.issued_anchors.insert(path.to_string(), state);
         visible
+    }
+
+    /// Assemble what the allocator should know about slots in use elsewhere.
+    ///
+    /// Built per call from `issued_anchors`, which is already the authoritative
+    /// per-path map, so there is no second source of truth to keep in step. The
+    /// only added state is the freed-slot history below.
+    fn slot_preference(&self, path: &str) -> crate::mnemonic_anchors::SlotPreference {
+        let mut live_elsewhere = Vec::new();
+        for (other, anchors) in &self.issued_anchors {
+            if other == path {
+                continue;
+            }
+            for handle in anchors.bindings.keys() {
+                if let Some((true, slot)) = crate::mnemonic_anchors::handle_slot(handle) {
+                    live_elsewhere.push(slot);
+                }
+            }
+        }
+        live_elsewhere.sort_unstable();
+        live_elsewhere.dedup();
+
+        let mut freed_elsewhere: HashMap<usize, u64> = HashMap::new();
+        for (other, freed) in &self.freed_slots {
+            if other == path {
+                continue;
+            }
+            for (slot, clock) in freed {
+                // Keep the most recent sighting: a slot freed long ago in one
+                // file and moments ago in another is, for reuse purposes, as
+                // fresh as the recent one.
+                let entry = freed_elsewhere.entry(*slot).or_insert(*clock);
+                *entry = (*entry).max(*clock);
+            }
+        }
+
+        crate::mnemonic_anchors::SlotPreference {
+            freed_here: self.freed_slots.get(path).cloned().unwrap_or_default(),
+            live_elsewhere,
+            freed_elsewhere,
+        }
+    }
+
+    /// Stamp every slot that this reconcile released, so later allocations can
+    /// prefer something that has been cold for longer.
+    ///
+    /// In memory only. Losing it across a restart costs ranking quality on the
+    /// first reads of the next session, never correctness — the hard constraint
+    /// is enforced from `issued_prefixes`, which does persist.
+    fn record_freed_slots(
+        &mut self,
+        path: &str,
+        before: &HashMap<String, String>,
+        after: &HashMap<String, String>,
+    ) {
+        let freed: Vec<usize> = before
+            .keys()
+            .filter(|handle| !after.contains_key(*handle))
+            .filter_map(|handle| match crate::mnemonic_anchors::handle_slot(handle) {
+                Some((true, slot)) => Some(slot),
+                _ => None,
+            })
+            .collect();
+        if freed.is_empty() {
+            return;
+        }
+        self.slot_clock += 1;
+        let clock = self.slot_clock;
+        let entry = self.freed_slots.entry(path.to_string()).or_default();
+        for slot in freed {
+            entry.insert(slot, clock);
+        }
     }
 
     /// The anchors the model is currently holding for `view`, without issuing
@@ -700,10 +796,11 @@ impl FileToolManager {
     /// — a removed line's anchor has to still be the handle the model has, or
     /// the report cannot tell it which handle just died.
     fn anchored_lines_for(&self, path: &str, view: &FileView) -> Vec<AnchoredLine> {
-        let issued = self.issued_prefixes.get(path);
+        let issued = self.issued_anchors.get(path);
         let by_hash: HashMap<&str, &str> = issued
-            .map(|bindings| {
-                bindings
+            .map(|anchors| {
+                anchors
+                    .bindings
                     .iter()
                     .map(|(handle, packed)| (binding_full(packed), handle.as_str()))
                     .collect()
@@ -1219,8 +1316,8 @@ impl FileToolManager {
         })
     }
 
-    fn path_prefixes_mut(&mut self, path: &str) -> &mut HashMap<String, String> {
-        self.issued_prefixes.entry(path.to_string()).or_default()
+    fn path_anchors_mut(&mut self, path: &str) -> &mut PathAnchors {
+        self.issued_anchors.entry(path.to_string()).or_default()
     }
 
     /// Resolve a model-facing mnemonic anchor for editing. A mnemonic that no
@@ -1235,10 +1332,12 @@ impl FileToolManager {
     ) -> Result<String> {
         let visible_owned = visible.trim().to_ascii_lowercase();
         let visible = visible_owned.as_str();
-        let issued = self.path_prefixes_mut(path);
+        let issued = &mut self.path_anchors_mut(path).bindings;
         Self::resolve_hash(issued, visible, view)
     }
 
+    /// Takes the bindings alone rather than the whole [`PathAnchors`]: resolving
+    /// an anchor has no business reading or moving the allocator cursors.
     fn resolve_hash(
         issued: &mut HashMap<String, String>,
         visible: &str,
@@ -1338,7 +1437,7 @@ impl FileToolManager {
     /// Used by write/edit which replace the entire mapping.
     fn clear_all_for_path(&mut self, path: &str) {
         self.pending_confirmations.retain(|k| k.0 != path);
-        self.issued_prefixes.remove(path);
+        self.issued_anchors.remove(path);
     }
 }
 
@@ -1955,16 +2054,46 @@ mod tests {
             .await
             .unwrap();
 
-        // Handles are deliberately reusable across files; path + handle is the
-        // complete model-facing address.
-        let anchor = r1.lines[0].anchor.clone();
-        assert_eq!(anchor, r2.lines[0].anchor);
+        // `path + handle` remains the complete model-facing address, and a
+        // handle live in two files still addresses each independently. What
+        // changed is that fresh files no longer *start* from the same slot:
+        // every file used to draw `like, time, people, …`, so an anchor read in
+        // one file resolved successfully — and wrongly — against another.
+        let a_anchor = r1.lines[0].anchor.clone();
+        let b_anchor = r2.lines[0].anchor.clone();
+        assert_ne!(
+            a_anchor, b_anchor,
+            "fresh files should not draw the same slot; cross-file preference is not being applied"
+        );
+
+        // The safety property that buys: a handle from another file is not
+        // issued here, so it is refused rather than silently resolving to
+        // whatever happens to occupy that slot.
+        let foreign = mgr
+            .edit_file(EditRequest {
+                path: s2.clone(),
+                operations: vec![EditOperation::Replace {
+                    end_hash: None,
+                    hash: a_anchor.clone(),
+                    content: "should not apply".to_string(),
+                }],
+            })
+            .await;
+        assert!(
+            foreign.is_err(),
+            "an anchor from another file was accepted"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&p2).await.unwrap(),
+            "delta\nepsilon\nzeta\n",
+            "a rejected edit still modified the file"
+        );
 
         mgr.edit_file(EditRequest {
             path: s2.clone(),
             operations: vec![EditOperation::Replace {
                 end_hash: None,
-                hash: anchor.clone(),
+                hash: b_anchor,
                 content: "replaced delta".to_string(),
             }],
         })
@@ -1983,7 +2112,7 @@ mod tests {
             path: s1.clone(),
             operations: vec![EditOperation::Replace {
                 end_hash: None,
-                hash: anchor,
+                hash: a_anchor,
                 content: "replaced alpha".to_string(),
             }],
         })

@@ -19,8 +19,25 @@ pub struct DepHit {
 
 /// Forward BFS — what does `start` import (transitively).
 pub fn forward(graph: &DepGraph, start: &Path, max_depth: usize) -> Vec<DepHit> {
+    forward_limited(graph, start, max_depth, usize::MAX)
+}
+
+/// Forward BFS, capped at `limit` hits.
+///
+/// Split out rather than added to `forward` because the two have different
+/// callers: the internal ones (call resolution, impact, the first-touch note)
+/// want every import and would only have to pass `usize::MAX`. The tool
+/// surface is the one that advertises a `limit`, and it was silently dropping
+/// it — `reverse` had always taken one, so `code_deps(limit=…)` bound in one
+/// direction and did nothing in the other, which is the default.
+pub fn forward_limited(
+    graph: &DepGraph,
+    start: &Path,
+    max_depth: usize,
+    limit: usize,
+) -> Vec<DepHit> {
     let edges_at = |p: &Path| graph.forward.get(p).cloned().unwrap_or_default();
-    bfs(start, max_depth, usize::MAX, edges_at, |_| true)
+    bfs(start, max_depth, limit, edges_at, |_| true)
 }
 
 /// Reverse BFS — who imports `start` (transitively).

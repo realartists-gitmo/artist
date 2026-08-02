@@ -16,6 +16,8 @@ pub mod cdp;
 pub mod pixels;
 pub mod programmatic;
 pub mod pty;
+#[cfg(all(feature = "ocr", feature = "stage-wayland"))]
+pub mod screen;
 
 /// A watcher armed *before* the action that it observes.
 ///
@@ -23,9 +25,7 @@ pub mod pty;
 /// subscribing after dispatch is a race. A fast surface can finish reacting
 /// before the watcher attaches, and the wait then burns the full timeout on an
 /// already-settled screen while a slow one is missed entirely.
-pub struct SettleWatch(
-    pub Box<dyn std::future::Future<Output = SettleOutcome> + Send + Unpin>,
-);
+pub struct SettleWatch(pub Box<dyn std::future::Future<Output = SettleOutcome> + Send + Unpin>);
 
 impl SettleWatch {
     pub fn ready(outcome: SettleOutcome) -> Self {
@@ -165,9 +165,26 @@ pub async fn run_program(
 
     // `expect` is only meaningful if the program actually finished; reporting a
     // failed expectation on top of a failed step would just be noise.
-    let expect_met = failure
+    let mut expect_met = failure
         .is_none()
         .then(|| check_expect(&snapshot, book, &program.expect));
+
+    // A streaming surface hands over what arrived *since the last look*, so a
+    // shell that printed the text one observation ago reports it absent now —
+    // and the model is told its assertion failed about something it can plainly
+    // see. `Appears` means "it is there", not "it is there in this instant's
+    // delta", so a miss is rechecked against everything the surface still holds.
+    //
+    // Free for every surface with a tree, where the two reads are the same.
+    // Deliberately only `Appears`: for `Gone`, the retained buffer of a shell
+    // contains every line it ever printed, so consulting it would make "gone"
+    // unsatisfiable rather than more accurate.
+    if expect_met == Some(false) && matches!(program.expect, Expect::Appears(_)) {
+        let retained = surface.snapshot_full().await?;
+        if check_expect(&retained, book, &program.expect) {
+            expect_met = Some(true);
+        }
+    }
 
     // A delta is right when the model already knows the surface. It is exactly
     // wrong after a failure: nothing was dispatched, so the surface is
@@ -385,12 +402,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_settle_watcher_is_armed_before_the_final_step_dispatches() {
-        let (surface, mut book, anchors) =
-            seeded(vec![Node::new("a", Role::Button, "Save")]).await;
-        let steps = vec![
-            click(&anchors[0], "Save"),
-            Step::Key("Enter".into()),
-        ];
+        let (surface, mut book, anchors) = seeded(vec![Node::new("a", Role::Button, "Save")]).await;
+        let steps = vec![click(&anchors[0], "Save"), Step::Key("Enter".into())];
         let report = run_program(&surface, &mut book, &program(steps, "Save"))
             .await
             .unwrap();
@@ -412,7 +425,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(report.failed_step, Some(0));
-        assert!(surface.calls().is_empty(), "nothing may dispatch: {:?}", surface.calls());
+        assert!(
+            surface.calls().is_empty(),
+            "nothing may dispatch: {:?}",
+            surface.calls()
+        );
     }
 
     #[tokio::test]
@@ -454,13 +471,15 @@ mod tests {
 
         assert_eq!(report.failed_step, Some(0));
         assert_eq!(report.steps.len(), 1, "later steps must not be attempted");
-        assert_eq!(report.expect_met, None, "expect is not judged after a failure");
+        assert_eq!(
+            report.expect_met, None,
+            "expect is not judged after a failure"
+        );
     }
 
     #[tokio::test]
     async fn expect_is_verified_against_the_surface_after_the_program() {
-        let (surface, mut book, anchors) =
-            seeded(vec![Node::new("a", Role::Button, "Save")]).await;
+        let (surface, mut book, anchors) = seeded(vec![Node::new("a", Role::Button, "Save")]).await;
         let report = run_program(
             &surface,
             &mut book,
@@ -537,8 +556,7 @@ mod tests {
     async fn expect_still_checks_the_label_not_just_the_anchor() {
         // The under-checked half: `still` used to pass if the anchor resolved
         // to *anything*, including an element now named "Send failed".
-        let (surface, mut book, anchors) =
-            seeded(vec![Node::new("a", Role::Button, "Save")]).await;
+        let (surface, mut book, anchors) = seeded(vec![Node::new("a", Role::Button, "Save")]).await;
         // Same binding, different name.
         *surface.nodes.lock().unwrap() = vec![Node::new("a", Role::Button, "Send failed")];
 
@@ -630,7 +648,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(report.error, Some(StepError::LabelMismatch { .. })));
+        assert!(matches!(
+            report.error,
+            Some(StepError::LabelMismatch { .. })
+        ));
         assert!(
             !surface.calls().iter().any(|call| call == "apply:key"),
             "the key must not be delivered: {:?}",

@@ -1,0 +1,20 @@
+# A file manager, replaced by opening things directly.
+#
+# `xdg-open` is what a desktop already uses to decide which application owns a
+# file type, so this is not a shortcut around the user's configuration — it is
+# the same lookup the double-click performs, minus finding the icon.
+name = "files"
+match_app_id = [
+  "*nautilus*", "*dolphin*", "*thunar*", "*nemo*", "*pcmanfm*",
+  "*cosmic-files*", "*org.gnome.Nautilus*",
+]
+
+[[action]]
+name = "open"
+description = "Open a path with whatever application owns its type."
+cli = { argv = ["xdg-open", "{value}"] }
+
+[[action]]
+name = "list"
+description = "What is in a directory, one entry per line, with types."
+cli = { argv = ["ls", "-1Ap", "--", "{value}"] }

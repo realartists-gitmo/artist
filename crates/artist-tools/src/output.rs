@@ -173,6 +173,7 @@ pub fn head(mut value: String, cap: usize) -> String {
 /// bytes smaller but needs 46 more legend entries to do it, which costs more
 /// than it saves. Legible totals −49.9% against full's −48.4%, with 14 legend
 /// entries instead of 60.
+#[allow(dead_code)] // parked: see the call site in bash.rs
 pub fn tail_compressed(value: String, cap: usize) -> (String, bool) {
     if value.len() <= cap {
         return (value, false);

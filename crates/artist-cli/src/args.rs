@@ -40,6 +40,20 @@ pub struct ComputerArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ComputerCommand {
+    /// Check whether computer use will work on this machine.
+    ///
+    /// Every check here already existed as a runtime error thrown at the moment
+    /// a task failed. This is the same information, before anything fails, with
+    /// the fix attached to each problem.
+    Doctor {
+        /// Apply the repairs this can perform itself.
+        ///
+        /// Only ever our own state — fetching model weights into our model
+        /// directory. Anything needing a package manager and root is reported
+        /// with the command to run, never run for you.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Print the observe/act sequence for a session.
     ///
     /// The event log already holds everything an inspector would show —
@@ -61,6 +75,67 @@ pub enum ComputerCommand {
         /// Include programs that failed or whose expectation was not met.
         #[arg(long)]
         include_failed: bool,
+    },
+    /// Replay a distilled macro against a fresh application.
+    ///
+    /// A macro records *what was done*, never what to do it to: the event log
+    /// has no launch command, and the surface id it carries belonged to a
+    /// session that is gone. So the program to run is given here, and the macro
+    /// supplies the steps.
+    /// Hold a computer-use session open so it can be driven from outside.
+    ///
+    /// The registry and its stage live for the life of *one process* — a stage
+    /// is killed on `Drop`, deliberately — so a one-shot command could never
+    /// carry a surface from one call to the next. This keeps one alive and
+    /// takes tool calls over a socket, which is what makes the tool drivable by
+    /// anything that can run a command: a test, a script, or a model that is
+    /// not this harness.
+    Serve {
+        /// Socket path. Defaults to `$XDG_RUNTIME_DIR/artist-computer.sock`.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+    /// Send one `computer` tool call to a running `serve`, and print the reply.
+    ///
+    /// The argument is the tool's own JSON, exactly as a model would emit it —
+    /// so what comes back is exactly what a model would read, including the
+    /// error wording. That is the point: no other test exercises the words.
+    Call {
+        /// The tool arguments as JSON, e.g. `{"mode":"surfaces"}`.
+        json: String,
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+    /// Write a session's computer-use trajectory as one JSON document.
+    ///
+    /// A trajectory is the whole record — every observation and every action, in
+    /// order, with the frame digests that name the screenshots. `log` renders
+    /// that for a person and `distill` reduces it to a replayable macro; this is
+    /// the lossless middle, which is what a benchmark harness reads and what a
+    /// future fine-tune trains on.
+    Export {
+        /// Session id. Defaults to the most recent for this project.
+        id: Option<String>,
+        /// Write here instead of standard output.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    Replay {
+        /// A macro file produced by `artist computer distill`.
+        file: std::path::PathBuf,
+        /// The program to run it against, e.g. `chromium https://example.com`.
+        ///
+        /// Optional when the macro records its own launch, which distilled
+        /// macros now do. Given here it overrides the recorded one.
+        #[arg(long)]
+        launch: Option<String>,
+        /// Allow a step whose element has been renamed to run anyway.
+        ///
+        /// Off by default. A macro is trusted because it is the path that was
+        /// worked out; running it against a merely similar element turns a
+        /// script back into a guess. When on, every substitution is reported.
+        #[arg(long)]
+        heal: bool,
     },
     /// Write a captured frame out by its digest, for an image viewer.
     Frame {

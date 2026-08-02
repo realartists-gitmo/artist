@@ -36,21 +36,23 @@ pub enum TraceOutcome {
 }
 
 /// One hop on a resolved path: the qn reached and the edge taken into it.
-struct Hop {
-    qn: Qn,
-    via: CallEdge,
+pub struct Hop {
+    pub qn: Qn,
+    pub via: CallEdge,
 }
 
 /// A found path: the starting qn plus the ordered hops to the target.
-struct Found {
-    start: Qn,
-    hops: Vec<Hop>,
+pub struct Found {
+    pub start: Qn,
+    pub hops: Vec<Hop>,
 }
 
 /// Multi-source / multi-target BFS over `forward` (callees) edges. Returns the
 /// shortest path from any `froms` qn to any `tos` qn, or `None` when the
 /// target is unreachable within `max_depth` hops.
-fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) -> Option<Found> {
+/// Public so a host can render the path itself. `render_trace` bakes in this
+/// crate's `file:line` output; artist addresses lines by mnemonic anchor.
+pub fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) -> Option<Found> {
     use std::collections::HashSet;
     let to_set: HashSet<&Qn> = tos.iter().collect();
 

@@ -15,7 +15,8 @@
 //! All three are fire-and-forget: none may delay a stream, a tool loop, or the
 //! input box.
 
-use artist_memory::{Memory, NewFact, Scope};
+use artist_memory::identity::{handle, resolve};
+use artist_memory::{Memory, NewFact, ObjectId};
 use artist_session::{MemoryWritten, Recorder};
 use regex::RegexSet;
 use rig_agent::agent::{
@@ -46,9 +47,25 @@ pub struct MemoryHandle {
 /// The outcome of a successful write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Written {
-    pub id: i64,
+    pub id: ObjectId,
     /// The fact this one retired, when it revised rather than added.
-    pub replaced: Option<i64>,
+    pub replaced: Option<ObjectId>,
+}
+
+/// What became of a write attempt.
+///
+/// Rejection carries the fact it collided with rather than collapsing to
+/// "nothing happened". A restatement is the one outcome where the caller most
+/// needs the detail: the model may have been trying to *correct* a belief, and
+/// without the matched id it cannot tell that apart from its write having been
+/// dropped, nor reach for `mode=supersede` instead.
+#[derive(Debug)]
+pub enum Remembered {
+    Stored(Written),
+    /// Not stored: it restates the fact with this id.
+    Restated(ObjectId),
+    /// The store accepted the write but handed back no id.
+    NoId,
 }
 
 /// A handle bound to one session's log.
@@ -91,7 +108,7 @@ impl MemoryHandle {
         let Some(embedder) = self.embedder.clone() else {
             return;
         };
-        let store = self.memory.project().clone();
+        let store = self.memory.store().clone();
         tokio::spawn(async move {
             let indexer = artist_memory::Indexer::new(store, embedder);
             match indexer.index_tree(&project).await {
@@ -155,8 +172,10 @@ impl MemoryWriter {
 
     /// Store one fact, recording the write to the session log.
     ///
-    /// Returns `None` only when the fact restates one already held, so callers
-    /// can tell "stored" from "already known" without a second query.
+    /// A restatement comes back as [`Remembered::Restated`] carrying the fact it
+    /// collided with, so callers can tell "stored" from "already known" — and,
+    /// crucially, can say *which* fact was already known rather than reporting
+    /// a silent no-op.
     ///
     /// A write that *resembles* a stored fact without repeating it revises it:
     /// the new fact is inserted and the old one retired in the same step. That
@@ -166,25 +185,34 @@ impl MemoryWriter {
     /// corrections this path exists to capture — see [`artist_memory::admit`].
     pub async fn remember(
         &self,
-        scope: Scope,
         subject: &str,
         predicate: &str,
         object: &str,
         text: &str,
         origin: &str,
-    ) -> anyhow::Result<Option<Written>> {
-        let store = self.handle.memory.store(scope);
+    ) -> anyhow::Result<Remembered> {
+        let store = self.handle.memory.store();
         let embedding = self.handle.document_vector(text).await;
         if embedding.len() != artist_memory::schema::DIM {
             // Without a usable vector the fact would be invisible to the
             // semantic leg and would break the fixed-width column.
             anyhow::bail!("no embedder available; cannot store a fact");
         }
+        let recorded_vector = embedding.clone();
+        let embedder = self
+            .handle
+            .embedder()
+            .map(|e| e.model_id().to_owned())
+            .unwrap_or_default();
         // Embed first: the candidate probe is ordinary retrieval, and the
         // vector is needed for the write regardless, so nothing is wasted.
         let candidates = store.revision_candidates(text, &embedding, 5).await?;
         let revises = match artist_memory::admit(text, &candidates) {
-            artist_memory::Admission::Restates(_) => return Ok(None),
+            // Carry the collision out rather than dropping it. This is a
+            // rejection, not a write, so it is deliberately not recorded as a
+            // `MemoryWritten` event — replaying one would resurrect a fact that
+            // was never stored.
+            artist_memory::Admission::Restates(old) => return Ok(Remembered::Restated(old)),
             artist_memory::Admission::Revises(old) => Some(old),
             artist_memory::Admission::Insert => None,
         };
@@ -201,7 +229,7 @@ impl MemoryWriter {
             }])
             .await?;
         let Some(id) = ids.first().copied() else {
-            return Ok(None);
+            return Ok(Remembered::NoId);
         };
         if let Some(old) = revises {
             store.supersede(old, id).await?;
@@ -209,16 +237,17 @@ impl MemoryWriter {
         // Recorded with the supersession attached, so a rewind past this write
         // restores the belief it replaced rather than leaving a gap.
         self.recorder.record(MemoryWritten {
-            fact_id: id,
-            scope: scope.as_str().to_owned(),
+            fact_id: format!("{:032x}", id.0),
             subject: subject.to_owned(),
             predicate: predicate.to_owned(),
             object: object.to_owned(),
             text: text.to_owned(),
             origin: origin.to_owned(),
-            superseded: revises,
+            superseded: revises.map(|r| format!("{:032x}", r.0)),
+            embedding: recorded_vector,
+            embedder,
         });
-        Ok(Some(Written {
+        Ok(Remembered::Stored(Written {
             id,
             replaced: revises,
         }))
@@ -228,16 +257,21 @@ impl MemoryWriter {
     /// because every index over `fact` is filtered on `live`.
     pub async fn supersede(
         &self,
-        scope: Scope,
-        old: i64,
+        old: ObjectId,
         text: &str,
         origin: &str,
-    ) -> anyhow::Result<Option<i64>> {
-        let store = self.handle.memory.store(scope);
+    ) -> anyhow::Result<Option<ObjectId>> {
+        let store = self.handle.memory.store();
         let embedding = self.handle.document_vector(text).await;
         if embedding.len() != artist_memory::schema::DIM {
             anyhow::bail!("no embedder available; cannot store a fact");
         }
+        let recorded_vector = embedding.clone();
+        let embedder = self
+            .handle
+            .embedder()
+            .map(|e| e.model_id().to_owned())
+            .unwrap_or_default();
         let ids = store
             .put_facts(&[NewFact {
                 subject: String::new(),
@@ -255,14 +289,15 @@ impl MemoryWriter {
         };
         store.supersede(old, id).await?;
         self.recorder.record(MemoryWritten {
-            fact_id: id,
-            scope: scope.as_str().to_owned(),
+            fact_id: format!("{:032x}", id.0),
             subject: String::new(),
             predicate: String::new(),
             object: text.to_owned(),
             text: text.to_owned(),
             origin: origin.to_owned(),
-            superseded: Some(old),
+            superseded: Some(format!("{:032x}", old.0)),
+            embedding: recorded_vector,
+            embedder,
         });
         Ok(Some(id))
     }
@@ -290,9 +325,8 @@ pub(crate) struct MemoryArgs {
     /// `search`: the query. `store`/`supersede`: the fact, as one sentence.
     query: Option<String>,
     text: Option<String>,
-    scope: Option<String>,
     /// `supersede`: the id being replaced.
-    replaces: Option<i64>,
+    replaces: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -314,10 +348,10 @@ impl PortableTool for MemoryTool {
          and is not already obvious from the code: a stated preference, a project constraint, \
          a decision and why it was made, or a correction. Do not store what a file already \
          says, what only matters this turn, or anything you have not actually confirmed.\n\n\
-         Write one self-contained sentence — it will be read with no surrounding context. \
-         scope=global for things that follow the user between projects, scope=project (the \
-         default) for this repository. Memory is kept outside your context and survives \
-         compaction and handoff."
+         Write one self-contained sentence — it will be read with no surrounding context; \
+         there is one undivided memory, so say what makes the fact findable rather than \
+         relying on which project you are in. Memory is kept outside your context and \
+         survives compaction and handoff."
             .into()
     }
 
@@ -326,16 +360,11 @@ impl PortableTool for MemoryTool {
             "mode":{"enum":["search","store","supersede"],"default":"search"},
             "query":{"type":"string","description":"What to recall. Required for mode=search."},
             "text":{"type":"string","description":"The fact, as one self-contained sentence. Required for store and supersede."},
-            "scope":{"enum":["project","global"],"default":"project"},
-            "replaces":{"type":"integer","description":"The fact id being replaced. Required for mode=supersede."}
+            "replaces":{"type":"string","description":"The id shown in the recalled fact. Required for mode=supersede."}
         },"additionalProperties":false})
     }
 
     async fn call(&self, args: MemoryArgs) -> Result<String, MemoryError> {
-        let scope = match args.scope.as_deref() {
-            Some("global") => Scope::Global,
-            _ => Scope::Project,
-        };
         let mode = args.mode.as_deref().unwrap_or("search");
         match mode {
             "search" => {
@@ -349,7 +378,7 @@ impl PortableTool for MemoryTool {
                 }
                 Ok(hits
                     .iter()
-                    .map(|h| format!("[{}] ({}) {}", h.id, h.scope.as_str(), h.text.trim()))
+                    .map(|h| format!("[{}] {}", h.id, h.text.trim()))
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
@@ -359,18 +388,29 @@ impl PortableTool for MemoryTool {
                     .ok_or_else(|| MemoryError("mode=store needs text".into()))?;
                 match self
                     .handle
-                    .remember(scope, "", "", &text, &text, "tool")
+                    .remember("", "", &text, &text, "tool")
                     .await
                 {
                     // Reporting the retirement matters: without it the model
                     // cannot tell adding a belief from revising one, and would
                     // have no reason to look at what it just replaced.
-                    Ok(Some(Written {
+                    Ok(Remembered::Stored(Written {
                         id,
                         replaced: Some(old),
-                    })) => Ok(format!("Stored as [{id}], superseding [{old}].")),
-                    Ok(Some(Written { id, .. })) => Ok(format!("Stored as [{id}].")),
-                    Ok(None) => Ok("That restates a memory already held; nothing stored.".into()),
+                    })) => Ok(format!(
+                        "Stored as [{}], superseding [{}].",
+                        handle(id),
+                        handle(old)
+                    )),
+                    Ok(Remembered::Stored(Written { id, .. })) => {
+                        Ok(format!("Stored as [{}].", handle(id)))
+                    }
+                    Ok(Remembered::Restated(old)) => Ok(format!(
+                        "That restates [{0}]; nothing stored. \
+                         If you meant to change it, use mode=supersede with replaces={0}.",
+                        handle(old)
+                    )),
+                    Ok(Remembered::NoId) => Ok("Nothing stored.".into()),
                     Err(err) => Err(MemoryError(err.to_string())),
                 }
             }
@@ -378,11 +418,28 @@ impl PortableTool for MemoryTool {
                 let text = args
                     .text
                     .ok_or_else(|| MemoryError("mode=supersede needs text".into()))?;
-                let old = args
+                let prefix = args
                     .replaces
                     .ok_or_else(|| MemoryError("mode=supersede needs `replaces`".into()))?;
-                match self.handle.supersede(scope, old, &text, "tool").await {
-                    Ok(Some(id)) => Ok(format!("Replaced [{old}] with [{id}].")),
+                // Resolve the short handle the model was shown. Ambiguity is an
+                // error rather than a guess: superseding the wrong belief is
+                // silent and unrecoverable, where asking for more characters
+                // costs one turn.
+                let known = self
+                    .handle
+                    .handle()
+                    .memory()
+                    .store()
+                    .all_fact_ids()
+                    .await
+                    .map_err(|e| MemoryError(e.to_string()))?;
+                let old = resolve(&prefix, &known).map_err(|e| MemoryError(e.to_string()))?;
+                match self.handle.supersede(old, &text, "tool").await {
+                    Ok(Some(id)) => Ok(format!(
+                        "Replaced [{}] with [{}].",
+                        handle(old),
+                        handle(id)
+                    )),
                     Ok(None) => Ok("Nothing stored.".into()),
                     Err(err) => Err(MemoryError(err.to_string())),
                 }
@@ -438,9 +495,17 @@ pub(crate) fn capture_correction(writer: MemoryWriter, text: &str) {
     }
     let text = text.to_owned();
     tokio::spawn(async move {
-        let _ = writer
-            .remember(Scope::Project, "", "", &text, &text, "correction")
-            .await;
+        // Fire-and-forget, but not silent: a correction that fails to store is
+        // exactly the write worth knowing about, and discarding the result made
+        // an embedder failure indistinguishable from success.
+        match writer
+            .remember("", "", &text, &text, "correction")
+            .await
+        {
+            Ok(Remembered::Stored(_)) | Ok(Remembered::Restated(_)) => {}
+            Ok(Remembered::NoId) => eprintln!("memory: correction produced no fact id"),
+            Err(error) => eprintln!("memory: could not store correction: {error}"),
+        }
     });
 }
 
@@ -631,9 +696,14 @@ impl MemoryHook {
         };
         tokio::spawn(async move {
             let text = format!("Committed: {subject}");
-            let _ = handle
-                .remember(Scope::Project, "", "", &text, &text, "commit")
-                .await;
+            match handle
+                .remember("", "", &text, &text, "commit")
+                .await
+            {
+                Ok(Remembered::Stored(_)) | Ok(Remembered::Restated(_)) => {}
+                Ok(Remembered::NoId) => eprintln!("memory: commit note produced no fact id"),
+                Err(error) => eprintln!("memory: could not store commit note: {error}"),
+            }
         });
     }
 
@@ -644,7 +714,7 @@ impl MemoryHook {
         let mut state = self.lock();
         hits.append(&mut state.pending);
         let mut seen = std::collections::BTreeSet::new();
-        hits.retain(|h| seen.insert((h.scope.as_str(), h.id)));
+        hits.retain(|h| seen.insert(h.id));
         hits
     }
 }

@@ -34,6 +34,8 @@ use crate::program::StepError;
 pub mod bus;
 pub mod damage;
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+pub mod viewer;
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
 pub mod wayland;
 
 /// A stage-scoped identifier.

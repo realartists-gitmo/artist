@@ -39,42 +39,49 @@ pub(crate) fn discover_from(
     files
 }
 
+/// Every nested `AGENTS.md` beneath the workspace, ignore-rules respected.
+///
+/// This used to be a hand-rolled walk that excluded `.git` and `node_modules`
+/// and nothing else, under a global 5,000-entry budget. On any Rust project
+/// that budget was consumed inside `target/` — 17,000 entries at depth three in
+/// this repository alone — and because the walk was a stack popped in
+/// `read_dir` order, *which* directories were reached before the budget ran out
+/// depended on filesystem ordering. A nested `AGENTS.md` could be silently
+/// dropped, and the set could change between turns with no file having changed,
+/// which then moved the system prompt underneath the prompt cache.
+///
+/// Deferring to `ignore` fixes the cause rather than the symptom: build outputs
+/// are gitignored, so they are skipped for the same reason the user's editor
+/// skips them, and a sorted walk makes the result depend on the tree rather
+/// than on the order the filesystem happened to return.
 pub fn nested(workspace: &Path, diagnostics: &mut Vec<String>) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut pending = vec![(workspace.to_owned(), 0usize)];
-    let mut visited = 0usize;
-    while let Some((directory, depth)) = pending.pop() {
-        if depth > MAX_DEPTH || found.len() >= MAX_NESTED || visited >= 5_000 {
+    let walker = ignore::WalkBuilder::new(workspace)
+        .max_depth(Some(MAX_DEPTH))
+        .follow_links(false)
+        // Dotfile directories are not hidden from this walk — `.artist/` and
+        // friends may legitimately carry instructions — but `.git` is never
+        // interesting and is enormous.
+        .hidden(false)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        // Apply gitignore rules even outside a git checkout, so a tarball of a
+        // project behaves the same as a clone of it.
+        .require_git(false)
+        .sort_by_file_name(std::ffi::OsStr::cmp)
+        .build();
+
+    let root_agents = workspace.join("AGENTS.md");
+    for entry in walker.flatten() {
+        if found.len() >= MAX_NESTED {
+            diagnostics.push(format!("nested AGENTS.md scan capped at {MAX_NESTED} files"));
+            break;
+        }
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
             continue;
         }
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            visited += 1;
-            if visited >= 5_000 {
-                diagnostics.push("nested AGENTS.md scan capped at 5000 entries".into());
-                break;
-            }
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if kind.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if kind.is_file()
-                && entry.file_name() == "AGENTS.md"
-                && path != workspace.join("AGENTS.md")
-            {
-                found.push(path);
-            } else if kind.is_dir()
-                && depth < MAX_DEPTH
-                && entry.file_name() != ".git"
-                && entry.file_name() != "node_modules"
-            {
-                pending.push((path, depth + 1));
-            }
+        let path = entry.into_path();
+        if path.file_name() == Some(std::ffi::OsStr::new("AGENTS.md")) && path != root_agents {
+            found.push(path);
         }
     }
     found.sort();

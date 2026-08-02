@@ -236,7 +236,10 @@ mod tests {
 
         statuses.event(
             "a-green-comet",
-            &artist_agent::PromptEvent::CompletionUsage { total_tokens: 42 },
+            &artist_agent::PromptEvent::CompletionUsage {
+                total_tokens: 42,
+                cached_input_tokens: 0,
+            },
         );
         statuses.event(
             "missing",

@@ -64,8 +64,19 @@ impl SteeringHandle {
     }
 }
 
+/// Injects user steering and inter-agent messages at the same seam.
+///
+/// One hook rather than two, deliberately. This is where "was it already put in
+/// front of the model" is decided, and TTSR's abort-and-reinject makes that a
+/// question with a subtle answer — one already pinned by
+/// `delivered_steering_survives_abort_without_double_delivery`. A second
+/// delivery path would have to rediscover it.
 #[derive(Clone)]
-pub(crate) struct SteeringHook(pub SteeringHandle);
+pub(crate) struct SteeringHook {
+    pub steering: SteeringHandle,
+    /// `None` for an agent with no identity, which simply receives no mail.
+    pub inbox: Option<crate::messaging::Inbox>,
+}
 
 impl AgentHook for SteeringHook {
     async fn on_tool_result(
@@ -78,7 +89,7 @@ impl AgentHook for SteeringHook {
         // original and the display would lose it on restore.
         let result = event.presentation.render();
         let messages = {
-            let mut state = self.0.lock();
+            let mut state = self.steering.lock();
             let messages = state.pending.drain(..).collect::<Vec<_>>();
             state.delivered.extend(messages.iter().cloned());
             if !messages.is_empty() {
@@ -88,15 +99,22 @@ impl AgentHook for SteeringHook {
             }
             messages
         };
-        if messages.is_empty() {
-            return ToolResultAction::keep();
-        }
-        let steering = messages
+
+        let mut blocks: Vec<String> = messages
             .iter()
             .map(|message| format!("<user_steering>\n{message}\n</user_steering>"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        ToolResultAction::rewrite_output(append_steering(event.presentation, steering))
+            .collect();
+        // Collected here, at the same boundary, so the reply target is bound
+        // when the model is actually shown the message — not when it later
+        // decides to answer.
+        if let Some(agent_mail) = self.inbox.as_ref().and_then(crate::messaging::Inbox::collect) {
+            blocks.push(agent_mail);
+        }
+
+        if blocks.is_empty() {
+            return ToolResultAction::keep();
+        }
+        ToolResultAction::rewrite_output(append_steering(event.presentation, blocks.join("\n\n")))
     }
 }
 

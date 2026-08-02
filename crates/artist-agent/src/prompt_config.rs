@@ -54,7 +54,11 @@ pub(crate) fn profile_description(name: &str) -> &'static str {
         "planner" => {
             "Planning agent that turns requirements and code evidence into an executable plan"
         }
-        _ => "Review agent focused on correctness, regressions, security, and missing tests",
+        "reviewer" => "Review agent focused on correctness, regressions, security, and missing tests",
+        // A name with no text of its own, rather than the last arm's. This used
+        // to fall through to the reviewer, so a sixth built-in would have
+        // shipped describing itself as one.
+        _ => "",
     }
 }
 
@@ -71,9 +75,10 @@ pub(crate) fn profile_prompt(name: &str) -> &'static str {
         "planner" => {
             "Analyze requirements and the current code before planning. Return an ordered, implementation-ready plan with exact files, dependencies, verification steps, and risks. Do not edit files.\n"
         }
-        _ => {
+        "reviewer" => {
             "Review like a code owner. Lead with concrete findings ordered by severity, cite files and symbols, explain impact and reproduction, and avoid style-only feedback. Do not edit files.\n"
         }
+        _ => "",
     }
 }
 
@@ -98,6 +103,25 @@ mod tests {
         let profiles = crate::profiles::Profiles::discover_from(d.path(), Some(d.path()));
         for name in BUILTIN_NAMES {
             assert!(profiles.get(name).is_ok(), "missing built-in {name}");
+        }
+    }
+
+    /// A built-in with no text of its own is a built-in that ships wearing
+    /// someone else's. Descriptions are what the delegating model chooses from,
+    /// so a blank one is unpickable; `default` is the one profile that adds
+    /// nothing to the shared prompt, and no other may share that emptiness.
+    #[test]
+    fn every_builtin_has_text_of_its_own() {
+        let mut prompts = std::collections::BTreeSet::new();
+        for name in BUILTIN_NAMES {
+            assert!(
+                !profile_description(name).is_empty(),
+                "{name} has no description to be chosen by"
+            );
+            assert!(
+                prompts.insert(profile_prompt(name)),
+                "{name} shares another built-in's prompt"
+            );
         }
     }
 

@@ -13,7 +13,7 @@
 //! Single survivor → `Inferred`; otherwise → `Ambiguous` with all
 //! candidates kept under `CallEdge::candidates`.
 
-use crate::calls::graph::{CallEdge, CallTarget, Confidence, Qn};
+use crate::calls::graph::{CallEdge, CallKindCompat, CallTarget, Confidence, Qn};
 use crate::calls::pass::{file_rel, raw_to_edge, FilePass, RawEdge};
 use crate::deps::manifest::detect_aliases;
 use crate::deps::resolver::{build_suffix_index, resolve as resolve_spec, Lang, ResolveCtx};
@@ -156,10 +156,42 @@ pub fn run_with_table(
                     // receiver-bearing single match.
                     ambiguous_buffer.push((raw.clone(), fp.file.clone(), cands.clone()));
                 }
+                // Zero candidates on a *plain call*. The whole callable table
+                // was searched and nothing matched, so the callee is outside
+                // the project: stdlib, a dependency, or a trait method whose
+                // impl is not visible.
+                //
+                // Restricted to `Call` on purpose. A `Construct` edge targets a
+                // type and a `Macro` edge targets a macro, neither of which
+                // lives in the callable table — so a miss there is not evidence
+                // of anything, and calling it external would mislabel
+                // `new Greeter()` for a `Greeter` defined in the same file.
+                // Those keep the original `Bare`/`Ambiguous` treatment.
+                _ if matches!(raw.kind, CallKindCompat::Call) => {
+                    //
+                    // This used to emit `Bare` + `Ambiguous`, which is what
+                    // made `callees` look broken on idiomatic Rust — every
+                    // `collect`/`map`/`iter` came back tagged `(Ambiguous)`,
+                    // a label whose own documentation means "multiple
+                    // candidates, no disambiguation possible". Zero candidates
+                    // is the opposite situation and deserves the opposite
+                    // label. `CallTarget::External` already existed for it and
+                    // was simply never constructed, leaving the renderer's
+                    // `[external]` arm and `--hide-external` both unreachable.
+                    let edge = raw_to_edge(
+                        raw.clone(),
+                        CallTarget::External(raw.bare_name.clone()),
+                        Confidence::External,
+                        rel_path(root, &fp.file),
+                        Vec::new(),
+                    );
+                    forward.entry(edge.source.clone()).or_default().push(edge);
+                }
                 _ => {
-                    // 0 candidates: keep as Bare. Could be external, could
-                    // be dynamically dispatched. We don't try to distinguish
-                    // External here (would require deeper import tracking).
+                    // Zero candidates on a construct/macro/super edge: the
+                    // callable table has nothing to say about these, so this
+                    // stays an honest "could not resolve" rather than a claim
+                    // about where the target lives.
                     let edge = raw_to_edge(
                         raw.clone(),
                         CallTarget::Bare(raw.bare_name.clone()),

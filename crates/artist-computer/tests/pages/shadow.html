@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shadow DOM</title>
+<h1>Settings</h1>
+<my-panel></my-panel>
+<script>
+  // A button inside a closed-ish shadow root. It is invisible to a naive
+  // document.querySelectorAll walk, and the accessibility tree is the only
+  // thing that reliably sees through it — which is exactly the claim rung 1
+  // makes and has never been tested against.
+  customElements.define('my-panel', class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = `
+        <label>Display name <input id="name" value="unset"></label>
+        <button id="save">Save settings</button>
+        <p id="saved"></p>`;
+      root.getElementById('save').addEventListener('click', () => {
+        root.getElementById('saved').textContent =
+          'Saved ' + root.getElementById('name').value;
+      });
+    }
+  });
+</script>

@@ -14,11 +14,10 @@ use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
-use tokio::sync::Semaphore;
 
-use dashmap::DashMap;
+use crate::tool_set::Tool;
 
 /// Whether the model reasons before answering. Providers spell this
 /// differently; the profile records intent and the request builder translates.
@@ -147,7 +146,9 @@ impl Profile {
 #[derive(Clone)]
 pub struct Profiles {
     profiles: Arc<BTreeMap<String, Profile>>,
-    pub semaphore: Arc<Semaphore>,
+    /// Shared across every artist process on this project — see
+    /// [`project_permits`].
+    pub permits: artist_registry::Permits,
     diagnostics: Arc<Vec<String>>,
 }
 
@@ -200,7 +201,7 @@ const DEFAULT_MAX_CONCURRENT: usize = 4;
 /// Session-control tools, governed by `deny` but never narrowed away by
 /// `allow`. `subagent` is deliberately not here: delegating expands the
 /// capability surface, so it stays something a profile opts into.
-const HARNESS_TOOLS: [&str; 2] = ["handoff", "todo"];
+const HARNESS_TOOLS: [&str; 2] = [Tool::Handoff.name(), Tool::Todo.name()];
 
 impl Profiles {
     pub fn discover(project: &Path) -> Self {
@@ -241,7 +242,7 @@ impl Profiles {
 
         Self {
             profiles: Arc::new(profiles),
-            semaphore: project_semaphore(project, max_concurrent.unwrap_or(DEFAULT_MAX_CONCURRENT)),
+            permits: project_permits(project, max_concurrent.unwrap_or(DEFAULT_MAX_CONCURRENT)),
             diagnostics: Arc::new(diagnostics),
         }
     }
@@ -444,13 +445,17 @@ fn compile(patterns: &[String], profile: &str) -> Result<Vec<GlobMatcher>, Strin
         .collect()
 }
 
-fn project_semaphore(project: &Path, permits: usize) -> Arc<Semaphore> {
-    static SEMAPHORES: OnceLock<DashMap<PathBuf, Arc<Semaphore>>> = OnceLock::new();
-    SEMAPHORES
-        .get_or_init(DashMap::new)
-        .entry(project.to_owned())
-        .or_insert_with(|| Arc::new(Semaphore::new(permits)))
-        .clone()
+/// The project's delegation seat pool.
+///
+/// On disk rather than in memory because `max_concurrent` is a claim about the
+/// *project* — how many subagents may run against this worktree — and an
+/// in-process semaphore quietly made it a claim about the process instead. Two
+/// terminals running artist on one repository each got the full allowance, so
+/// the configured limit was multiplied by however many artist processes
+/// happened to be open, all contending for the same cores and the same build
+/// lock.
+fn project_permits(project: &Path, permits: usize) -> artist_registry::Permits {
+    artist_registry::Registry::for_project(project).permits(permits)
 }
 
 /// The profiles that ship in the binary.
@@ -508,14 +513,42 @@ fn builtins() -> Vec<Raw> {
         .collect()
 }
 
+/// Every structural navigation tool. All read-only: they parse and report, and
+/// none of them touches a file. `ast_rewrite` is deliberately absent — it only
+/// previews today, but it is a mutation tool by intent and does not belong in a
+/// read-only allowlist on a technicality.
+pub(crate) const NAVIGATION_TOOLS: &[&str] = &[
+    Tool::CodeMap.name(),
+    Tool::CodeShow.name(),
+    Tool::CodeSurface.name(),
+    Tool::CodeImplements.name(),
+    Tool::CodeDeps.name(),
+    Tool::CodeCycles.name(),
+    Tool::CodeTrace.name(),
+    Tool::CodeImpact.name(),
+    Tool::CodeSearch.name(),
+    Tool::CodeRelated.name(),
+    Tool::AstQuery.name(),
+];
+
 fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
     match name {
+        // The read-only profiles are exactly who benefits most from structural
+        // navigation — a reviewer wants callers and blast radius before it
+        // wants file contents. They were previously limited to read/find/grep,
+        // which excluded every one of these for no safety reason.
         "explorer" | "planner" | "reviewer" => (
             Some(
-                ["read", "find", "grep", "skill"]
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
+                [
+                    Tool::Read.name(),
+                    Tool::Find.name(),
+                    Tool::Grep.name(),
+                    Tool::Skill.name(),
+                ]
+                .into_iter()
+                .chain(NAVIGATION_TOOLS.iter().copied())
+                .map(str::to_owned)
+                .collect(),
             ),
             Vec::new(),
         ),
@@ -546,8 +579,13 @@ mod tests {
 
     /// The headline workflow is "plan, then hand to a worker". An allow-list
     /// that omits `handoff` and `todo` silently makes that impossible.
+    ///
+    /// Policy only. What a profile is actually *given* is pinned in
+    /// [`crate::tool_set`], and that separation is the point: this test used to
+    /// read as if it covered both, while the subagent path quietly registered
+    /// something else.
     #[test]
-    fn read_only_builtins_can_still_hand_off_and_track_work() {
+    fn read_only_builtins_permit_handoff_and_work_tracking() {
         let dir = tempfile::tempdir().unwrap();
         let profiles = Profiles::discover_from(dir.path(), None);
         for name in ["explorer", "planner", "reviewer"] {
@@ -567,6 +605,32 @@ mod tests {
             );
             // Delegating expands the capability surface, so it stays opt-in.
             assert!(!profile.permits("subagent"), "{name} should not delegate");
+        }
+    }
+
+    /// These profiles exist to understand code without changing it, which is
+    /// precisely what the structural tools are for. They were shipped excluded
+    /// by an allow-list written before the tools existed; this pins them in so
+    /// the next tool added cannot silently miss the same list.
+    ///
+    /// Policy only — including for the two that ride the memory index, which an
+    /// environment without one cannot supply. The surface is pinned in
+    /// [`crate::tool_set`].
+    #[test]
+    fn read_only_builtins_permit_every_navigation_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let profiles = Profiles::discover_from(dir.path(), None);
+        for name in ["explorer", "planner", "reviewer"] {
+            let profile = profiles.get(name).unwrap();
+            for tool in NAVIGATION_TOOLS {
+                assert!(profile.permits(tool), "{name} cannot use {tool}");
+            }
+            // Preview-only today, but it is a mutation tool by intent and must
+            // not drift into a read-only allow-list.
+            assert!(
+                !profile.permits("ast_rewrite"),
+                "{name} must not be offered a rewrite tool"
+            );
         }
     }
 
@@ -866,7 +930,14 @@ mod tests {
             "[settings]\nmax_concurrent = 2\n",
         );
         let profiles = Profiles::discover_from(dir.path(), None);
-        assert_eq!(profiles.semaphore.available_permits(), 2);
+        assert_eq!(profiles.permits.max(), 2);
+
+        // And the limit is the project's rather than this process's: a pool
+        // built independently against the same root sees the same seats.
+        let held = profiles.permits.try_acquire("first").unwrap();
+        assert!(held.is_some());
+        let elsewhere = artist_registry::Registry::for_project(dir.path()).permits(2);
+        assert_eq!(elsewhere.live().unwrap(), 1);
     }
 
     #[test]
