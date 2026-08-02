@@ -469,9 +469,25 @@ impl RelationalView {
         };
         for ((pred, _), events) in &self.history {
             let p = oid(*pred);
-            for (_, is_assert, _, tuple, source) in events {
-                // A retraction is not a claim about the world, so whoever wrote
-                // it does not vouch for the tuple.
+            // **Fold per statement first, exactly as `state_at` does.**
+            //
+            // Skipping *retraction events* is not the same as skipping retracted
+            // *statements*: the original assertion is still in `history`, so an
+            // agent who wrote a claim and then withdrew it went on vouching for
+            // it. Semantics §8.1 makes liveness one predicate that the verdict
+            // and the attribution both read — here that means the latest event
+            // for a statement decides whether its author still stands behind it.
+            let mut live: BTreeMap<i64, (i64, bool, Vec<ObjectId>, Option<ObjectId>)> =
+                BTreeMap::new();
+            for (at, is_assert, id, tuple, source) in events {
+                match live.get(id) {
+                    Some((prev, _, _, _)) if prev > at => {}
+                    _ => {
+                        live.insert(*id, (*at, *is_assert, tuple.clone(), *source));
+                    }
+                }
+            }
+            for (_, is_assert, tuple, source) in live.values() {
                 let (true, Some(src)) = (*is_assert, *source) else { continue };
                 // **Index every alias spelling, not just the canonical one.**
                 // `history` has been through `canonicalise_log`, so these tuples

@@ -100,7 +100,8 @@ use smithay::{
 use crate::model::{Frame, Rect};
 use crate::program::StepError;
 use crate::stage::{
-    AppCommand, AppHandle, Damage, Stage, StageEnv, StageId, WindowInfo, WindowKey, WindowKind,
+    AppCommand, AppHandle, Damage, Gesture, Stage, StageEnv, StageId, WindowInfo, WindowKey,
+    WindowKind,
 };
 
 /// The stage's default virtual screen.
@@ -172,6 +173,21 @@ enum StageCommand {
         u32,
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
+    Scroll(
+        WindowKey,
+        Rect,
+        i32,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
+    /// One primitive of a touch sequence.
+    ///
+    /// Gestures are assembled by the *proxy*, not here, because the timing is
+    /// the gesture: a long press is a contact held for half a second and a fling
+    /// is one moved over sixteen-millisecond steps. Sleeping for either on the
+    /// compositor thread would stall rendering and the command channel for
+    /// exactly as long as the gesture lasts — so the thread only ever handles
+    /// instantaneous events, and the waiting happens on the caller's task.
+    Touch(TouchStep, tokio::sync::oneshot::Sender<Result<(), String>>),
     Capture(
         Option<WindowKey>,
         tokio::sync::oneshot::Sender<Result<Frame, String>>,
@@ -181,6 +197,32 @@ enum StageCommand {
     /// Both render buffers and the index of the one holding a finished frame.
     RenderTarget(RenderTargetReply),
     Shutdown,
+}
+
+/// One instantaneous step of a touch sequence.
+///
+/// `slot` is the contact identifier: 0 and 1 are two fingers of a pinch, and a
+/// client tracks them independently. Reusing a slot that is still down is what
+/// makes a two-finger gesture arrive as one confused finger.
+#[derive(Clone, Copy, Debug)]
+enum TouchStep {
+    Down {
+        window: WindowKey,
+        at: (i32, i32),
+        slot: u32,
+    },
+    Motion {
+        window: WindowKey,
+        at: (i32, i32),
+        slot: u32,
+    },
+    Up {
+        slot: u32,
+    },
+    /// Withdraw every contact. Used when a gesture fails part-way: a contact
+    /// left down is worse than a gesture that did not happen, because the next
+    /// interaction inherits it.
+    Cancel,
 }
 
 /// A window the compositor is managing.
@@ -255,9 +297,27 @@ struct StageState {
     render_error: Option<String>,
     width: i32,
     height: i32,
+    /// When the stage came up, so input events can carry real timestamps.
+    ///
+    /// Every event used to be stamped `0`. Clients that only ask "did something
+    /// happen" never noticed, but anything that reads the clock did: two clicks
+    /// at the same millisecond are a double-click, a contact that goes down and
+    /// up at the same instant has no duration to distinguish a tap from a long
+    /// press, and a swipe delivered with no elapsed time has infinite velocity.
+    /// Android reads all three.
+    started: std::time::Instant,
 }
 
 impl StageState {
+    /// Milliseconds since the stage started, which is what input events carry.
+    ///
+    /// Wrapping at `u32` is the protocol's own behaviour — clients are required
+    /// to treat these as a wrapping counter — and 49 days of uptime is not a
+    /// case worth carrying a second clock for.
+    fn now_ms(&self) -> u32 {
+        self.started.elapsed().as_millis() as u32
+    }
+
     fn full_screen(&self) -> Rect {
         Rect {
             x: 0,
@@ -793,6 +853,148 @@ impl StageWayland {
     }
 }
 
+/// One step of a swipe or pinch, at roughly a 60 Hz frame.
+///
+/// Android's velocity tracker integrates the last handful of points, so the
+/// step rate is what a fling's distance is computed from. Much coarser and a
+/// swipe reads as a teleport with no velocity; much finer and the events
+/// outpace the frames that would consume them.
+const GESTURE_STEP_MS: u64 = 16;
+
+/// The shortest a contact stays down.
+///
+/// A down and an up in the same millisecond is discarded by some input stacks
+/// as a spurious contact, and read by others as a zero-duration tap that never
+/// crosses the threshold to become a click at all.
+const MIN_CONTACT_MS: u64 = 40;
+
+impl StageWayland {
+    async fn touch_step(&self, step: TouchStep) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Touch(step, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    /// Play a gesture out over wall-clock time.
+    ///
+    /// The waiting happens here, on the caller's task, rather than on the
+    /// compositor thread — which is why the thread only ever sees instantaneous
+    /// events. A 500 ms long press otherwise stalls rendering, damage delivery
+    /// and every other command for half a second.
+    async fn run_gesture(&self, window: WindowKey, gesture: &Gesture) -> Result<(), StepError> {
+        match *gesture {
+            Gesture::Tap { at, hold_ms } => {
+                let point = centre_i32(at);
+                self.touch_step(TouchStep::Down {
+                    window,
+                    at: point,
+                    slot: 0,
+                })
+                .await?;
+                tokio::time::sleep(std::time::Duration::from_millis(hold_ms.max(MIN_CONTACT_MS)))
+                    .await;
+                self.touch_step(TouchStep::Up { slot: 0 }).await
+            }
+            Gesture::Swipe {
+                from,
+                to,
+                duration_ms,
+            } => {
+                let start = centre_i32(from);
+                let end = centre_i32(to);
+                let steps = (duration_ms / GESTURE_STEP_MS).clamp(2, 240) as i32;
+                self.touch_step(TouchStep::Down {
+                    window,
+                    at: start,
+                    slot: 0,
+                })
+                .await?;
+                for step in 1..=steps {
+                    tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
+                    self.touch_step(TouchStep::Motion {
+                        window,
+                        at: lerp(start, end, step, steps),
+                        slot: 0,
+                    })
+                    .await?;
+                }
+                self.touch_step(TouchStep::Up { slot: 0 }).await
+            }
+            Gesture::Pinch {
+                at,
+                from_gap,
+                to_gap,
+                duration_ms,
+            } => {
+                let (cx, cy) = centre_i32(at);
+                let steps = (duration_ms / GESTURE_STEP_MS).clamp(2, 240) as i32;
+                // Horizontal, about the centre. The axis is arbitrary — every
+                // pinch handler cares about the distance between contacts and
+                // not their orientation — but it has to be *consistent*, or a
+                // two-finger gesture reads as a rotation as well as a scale.
+                let half = |gap: u32| (gap / 2) as i32;
+                let left = |gap: u32| (cx - half(gap), cy);
+                let right = |gap: u32| (cx + half(gap), cy);
+
+                self.touch_step(TouchStep::Down {
+                    window,
+                    at: left(from_gap),
+                    slot: 0,
+                })
+                .await?;
+                self.touch_step(TouchStep::Down {
+                    window,
+                    at: right(from_gap),
+                    slot: 1,
+                })
+                .await?;
+                for step in 1..=steps {
+                    tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
+                    let gap = lerp_u32(from_gap, to_gap, step, steps);
+                    self.touch_step(TouchStep::Motion {
+                        window,
+                        at: left(gap),
+                        slot: 0,
+                    })
+                    .await?;
+                    self.touch_step(TouchStep::Motion {
+                        window,
+                        at: right(gap),
+                        slot: 1,
+                    })
+                    .await?;
+                }
+                // Lifted in the order they were placed. Simultaneous lifts are
+                // not expressible — each is its own event — and lifting the
+                // second first is what a real hand does least often.
+                self.touch_step(TouchStep::Up { slot: 0 }).await?;
+                self.touch_step(TouchStep::Up { slot: 1 }).await
+            }
+        }
+    }
+}
+
+fn centre_i32(rect: Rect) -> (i32, i32) {
+    (
+        rect.x + (rect.width / 2) as i32,
+        rect.y + (rect.height / 2) as i32,
+    )
+}
+
+fn lerp(from: (i32, i32), to: (i32, i32), step: i32, steps: i32) -> (i32, i32) {
+    let fraction = f64::from(step) / f64::from(steps);
+    (
+        from.0 + ((f64::from(to.0 - from.0)) * fraction).round() as i32,
+        from.1 + ((f64::from(to.1 - from.1)) * fraction).round() as i32,
+    )
+}
+
+fn lerp_u32(from: u32, to: u32, step: i32, steps: i32) -> u32 {
+    let fraction = f64::from(step) / f64::from(steps);
+    let span = f64::from(to) - f64::from(from);
+    (f64::from(from) + span * fraction).round().max(0.0) as u32
+}
+
 fn runtime_dir_string(dir: &std::path::Path) -> String {
     dir.to_string_lossy().into_owned()
 }
@@ -896,6 +1098,33 @@ impl Stage for StageWayland {
         self.ask(|tx| StageCommand::Capture(window, tx))
             .await?
             .map_err(StepError::Backend)
+    }
+
+    fn seat(&self) -> crate::stage::SeatCaps {
+        crate::stage::SeatCaps {
+            keyboard: true,
+            pointer: true,
+            scroll: true,
+            touch: true,
+        }
+    }
+
+    async fn scroll(&self, window: WindowKey, at: Rect, amount: i32) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Scroll(window, at, amount, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn gesture(&self, window: WindowKey, gesture: &Gesture) -> Result<(), StepError> {
+        let result = self.run_gesture(window, gesture).await;
+        if result.is_err() {
+            // A contact left down outlives the failed gesture and poisons the
+            // next one, so the withdrawal is unconditional and its own failure
+            // is ignored: there is nothing better to do with it, and reporting
+            // it would replace the real error with a less useful one.
+            let _ = self.touch_step(TouchStep::Cancel).await;
+        }
+        result
     }
 
     fn damage(&self) -> tokio::sync::broadcast::Receiver<Damage> {
@@ -1174,6 +1403,7 @@ fn run_compositor(
         render_error: None,
         width,
         height,
+        started: std::time::Instant::now(),
     };
 
     let keyboard = match state.seat.add_keyboard(Default::default(), 200, 25) {
@@ -1184,6 +1414,11 @@ fn run_compositor(
         }
     };
     let pointer = state.seat.add_pointer();
+    // The seat advertises `wl_touch` from the moment it is created, because a
+    // client reads the seat's capabilities once and decides from them what it
+    // can do. Adding touch later would be invisible to anything already running
+    // — and for Android that is the whole application.
+    let touch = state.seat.add_touch();
 
     // Bound by absolute path rather than through `XDG_RUNTIME_DIR`.
     // `ListeningSocket::bind` reads that variable from the process environment,
@@ -1231,6 +1466,7 @@ fn run_compositor(
                 &mut state,
                 &keyboard,
                 &pointer,
+                &touch,
                 Buffers {
                     targets: &mut targets,
                     back,
@@ -1348,6 +1584,7 @@ fn handle_command(
     state: &mut StageState,
     keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
     pointer: &smithay::input::pointer::PointerHandle<StageState>,
+    touch: &smithay::input::touch::TouchHandle<StageState>,
     buffers: Buffers<'_>,
     command: StageCommand,
 ) {
@@ -1396,6 +1633,12 @@ fn handle_command(
         }
         StageCommand::Pointer(key, at, button, reply) => {
             let _ = reply.send(deliver_click(state, pointer, key, at, button));
+        }
+        StageCommand::Scroll(key, at, amount, reply) => {
+            let _ = reply.send(deliver_scroll(state, pointer, key, at, amount));
+        }
+        StageCommand::Touch(step, reply) => {
+            let _ = reply.send(deliver_touch(state, touch, step));
         }
         StageCommand::Capture(window, reply) => {
             let full = state.full_screen();
@@ -1513,11 +1756,11 @@ fn deliver_click(
         return Err(format!("no window {key:?}"));
     };
     let surface = window.toplevel.wl_surface().clone();
-    let point = smithay::utils::Point::<f64, smithay::utils::Logical>::from((
-        f64::from(at.x) + f64::from(at.width) / 2.0,
-        f64::from(at.y) + f64::from(at.height) / 2.0,
-    ));
-    let time = 0;
+    let point = centre_of(at);
+    // Real elapsed milliseconds, not zero. Two clicks stamped with the same
+    // time are a double-click to every toolkit that checks, which turned two
+    // deliberate single clicks into an unintended double.
+    let time = state.now_ms();
 
     pointer.motion(
         state,
@@ -1549,6 +1792,145 @@ fn deliver_click(
     Ok(())
 }
 
+/// The centre of a rectangle, in compositor-logical coordinates.
+fn centre_of(rect: Rect) -> smithay::utils::Point<f64, smithay::utils::Logical> {
+    smithay::utils::Point::from((
+        f64::from(rect.x) + f64::from(rect.width) / 2.0,
+        f64::from(rect.y) + f64::from(rect.height) / 2.0,
+    ))
+}
+
+/// How many logical pixels one wheel notch scrolls.
+///
+/// The conventional figure, and the one wlroots and smithay's own examples use.
+/// It matters because `v120` and the continuous value have to agree: a client
+/// that reads the discrete steps and one that reads the pixel value must scroll
+/// by the same amount, or the same call moves a GTK list and an Android list by
+/// visibly different distances.
+const PIXELS_PER_NOTCH: f64 = 15.0;
+
+/// Scroll at a point, as a wheel would.
+fn deliver_scroll(
+    state: &mut StageState,
+    pointer: &smithay::input::pointer::PointerHandle<StageState>,
+    key: WindowKey,
+    at: Rect,
+    amount: i32,
+) -> Result<(), String> {
+    use smithay::backend::input::{Axis, AxisSource};
+    use smithay::input::pointer::{AxisFrame, MotionEvent};
+    use smithay::utils::SERIAL_COUNTER;
+
+    if amount == 0 {
+        return Ok(());
+    }
+    let Some(window) = state.window(key) else {
+        return Err(format!("no window {key:?}"));
+    };
+    let surface = window.toplevel.wl_surface().clone();
+    let point = centre_of(at);
+
+    // The pointer has to be over the thing being scrolled first: a wheel event
+    // goes to whatever is under the cursor, so scrolling without moving there
+    // scrolls whatever was last clicked instead.
+    pointer.motion(
+        state,
+        Some((surface, (0.0, 0.0).into())),
+        &MotionEvent {
+            location: point,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: state.now_ms(),
+        },
+    );
+
+    // Delivered a notch at a time rather than as one large value. A real wheel
+    // never sends 900 pixels in one frame, and a list that animates per notch
+    // treats a single huge delta as one jump — losing the intermediate layout
+    // that a virtualized list needs in order to realize its rows.
+    let notches = (f64::from(amount).abs() / PIXELS_PER_NOTCH).ceil() as i32;
+    let notches = notches.clamp(1, 40);
+    let per_notch = f64::from(amount) / f64::from(notches);
+    for _ in 0..notches {
+        let time = state.now_ms();
+        let frame = AxisFrame::new(time)
+            .source(AxisSource::Wheel)
+            .value(Axis::Vertical, per_notch)
+            .v120(
+                Axis::Vertical,
+                (per_notch / PIXELS_PER_NOTCH * 120.0).round() as i32,
+            );
+        pointer.axis(state, frame);
+        pointer.frame(state);
+    }
+    Ok(())
+}
+
+/// Deliver one instantaneous step of a touch sequence.
+fn deliver_touch(
+    state: &mut StageState,
+    touch: &smithay::input::touch::TouchHandle<StageState>,
+    step: TouchStep,
+) -> Result<(), String> {
+    use smithay::backend::input::TouchSlot;
+    use smithay::input::touch::{DownEvent, MotionEvent, UpEvent};
+    use smithay::utils::SERIAL_COUNTER;
+
+    let time = state.now_ms();
+    match step {
+        TouchStep::Down { window, at, slot } => {
+            let Some(managed) = state.window(window) else {
+                return Err(format!("no window {window:?}"));
+            };
+            let surface = managed.toplevel.wl_surface().clone();
+            let location = smithay::utils::Point::from((f64::from(at.0), f64::from(at.1)));
+            touch.down(
+                state,
+                Some((surface, (0.0, 0.0).into())),
+                &DownEvent {
+                    slot: TouchSlot::from(Some(slot)),
+                    location,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                },
+            );
+            touch.frame(state);
+        }
+        TouchStep::Motion { window, at, slot } => {
+            let Some(managed) = state.window(window) else {
+                return Err(format!("no window {window:?}"));
+            };
+            let surface = managed.toplevel.wl_surface().clone();
+            let location = smithay::utils::Point::from((f64::from(at.0), f64::from(at.1)));
+            touch.motion(
+                state,
+                Some((surface, (0.0, 0.0).into())),
+                &MotionEvent {
+                    slot: TouchSlot::from(Some(slot)),
+                    location,
+                    time,
+                },
+            );
+            touch.frame(state);
+        }
+        TouchStep::Up { slot } => {
+            touch.up(
+                state,
+                &UpEvent {
+                    slot: TouchSlot::from(Some(slot)),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time,
+                },
+            );
+            touch.frame(state);
+        }
+        TouchStep::Cancel => {
+            touch.cancel(state);
+            touch.frame(state);
+        }
+    }
+    Ok(())
+}
+
 /// Press and release one evdev keycode, optionally wrapped in modifier holds.
 fn tap(
     state: &mut StageState,
@@ -1561,12 +1943,16 @@ fn tap(
 
     const OFFSET: u32 = 8; // evdev -> xkb
     let send = |state: &mut StageState, code: u32, pressed: KeyState| {
+        // Real time and a fresh serial, for the same reason clicks carry them:
+        // a client that measures key repeat, or that matches a request to the
+        // event that authorized it, is reading both.
+        let time = state.now_ms();
         keyboard.input::<(), _>(
             state,
             Keycode::from(code + OFFSET),
             pressed,
-            Serial::from(0),
-            0,
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+            time,
             |_, _, _| FilterResult::Forward,
         );
     };

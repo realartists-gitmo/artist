@@ -136,6 +136,61 @@ pub struct Damage {
     pub region: Rect,
 }
 
+/// A touch gesture, in coordinates the harness resolved from an anchor.
+///
+/// Separate from [`Stage::pointer`] rather than folded into it, because a
+/// touchscreen is not a mouse with one button. Android decides what a contact
+/// *meant* from how long it stayed down and how far it travelled: the same two
+/// endpoints are a scroll, a fling or a drag depending on timing, and a contact
+/// held in place is a long press rather than a slow tap. Collapsing those into a
+/// click would make three quarters of a phone UI unreachable.
+///
+/// Durations are honoured by delivering the contact as a real sequence over
+/// wall-clock time, not by stamping the endpoints and hoping.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Gesture {
+    /// One contact placed and lifted at the centre of `at`.
+    ///
+    /// `hold_ms` past Android's long-press threshold is a *different gesture*,
+    /// which is why it is a parameter rather than an implementation detail.
+    Tap { at: Rect, hold_ms: u64 },
+    /// One contact dragged from the centre of `from` to the centre of `to`.
+    ///
+    /// `duration_ms` is what separates a scroll from a fling: the velocity of
+    /// the last few points is what Android integrates, so a swipe delivered
+    /// instantly scrolls by exactly its length and coasts nowhere.
+    Swipe {
+        from: Rect,
+        to: Rect,
+        duration_ms: u64,
+    },
+    /// Two contacts moving symmetrically about the centre of `at`.
+    Pinch {
+        at: Rect,
+        /// Distance between the two contacts at the start, in pixels.
+        from_gap: u32,
+        /// …and at the end. Larger than `from_gap` zooms in.
+        to_gap: u32,
+        duration_ms: u64,
+    },
+}
+
+/// What a stage's seat can actually do.
+///
+/// Reported rather than assumed, because a surface's [`crate::model::Caps`] is
+/// derived from it: a rung-3 surface may only advertise scrolling if the thing
+/// underneath it can scroll, and advertising what the seat does not have is how
+/// a step comes back `ok` having done nothing.
+/// Named `SeatCaps` rather than `Seat` because the compositor backend already
+/// has a `Seat` — smithay's, which is the thing this describes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SeatCaps {
+    pub keyboard: bool,
+    pub pointer: bool,
+    pub scroll: bool,
+    pub touch: bool,
+}
+
 /// An isolated graphical session.
 #[async_trait::async_trait]
 pub trait Stage: Send + Sync {
@@ -150,6 +205,36 @@ pub trait Stage: Send + Sync {
     async fn text(&self, window: WindowKey, text: &str) -> Result<(), StepError>;
     async fn pointer(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError>;
     async fn capture(&self, window: Option<WindowKey>) -> Result<Frame, StepError>;
+
+    /// What this seat has. The default is the seat as it shipped: keys and a
+    /// pointer, nothing else.
+    fn seat(&self) -> SeatCaps {
+        SeatCaps {
+            keyboard: true,
+            pointer: true,
+            scroll: false,
+            touch: false,
+        }
+    }
+
+    /// Scroll at a point. Positive `amount` scrolls down, in pixels, matching
+    /// [`crate::program::Step::Scroll`].
+    ///
+    /// Defaults to a refusal rather than a silent success: a stage that cannot
+    /// scroll and says `ok` is indistinguishable, to the model, from a list that
+    /// was already at the bottom.
+    async fn scroll(&self, _window: WindowKey, _at: Rect, _amount: i32) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat has no scroll axis".into(),
+        ))
+    }
+
+    /// Deliver a touch gesture.
+    async fn gesture(&self, _window: WindowKey, _gesture: &Gesture) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat has no touch device".into(),
+        ))
+    }
 
     /// Subscribe to damage. Used to build settle predicates.
     fn damage(&self) -> tokio::sync::broadcast::Receiver<Damage>;

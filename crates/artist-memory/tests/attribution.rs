@@ -103,3 +103,47 @@ async fn a_source_named_like_an_operator_is_not_that_operator() {
         "and it is the ordinary content-addressed atom for that name"
     );
 }
+
+/// **A withdrawn claim stops vouching.**
+///
+/// Skipping *retraction events* is not the same as skipping retracted
+/// *statements*: the original assertion is still in the log, so an agent who
+/// wrote a claim and then withdrew it went on being named as its authority.
+/// "Go and ask whoever told me this" pointed at someone who had told you the
+/// opposite.
+///
+/// §8.1 makes liveness one predicate that the verdict and the attribution both
+/// read, so the fold here is the same one `state_at` uses: the latest event for
+/// a statement decides whether its author still stands behind it.
+#[tokio::test]
+async fn a_retracted_claim_stops_vouching() {
+    use artist_memory::relational::retract_stmt;
+
+    let (_d, s) = store().await;
+    let fast = intern(&s, "build-is-fast").await.expect("sym");
+    let proj = intern(&s, "artist").await.expect("sym");
+
+    let id = assert_stmt(&s, fast, &[proj], "agent-a").await.expect("fact");
+    let view = RelationalView::load(&s).await.expect("load");
+    assert!(
+        !view.attribution(proposition(fast, &[oid(proj)])).is_empty(),
+        "while it stands, its author vouches for it"
+    );
+
+    retract_stmt(&s, id).await.expect("retract");
+    let view = RelationalView::load(&s).await.expect("reload");
+    assert!(
+        view.attribution(proposition(fast, &[oid(proj)])).is_empty(),
+        "withdrawn: nobody is left standing behind it"
+    );
+
+    // …and a second, independent assertion of the same fact is unaffected,
+    // because the fold is per statement rather than per tuple.
+    assert_stmt(&s, fast, &[proj], "agent-b").await.expect("second");
+    let view = RelationalView::load(&s).await.expect("reload");
+    assert_eq!(
+        view.attribution(proposition(fast, &[oid(proj)])).len(),
+        1,
+        "agent-b vouches; agent-a still does not"
+    );
+}

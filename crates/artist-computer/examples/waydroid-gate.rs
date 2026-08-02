@@ -109,7 +109,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&dir)?;
 
     println!("== stage ==");
-    let stage = Arc::new(StageWayland::start(StageId("waydroid-gate".into()), &dir)?);
+    let mut stage = StageWayland::start(StageId("waydroid-gate".into()), &dir)?;
+
+    // Waydroid derives the PulseAudio socket from `XDG_RUNTIME_DIR`, and on a
+    // stage that variable points at the stage's own private directory — which
+    // has a Wayland socket in it and nothing else. LXC is then told to
+    // bind-mount a socket that does not exist, the mount fails, and the
+    // *container* fails to start with no mention of audio anywhere in the
+    // error. Point it back at the user's real one explicitly.
+    if std::env::var_os("PULSE_RUNTIME_PATH").is_none() {
+        let host_pulse = std::path::Path::new(&runtime_dir).join("pulse");
+        if host_pulse.join("native").exists() {
+            let mut extra = artist_computer::stage::StageEnv::default();
+            extra.set("PULSE_RUNTIME_PATH", host_pulse.to_string_lossy());
+            stage.extend_env(&extra);
+            println!("  PULSE_RUNTIME_PATH = {}", host_pulse.display());
+        }
+    }
+    let stage = Arc::new(stage);
     let wayland_display = stage.env().get("WAYLAND_DISPLAY").unwrap_or("<unset>");
     let stage_runtime = stage.env().get("XDG_RUNTIME_DIR").unwrap_or("<unset>");
     println!("  WAYLAND_DISPLAY = {wayland_display}");
@@ -336,8 +353,16 @@ fn describe(window: &WindowInfo) {
 
 /// The checks whose failure otherwise presents as "the compositor is broken".
 fn report_preflight() {
+    // Three ways to have binder, and a check that knows only one of them is a
+    // check that reports a working system as broken. Mainline kernels expose it
+    // as binderfs — including the Rust implementation, where there is no module
+    // to find and no `/dev/binder` node until the container asks for one.
     let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
-    let binder = modules.contains("binder_linux") || std::path::Path::new("/dev/binder").exists();
+    let filesystems = std::fs::read_to_string("/proc/filesystems").unwrap_or_default();
+    let binder = modules.contains("binder_linux")
+        || std::path::Path::new("/dev/binderfs").exists()
+        || filesystems.contains("binder")
+        || std::path::Path::new("/dev/binder").exists();
     println!("  binder            {}", yes_no(binder));
 
     let images = std::path::Path::new("/var/lib/waydroid/images/system.img").exists();

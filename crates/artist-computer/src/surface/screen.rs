@@ -98,6 +98,23 @@ impl ScreenSurface {
         self.stage.capture(Some(self.window)).await
     }
 
+    /// This window's geometry, for actions that need a point but were given no
+    /// element.
+    async fn window_bounds(&self) -> Result<crate::model::Rect, StepError> {
+        self.stage
+            .windows()
+            .await?
+            .into_iter()
+            .find(|window| window.key == self.window)
+            .map(|window| window.geometry)
+            .ok_or_else(|| {
+                StepError::Backend(format!(
+                    "{} is no longer on the stage — its window has gone",
+                    self.id
+                ))
+            })
+    }
+
     /// Read the screen, re-reading only what the compositor says changed.
     async fn refresh(&self) -> Result<Vec<Node>, StepError> {
         let frame = self.capture().await?;
@@ -140,14 +157,22 @@ impl Surface for ScreenSurface {
     /// Honest about the one thing this rung cannot do.
     ///
     /// Clicking works because we find the target ourselves. Typing and keys go
-    /// to whatever holds focus, which the stage handles. Scrolling has no
-    /// meaning without a scrollable container we can identify, and we cannot.
+    /// to whatever holds focus, which the stage handles.
+    ///
+    /// Scrolling used to be refused here, on the grounds that it has no meaning
+    /// without a scrollable container we can identify. That was true of a
+    /// *browser*, where the wrong container silently scrolls the document
+    /// instead; it is not true of a screen. Scrolling at a point is exactly what
+    /// a wheel does, and the thing under that point is whatever the application
+    /// decided should be there — which is the same answer a person gets. So it
+    /// is offered when the seat can deliver it, and still refused when it
+    /// cannot, rather than being reported as done and doing nothing.
     fn caps(&self) -> Caps {
         Caps {
             click: true,
             type_text: false,
             key: true,
-            scroll: false,
+            scroll: self.stage.seat().scroll,
             pixels: true,
         }
     }
@@ -242,6 +267,18 @@ impl Surface for ScreenSurface {
                 Ok(())
             }
             Step::Key(press) => self.stage.key(self.window, press.chord()).await,
+            Step::Scroll { amount, .. } => {
+                // At the named element when there is one, and at the middle of
+                // the window otherwise. The fallback is the meaningful case on
+                // this rung: a list the OCR read as a column of text has no
+                // container to name, and scrolling "the screen" is what the
+                // model meant.
+                let at = match node.and_then(|node| node.bounds) {
+                    Some(bounds) => bounds,
+                    None => self.window_bounds().await?,
+                };
+                self.stage.scroll(self.window, at, *amount).await
+            }
             other => Err(StepError::Backend(format!(
                 "a screen surface cannot {:?} — it can click what it can read, and send keys. \
                  If this application has a debugging protocol or an accessibility tree, it \
