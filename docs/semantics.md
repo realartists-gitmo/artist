@@ -384,6 +384,101 @@ becomes when one bit is settled and the other is not, and the nine lemmas
 re-derived. None of that is code, and none of it should be until reviewed — the
 last three rules that shipped on my own reading did not survive someone else's.
 
+
+### 7.1c The construction, worked
+
+Not code, and not yet reviewed. Written out so it can be attacked.
+
+**Values.** Let `𝟛 = {0, 1, u}` be the flat domain: `u ⊑ 0`, `u ⊑ 1`, and `0`,
+`1` incomparable. A denotation is a pair
+
+```
+⟦n⟧_M = ⟨t, f⟩ ∈ 𝟛 × 𝟛
+```
+
+— nine values, of which four are the old FOUR (`N=⟨0,0⟩`, `T=⟨1,0⟩`, `F=⟨0,1⟩`,
+`B=⟨1,1⟩`) and five are genuinely partial. `⟨u,u⟩` is the old `⊥`. `⟨1,u⟩` —
+*supported, refutation unresolved* — is the value that did not exist and whose
+absence refuted three rules.
+
+**Clauses.** With `∧`, `∨`, `¬` the Kleene operations on `𝟛` (`∧` is `0` if any
+operand is `0`, `1` if all are `1`, else `u`; `∨` dually; `¬` swaps `0` and `1`
+and fixes `u`):
+
+```
+¬⟨t,f⟩        = ⟨f, t⟩
+⋀ᵢ ⟨tᵢ,fᵢ⟩    = ⟨ ⋀ᵢ tᵢ , ⋁ᵢ fᵢ ⟩          — and, ∀ over ext
+⋁ᵢ ⟨tᵢ,fᵢ⟩    = ⟨ ⋁ᵢ tᵢ , ⋀ᵢ fᵢ ⟩          — or, ∃ over ext
+a ⊃ b         = ⟨ ¬a⁺ ∨ b⁺ , a⁺ ∧ b⁻ ⟩
+```
+
+Leaves take `R_{v,τ}` (§8.2), which always yields a *defined* FOUR value — which
+is why an atom nobody has mentioned is `N = ⟨0,0⟩` and **grounded**, the
+distinction §4 needed a fifth value to make and now gets from the base case.
+
+**Lemma (monotonicity).** Every clause is `⊑`-monotone, because each Kleene
+operation is monotone on the flat domain: raising an argument from `u` can only
+settle a result, never unsettle or change a settled one. Hence `Φ_M` is monotone
+on the product cpo of valuations, and `lfp(Φ_M)` exists by ordinal iteration from
+the all-`u` valuation. ∎
+
+This is markedly better than §4.2's construction, which quantified over *total
+extensions* and needed an argument about extension sets. Here monotonicity is
+immediate and per-clause, which is also why it is harder to get wrong.
+
+**Grounding, per bit.** `Grounded(n)` iff both bits are defined in `lfp`. When a
+bit is undefined, classify it as §4.3 does — `StableLoop` when some fixpoint
+settles it classically, `Oscillatory` when none does. The liar gives
+`⟨t,f⟩ = ⟨f,t⟩`, so `t = f`: fixpoints exist at `⟨0,0⟩` and `⟨1,1⟩` but none at
+`⟨1,0⟩` or `⟨0,1⟩`, so it is `Oscillatory`. The truth-teller gives `⟦Q⟧ = ⟦Q⟧`,
+satisfied by every value, so `StableLoop`. Both classifications survive.
+
+**`Bound` gains a state.** Each side of a judgment must say which of three things
+it knows about its bit:
+
+| `Bound` | asserts | |
+|---|---|---|
+| `Certain` | the bit is `1` | |
+| `Excluded` | the bit is `0` | **new** |
+| `None` | nothing | the bit is unknown |
+| `Partial` | nothing | search state, as before |
+
+`None` currently means both *known zero* and *unknown*, which is the whole
+defect: `F`'s support bit is an established `0`, a truth-teller's is `u`, and
+every clause reading `¬a⁺` needs to tell them apart.
+
+**The nine lemmas, re-derived.** Each is now a statement about one bit, which is
+what they always were:
+
+| rule | obligation | holds because |
+|---|---|---|
+| `Axiom` | `⟦#true⟧ = ⟨1,0⟩` | by definition |
+| `Told` | leaf bits defined by `R_{v,τ}` | §8.2, no recursion |
+| `Negation` | bits swap | the clause |
+| `Connective` | `∧`: all `t=1 ⟹ t=1`; any `f=1 ⟹ f=1`. `∨` dual | Kleene `⋀`/`⋁`; **short-circuit is sound**, since `⋁` is `1` as soon as one operand is |
+| `Instance` | `∃`: one `t=1 ⟹ t=1`. `∀`: one `f=1 ⟹ f=1` | same, over `ext ⊇ enum` |
+| `Exhaustive` | `∀`: all `t=1 ⟹ t=1`, needs `enum = ext` | `⋀` over the whole domain |
+| `ModusPonens` | `(a⊃c)⁺=1 ∧ a⁺=1 ⟹ c⁺=1` | `¬1 ∨ c⁺ = 0 ∨ c⁺` |
+| `Instantiate` | `∀`'s `t=1 ⟹ every instance `t=1` | `⋀` is `1` only if all are |
+| `Ungrounded` | per-bit fixpoint classification | above |
+
+`Instance` and `Instantiate` are sound again, and `Connective` needs no side
+condition — the countermodels all turned on the *complete value* being undefined
+while a bit was settled, and a settled bit is now a value the semantics can hold.
+
+**What this does not do.** It does not make `⟦E⟧ ∈ {N,F}` free: that is
+`E⁺ = 0`, and establishing it still requires the evaluator to *derive* a zero
+rather than fail to derive a one. `Excluded` makes it expressible; the resolver
+must still supply it, and for a closed predicate it does.
+
+**Open, and the reason this is not code.** Whether `Determinacy` and `Credence`
+compose per-bit or per-value is unexamined. `Conflicted` as an *evidential*
+report is `⟨1,1⟩`, but `Evidential` is currently derived from two `Bound`s and
+that derivation needs restating over four states rather than three. And the
+`Excluded` state has to reach the resolvers, which is where the `Knowledge`
+enum's `Fails` already lives — so the plumbing may be shorter than it looks, or
+may not.
+
 ### 7.2 What a `(support, refutation)` pair asserts
 
 `Bound = None | Partial | Certain` on each side, giving nine pairs. Only the
