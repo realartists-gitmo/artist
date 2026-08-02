@@ -267,9 +267,13 @@ fn evaluation_brackets_the_denotation() {
         let mut s = MapGraphStructure::new();
         let mut atoms = Vec::new();
         let mut partial = Vec::new();
-        // A closed predicate refutes what it does not list; an open one leaves it
-        // `N`. That reaches `T`, `F` and `N`. `B` is not expressible through this
-        // structure's API and so is not generated — a coverage gap, stated.
+        // **All four values, including `B`.** This generated only `T`, `F` and
+        // `N` for as long as it existed, because the fixture could not express a
+        // conflicted tuple — and the one soundness bug this test failed to catch
+        // (material implication reporting a refuted implication as supported)
+        // lives exactly at `B`, where `¬B ∨ F = B` is designated and `B ⊃ F = F`
+        // is not. A generator blind to a quarter of the truth values is not
+        // checking the logic it claims to.
         for p in &preds {
             let closed = rng.pick(2) == 0;
             if closed {
@@ -278,13 +282,17 @@ fn evaluation_brackets_the_denotation() {
             for a in &args {
                 let node = g.apply(*p, vec![*a]);
                 atoms.push(node);
-                if rng.pick(2) == 0 {
-                    s = s.fact(*p, vec![*a]);
-                    partial.push(Some(Four::T));
-                } else if closed {
-                    partial.push(Some(Four::F));
-                } else {
-                    partial.push(Some(Four::N));
+                match rng.pick(4) {
+                    0 => {
+                        s = s.conflicting(*p, vec![*a]);
+                        partial.push(Some(Four::B));
+                    }
+                    1 => {
+                        s = s.fact(*p, vec![*a]);
+                        partial.push(Some(Four::T));
+                    }
+                    _ if closed => partial.push(Some(Four::F)),
+                    _ => partial.push(Some(Four::N)),
                 }
             }
         }
@@ -303,6 +311,14 @@ fn evaluation_brackets_the_denotation() {
         // against an `N`-valued reference would be checking it against a
         // structure it never claimed to cover.
         let bivalent = r.determinacy_basis == DeterminacyBasis::Presumed;
+        // **`M ⊨ Γ` is a precondition, not a formality.** A result that presumes
+        // bivalence claims nothing about a structure holding a conflicted atom,
+        // because such a structure is not bivalent — `B` is neither `T` nor `F`.
+        // Checking it anyway would be testing the theorem against a model it
+        // explicitly excludes.
+        if bivalent && partial.iter().any(|v| *v == Some(Four::B)) {
+            continue;
+        }
         let effective: Vec<Option<Four>> = if bivalent {
             // Under the presumption, an atom the store left open is *some*
             // classical value; the reference agrees only when both agree.
@@ -313,6 +329,12 @@ fn evaluation_brackets_the_denotation() {
         // `None` here is `⊥` — genuinely undefined — and is now a checkable
         // outcome rather than a case to skip.
         let truth = denote_over(&g, term, &atoms, &effective, bivalent);
+        // Under a presumption, `None` means the completions disagree — the
+        // presumption does not pin the value — which is different from a genuine
+        // `⊥`, and outside what the judgment claims.
+        if bivalent && truth.is_none() {
+            continue;
+        }
         let (must, may) = allowed(&r);
 
         if let (Some(must), Some(t)) = (must, truth) {

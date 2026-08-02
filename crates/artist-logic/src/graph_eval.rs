@@ -4635,6 +4635,9 @@ fn downgrade(a: ComputeStatus, b: ComputeStatus) -> ComputeStatus {
 #[derive(Default)]
 pub struct MapGraphStructure {
     facts: std::collections::BTreeSet<(ObjectId, Vec<ObjectId>)>,
+    /// Tuples the store was told **both** ways — Belnap's `B` (semantics §8.2:
+    /// `aff ≠ ∅ ∧ den ≠ ∅`).
+    conflicts: std::collections::BTreeSet<(ObjectId, Vec<ObjectId>)>,
     closed: std::collections::BTreeSet<ObjectId>,
     domains: BTreeMap<ObjectId, Vec<ObjectId>>,
     /// Integer values of literal nodes, so `scale` can read its factor back out
@@ -4654,6 +4657,20 @@ impl MapGraphStructure {
     pub fn new() -> Self {
         Self::default()
     }
+    /// The store was told **both** directions — Belnap's `B`.
+    ///
+    /// Added because its absence was a hole in the *verification*, not in the
+    /// fixture. `tests/soundness.rs` could not generate a conflicted atom, so
+    /// its structures only ever reached `T`, `F` and `N` — and the one soundness
+    /// bug it failed to catch (material implication reporting a refuted
+    /// implication as supported) lives exactly at `B`. A property test that
+    /// cannot express a quarter of the truth values is not checking the logic it
+    /// claims to.
+    pub fn conflicting(mut self, pred: ObjectId, args: Vec<ObjectId>) -> Self {
+        self.conflicts.insert((pred, args));
+        self
+    }
+
     pub fn fact(mut self, pred: ObjectId, args: Vec<ObjectId>) -> Self {
         self.facts.insert((pred, args));
         self.version += 1;
@@ -4713,6 +4730,11 @@ impl MapGraphStructure {
 
 impl GraphStructure for MapGraphStructure {
     fn known(&self, pred: ObjectId, args: &[ObjectId]) -> Knowledge {
+        // Told both. Checked first, because a conflicted tuple is also in
+        // `facts` and `Holds` would mask it.
+        if self.conflicts.contains(&(pred, args.to_vec())) {
+            return Knowledge::Conflicted;
+        }
         if self.facts.contains(&(pred, args.to_vec())) {
             return Knowledge::Holds;
         }
