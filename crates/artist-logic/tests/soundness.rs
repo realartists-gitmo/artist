@@ -257,6 +257,23 @@ fn phi_is_monotone_under_information_extension() {
 /// denotation, over generated structures and generated terms.
 #[test]
 fn evaluation_brackets_the_denotation() {
+    brackets(false);
+}
+
+/// The same property with **self-reference in the generator**, so `⊥` is
+/// reachable and a settled bit can meet an unsettled value.
+///
+/// It fails, and finding this is the point: three rules were refuted by
+/// adversarial review using exactly this shape, and they had to be built by hand
+/// because the generator could not reach them. Now it reaches them in a few
+/// hundred cases. Un-ignore once semantics.md §7.1c lands.
+#[test]
+#[ignore = "semantics.md §7.1a — the generator now finds the refuted cases"]
+fn evaluation_brackets_the_denotation_with_self_reference() {
+    brackets(true);
+}
+
+fn brackets(recursive: bool) {
     let mut rng = Lcg(0x5eed_1234);
 
     for case in 0..300 {
@@ -295,6 +312,32 @@ fn evaluation_brackets_the_denotation() {
                     _ => partial.push(Some(Four::N)),
                 }
             }
+        }
+
+        // **A self-referential atom, so `⊥` is reachable.**
+        //
+        // Every structure this generated was total: each atom got a defined FOUR
+        // value, so `⟦·⟧` was never undefined and no term could exercise the
+        // interaction between a settled bit and an unsettled value. That is
+        // exactly where three rules turned out to be unsound, and the
+        // countermodels had to be built by hand because this generator could not
+        // reach them. A property test that cannot construct the liar is not
+        // testing a logic that contains one.
+        //
+        // The truth-teller `Q := (holds (quote Q))` is the minimal case: no
+        // fixpoint of `Φ` is forced, so `⟦Q⟧ = ⊥`. It enters `partial` as `None`,
+        // which `denote_over` already reads as "quantify over completions".
+        if recursive {
+            let teller = {
+                let q = g.alloc();
+                let quoted = g.apply(wk::QUOTE, vec![q]);
+                let holds = g.apply(wk::HOLDS, vec![quoted]);
+                let body = g.get(holds).cloned().expect("built");
+                g.define(q, body);
+                q
+            };
+            atoms.push(teller);
+            partial.push(None);
         }
 
         let mut pool = atoms.clone();
