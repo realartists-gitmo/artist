@@ -255,3 +255,95 @@ fn a_default_still_evaluates() {
     assert_eq!(r.evidential(), Evidential::Supported, "the default holds, unrefuted");
     assert!(!r.defeated_by.is_empty(), "and it names what would overturn it");
 }
+
+// ---------------------------------------------------------------------------
+// REFUTED — outstanding soundness debt, from adversarial review of the rules.
+//
+// `⟦·⟧` assigns one *complete* FOUR value or none; the bounds reason about the
+// two evidence bits independently. A support bit can be fixed across every
+// completion while the complete value varies between `T` and `B` — the semantics
+// says `⊥`, the certificate says `Certain`, and `Certain` excludes `⊥`.
+//
+// These run under `cargo test -- --ignored` and assert the behaviour the repair
+// in semantics.md §7.1b must produce. They are ignored rather than deleted
+// because a known-unsound rule with no failing test is how the last three got
+// re-invented. Un-ignore them as the repair lands.
+// ---------------------------------------------------------------------------
+
+/// A truth-teller: `Q := (holds (quote Q))`, whose denotation is `⊥`.
+fn truth_teller(g: &mut ObjectGraph) -> ObjectId {
+    let q = g.alloc();
+    let quoted = g.apply(wk::QUOTE, vec![q]);
+    let holds = g.apply(wk::HOLDS, vec![quoted]);
+    let body = g.get(holds).cloned().expect("built");
+    g.define(q, body);
+    q
+}
+
+/// **`Connective` short-circuits, and short-circuiting is unsound here.**
+///
+/// `B ∨ T = T` and `B ∨ F = B`, so with an undefined second operand the
+/// completions disagree and `⟦P ∨ Q⟧ = ⊥`. The evaluator answers `Supported`.
+///
+/// The result is internally contradictory by §7.2's own reading: `Certain`
+/// asserts `⟦n⟧ ∈ {T,B}` while the `StableLoop` it simultaneously reports asserts
+/// `⟦n⟧ = ⊥`.
+#[test]
+#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
+fn a_disjunction_with_an_undefined_operand_is_not_supported() {
+    let mut g = ObjectGraph::new();
+    let (b, a) = (g.atom("b"), g.atom("a"));
+    let ba = g.apply(b, vec![a]);
+    let q = truth_teller(&mut g);
+    let s = MapGraphStructure::new().conflicting(b, vec![a]);
+
+    let disj = g.apply(wk::OR, vec![ba, q]);
+    let r = GraphEvaluator::new().eval(&mut g, disj, &s, 100_000);
+    assert_ne!(
+        r.evidential(),
+        Evidential::Supported,
+        "B ∨ ⊥ is ⊥ under the exact-value semantics, not T"
+    );
+}
+
+/// The dual: `B ∧ T = B`, `B ∧ F = F`, so `⟦P ∧ Q⟧ = ⊥` while the evaluator
+/// answers `Refuted`.
+#[test]
+#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
+fn a_conjunction_with_an_undefined_operand_is_not_refuted() {
+    let mut g = ObjectGraph::new();
+    let (b, a) = (g.atom("b"), g.atom("a"));
+    let ba = g.apply(b, vec![a]);
+    let q = truth_teller(&mut g);
+    let s = MapGraphStructure::new().conflicting(b, vec![a]);
+
+    let conj = g.apply(wk::AND, vec![ba, q]);
+    let r = GraphEvaluator::new().eval(&mut g, conj, &s, 100_000);
+    assert_ne!(r.evidential(), Evidential::Refuted, "B ∧ ⊥ is ⊥, not F");
+}
+
+/// **No result may claim a `Certain` bound and a non-`Grounded` grounding.**
+///
+/// §7.2: the first asserts `⟦n⟧ ∈ {T,B}` or `{F,B}`, the second asserts
+/// `⟦n⟧ = ⊥`. This is the cleanest statement of the defect — it needs no
+/// countermodel, only the evaluator's own output read against its own spec.
+#[test]
+#[ignore = "REFUTED: semantics.md §7.1a — awaiting the §7.1b repair"]
+fn a_certain_bound_and_an_ungrounded_verdict_cannot_coexist() {
+    use artist_logic::evidence::{Bound, Grounding};
+    let mut g = ObjectGraph::new();
+    let (b, a) = (g.atom("b"), g.atom("a"));
+    let ba = g.apply(b, vec![a]);
+    let q = truth_teller(&mut g);
+    let s = MapGraphStructure::new().conflicting(b, vec![a]);
+
+    for node in [g.apply(wk::OR, vec![ba, q]), g.apply(wk::AND, vec![ba, q])] {
+        let r = GraphEvaluator::new().eval(&mut g, node, &s, 100_000);
+        let certain = r.support == Bound::Certain || r.refutation == Bound::Certain;
+        assert!(
+            !(certain && r.grounding != Grounding::Grounded),
+            "claims a Certain bound while reporting {:?}",
+            r.grounding
+        );
+    }
+}

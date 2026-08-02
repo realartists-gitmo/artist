@@ -277,6 +277,84 @@ to one rule, and the distinction matters because §8.5 reads an empty `Γ` as a
 *claim* — that the judgment holds in every structure — rather than as a missing
 attribution.
 
+### 7.1a REFUTED: the bounds and the denotation disagree
+
+> **`Instance` and `Instantiate` are unsound, `Connective` needs a side
+> condition it does not have, and the strict kernel is therefore *not* green.**
+> Adversarial review, with countermodels, reproduced live below.
+
+The cause is one mismatch. `⟦·⟧` assigns **one complete FOUR value or none**: a
+node is defined only when every total extension agrees on the *whole* value. The
+bounds reason about the two evidence bits **independently**. So a support bit can
+be fixed across every completion while the complete value varies between `T` and
+`B` — the semantics then says `⊥`, and the certificate says `Certain`, which
+excludes `⊥`.
+
+Write `c⁺`, `c⁻` for the evidence bits: `N=(0,0)`, `T=(1,0)`, `F=(0,1)`,
+`B=(1,1)`.
+
+**Connective.** Let `⟦P⟧ = B` and `Q` be a truth-teller, `⟦Q⟧ = ⊥`.
+`B ∨ T = T` and `B ∨ F = B`, so the completions disagree and `⟦P ∨ Q⟧ = ⊥` —
+while `P` has certain support. Dually `B ∧ T = B`, `B ∧ F = F`, so
+`⟦P ∧ Q⟧ = ⊥` while `P` has certain refutation. **A short-circuiting
+`Connective` is unsound**, and the implementation short-circuits:
+
+```
+(or  B Q) : Supported  StableLoop      (and B Q) : Refuted  StableLoop
+```
+
+Note those results are internally contradictory by §7.2's own reading: `Certain`
+asserts `⟦n⟧ ∈ {T,B}`, and `StableLoop` asserts `⟦n⟧ = ⊥`.
+
+**Instance.** `ext(σ) = {a,b}`, `⟦P(a)⟧ = B`, `P(b)` a truth-teller. The
+existential's completions give `T` and `B`; they disagree, so it is `⊥` — while
+the witness has certain support. The universal's give `B` and `F`, so it too is
+`⊥` — while the counterexample has certain refutation. Domain membership repairs
+neither.
+
+**Instantiate.** Let `P(a) = Q ∨ B₀` with `Q` undefined and `⟦B₀⟧ = B`. Every
+completion of `P(a)` is designated (`T` or `B`) yet they disagree, so
+`⟦P(a)⟧ = ⊥`. Put `P(b) = B₀`. Then `T ∧ B = B` and `B ∧ B = B`: all completions
+agree, so `⟦∀x ∈ σ. P(x)⟧ = B`, grounded and designated — while the instance
+`P(a)` is `⊥`. "A designated meet forces every instance designated" holds of
+*bits*, not of complete values, and the lemma stated the latter.
+
+### 7.1b The repair: make the semantics as partial as the judgment
+
+Two repairs are available. **The second is chosen**, and the reason is that the
+first patches the rules to fit a semantics that does not fit the machine, while
+the second removes the mismatch.
+
+1. *Keep the exact-value semantics; strengthen the rules.* Add an exact-value or
+   conflict-freedom judgment; `Instance` may use only an exact `T` witness or
+   exact `F` counterexample, `Instantiate` requires the universal exactly `T`,
+   and `Connective` must verify completion-constancy. Sound, and it makes the
+   common cases uncertifiable — every one-sided rule now needs two-sided
+   information.
+2. **Give `⟦·⟧` independently partial components.** A denotation is a pair
+   `⟨t, f⟩` with each bit in `{0, 1, ⊥}`, each the least fixpoint of its own
+   Kleene-monotone clauses:
+
+   ```
+   ¬⟨t,f⟩ = ⟨f,t⟩       ⋀ᵢ⟨tᵢ,fᵢ⟩ = ⟨⋀tᵢ, ⋁fᵢ⟩       ⋁ᵢ⟨tᵢ,fᵢ⟩ = ⟨⋁tᵢ, ⋀fᵢ⟩
+   (a ⊃ b)⁺ = ¬a⁺ ∨ b⁺                                (a ⊃ b)⁻ = a⁺ ∧ b⁻
+   ```
+
+   "Support established while refutation is unresolved" becomes a **genuine
+   semantic value** rather than collapsing to `⊥`. Every countermodel above
+   dissolves: `(or B Q)` is `⟨1, ⊥⟩` — supported, refutation open — so the
+   evaluator's answer is *correct* rather than merely reported. `Instance` and
+   `Instantiate` recover as stated, because they were always claims about bits.
+
+   `Grounded` becomes "both bits defined"; `support = Certain` asserts `t = 1`
+   and says nothing about `f`, so the contradictory pair above is no longer
+   expressible.
+
+**This is the same move AFT makes** (`defeasibility.md` §3): a pair of partial
+components under a precision order, which is the approximation bilattice. That
+the strict repair and the defeasibility construction converge on one structure is
+evidence for it, and means the two should be done together rather than in series.
+
 ### 7.2 What a `(support, refutation)` pair asserts
 
 `Bound = None | Partial | Certain` on each side, giving nine pairs. Only the

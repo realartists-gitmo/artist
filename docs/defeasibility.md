@@ -7,6 +7,23 @@
 > Baseline: `strict-kernel-v1`. The strict kernel is frozen and is **layer 0** in
 > everything below. It is not modified while this is open, unless a concrete
 > counterexample breaks it.
+>
+> **A counterexample has broken it.** Adversarial review refuted `Instance` and
+> `Instantiate` and showed `Connective` needs a side condition it does not have —
+> see `semantics.md` §7.1a, reproduced live. Layer 0 is therefore *not* green, and
+> the repair chosen in §7.1b **changes what layer 0 denotes**: `⟦·⟧` becomes a
+> pair of independently partial evidence bits rather than one complete FOUR value
+> or none.
+>
+> This does not invalidate §8 — every case there is about the *attack* structure,
+> which is unaffected — but it does mean Design B's layer 0 is a moving target
+> until §7.1b lands. **Sequence: repair layer 0 first, then defeasibility.**
+>
+> It is also a point in Design A's favour that should be recorded honestly: the
+> §7.1b repair *is* an approximation bilattice, which is what AFT works over. The
+> strict repair and the defeasible construction have converged on one structure,
+> and §7's recommendation should be revisited once layer 0 is repaired rather
+> than treated as settled.
 
 ## 1. What has already been refuted
 
