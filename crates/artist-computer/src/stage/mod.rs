@@ -33,6 +33,7 @@ use crate::program::StepError;
 
 pub mod bus;
 pub mod damage;
+pub mod diff;
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
 pub mod viewer;
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
@@ -134,6 +135,19 @@ pub struct AppHandle {
 pub struct Damage {
     pub window: Option<WindowKey>,
     pub region: Rect,
+    /// Whether the client said *this* is what changed.
+    ///
+    /// False means it committed a new buffer and named no damage, so the region
+    /// is the whole surface as a conservative bound — the compositor's way of
+    /// saying "something changed and I do not know where".
+    ///
+    /// The distinction is not cosmetic. A precise full-surface rect is a real
+    /// full repaint; an imprecise one carries no location information at all,
+    /// and treating them alike makes a client that never reports damage look
+    /// like a client repainting everything constantly. Anything that reasons
+    /// about *where* — the noise filter, incremental OCR — has to know which it
+    /// is holding.
+    pub precise: bool,
 }
 
 /// A touch gesture, in coordinates the harness resolved from an anchor.

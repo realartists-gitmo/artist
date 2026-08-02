@@ -26,9 +26,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use artist_computer::android::session::Session;
 use artist_computer::model::Rect;
 use artist_computer::stage::wayland::StageWayland;
-use artist_computer::stage::{AppCommand, Damage, Stage, StageId, WindowInfo};
+use artist_computer::stage::{Damage, Stage, StageId, WindowInfo};
 
 /// How long to wait for the container to boot and paint something.
 ///
@@ -63,9 +64,24 @@ enum WindowMode {
     Multi,
     /// One fullscreen surface, with Android's own window manager inside it.
     Full,
-    /// Whatever the container is already set to. The default, because changing
-    /// it costs a session restart.
-    AsFound,
+}
+
+impl WindowMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Multi => "multi-window",
+            Self::Full => "full-UI",
+        }
+    }
+}
+
+impl From<WindowMode> for artist_computer::android::WindowMode {
+    fn from(mode: WindowMode) -> Self {
+        match mode {
+            WindowMode::Multi => Self::MultiWindow,
+            WindowMode::Full => Self::FullUi,
+        }
+    }
 }
 
 fn parse_args() -> Args {
@@ -73,7 +89,7 @@ fn parse_args() -> Args {
         package: None,
         seconds: 20,
         viewer: false,
-        mode: WindowMode::AsFound,
+        mode: WindowMode::Multi,
         poke: 6,
     };
     let mut argv = std::env::args().skip(1);
@@ -89,9 +105,8 @@ fn parse_args() -> Args {
             }
             "--mode" => {
                 args.mode = match argv.next().as_deref() {
-                    Some("multi") => WindowMode::Multi,
                     Some("full") => WindowMode::Full,
-                    _ => WindowMode::AsFound,
+                    _ => WindowMode::Multi,
                 }
             }
             other => eprintln!("ignoring unknown flag {other}"),
@@ -105,27 +120,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    let dir = std::path::Path::new(&runtime_dir).join("artist-waydroid-gate");
+    // Process-scoped, exactly as a real stage's directory is. A *fixed* path
+    // would be reused across runs, and because LXC bind-mounts the socket by
+    // inode rather than by name, a container started against a previous run's
+    // socket would keep rendering into the dead one while every path comparison
+    // said it belonged to us.
+    let dir = std::path::Path::new(&runtime_dir).join(format!(
+        "artist-waydroid-gate-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir)?;
 
     println!("== stage ==");
     let mut stage = StageWayland::start(StageId("waydroid-gate".into()), &dir)?;
 
-    // Waydroid derives the PulseAudio socket from `XDG_RUNTIME_DIR`, and on a
-    // stage that variable points at the stage's own private directory — which
-    // has a Wayland socket in it and nothing else. LXC is then told to
-    // bind-mount a socket that does not exist, the mount fails, and the
-    // *container* fails to start with no mention of audio anywhere in the
-    // error. Point it back at the user's real one explicitly.
-    if std::env::var_os("PULSE_RUNTIME_PATH").is_none() {
-        let host_pulse = std::path::Path::new(&runtime_dir).join("pulse");
-        if host_pulse.join("native").exists() {
-            let mut extra = artist_computer::stage::StageEnv::default();
-            extra.set("PULSE_RUNTIME_PATH", host_pulse.to_string_lossy());
-            stage.extend_env(&extra);
-            println!("  PULSE_RUNTIME_PATH = {}", host_pulse.display());
-        }
+    // Everything Waydroid needs added to a stage environment lives in one
+    // place, so the gate and the real launch path cannot drift apart.
+    let mut extra = artist_computer::stage::StageEnv::default();
+    artist_computer::android::prepare_env(&mut extra, std::path::Path::new(&runtime_dir));
+    if let Some(pulse) = extra.get("PULSE_RUNTIME_PATH") {
+        println!("  PULSE_RUNTIME_PATH = {pulse}");
     }
+    stage.extend_env(&extra);
     let stage = Arc::new(stage);
     let wayland_display = stage.env().get("WAYLAND_DISPLAY").unwrap_or("<unset>");
     let stage_runtime = stage.env().get("XDG_RUNTIME_DIR").unwrap_or("<unset>");
@@ -142,35 +158,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("== container ==");
     report_preflight();
 
-    if args.mode != WindowMode::AsFound {
-        // Deliberately before the session starts: the property is read when the
-        // Android window manager comes up, so setting it afterwards means a
-        // restart. Doing it here is the difference between one boot and two.
-        set_window_mode(&stage, args.mode);
-    }
-
     println!();
     println!("== session ==");
-    println!("  waydroid session start");
-    let session = stage
-        .spawn(
-            AppCommand::new("waydroid")
-                .arg("session".to_owned())
-                .arg("start".to_owned()),
-        )
-        .await;
-    match &session {
-        Ok(handle) => println!("  started, pid {}", handle.pid),
+    println!("  starting Android in {} mode…", args.mode.label());
+    let session = match Session::start(stage.as_ref(), args.mode.into()).await {
+        Ok(session) => session,
         Err(error) => {
-            eprintln!("  could not start the session: {error}");
-            eprintln!("  is waydroid installed and initialised? try: waydroid status");
+            eprintln!("  {error}");
             return Ok(());
         }
+    };
+    println!("  booted");
+
+    // Launched *before* waiting for a window, which is the ordering Android
+    // forces. A booted container with nothing active shows nothing at all: the
+    // compositor is healthy, Android is healthy, and the screen is empty
+    // because no app has been made the active one.
+    let package = args.package.as_deref().unwrap_or("com.android.settings");
+    println!();
+    println!("== launching {package} ==");
+    session.set_active(package).await?;
+    match std::process::Command::new("waydroid")
+        .args(["app", "launch", package])
+        .status()
+    {
+        Ok(status) if status.success() => println!("  launched"),
+        Ok(status) => println!("  waydroid app launch exited {status}"),
+        Err(error) => println!("  could not launch: {error}"),
     }
 
     println!();
     println!("== waiting for a toplevel ==");
     let deadline = Instant::now() + BOOT_TIMEOUT;
+    let started_waiting = Instant::now();
     let mut windows = Vec::new();
     let mut announced = false;
     while Instant::now() < deadline {
@@ -178,8 +198,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if windows.iter().any(|window| window.mapped) {
             break;
         }
-        if !announced && Instant::now().elapsed() > Duration::from_secs(30) {
-            println!("  still nothing after 30s — first boot provisions data, so this is normal");
+        if !announced && started_waiting.elapsed() > Duration::from_secs(30) {
+            println!("  still nothing after 30s — the app may not be installed;");
+            println!("  `waydroid app list` will say what is.");
             announced = true;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -199,29 +220,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         describe(window);
     }
     println!();
-    println!("  NOTE: pid is the HWComposer's for every one of these — it does not");
-    println!("  discriminate between Android apps. Package identity has to come from");
-    println!("  the container, which is what task 5 exists to do.");
+    println!("  NOTE: the pid above is the HWComposer's for every one of these — it does");
+    println!("  not discriminate between Android apps. That is what android::identity");
+    println!("  replaces, by asking the container which activity is resumed.");
 
-    if let Some(package) = &args.package {
-        println!();
-        println!("== launching {package} ==");
-        match stage
-            .spawn(
-                AppCommand::new("waydroid")
-                    .arg("app".to_owned())
-                    .arg("launch".to_owned())
-                    .arg(package.clone()),
-            )
-            .await
-        {
-            Ok(_) => println!("  launched"),
-            Err(error) => eprintln!("  could not launch: {error}"),
-        }
-        // Give the activity a moment to arrive before we start counting, so the
-        // measurement is of the app rather than of the launcher animating away.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
+    // Let the launch animation finish before counting, so the measurement is of
+    // the application rather than of the launcher sliding away.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let viewer = if args.viewer {
         match artist_computer::stage::viewer::Viewer::open(Arc::clone(&stage)).await {
@@ -383,25 +388,6 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "NO" }
 }
 
-fn set_window_mode(stage: &StageWayland, mode: WindowMode) {
-    let value = if mode == WindowMode::Multi {
-        "true"
-    } else {
-        "false"
-    };
-    println!("  persist.waydroid.multi_windows := {value}");
-    let mut command = std::process::Command::new("waydroid");
-    command.args(["prop", "set", "persist.waydroid.multi_windows", value]);
-    for (key, env_value) in stage.env().iter() {
-        command.env(key, env_value);
-    }
-    match command.status() {
-        Ok(status) if status.success() => {}
-        Ok(_) => println!("  (prop set failed — it needs a running session; measuring as-found)"),
-        Err(error) => println!("  (could not run waydroid prop: {error})"),
-    }
-}
-
 /// What the damage stream looked like.
 #[derive(Default)]
 struct Stats {
@@ -411,6 +397,8 @@ struct Stats {
     buckets: BTreeMap<&'static str, u64>,
     degenerate: u64,
     unattributed: u64,
+    /// Events where the client actually said what changed.
+    precise: u64,
     total_fraction: f64,
     largest: f64,
     smallest: f64,
@@ -419,6 +407,9 @@ struct Stats {
 impl Stats {
     fn record(&mut self, event: &Damage, windows: &[WindowInfo]) {
         self.events += 1;
+        if event.precise {
+            self.precise += 1;
+        }
         if self.events == 1 {
             self.smallest = 1.0;
         }
@@ -469,6 +460,8 @@ impl Stats {
 
         println!("  {} events ({} lagged, {} unattributed to a window)",
             self.events, self.lagged, self.unattributed);
+        println!("  {} of {} carried real damage rectangles from the client",
+            self.precise, self.events);
         for (bucket, count) in &self.buckets {
             let share = 100.0 * *count as f64 / self.events as f64;
             println!("    {bucket:>8}  {count:>6}  {share:>5.1}%");
@@ -479,12 +472,24 @@ impl Stats {
 
         let degenerate_share = self.degenerate as f64 / self.events as f64;
         println!();
-        if degenerate_share > 0.5 {
-            println!("  VERDICT: DEGENERATE. {:.0}% of frames damage the whole surface.",
+
+        // The two ways this can go wrong look identical in a naive count, and
+        // they call for completely different work. Silence about which one we
+        // are in is how a measurement becomes folklore.
+        if self.precise == 0 {
+            println!("  VERDICT: NO DAMAGE INFORMATION. The client committed {} buffers",
+                self.events);
+            println!("  without attaching a single damage rectangle, so every region above is");
+            println!("  the compositor's own conservative bound rather than anything Waydroid");
+            println!("  said. SurfaceFlinger's rects are not reaching the wire at all — which");
+            println!("  is a different problem from them arriving and being coarse, and is not");
+            println!("  fixable from our side of the socket.");
+        } else if degenerate_share > 0.5 {
+            println!("  VERDICT: DEGENERATE. {:.0}% of frames damage the whole surface,",
                 100.0 * degenerate_share);
-            println!("  SurfaceFlinger's rects are not surviving the trip, so damage carries");
-            println!("  no location information on Android. Settle must fall back to frame");
-            println!("  differencing, and incremental OCR loses its 15x — plan accordingly.");
+            println!("  and the rectangles are real rather than synthesized. Damage carries no");
+            println!("  usable location information here: settle must fall back to frame");
+            println!("  differencing, and incremental OCR loses its 15x.");
         } else {
             println!("  VERDICT: TIGHT. {:.0}% of frames damage a real sub-region.",
                 100.0 * (1.0 - degenerate_share));

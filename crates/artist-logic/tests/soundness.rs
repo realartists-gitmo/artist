@@ -356,12 +356,19 @@ fn evaluation_brackets_the_denotation() {
 /// The same property with **self-reference in the generator**, so `⊥` is
 /// reachable and a settled bit can meet an unsettled value.
 ///
-/// It fails, and finding this is the point: three rules were refuted by
-/// adversarial review using exactly this shape, and they had to be built by hand
-/// because the generator could not reach them. Now it reaches them in a few
-/// hundred cases. Un-ignore once semantics.md §7.1c lands.
+/// It failed when self-reference was added, which is what it was for: three
+/// rules were refuted by adversarial review using exactly this shape, and the
+/// countermodels had to be built by hand because the generator could not reach
+/// them. It passes since the §7.1c repair.
+///
+/// Note the reference here still computes the **exact-value** denotation —
+/// defined only when every completion agrees on a whole FOUR value — which is
+/// *stricter* than the per-bit semantics §7.1c commits to. Where the exact-value
+/// denotation is defined the two agree, and where it is `⊥` the per-bit one may
+/// settle a bit, so passing this implies passing the weaker obligation. Bringing
+/// the reference to per-bit would let it check more, and is not needed for
+/// soundness.
 #[test]
-#[ignore = "semantics.md §7.1a — the generator now finds the refuted cases"]
 fn evaluation_brackets_the_denotation_with_self_reference() {
     brackets(true);
 }

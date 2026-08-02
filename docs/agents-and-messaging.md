@@ -35,7 +35,11 @@ The implementation is invalid if any of these invariants is violated:
 5. A message is content, never policy. Inter-agent messages are delivered
    through the same channel as user steering and never as system-role content.
 6. A group is a durable set with a durable creator, not a live predicate. The
-   selector is evaluated once, at construction.
+   selector is evaluated once, at construction, in exactly one place
+   (`Names::select`).
+11. A structured return is always an envelope. A parent that asked for a schema
+    never receives an error and never receives bare prose — only which arm of
+    the envelope it gets varies.
 7. `reply` addresses the last communication the caller was *made aware of* —
    bound at injection time, never read from a mailbox at call time.
 8. Any tool that blocks on another agent releases its delegation seat for the
@@ -307,8 +311,37 @@ Two failure modes to design against:
   long reasoning run degrades quality. The forced-tool shape gives this for
   free: the child reasons normally and structure applies once, at the end.
 
-**What happens if a child never yields** is undecided and must be settled before
-implementation — see Open questions.
+### What a child returns, and what happens when it doesn't
+
+The parent's contract is with the **harness**, not with the child's compliance.
+The return is always an envelope; the child only influences which arm:
+
+```
+{status: "ok",         value: <schema>, note?: string}
+{status: "blocked",    reason: string}
+{status: "incomplete", reason: string}
+{status: "failed",     error: string}
+{status: "cancelled"}
+```
+
+Three layers, each catching what the one above cannot:
+
+1. **`blocked` is an arm of the yield tool itself.** A child that concludes the
+   task is impossible says so in band, with its reasoning, rather than leaving
+   the harness to infer it from silence. The `ok` arm carries a free-text
+   `note` for the same reason: the most valuable thing a child produces is
+   often the thing the schema had no field for.
+2. **One re-prompt when a run ends without yielding**, budget permitting. The
+   overwhelmingly common cause is a model writing its answer as prose instead
+   of calling the tool — the work is already done, and discarding the whole run
+   over a missed tool call is pure waste. Exactly one: a second means it
+   genuinely will not, and looping burns the parent's budget.
+3. **Otherwise the harness synthesizes `incomplete`** from the child's final
+   text, so nothing the child produced is lost.
+
+`failed` and `cancelled` stay distinct from `blocked` because they are not the
+child's judgment — they mirror the `Outcome` arms the job registry already
+records rather than introducing a second vocabulary for the same events.
 
 ## Delivery
 
@@ -367,23 +400,16 @@ rule.
 
 ## Open questions
 
-- **What happens when a child never yields.** A run that exhausts its turns, or
-  decides the task was impossible, has produced no return value. This is the
-  same hole as the free-text/blocked variant above and must be decided before
-  `yield` is written. Note the reference implementation we looked at
-  (`oh-my-pi`'s `requireYieldTool` / `outputSchema`) does not document an answer
-  either.
 - **Cross-process cancel.** A job's record crosses processes but its abort
   handle does not, so cancelling another process's job is refused rather than
   faked. A control marker the owner polls would close this; reporting
   "cancelled" for work still running would be worse than refusing.
-- **`gc` selectors are an explicit member list**, not yet a predicate language.
-  Materialisation means adding one later costs an evaluation at construction
-  rather than a redesign.
-- **`yield` is not implemented.** The structured-return path — a synthetic
-  forced-tool whose parameters are the profile's schema — is designed above but
-  unwritten, and the "what happens when a child never yields" question below
-  still gates it.
+- **Richer selectors.** The predicate is a conjunction over project, profile
+  and ancestry, unioned with explicit names and minus exclusions. Anything more
+  expressive — globs, boolean trees — is additive, because the selector is
+  evaluated once at construction rather than on every delivery.
+- **`yield` is designed but unwritten.** The semantics are settled (see
+  *Structured returns* below); what remains is the forced-tool plumbing.
 - **Selector expressiveness for `gc`.** Materialisation makes this cheap to
   defer, but the initial predicate set still has to be chosen.
 - **Runaway chatter.** A tells B, B tells A, indefinitely. No cycle detection is

@@ -37,13 +37,24 @@ const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 #[derive(Clone)]
 pub(crate) struct MessageTools {
     inbox: Inbox,
+    /// This agent's worktree, so `project: "current"` can be resolved here
+    /// rather than requiring a model to know its own absolute path.
+    project: String,
     /// Released while blocked in `query` — see the module note.
     seat: Option<crate::delegate::PermitSlot>,
 }
 
 impl MessageTools {
-    pub fn new(inbox: Inbox, seat: Option<crate::delegate::PermitSlot>) -> Self {
-        Self { inbox, seat }
+    pub fn new(
+        inbox: Inbox,
+        project: String,
+        seat: Option<crate::delegate::PermitSlot>,
+    ) -> Self {
+        Self {
+            inbox,
+            project,
+            seat,
+        }
     }
 
     fn send_to(&self, audience: &Audience, to: &str, body: &str, expects_reply: bool) -> Result<usize, MessageError> {
@@ -299,9 +310,29 @@ pub(crate) struct GroupTool(pub MessageTools);
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GroupArgs {
-    /// Agent names to include. The caller is always a member.
+    /// Restrict to agents working in this project. `"current"` means this
+    /// worktree; omit to span every project on the machine.
+    #[serde(default)]
+    project: Option<String>,
+    /// Restrict to agents running this profile.
+    #[serde(default)]
+    profile: Option<String>,
+    /// Restrict to agents beneath this one, transitively.
+    #[serde(default)]
+    descendant_of: Option<String>,
+    /// Names to include regardless of the predicate.
+    #[serde(default)]
     members: Vec<String>,
-    message: String,
+    /// Names to drop, whatever else matched.
+    #[serde(default)]
+    exclude: Vec<String>,
+    /// Resolve the predicate and report who it selects without opening a group
+    /// or sending anything. Also the directory read: an agent that does not yet
+    /// know who exists asks with no criteria.
+    #[serde(default)]
+    preview: bool,
+    #[serde(default)]
+    message: Option<String>,
     #[serde(default)]
     label: Option<String>,
 }
@@ -313,8 +344,11 @@ impl PortableTool for GroupTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Open a group conversation with several agents and send the first \
-         message. Returns a group id; later messages address that id."
+        "Open a group conversation over a set of agents and send the first \
+         message. Select them by project, profile, or who spawned them, and/or \
+         name them explicitly. Use preview to see who a selection covers — \
+         with no criteria, that lists every agent on this machine. Returns a \
+         group id; later messages address that id."
             .into()
     }
 
@@ -322,36 +356,78 @@ impl PortableTool for GroupTool {
         json!({
             "type": "object",
             "properties": {
-                "members": {"type": "array", "items": {"type": "string"}, "description": "Agent names to include."},
-                "message": {"type": "string"},
+                "project": {"type": "string", "description": "Restrict to a worktree. \"current\" means this one; omit to span every project."},
+                "profile": {"type": "string", "description": "Restrict to agents running this profile, e.g. reviewer."},
+                "descendantOf": {"type": "string", "description": "Restrict to agents spawned beneath this agent, transitively."},
+                "members": {"type": "array", "items": {"type": "string"}, "description": "Agent names to include regardless of the criteria above."},
+                "exclude": {"type": "array", "items": {"type": "string"}, "description": "Agent names to drop, whatever else matched."},
+                "preview": {"type": "boolean", "default": false, "description": "Report who the selection covers without opening a group or sending anything."},
+                "message": {"type": "string", "description": "The first message. Required unless preview is set."},
                 "label": {"type": "string", "description": "What this group is for."}
             },
-            "required": ["members", "message"],
             "additionalProperties": false
         })
     }
 
     async fn call(&self, args: GroupArgs) -> Result<String, MessageError> {
-        let known = artist_registry::names();
-        let mut members = Vec::new();
-        let mut unknown = Vec::new();
-        for member in args.members {
-            match known.resolve(&member).ok().flatten() {
-                Some(name) => members.push(name.name),
-                None => unknown.push(member),
-            }
+        let selector = artist_registry::Selector {
+            // "current" is spelled by the caller but resolved here: a model
+            // should not have to know the absolute path of its own worktree to
+            // address the agents in it.
+            project: args.project.map(|project| {
+                if project == "current" {
+                    self.0.project.clone()
+                } else {
+                    project
+                }
+            }),
+            profile: args.profile,
+            descendant_of: args.descendant_of,
+            names: args.members.clone(),
+            exclude: args.exclude,
+        };
+
+        // The one evaluation. Everything after this addresses the answer, not
+        // the question — a standing predicate would mean membership differed
+        // between send and delivery, and a reply would have no defined
+        // audience.
+        let selected = artist_registry::names()
+            .select(&selector)
+            .map_err(|error| MessageError(error.to_string()))?;
+        let mut members: Vec<String> = selected.into_iter().map(|name| name.name).collect();
+        let unknown: Vec<&String> = args
+            .members
+            .iter()
+            .filter(|wanted| !members.contains(wanted))
+            .collect();
+        // The caller is a member of its own group, but is not an audience for
+        // its own messages — `send_to` skips itself.
+        members.retain(|member| member != &*self.0.inbox.name);
+
+        if args.preview {
+            return Ok(json!({
+                "wouldInclude": members,
+                "unknown": unknown,
+            })
+            .to_string());
         }
+
+        let Some(message) = args.message else {
+            return Err(MessageError(
+                "message is required unless preview is set".into(),
+            ));
+        };
         if members.is_empty() {
-            return Err(MessageError(format!(
-                "no agents found for: {}",
-                unknown.join(", ")
-            )));
+            return Err(MessageError(
+                "that selection matched no other agents; use preview to see who is available"
+                    .into(),
+            ));
         }
 
         // Materialised now, once. Membership is recorded rather than
         // re-derived, so every later message and every reply reaches the same
-        // set — and the creator is a member even though they were not in the
-        // list that defined it.
+        // set — and the creator is a member even though a predicate over
+        // "my reports" would never have selected them.
         let group = Group {
             id: artist_tools::short_id("g"),
             creator: self.0.inbox.name.to_string(),
@@ -367,9 +443,10 @@ impl PortableTool for GroupTool {
         let audience = Audience::Group {
             id: group.id.clone(),
         };
-        let delivered = self.0.send_to(&audience, &group.id, &args.message, false)?;
+        let delivered = self.0.send_to(&audience, &group.id, &message, false)?;
         Ok(json!({
             "groupId": group.id,
+            "members": group.members,
             "delivered": delivered,
             "unknown": unknown,
         })
@@ -384,6 +461,7 @@ mod tests {
     fn tools(name: &str, root: &std::path::Path) -> MessageTools {
         MessageTools::new(
             Inbox::with_store(name, artist_registry::Registry::at(root).messages_for_test()),
+            "/p".into(),
             None,
         )
     }
@@ -574,6 +652,129 @@ mod tests {
             .unwrap();
         assert!(answer.contains("which parser?"), "{answer}");
         assert!(answer.contains("from=\"Bach\""), "{answer}");
+    }
+
+    /// Serialised: these share a process-wide roster via `ARTIST_STATE_DIR`.
+    fn with_directory<T>(body: impl FnOnce(&std::path::Path) -> T) -> T {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = GUARD.lock().unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded within the guard.
+        unsafe { std::env::set_var("ARTIST_STATE_DIR", dir.path()) };
+        body(dir.path())
+    }
+
+    fn register(session: &str, project: &str, profile: &str, parent: Option<&str>) -> String {
+        artist_registry::names()
+            .claim(&artist_registry::Registration {
+                session: session.into(),
+                actor: session.into(),
+                project: Some(project.into()),
+                profile: Some(profile.into()),
+                parent: parent.map(str::to_owned),
+            })
+            .unwrap()
+            .name
+    }
+
+    /// The predicate that motivated the directory: everyone here, by role,
+    /// without naming them.
+    #[tokio::test]
+    async fn a_group_can_be_opened_by_predicate_rather_than_by_name() {
+        let selected = with_directory(|root| {
+            let lead = register("s-lead", "/p", "default", None);
+            register("s-rev-a", "/p", "reviewer", Some(&lead));
+            register("s-rev-b", "/p", "reviewer", Some(&lead));
+            register("s-elsewhere", "/other", "reviewer", None);
+
+            let tools = MessageTools::new(
+                Inbox::with_store(
+                    lead.clone(),
+                    artist_registry::Registry::at(root).messages_for_test(),
+                ),
+                "/p".into(),
+                None,
+            );
+            futures::executor::block_on(GroupTool(tools).call(GroupArgs {
+                project: Some("current".into()),
+                profile: Some("reviewer".into()),
+                descendant_of: None,
+                members: Vec::new(),
+                exclude: Vec::new(),
+                preview: false,
+                message: Some("standup".into()),
+                label: None,
+            }))
+            .unwrap()
+        });
+
+        let parsed: Value = serde_json::from_str(&selected).unwrap();
+        let members = parsed["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2, "{selected}");
+        assert_eq!(parsed["delivered"], 2);
+    }
+
+    /// Preview is the directory read: it answers "who is out there" without
+    /// creating anything or sending anything.
+    #[tokio::test]
+    async fn preview_reports_the_selection_without_creating_a_group() {
+        let output = with_directory(|root| {
+            let me = register("s-me", "/p", "default", None);
+            register("s-other", "/p", "worker", None);
+
+            let tools = MessageTools::new(
+                Inbox::with_store(
+                    me.clone(),
+                    artist_registry::Registry::at(root).messages_for_test(),
+                ),
+                "/p".into(),
+                None,
+            );
+            futures::executor::block_on(GroupTool(tools.clone()).call(GroupArgs {
+                project: None,
+                profile: None,
+                descendant_of: None,
+                members: Vec::new(),
+                exclude: Vec::new(),
+                preview: true,
+                message: None,
+                label: None,
+            }))
+            .unwrap()
+        });
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.get("groupId").is_none(), "preview creates nothing");
+        assert_eq!(parsed["wouldInclude"].as_array().unwrap().len(), 1);
+    }
+
+    /// A predicate that matches nobody must say so rather than open an empty
+    /// group that silently swallows every later message.
+    #[tokio::test]
+    async fn an_empty_selection_is_refused_with_a_pointer_to_preview() {
+        let error = with_directory(|root| {
+            let me = register("s-me", "/p", "default", None);
+            let tools = MessageTools::new(
+                Inbox::with_store(
+                    me,
+                    artist_registry::Registry::at(root).messages_for_test(),
+                ),
+                "/p".into(),
+                None,
+            );
+            futures::executor::block_on(GroupTool(tools).call(GroupArgs {
+                project: Some("current".into()),
+                profile: Some("nobody-has-this".into()),
+                descendant_of: None,
+                members: Vec::new(),
+                exclude: Vec::new(),
+                preview: false,
+                message: Some("hello".into()),
+                label: None,
+            }))
+            .unwrap_err()
+        });
+        assert!(error.to_string().contains("preview"), "{error}");
     }
 
     /// Writing into an inbox nobody drains would look like delivery, so an

@@ -769,7 +769,12 @@ where
     // a name placed any earlier gives each agent its own prefix and none of
     // them ever share a cached prompt. That costs most in exactly the case we
     // care about: a fan-out of subagents spawned together off one base prompt.
-    let identity = identity::for_session(&handles.conversation_id, &handles.conversation_id);
+    let identity = identity::session(
+        &handles.conversation_id,
+        &handles.conversation_id,
+        tools.project_root(),
+        &profile.name,
+    );
     let frozen_prompt = handles.prefix.freeze(
         &prefix::key(&handles.conversation_id, &profile.name),
         format!(

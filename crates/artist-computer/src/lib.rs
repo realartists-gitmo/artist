@@ -18,6 +18,8 @@
 //!   emits nodes and consumes steps; everything model-facing lives above it.
 
 pub mod anchors;
+#[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+pub mod android;
 pub mod doctor;
 pub mod extract;
 pub mod host;

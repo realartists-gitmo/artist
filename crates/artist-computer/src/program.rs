@@ -99,6 +99,31 @@ pub enum Step {
     },
     /// A key or chord delivered to whatever holds focus.
     Key(KeyPress),
+    /// A press held long enough to mean something else.
+    ///
+    /// Not a slow click. On a touch platform a held contact is a *different
+    /// gesture* with a different meaning — the context menu, the drag handle,
+    /// the multi-select — and there is no way to reach any of it by clicking for
+    /// longer. Refused by surfaces that have no notion of it, rather than
+    /// quietly downgraded to a click, because a long press that silently becomes
+    /// a click opens the wrong thing.
+    LongPress(Target),
+    /// Drag across the surface, in a named direction.
+    ///
+    /// A direction rather than two points, deliberately: the model naming
+    /// coordinates is the thing this subsystem exists to prevent, and "swipe
+    /// left on this row" is both what a person means and what survives a
+    /// relayout. The harness turns it into a contact path with real velocity,
+    /// which is what separates a scroll from a fling.
+    Swipe {
+        /// What to swipe on. Absent means the surface itself.
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
+        direction: Direction,
+        /// How far, in pixels. Defaults to something proportional to the target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        distance: Option<u32>,
+    },
     /// Scroll a container, or the surface itself.
     ///
     /// The target is a full [`Target`] rather than a bare anchor because it is
@@ -150,6 +175,8 @@ impl Step {
             Self::Click(_) => "click",
             Self::Type { .. } => "type",
             Self::Key(_) => "key",
+            Self::LongPress(_) => "longPress",
+            Self::Swipe { .. } => "swipe",
             Self::Scroll { .. } => "scroll",
             Self::Navigate { .. } => "navigate",
             Self::Back { .. } => "back",
@@ -162,10 +189,11 @@ impl Step {
     /// so has nothing to check.
     pub fn target(&self) -> Option<&Target> {
         match self {
-            Self::Click(target) | Self::Type { target, .. } | Self::Invoke { target, .. } => {
-                Some(target)
-            }
-            Self::Scroll { target, .. } => target.as_ref(),
+            Self::Click(target)
+            | Self::LongPress(target)
+            | Self::Type { target, .. }
+            | Self::Invoke { target, .. } => Some(target),
+            Self::Scroll { target, .. } | Self::Swipe { target, .. } => target.as_ref(),
             Self::Key(_) => None,
             Self::Navigate { .. } | Self::Back { .. } | Self::Forward { .. } => None,
         }
@@ -179,7 +207,12 @@ impl Step {
             Self::Key(press) => Some(press.chord()),
             Self::Navigate { url } => Some(url),
             Self::Invoke { action, .. } => Some(action),
-            Self::Click(_) | Self::Scroll { .. } | Self::Back { .. } | Self::Forward { .. } => None,
+            Self::Click(_)
+            | Self::LongPress(_)
+            | Self::Scroll { .. }
+            | Self::Swipe { .. }
+            | Self::Back { .. }
+            | Self::Forward { .. } => None,
         }
     }
 }
@@ -206,6 +239,32 @@ impl Default for Settle {
         Self {
             until: SettleKind::default(),
             timeout_ms: default_timeout_ms(),
+        }
+    }
+}
+
+/// Which way a swipe goes.
+///
+/// Named for the direction the *finger* travels, which is how a person
+/// describes it — "swipe up" moves content up and reveals what is below. The
+/// opposite convention reads correctly to nobody outside the code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl Direction {
+    /// The offset a swipe of this length travels.
+    pub fn offset(self, distance: i32) -> (i32, i32) {
+        match self {
+            Self::Up => (0, -distance),
+            Self::Down => (0, distance),
+            Self::Left => (-distance, 0),
+            Self::Right => (distance, 0),
         }
     }
 }

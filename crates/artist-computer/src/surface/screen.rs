@@ -35,6 +35,16 @@ use crate::surface::{SettleWatch, Surface};
 const QUIET_MS: u64 = 250;
 /// Poll granularity while waiting.
 const POLL_MS: u64 = 30;
+/// How long a long press holds.
+///
+/// Android's own threshold is 500 ms, so this clears it with margin. Sitting
+/// exactly on the threshold makes the gesture a coin toss decided by scheduling.
+const LONG_PRESS_MS: u64 = 600;
+/// How long a swipe takes to travel.
+///
+/// Short enough to feel deliberate, long enough that the velocity tracker sees
+/// several points and reads it as a gesture rather than a teleport.
+const SWIPE_MS: u64 = 250;
 
 /// A window driven entirely from what is drawn on it.
 pub struct ScreenSurface {
@@ -47,6 +57,10 @@ pub struct ScreenSurface {
     state: Mutex<Incremental>,
     /// Damage seen since the last observation, in frame coordinates.
     pending: Arc<Mutex<Vec<crate::model::Rect>>>,
+    /// The last capture, kept only for surfaces whose damage is too coarse to
+    /// use. It is `None` until the first coarse frame, so a well-behaved client
+    /// never pays for the memory.
+    previous: Mutex<Option<Frame>>,
 }
 
 impl ScreenSurface {
@@ -82,6 +96,7 @@ impl ScreenSurface {
             options: DetectOptions::default(),
             state: Mutex::new(Incremental::new()),
             pending,
+            previous: Mutex::new(None),
         }
     }
 
@@ -115,10 +130,35 @@ impl ScreenSurface {
             })
     }
 
-    /// Read the screen, re-reading only what the compositor says changed.
+    /// Read the screen, re-reading only what changed.
+    ///
+    /// Compositor damage is believed whenever it is specific, because a client
+    /// knew what it drew before the pixels existed. When it is not — Android
+    /// reports one full-surface rectangle per frame and nothing finer — the
+    /// locality is recovered by comparing this capture with the last one. That
+    /// costs a memcmp over the frame; the alternative costs an OCR pass over all
+    /// of it.
     async fn refresh(&self) -> Result<Vec<Node>, StepError> {
         let frame = self.capture().await?;
-        let damage = self.take_damage();
+        let mut damage = self.take_damage();
+
+        if crate::stage::diff::is_coarse(&damage, &frame) {
+            let mut previous = self.previous.lock().unwrap();
+            if let Some(before) = previous.as_ref() {
+                let regions = crate::stage::diff::changed_regions(before, &frame);
+                // An empty result is meaningful: the client said everything
+                // changed and nothing actually did — an animation frame that
+                // repainted identical pixels. Believing the pixels saves the
+                // entire read.
+                damage = regions;
+            }
+            *previous = Some(frame.clone());
+        } else if !damage.is_empty() {
+            // Kept up to date even when it is not needed, or the first coarse
+            // frame after a run of precise ones would have nothing to compare
+            // against and would fall back to a full read.
+            *self.previous.lock().unwrap() = Some(frame.clone());
+        }
 
         let mut state = self.state.lock().unwrap();
         let boxes = state
@@ -267,6 +307,58 @@ impl Surface for ScreenSurface {
                 Ok(())
             }
             Step::Key(press) => self.stage.key(self.window, press.chord()).await,
+            Step::LongPress(_) => {
+                let at = match node.and_then(|node| node.bounds) {
+                    Some(bounds) => bounds,
+                    None => self.window_bounds().await?,
+                };
+                self.stage
+                    .gesture(
+                        self.window,
+                        &crate::stage::Gesture::Tap {
+                            at,
+                            hold_ms: LONG_PRESS_MS,
+                        },
+                    )
+                    .await
+            }
+            Step::Swipe {
+                direction,
+                distance,
+                ..
+            } => {
+                let window = self.window_bounds().await?;
+                let from = match node.and_then(|node| node.bounds) {
+                    Some(bounds) => bounds,
+                    None => window,
+                };
+                // Defaulted from the *window*, not the element: a swipe on a
+                // list row means "drag this row", and a row is forty pixels
+                // tall, so a distance proportional to it would travel too
+                // little to register as anything.
+                let span = match direction {
+                    crate::program::Direction::Up | crate::program::Direction::Down => window.height,
+                    _ => window.width,
+                };
+                let travel = distance.unwrap_or(span / 2).min(span) as i32;
+                let (dx, dy) = direction.offset(travel);
+                let to = crate::model::Rect {
+                    x: from.x + dx,
+                    y: from.y + dy,
+                    width: from.width,
+                    height: from.height,
+                };
+                self.stage
+                    .gesture(
+                        self.window,
+                        &crate::stage::Gesture::Swipe {
+                            from,
+                            to,
+                            duration_ms: SWIPE_MS,
+                        },
+                    )
+                    .await
+            }
             Step::Scroll { amount, .. } => {
                 // At the named element when there is one, and at the middle of
                 // the window otherwise. The fallback is the meaningful case on

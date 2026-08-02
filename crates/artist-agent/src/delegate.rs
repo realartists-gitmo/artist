@@ -144,6 +144,10 @@ pub(crate) struct Delegate {
     /// the session id at every depth would show a grandchild the root's list
     /// instead of the one its own instructions were written against.
     spawner: String,
+    /// The spawning agent's *display* name, recorded on each child so the
+    /// directory can answer "everyone under Monet". `None` where the spawner
+    /// has no identity, which is only the case in tests.
+    spawner_name: Option<String>,
 }
 
 struct DelegateRun {
@@ -183,6 +187,10 @@ impl Delegate {
             dynamic: env.dynamic.clone(),
             parent_permit: delegation.parent_permit.clone(),
             spawner: env.todo_owner.clone(),
+            // The inbox name is this agent's name, so a child's parent link and
+            // the address a person uses are the same string by construction
+            // rather than by two lookups that could disagree.
+            spawner_name: env.inbox.as_ref().map(|inbox| inbox.name.to_string()),
         }
     }
 
@@ -616,7 +624,14 @@ impl Delegate {
         // that a fan-out would drain the roster at the rate it spawns children.
         // Placed last in the prompt for the same reason as at the root — every
         // byte above it is shared between siblings and can cache across them.
-        let identity = crate::identity::for_run(&run.actor);
+        let identity = crate::identity::for_run(
+            &run.actor,
+            self.tools.project_root(),
+            &role.name,
+            // The spawner's display name, so `descendantOf` walks the same
+            // identifiers a person addresses agents with.
+            self.spawner_name.as_deref(),
+        );
         let policy = format!(
             "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}{}",
             role.name,

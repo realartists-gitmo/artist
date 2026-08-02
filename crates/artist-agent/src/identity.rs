@@ -44,17 +44,39 @@ impl Identity {
 /// registry that cannot be reached degrades to the actor id: an unnameable
 /// agent would be a worse failure than an unaesthetic one, and every downstream
 /// use — addressing included — works on the id.
-pub(crate) fn for_session(session: &str, actor: &str) -> Identity {
-    match artist_registry::names().claim(session, actor) {
+pub(crate) fn for_session(registration: artist_registry::Registration) -> Identity {
+    let actor = registration.actor.clone();
+    match artist_registry::names().claim(&registration) {
         Ok(name) => Identity {
             name: name.name,
             actor: name.actor,
         },
         Err(_) => Identity {
-            name: actor.to_owned(),
-            actor: actor.to_owned(),
+            name: actor.clone(),
+            actor,
         },
     }
+}
+
+/// What a session records about itself in the directory.
+///
+/// The attributes are what make a predicate answerable: without `project` there
+/// is no "everyone on this repo", without `profile` no "every reviewer", and
+/// without `parent` no "everyone under Monet". A directory that records only
+/// names can be read but not queried.
+pub(crate) fn session(
+    session: &str,
+    actor: &str,
+    project: &std::path::Path,
+    profile: &str,
+) -> Identity {
+    for_session(artist_registry::Registration {
+        session: session.to_owned(),
+        actor: actor.to_owned(),
+        project: Some(project.display().to_string()),
+        profile: Some(profile.to_owned()),
+        parent: None,
+    })
 }
 
 /// Claim a name for a subagent run, released when the run ends.
@@ -63,9 +85,22 @@ pub(crate) fn for_session(session: &str, actor: &str) -> Identity {
 /// nothing to return to — so unlike a session name this one is given back
 /// immediately. Without that a fan-out would consume the roster permanently at
 /// the rate it spawns children.
-pub(crate) fn for_run(actor: &str) -> RunIdentity {
+pub(crate) fn for_run(
+    actor: &str,
+    project: &std::path::Path,
+    profile: &str,
+    parent: Option<&str>,
+) -> RunIdentity {
     RunIdentity {
-        identity: for_session(actor, actor),
+        identity: for_session(artist_registry::Registration {
+            session: actor.to_owned(),
+            actor: actor.to_owned(),
+            project: Some(project.display().to_string()),
+            profile: Some(profile.to_owned()),
+            // The spawner's *name*, so descendants are walkable by the same
+            // identifier a person addresses them with.
+            parent: parent.map(str::to_owned),
+        }),
         released: Arc::new(ReleaseOnDrop(actor.to_owned())),
     }
 }
@@ -118,8 +153,8 @@ mod tests {
     #[test]
     fn a_session_keeps_its_name_across_repeated_resolution() {
         with_roster(|| {
-            let first = for_session("s-1", "s-1");
-            let again = for_session("s-1", "s-1");
+            let first = session("s-1", "s-1", std::path::Path::new("/p"), "default");
+            let again = session("s-1", "s-1", std::path::Path::new("/p"), "default");
             assert_eq!(first.name, again.name);
             assert_eq!(first.actor, "s-1");
         });
@@ -131,8 +166,8 @@ mod tests {
     fn the_identity_block_is_a_pure_suffix() {
         with_roster(|| {
             let shared = "shared system prompt";
-            let one = format!("{shared}{}", for_session("s-1", "s-1").prompt_block());
-            let two = format!("{shared}{}", for_session("s-2", "s-2").prompt_block());
+            let one = format!("{shared}{}", session("s-1", "s-1", std::path::Path::new("/p"), "default").prompt_block());
+            let two = format!("{shared}{}", session("s-2", "s-2", std::path::Path::new("/p"), "default").prompt_block());
 
             assert!(one.starts_with(shared) && two.starts_with(shared));
             assert_ne!(one, two, "two agents must not be the same agent");
@@ -151,7 +186,7 @@ mod tests {
     #[test]
     fn the_block_names_the_agent() {
         with_roster(|| {
-            let identity = for_session("s-1", "a-1");
+            let identity = session("s-1", "a-1", std::path::Path::new("/p"), "default");
             assert!(identity.prompt_block().contains(&identity.name));
             assert!(identity.prompt_block().contains("Artist"));
         });
@@ -163,7 +198,7 @@ mod tests {
     fn a_run_name_is_released_when_the_run_ends() {
         with_roster(|| {
             let name = {
-                let run = for_run("a-child");
+                let run = for_run("a-child", std::path::Path::new("/p"), "worker", Some("Monet"));
                 let held = run.name.clone();
                 assert!(
                     artist_registry::names()
@@ -185,7 +220,7 @@ mod tests {
     #[test]
     fn a_cloned_run_identity_holds_the_name_until_the_last_copy_drops() {
         with_roster(|| {
-            let run = for_run("a-child");
+            let run = for_run("a-child", std::path::Path::new("/p"), "worker", Some("Monet"));
             let name = run.name.clone();
             let clone = run.clone();
             drop(run);

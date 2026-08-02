@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Shown in Android's own accessibility settings. Written for the person who
+      finds it there and wonders what it is, which on a shared or borrowed
+      container is a fair question to be asked.
+    -->
+    <string name="service_description">Lets artist read this device\'s screen structure and act on it. Installed by the agent; remove it to revoke access.</string>
+</resources>

@@ -19,7 +19,7 @@ purchase. That coupling is a Linux accident, and it does not survive the port:
 | | isolation | damage regions | both from one mechanism? |
 |---|---|---|---|
 | **Linux** | own compositor | own compositor | **yes** |
-| **Android** | container on our compositor | forwarded from SurfaceFlinger | **yes** |
+| **Android** | container on our compositor | ~~forwarded from SurfaceFlinger~~ — **measured absent**; frame differencing instead | **no** |
 | **Windows** | `CreateDesktop` | — *removed by* `CreateDesktop` | **no, they oppose** |
 | **macOS** | none of the three is free — see below | occlusion/AX events, or a VNC framebuffer | no |
 | **iOS** | mutually exclusive with credentials | — | n/a |
@@ -51,18 +51,40 @@ Android-in-a-container renders through Wayland. Point its HWComposer at our stag
 with `WAYLAND_DISPLAY` and `persist.waydroid.multi_windows=true`, and Android
 windows arrive as ordinary `xdg_toplevel`s on a display we already own.
 
-**Damage survives intact.** Waydroid's `hwcomposer.cpp` reads
-`hwc_layer_1::surfaceDamage` — SurfaceFlinger's own per-layer dirty region — and
-forwards every rect to `wl_surface_damage` (VERIFIED, source read). Our
-`surface_damage()` already consumes exactly that (**checked against our code**),
-so `damage.rs` needs no changes and the 15× OCR win carries over. This is the
-only non-Linux target where that is true.
+**Damage does not survive — MEASURED, and this claim was wrong.** The reasoning
+was that Waydroid's `hwcomposer.cpp` reads `hwc_layer_1::surfaceDamage` —
+SurfaceFlinger's own per-layer dirty region — and forwards every rect to
+`wl_surface_damage`, so `damage.rs` would need no changes and the 15× OCR win
+would carry over. Reading the source supported it. Running it does not.
+
+Against a live container (Settings on a 1920×1080 stage, 25 s, clicks
+throughout): **709 damage events, 709 of them carrying real client rectangles,
+and every single rectangle covering the entire surface.** Nothing is
+malfunctioning — these are genuine `wl_surface.damage` commits, not our
+conservative fallback for a buffer committed without damage, which the gate
+distinguishes explicitly. They simply carry no location information. Every event
+also arrives with **no window attribution**, because the surface Waydroid commits
+on is not the toplevel we track.
+
+So the change-signal argument does not transfer, and this is the one property
+that mattered most. Two consequences follow. The noise filter classifies by
+rectangle, so on Android a blinking caret is indistinguishable from a dialog
+opening and `settle: quiet` waits out its timeout on anything animating.
+Incremental OCR re-reads the whole frame every look.
+
+**The compensation is `stage/diff.rs`.** When reported damage covers
+substantially the whole surface, the locality is recovered by comparing the
+capture with the previous one, tile by tile. This is only affordable because
+capture here is a buffer read rather than a screencast negotiation: a full-frame
+comparison is a couple of milliseconds against an OCR pass costing hundreds.
+Precise damage is still always believed — a client that reports it knew what it
+drew before the pixels existed.
 
 | # | Property | Verdict |
 |---|---|---|
 | 1 | Isolation | **1:1** — Android windows land on a display we own |
-| 2 | Damage regions | **1:1** — SurfaceFlinger's own rects, forwarded |
-| 3 | Window identity | different mechanism — `client_pid()` returns the HWComposer's pid for *every* window; real pid needs `dumpsys window` |
+| 2 | Damage regions | **lost — MEASURED.** Real rects, all full-surface, none attributed to a window. Recovered by frame differencing (`stage/diff.rs`) |
+| 3 | Window identity | **easier than expected.** `client_pid()` is the HWComposer's for every window, but Waydroid names each toplevel `waydroid.<package>` (VERIFIED: `waydroid.com.android.settings`). Strip the prefix and the package is free; `dumpsys` is only the fallback |
 | 4 | Capture is a buffer read | **1:1** — one surface tree per Android task |
 | 5 | Unpolluted a11y tree | different mechanism, *stronger* — the container holds only agent-launched apps |
 | 6 | Input as a function call | **1:1** — Waydroid writes `input_event`s to in-container uinput; multi-touch free |
@@ -70,14 +92,39 @@ only non-Linux target where that is true.
 | 8 | Lazy | degraded — container boot is seconds, not ~0 |
 | 9 | Teardown | **1:1** |
 
-**Prerequisite our code does not yet meet.** We advertise five globals —
-`wl_compositor`, `xdg_wm_base`, `wl_shm`, `wl_seat`, `wl_data_device_manager`.
-The original plan called for `wl_output`, `xdg_decoration`, `wp_viewporter`,
-`wp_presentation` and **`zwp_linux_dmabuf`** "from the start"; none exist
-(**checked**). Android's gralloc buffers *are* dmabufs, so with only `wl_shm`
-every frame round-trips through shared memory. GTK tests pass because GTK falls
-back to shm; Android will not. **dmabuf import and `wl_output` are Android
-prerequisites — and they also complete the Linux stage as designed.**
+**Prerequisite now met.** This section previously said we advertised only five
+globals and that `zwp_linux_dmabuf` and `wl_output` were missing. They exist:
+dmabuf at version 4 with a feedback tranche naming our render node, `wl_output`
+with xdg-output, plus `xdg_decoration`, `wp_viewporter` and `wp_presentation`.
+Android's gralloc buffers import through it and render — confirmed by capturing
+Settings off the stage as a PNG.
+
+**Three traps that are not in any Waydroid documentation**, each found by hitting
+it:
+
+* **`PULSE_RUNTIME_PATH`.** Waydroid derives the PulseAudio socket from
+  `XDG_RUNTIME_DIR`, which on a stage is a private directory holding a Wayland
+  socket and nothing else. LXC is then told to bind-mount a socket that does not
+  exist, the mount fails, and the *container* fails to start — with no mention of
+  audio anywhere in the error, which sends you looking at binder and images.
+  `android::prepare_env` points it back at the user's real one.
+* **The container freezes itself.** When Android suspends, Waydroid freezes the
+  LXC container: it renders nothing and answers nothing, while `waydroid status`
+  still reports the *session* as `RUNNING`. It happens within seconds of boot if
+  no app is active. Every input verb thaws first, because a frozen container
+  accepts events and discards them — a step that reports success against a screen
+  that could not have changed.
+* **`waydroid prop get` blocks rather than failing.** While Android's platform
+  service is still coming up it retries forever, so using `sys.boot_completed` as
+  a boot predicate hangs on the very thing it is waiting for. Every CLI call is
+  bounded, and a timeout is read as "still booting".
+
+**Container control needs no root.** `waydroid container unfreeze` shells out to
+`lxc-unfreeze` and fails for an ordinary user, but the same operation over
+`id.waydro.ContainerManager` on the system bus succeeds, because the service does
+it on our behalf. `GetSession` also returns the session's `wayland_display` and
+`xdg_runtime_dir`, which is how a session belonging to a *dead stage* is told
+apart from ours and restarted rather than adopted.
 
 **Rungs.** Rung 2 is the strongest rung on Android — the a11y tree is a
 first-class TalkBack product surface, not a bolt-on; ~70–80% of mainstream apps
@@ -95,8 +142,10 @@ already satisfied by the existing Wayland stage, so `AndroidStage` is a thin
 wrapper over it plus three pieces: a session supervisor, a package→`app_id` map,
 and a resident accessibility listener.
 
-**Gate, before any of it:** is `surfaceDamage` tight or degenerate for real apps?
-Degenerate damage means the whole change-signal argument collapses to polling.
+**Gate: answered, and the answer was the bad one.** `surfaceDamage` is
+degenerate for real apps — see the measurement above. The change-signal argument
+collapses, and `stage/diff.rs` is what replaces it. Re-run the measurement with
+`cargo run -p artist-computer --example waydroid-gate`.
 
 ---
 

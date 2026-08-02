@@ -305,7 +305,6 @@ fn truth_teller(g: &mut ObjectGraph) -> ObjectId {
 /// by a *conflicted* exception is exactly the case that separates `⟦E⟧ ∈ {N,F}`
 /// from `⟦E⟧ ∈ {F,B}`, and it cannot be stated until this lands.
 #[test]
-#[ignore = "semantics.md §7.1b: judgment type cannot express an established zero"]
 fn an_established_zero_is_distinguishable_from_an_unknown() {
     let (mut g, nodes, s) = four_valued();
     let f = nodes.iter().find(|(k, _)| *k == "F").unwrap().1;
@@ -331,7 +330,6 @@ fn an_established_zero_is_distinguishable_from_an_unknown() {
 /// `refutation: Certain` admits `B`; the repair recovers it rather than trading
 /// it away permanently.
 #[test]
-#[ignore = "semantics.md §7.1b: needs an established-zero support bit"]
 fn a_failing_antecedent_supports_an_implication_again() {
     let (mut g, nodes, s) = four_valued();
     let f = nodes.iter().find(|(k, _)| *k == "F").unwrap().1;
@@ -344,17 +342,21 @@ fn a_failing_antecedent_supports_an_implication_again() {
     );
 }
 
-/// **Grounding becomes per-bit, and the contradictory pair stops being
-/// expressible.**
+/// **A settled bit alongside an ungrounded node is now consistent.**
 ///
-/// Today `(or B Q)` reports `support: Certain` *and* `grounding: StableLoop` —
-/// which §7.2 reads as `⟦n⟧ ∈ {T,B}` and `⟦n⟧ = ⊥` simultaneously. Under §7.1b
-/// the support bit is 1 and the refutation bit is undefined, so the result is
-/// consistent; what must change is that `Grounded` no longer means "the whole
-/// value is defined" while a `Certain` bound is read as implying it.
+/// `(or B Q)` reports `support: Certain` *and* `grounding: StableLoop`. Under the
+/// old exact-value semantics those contradicted each other — `Certain` asserted
+/// `⟦n⟧ ∈ {T,B}` and `StableLoop` asserted `⟦n⟧ = ⊥` — and the evaluator was
+/// emitting the pair anyway.
+///
+/// Under §7.1b it is simply the truth: the support bit is `1` because `B ∨ x` is
+/// designated for every `x`, and the refutation bit is undefined because
+/// `1 ∧ f_Q` is. `Grounded` means *both* bits settled, so the node is not
+/// grounded and the support bound is still exact. An earlier draft of this test
+/// asserted the grounding must therefore change, which was the repair-1 reading:
+/// there is nothing wrong with the grounding, and there never was.
 #[test]
-#[ignore = "semantics.md §7.1b: grounding is not yet per-bit"]
-fn a_partly_grounded_result_is_stateable() {
+fn a_settled_bit_may_sit_on_an_ungrounded_node() {
     use artist_logic::evidence::{Bound, Grounding};
     let mut g = ObjectGraph::new();
     let (b, a) = (g.atom("b"), g.atom("a"));
@@ -364,10 +366,7 @@ fn a_partly_grounded_result_is_stateable() {
 
     let disj = g.apply(wk::OR, vec![ba, q]);
     let r = GraphEvaluator::new().eval(&mut g, disj, &s, 100_000);
-    assert_eq!(r.support, Bound::Certain, "the support bit really is 1");
-    assert_ne!(
-        r.grounding,
-        Grounding::StableLoop,
-        "and the node is not simply ungrounded — one of its bits is settled"
-    );
+    assert_eq!(r.support, Bound::Certain, "B ∨ x is designated for every x");
+    assert!(!r.refutation.is_settled(), "and the refutation bit is not settled");
+    assert_eq!(r.grounding, Grounding::StableLoop, "so the node is not grounded");
 }

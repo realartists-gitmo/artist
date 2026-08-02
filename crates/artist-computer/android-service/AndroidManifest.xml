@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The accessibility bridge. Deliberately tiny: one service, no activity, no
+  launcher icon. It is infrastructure the agent installs, not an app anybody
+  opens.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.artist.bridge"
+    android:versionCode="1"
+    android:versionName="0.1">
+
+    <!--
+      Required for the loopback ServerSocket. Android gates *all* socket
+      creation on INTERNET, including 127.0.0.1 — without it the bridge starts,
+      binds nothing, and the harness sees a service that is installed, enabled
+      and silent.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      29 is Waydroid's floor for the accessibility flags used here;
+      FLAG_RETRIEVE_INTERACTIVE_WINDOWS and getWindows() predate it, but the
+      node properties the tree walk reads (hint text, editable) do not.
+    -->
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="33" />
+
+    <application
+        android:label="artist bridge"
+        android:allowBackup="false"
+        android:hasCode="true">
+
+        <service
+            android:name=".BridgeService"
+            android:exported="true"
+            android:label="artist bridge"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+</manifest>

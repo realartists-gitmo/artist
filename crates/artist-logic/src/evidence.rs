@@ -18,7 +18,20 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One side of the evidence, as a monotone bound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Bound {
-    /// Nothing establishes this side.
+    /// **This side's bit is established *zero*.**
+    ///
+    /// Declared first so the derived `Ord` makes [`Self::meet`] and
+    /// [`Self::join`] the Kleene operations on `{0, u, 1}`: a meet is `Excluded`
+    /// if any operand is, `Certain` only if all are, and unknown otherwise.
+    ///
+    /// `None` used to carry this meaning as well as its own, and the conflation
+    /// is what made two rules unsound. `F`'s support bit is a known zero and a
+    /// truth-teller's is undefined; both reported `None`, so every clause reading
+    /// `¬a⁺` had to treat a settled fact as unknown. It is also why
+    /// `⟦E⟧ ∈ {N,F}` — *E fails* — could not be said at all, only
+    /// `⟦E⟧ ∈ {F,B}` — *E is refuted* — which admits the designated `B`.
+    Excluded,
+    /// Nothing establishes this side, and nothing rules it out either.
     #[default]
     None,
     /// Some evidence, not conclusive.
@@ -52,6 +65,17 @@ impl Bound {
     }
     pub fn is_certain(self) -> bool {
         self == Bound::Certain
+    }
+    /// Established *not* to hold — the bit is zero.
+    pub fn is_excluded(self) -> bool {
+        self == Bound::Excluded
+    }
+    /// Does this side say anything about the structure at all?
+    ///
+    /// `None` and `Partial` do not: `Partial` reports the search, and neither
+    /// constrains `⟦n⟧`. Only the two settled states are claims.
+    pub fn is_settled(self) -> bool {
+        matches!(self, Bound::Excluded | Bound::Certain)
     }
 }
 
@@ -415,11 +439,23 @@ impl EvaluationResult {
         }
     }
 
+    /// A definite classical answer: `T` when `v`, `F` otherwise.
+    ///
+    /// **Both bits are settled**, which is the point of `Bound::Excluded`
+    /// existing. `T` is `⟨1,0⟩`, not `⟨1,unknown⟩`: a structure that says a fact
+    /// *holds* has told you its refutation bit is zero, and leaving that as
+    /// `None` threw the information away — which is why "the antecedent fails"
+    /// could not be expressed and a whole row of the implication table was lost.
+    ///
+    /// `Conflicted` is the case where both bits are one, and it has its own
+    /// constructor rather than being reachable from here.
     pub fn certain(v: bool) -> Self {
         let mut r = EvaluationResult::new(ComputeStatus::Exact);
         if v {
             r.support = Bound::Certain;
+            r.refutation = Bound::Excluded;
         } else {
+            r.support = Bound::Excluded;
             r.refutation = Bound::Certain;
         }
         r
@@ -440,12 +476,21 @@ impl EvaluationResult {
         r
     }
 
+    /// The four-valued reading, from the two bits.
+    ///
+    /// **Keyed on what each side *asserts*, not on whether it is non-`None`.**
+    /// This matched `(_, Bound::None)` for `Supported`, which was right while
+    /// `None` was the only way to say "nothing on that side" — and became wrong
+    /// the moment `Excluded` existed, because a definite `T` is `⟨Certain,
+    /// Excluded⟩` and the old reading called it `Conflicted`. `Conflicted` means
+    /// **both bits are one**, which is a fact about the store, and `Excluded` is
+    /// the opposite of evidence rather than a weak form of it.
     pub fn evidential(&self) -> Evidential {
-        match (self.support, self.refutation) {
-            (Bound::None, Bound::None) => Evidential::Open,
-            (_, Bound::None) => Evidential::Supported,
-            (Bound::None, _) => Evidential::Refuted,
-            _ => Evidential::Conflicted,
+        match (self.support.is_certain(), self.refutation.is_certain()) {
+            (true, true) => Evidential::Conflicted,
+            (true, false) => Evidential::Supported,
+            (false, true) => Evidential::Refuted,
+            (false, false) => Evidential::Open,
         }
     }
 
@@ -469,8 +514,15 @@ impl EvaluationResult {
         self.compute_status == ComputeStatus::Exact
             && self.grounding == Grounding::Grounded
             && self.derivation != Derivation::Default
-            && ((self.support.is_certain() && self.refutation == Bound::None)
-                || (self.refutation.is_certain() && self.support == Bound::None))
+            // **One side certain and the other not certain.** This read
+            // `== Bound::None` on the opposite side, which was the only way to
+            // say "nothing there" before `Excluded` existed — and became wrong
+            // immediately after, because a definite `T` is now
+            // `⟨Certain, Excluded⟩` and the strongest possible answer stopped
+            // counting as definite. What must be excluded is the *other side
+            // also being certain*, which is `Conflicted`, not the other side
+            // being settled.
+            && (self.support.is_certain() != self.refutation.is_certain())
     }
 
     /// Record what settled this, when a scan decided it on one member.

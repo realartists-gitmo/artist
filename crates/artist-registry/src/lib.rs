@@ -32,7 +32,7 @@ mod roster;
 
 pub use jobs::{Job, JobState, Jobs, Outcome};
 pub use messages::{Audience, Group, Message, Messages, now};
-pub use names::{Name, Names};
+pub use names::{Name, Names, Registration, Selector};
 pub use permits::{Permits, Seat};
 pub use process::Owner;
 pub use roster::ROSTER;

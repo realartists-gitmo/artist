@@ -378,11 +378,32 @@ That reopens §7 of that document — Design B was preferred because it kept lay
 frozen and avoided AFT's cost, and layer 0 is now moving to AFT's structure
 anyway. **Sequence: repair layer 0, re-decide, then defeasibility.**
 
-**Not yet written**, and it is the next thing: the per-bit clauses for every
-operator, the per-bit fixpoint and its monotonicity proof, what `Grounding`
-becomes when one bit is settled and the other is not, and the nine lemmas
-re-derived. None of that is code, and none of it should be until reviewed — the
-last three rules that shipped on my own reading did not survive someone else's.
+**Implemented.** `Bound` gained `Excluded`, declared first so the derived `Ord`
+makes `meet`/`join` the Kleene operations. Four places had been reading `None` as
+"nothing on that side" when it now means only "unknown", and each was settling a
+bit nobody established:
+
+- `evidential()` keyed `Supported` on `refutation == None`, so a definite `T` —
+  now `⟨Certain, Excluded⟩` — read as `Conflicted`.
+- `is_definite()` required the opposite side to be `None`, so the strongest
+  possible answer stopped counting as definite.
+- `Scan::decided` and `finish_scan`'s collapse both republished a short-circuited
+  scan as a *classical* answer, claiming `⟦B ∨ Q⟧ = T` when it is `⟨1, u⟩`. This
+  is the same defect that refuted `Instance`, one layer down, and it was live.
+- `justifies` compared bounds by `Ord`, which is not the information order, and
+  assumed the evaluator is always at least as informative as its own certificate.
+  It is not: `Told{holds:false}` settles both bits while a scan gates its meet
+  side.
+
+The false-antecedent row of §5.2 came back with it, as predicted — `(a ⊃ b)⁺ =
+¬a⁺ ∨ b⁺` is derivable once *fails* and *is refuted* are different judgments.
+
+**Still open:** `Grounding` is unchanged, so a node with one settled bit and one
+unsettled reports `StableLoop` — which is now *consistent* with a `Certain`
+bound rather than contradicting it, but coarser than the pair deserves. And the
+soundness reference still computes the exact-value denotation, which is stricter
+than this section commits to; passing it implies the weaker obligation, so it is
+sound but checks less than it could.
 
 
 ### 7.1c The construction, worked

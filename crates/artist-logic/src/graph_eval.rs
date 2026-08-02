@@ -951,8 +951,25 @@ impl Scan {
 
     /// A verdict reached by short-circuit, carrying the axes the deciding case
     /// brought with it.
+    /// A scan that one operand settled.
+    ///
+    /// **Only the deciding bit is settled.** `EvaluationResult::certain` settles
+    /// both, which is right for a definite classical answer and wrong here: a
+    /// disjunction short-circuited by a `Conflicted` operand has support `1` and
+    /// a refutation bit that is genuinely *unknown*, because the operands it
+    /// never looked at could still have refuted every disjunct. Publishing `T`
+    /// would claim `B ∨ Q = T` when it is `⟨1, u⟩`.
+    ///
+    /// This is the short-circuit half of the defect that refuted `Instance` and
+    /// `Instantiate`: settling a bit nobody established, because the type had no
+    /// way to say "this side is open" separately from "this side is zero".
     fn decided(&self, value: bool, snapshot: u64) -> EvaluationResult {
-        let mut r = EvaluationResult::certain(value);
+        let mut r = EvaluationResult::new(ComputeStatus::Exact);
+        if value {
+            r.support = Bound::Certain;
+        } else {
+            r.refutation = Bound::Certain;
+        }
         r.grounding = self.grounding;
         r.derivation = self.derivation;
         r.determinacy = self.determinacy;
@@ -1098,6 +1115,18 @@ impl GraphEvaluator {
         // Every dated query went out that way, silently dropping the sources its
         // own inner steps had recorded.
         if cert.conclusion() != Some(root) {
+            cert.steps.clear();
+        }
+        // **And never hand out a derivation the kernel rejects.**
+        //
+        // `cite` finds the last step concluding a node, which is the wrong step
+        // when the same node was evaluated under different variable bindings
+        // inside a quantifier — the citation is stale and the premise does not
+        // license what it is cited for. That is a real bug in citation hygiene
+        // and it predates the `Bound` repair; discarding here is the honest
+        // fallback rather than the fix, because a certificate its own checker
+        // refuses is worse than no certificate at all.
+        if !cert.steps.is_empty() && cert.check(st.g).is_err() {
             cert.steps.clear();
         }
         (r, cert)
@@ -1427,7 +1456,14 @@ impl State<'_> {
         // implication — is **not** available, because `refutation: Certain`
         // asserts `⟦A⟧ ∈ {F,B}` and `B` is designated. That costs
         // `(implies #false X)`, which is now `Open`.
-        let decided = if c.support.is_certain() {
+        // `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺` and `(a ⊃ b)⁻ = a⁺ ∧ b⁻`, per bit.
+        //
+        // The first disjunct is what `Bound::Excluded` bought: an antecedent
+        // whose support bit is an established *zero* supports the implication
+        // outright. That row was surrendered when the strong implication landed,
+        // because `refutation: Certain` admits the designated `B` — and it comes
+        // back now that *fails* and *is refuted* are different judgments.
+        let decided = if c.support.is_certain() || a.support.is_excluded() {
             Some(true)
         } else if a.support.is_certain() && c.refutation.is_certain() {
             Some(false)
@@ -3717,14 +3753,17 @@ impl State<'_> {
         // the round-two `(and Conflicted #true)` failure reachable again the
         // moment one operand is a default instead of a truth atom. `Scan` folds
         // correctly; this line was undoing it.
-        if status == ComputeStatus::Exact {
-            if support.is_certain() && refutation == Bound::None {
-                return carry(EvaluationResult::certain(true));
-            }
-            if refutation.is_certain() && support == Bound::None {
-                return carry(EvaluationResult::certain(false));
-            }
-        }
+        // **The collapse must not settle the other side.** It called
+        // `EvaluationResult::certain`, which now settles *both* bits — so a
+        // disjunction whose refutation bit the scan left open was republished as
+        // a definite `T`, claiming `⟦B ∨ Q⟧ = T` when it is `⟨1, u⟩`. The scan
+        // computed the right pair and this line overwrote half of it, which is
+        // the same shape as the `Scan::decided` short-circuit above and the same
+        // shape as the defect that refuted `Instance`.
+        //
+        // Nothing is gained by collapsing at all once `Bound` can hold the pair,
+        // so the branch is gone rather than repaired.
+        let _ = status;
         carry(self.combine(node, support, refutation, status, scan.residuals.clone()))
     }
 

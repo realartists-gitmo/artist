@@ -149,19 +149,19 @@ fn row_implies() {
         let (q, b) = (g.atom("q-other"), g.atom("b-other"));
         g.apply(q, vec![b])
     };
-    // **The false-antecedent row is `Open`, and that is a completeness loss
-    // taken deliberately.** `→` is the strong implication (docs/semantics.md
-    // §3), so `A ⊃ C` is `C` when `A` is designated and `T` otherwise — and
-    // establishing "A is not designated" needs `⟦A⟧ ∈ {N,F}`, which the two
-    // bounds cannot express: `refutation: Certain` asserts `⟦A⟧ ∈ {F,B}`, and
-    // `B` is designated.
+    // **The false-antecedent row, lost and recovered.** `→` is the strong
+    // implication (docs/semantics.md §3), so `A ⊃ C` is `C` when `A` is
+    // designated and `T` otherwise — and establishing "A is not designated"
+    // needs `⟦A⟧⁺ = 0`.
     //
-    // Materially the row held, and materially the evaluator was *unsound*: with
-    // `A` conflicted, `¬B ∨ F = B` reads designated while `B ⊃ F = F`, so a
-    // refuted implication came back supported. Trading a true-but-underivable
-    // row for a false-and-derivable one is the right direction.
+    // That was inexpressible while `Bound::None` meant both *the bit is zero*
+    // and *the bit is unknown*, so this row went `Open` for a while: materially
+    // it held, and materially the evaluator was unsound, since with `A`
+    // conflicted `¬B ∨ F = B` reads designated while `B ⊃ F = F`. The §7.1b
+    // repair separates *fails* from *is refuted*, and the row is derivable again
+    // — without the unsoundness that used to come with it.
     for (a, b, expect) in [
-        (no, unknown, Evidential::Open),        // false antecedent: see above
+        (no, unknown, Evidential::Supported),   // false antecedent: `⟦A⟧⁺ = 0`
         (yes, yes, Evidential::Supported),      // true consequent
         (yes, no, Evidential::Refuted),         // the only refuting case
         (unknown, other, Evidential::Open),     // both open, and unrelated

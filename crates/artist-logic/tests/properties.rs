@@ -45,7 +45,7 @@
 //! buying nothing: not one assertion here distinguishes a budget of 5,000 from
 //! one of 1,000,000.
 
-use artist_logic::evidence::{ComputeStatus, EvaluationResult, Evidential};
+use artist_logic::evidence::{Bound, ComputeStatus, EvaluationResult, Evidential};
 use artist_logic::graph_eval::{GraphEvaluator, GraphStructure, Knowledge, MapGraphStructure};
 use artist_logic::object::{Binding, LiteralValue, wk};
 use artist_logic::syntax::{parse, print};
@@ -268,8 +268,40 @@ fn fixture(seed: u64) -> (ObjectGraph, Gen, Mixed, Rng) {
 /// The information order: `must` grows and `may` shrinks. `Certain` on a side
 /// may never become less than `Certain`, and a side that was `Partial` may not
 /// drop to `None`.
+/// Two spellings of one sentence must not *disagree*.
+///
+/// Not bit-for-bit equality. Since `Bound::Excluded` exists, two routes to the
+/// same answer can differ in how much they settle — a scan suppresses its meet
+/// side when the enumeration is not exact, so one spelling may leave a bit
+/// `None` where the other settles it to zero. `None` asserts nothing, so that is
+/// a difference in *informativeness*, and this property is about the answer.
+///
+/// What is forbidden is a genuine disagreement: the same evidential reading, and
+/// no bit settled one way by one spelling and the other way by the other.
+fn agree(a: &EvaluationResult, b: &EvaluationResult, what: &str) {
+    assert_eq!(a.evidential(), b.evidential(), "{what}");
+    let compatible = |x: Bound, y: Bound| !x.is_settled() || !y.is_settled() || x == y;
+    assert!(
+        compatible(a.support, b.support) && compatible(a.refutation, b.refutation),
+        "{what}: settled bits conflict — {:?}/{:?} vs {:?}/{:?}",
+        a.support,
+        a.refutation,
+        b.support,
+        b.refutation
+    );
+}
+
 fn no_information_lost(before: &EvaluationResult, after: &EvaluationResult) -> bool {
-    after.support >= before.support && after.refutation >= before.refutation
+    // **`Ord` on `Bound` is not the information order**, and this used to assume
+    // it was. The derived ordering exists to make `meet`/`join` the Kleene
+    // operations, so it runs `Excluded < None < Partial < Certain` — under which
+    // learning that a bit is *zero* reads as going backwards.
+    //
+    // Information order: an unsettled bound may become settled either way; a
+    // settled one must not move. `Excluded` and `Certain` are incomparable, and
+    // a flip between them is exactly the retraction this property forbids.
+    let kept = |b: Bound, a: Bound| if b.is_settled() { a == b } else { true };
+    kept(before.support, after.support) && kept(before.refutation, after.refutation)
 }
 
 // -------------------------------------------------------------- properties
@@ -378,12 +410,7 @@ fn a_sentence_does_not_depend_on_its_spelling() {
         };
         let a = ev.eval(&mut g, double_not, &s, 5_000);
         let b = ev.eval(&mut g, via_implies, &s, 5_000);
-        assert_eq!(
-            (a.support, a.refutation),
-            (b.support, b.refutation),
-            "seed {seed}: ¬¬P disagreed with ¬(P → ⊥) on {}",
-            print(&g, p)
-        );
+        agree(&a, &b, &format!("seed {seed}: ¬¬P vs ¬(¬P ∨ ⊥) on {}", print(&g, p)));
 
         // …and `P ∨ Q` against `¬P → Q`.
         let q = shapes.prop(&mut g, &mut r, 2);
@@ -398,11 +425,7 @@ fn a_sentence_does_not_depend_on_its_spelling() {
         };
         let a = ev.eval(&mut g, disj, &s, 5_000);
         let b = ev.eval(&mut g, implication, &s, 5_000);
-        assert_eq!(
-            (a.support, a.refutation),
-            (b.support, b.refutation),
-            "seed {seed}: P ∨ Q disagreed with ¬P → Q"
-        );
+        agree(&a, &b, &format!("seed {seed}: P ∨ Q vs (¬¬P ∨ Q)"));
     }
 }
 

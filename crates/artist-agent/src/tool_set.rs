@@ -318,6 +318,7 @@ impl ToolEnv {
     fn message_tools(&self) -> Option<crate::message_tools::MessageTools> {
         Some(crate::message_tools::MessageTools::new(
             self.inbox.clone()?,
+            self.project_root().display().to_string(),
             self.delegation
                 .as_ref()
                 .and_then(|delegation| delegation.parent_permit.clone()),

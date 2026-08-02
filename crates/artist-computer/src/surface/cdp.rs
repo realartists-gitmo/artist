@@ -1102,6 +1102,14 @@ impl Surface for CdpPage {
             }
             Step::Back { .. } => self.history(-1).await,
             Step::Forward { .. } => self.history(1).await,
+            // Touch verbs. A page can be driven with them — CDP has
+            // `Input.dispatchTouchEvent` — but a browser on a desktop stage is
+            // not a touchscreen, and silently turning a long press into a click
+            // is exactly the substitution the step exists to rule out.
+            other @ (Step::LongPress(_) | Step::Swipe { .. }) => Err(StepError::Backend(format!(
+                "a page has no {:?} — it is a pointer surface, not a touch one",
+                other.action()
+            ))),
             // The page rung has no declared per-element verbs — every element
             // is reached the same way — so `invoke` here is a routing mistake
             // rather than a missing feature, and says so.

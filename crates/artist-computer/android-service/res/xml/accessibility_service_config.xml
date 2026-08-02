@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Declared here *and* set again in onServiceConnected. Not redundant: this file
+  is what the system reads before the service runs — it decides whether the
+  service can be enabled at all and what it is allowed to ask for — while the
+  runtime call is what takes effect for the connected instance. A service that
+  declares less than it later requests simply does not receive the events.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"
+    android:notificationTimeout="0"
+    android:description="@string/service_description" />

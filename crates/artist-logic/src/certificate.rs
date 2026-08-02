@@ -324,8 +324,10 @@ impl Certificate {
                         sources.iter().copied().filter(|s| g.get(*s).is_some()).collect();
                     Checked {
                         node: *node,
-                        support: if *holds { Bound::Certain } else { Bound::None },
-                        refutation: if *holds { Bound::None } else { Bound::Certain },
+                        // Both bits settled: a structure that says a fact holds
+                        // has told you its refutation bit is zero.
+                        support: if *holds { Bound::Certain } else { Bound::Excluded },
+                        refutation: if *holds { Bound::Excluded } else { Bound::Certain },
                         grounding: Grounding::Grounded,
                         derivation: Derivation::Observed,
                         determinacy: Determinacy::Unknown,
@@ -432,9 +434,22 @@ impl Certificate {
                         // `implies` negates its antecedent, so position zero
                         // points the other way — a fact about the *slot*, which
                         // is why it can only be read once slots are tracked.
+                        // `implies` reads its antecedent's support bit, and
+                        // reads it *negated*: `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺` and
+                        // `(a ⊃ b)⁻ = a⁺ ∧ b⁻`. So position 0 is licensed by
+                        // `a⁺ = 0` when concluding true, and by `a⁺ = 1` when
+                        // concluding false — never by the antecedent's
+                        // *refutation*, which was the old condition and admits
+                        // the designated `B`.
                         let negated = op == wk::IMPLIES && *pos == 0;
-                        let want = if *holds != negated { p.support } else { p.refutation };
-                        if want != Bound::Certain {
+                        let licensed = if negated {
+                            if *holds { p.support.is_excluded() } else { p.support.is_certain() }
+                        } else if *holds {
+                            p.support.is_certain()
+                        } else {
+                            p.refutation.is_certain()
+                        };
+                        if !licensed {
                             return Err(Invalid::Unlicensed { step: i });
                         }
                         covered[*pos] = true;
@@ -588,9 +603,28 @@ impl Certificate {
     pub fn justifies(&self, g: &ObjectGraph, node: ObjectId, result: &EvaluationResult) -> bool {
         match self.check(g) {
             Ok(c) => {
+                // **They must not disagree**, in either direction.
+                //
+                // This was `cert ≤ result` on the `Ord`, meaning "the
+                // certificate may prove less but never more". Two things broke
+                // that. `Ord` is not the information order — it exists to make
+                // `meet`/`join` Kleene, so it runs `Excluded < None < Certain` —
+                // and, more substantially, the certificate can now be *more*
+                // informative than the evaluator: `Told{holds:false}` settles
+                // both bits, while a scan suppresses its meet side whenever the
+                // enumeration is not exact. A correct certificate was failing a
+                // check written when the evaluator was always the stronger of
+                // the two.
+                //
+                // What matters for the de Bruijn criterion is that they never
+                // *conflict*: a certificate concluding `Supported` for a result
+                // that is `Refuted` is the failure this exists to catch, and
+                // one settling a bit the evaluator left open is not.
+                let compatible =
+                    |c: Bound, r: Bound| !c.is_settled() || !r.is_settled() || c == r;
                 c.node == node
-                    && c.support <= result.support
-                    && c.refutation <= result.refutation
+                    && compatible(c.support, result.support)
+                    && compatible(c.refutation, result.refutation)
                     && c.grounding == result.grounding
                     // A certificate claiming a conclusion is *observed* does not
                     // justify a result that is defeasible, and one claiming a
@@ -910,8 +944,8 @@ pub(crate) fn loop_parity(g: &ObjectGraph, node: ObjectId) -> Option<bool> {
 fn base(node: ObjectId, holds: bool, determinacy: Determinacy) -> Checked {
     Checked {
         node,
-        support: if holds { Bound::Certain } else { Bound::None },
-        refutation: if holds { Bound::None } else { Bound::Certain },
+        support: if holds { Bound::Certain } else { Bound::Excluded },
+        refutation: if holds { Bound::Excluded } else { Bound::Certain },
         grounding: Grounding::Grounded,
         derivation: Derivation::Observed,
         determinacy,

@@ -178,9 +178,111 @@ pub fn run() -> Report {
             accessibility_daemons(),
             chromium(),
             ocr_models(),
+            waydroid(),
+            binder(),
+            adb(),
         ],
     }
 }
+
+/// Waydroid itself: installed, initialised, and its container service running.
+///
+/// Degraded rather than a blocker throughout, because a machine with no
+/// interest in Android is not broken.
+fn waydroid() -> Check {
+    if which("waydroid").is_none() {
+        return Check::bad(
+            "waydroid",
+            Severity::Degraded,
+            "waydroid is not installed, so the Android stage is unavailable",
+            "Install it (Arch: `pacman -S waydroid`), then `waydroid init`.",
+        );
+    }
+    if !Path::new("/var/lib/waydroid/images/system.img").exists() {
+        return Check::bad(
+            "waydroid",
+            Severity::Degraded,
+            "waydroid is installed but has no system image",
+            "Run `sudo waydroid init` to download and provision one.",
+        );
+    }
+
+    // The container service is what actually starts and stops the LXC
+    // container, and it is a *system* service. Without it every session start
+    // fails with "container failed to start", which reads as an image or kernel
+    // fault rather than a service that is not running.
+    let active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "waydroid-container"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !active {
+        return Check::bad(
+            "waydroid",
+            Severity::Degraded,
+            "the waydroid-container service is not running",
+            "sudo systemctl start waydroid-container",
+        );
+    }
+    Check::ok("waydroid", "installed, provisioned, and its container service is up")
+}
+
+/// Binder, in whichever of its three forms this kernel provides.
+///
+/// A check that knows only one of them reports a working system as broken —
+/// which this one did, until it was pointed at a machine using the Rust binder
+/// implementation, where there is no module to find and no `/dev/binder` node
+/// until a container asks for one.
+fn binder() -> Check {
+    if which("waydroid").is_none() {
+        return Check::ok("binder", "not needed — waydroid is not installed");
+    }
+
+    let modules = std::fs::read_to_string("/proc/modules").unwrap_or_default();
+    let filesystems = std::fs::read_to_string("/proc/filesystems").unwrap_or_default();
+
+    let how = if Path::new("/dev/binderfs").exists() {
+        Some("binderfs is mounted")
+    } else if filesystems.contains("binder") {
+        Some("the kernel supports binderfs")
+    } else if modules.contains("binder_linux") {
+        Some("the binder_linux module is loaded")
+    } else if Path::new("/dev/binder").exists() {
+        Some("a /dev/binder node exists")
+    } else {
+        None
+    };
+
+    match how {
+        Some(how) => Check::ok("binder", how),
+        None => Check::bad(
+            "binder",
+            Severity::Degraded,
+            "no binder support — an Android container cannot start",
+            "Use a kernel with CONFIG_ANDROID_BINDERFS (most distribution kernels have it), \
+             or install the binder_linux DKMS module.",
+        ),
+    }
+}
+
+/// adb, which is how everything above rung 3 reaches into the container.
+fn adb() -> Check {
+    if which("waydroid").is_none() {
+        return Check::ok("adb", "not needed — waydroid is not installed");
+    }
+    match which("adb") {
+        Some(path) => Check::ok("adb", path),
+        None => Check::bad(
+            "adb",
+            Severity::Degraded,
+            "adb is missing, so Android is limited to the pixel rung",
+            "Install the platform tools (Arch: `pacman -S android-tools`). Without adb there \
+             are no intents, no `dumpsys`, and no way to install the accessibility bridge — \
+             so no rung 0 and no rung 2 on Android.",
+        ),
+    }
+}
+
 
 /// `$XDG_RUNTIME_DIR`, and whether it is private.
 ///

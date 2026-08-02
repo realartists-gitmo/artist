@@ -470,6 +470,8 @@ impl Surface for PtySurface {
             other @ (Step::Navigate { .. }
             | Step::Back { .. }
             | Step::Forward { .. }
+            | Step::LongPress(_)
+            | Step::Swipe { .. }
             | Step::Invoke { .. }) => Err(StepError::Backend(format!(
                 "a terminal has no {:?} — drive it with key, type and scroll",
                 other.action()

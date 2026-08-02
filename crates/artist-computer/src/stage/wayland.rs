@@ -373,7 +373,7 @@ impl CompositorHandler for StageState {
         // `on_commit_buffer_handler` takes the buffer assignment as it imports
         // the texture, so asking afterwards makes every commit look like a
         // state-only commit with nothing to redraw.
-        let regions = surface_damage(surface, self.full_screen());
+        let (regions, precise) = surface_damage(surface, self.full_screen());
 
         // Required before any renderer touches the buffer; without it the
         // surface has no usable texture and rendering silently draws nothing.
@@ -398,7 +398,11 @@ impl CompositorHandler for StageState {
         // classifies by rectangle, and one rectangle the size of the display is
         // indistinguishable from a dialog opening.
         for region in regions {
-            let _ = self.damage.send(Damage { window, region });
+            let _ = self.damage.send(Damage {
+                window,
+                region,
+                precise,
+            });
         }
     }
 }
@@ -601,7 +605,7 @@ impl ClientData for StageClientState {
 ///   "assume everything", so it does fall back to the whole stage. Reporting
 ///   nothing there would let a settle predicate conclude the screen had gone
 ///   quiet while it was in fact fully repainting.
-fn surface_damage(surface: &wl_surface::WlSurface, full_screen: Rect) -> Vec<Rect> {
+fn surface_damage(surface: &wl_surface::WlSurface, full_screen: Rect) -> (Vec<Rect>, bool) {
     use smithay::wayland::compositor::{BufferAssignment, Damage as SurfaceDamage, with_states};
 
     let (rects, painted) = with_states(surface, |states| {
@@ -633,12 +637,16 @@ fn surface_damage(surface: &wl_surface::WlSurface, full_screen: Rect) -> Vec<Rec
     });
 
     if !rects.is_empty() {
-        return rects;
+        return (rects, true);
     }
+    // A new buffer with no damage attached. The client is entitled to do this —
+    // it means "assume all of it" — so the whole surface is the honest bound,
+    // reported as imprecise so nothing downstream mistakes it for a located
+    // change.
     if painted {
-        return vec![full_screen];
+        return (vec![full_screen], false);
     }
-    Vec::new()
+    (Vec::new(), true)
 }
 
 /// Send `wl_surface.frame` callbacks for a surface tree.
