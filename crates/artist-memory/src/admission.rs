@@ -133,7 +133,6 @@ mod tests {
         ObjectId(n)
     }
 
-
     #[test]
     fn nothing_stored_means_insert() {
         assert_eq!(admit("Adam prefers tabs", &[]), Admission::Insert);
@@ -152,7 +151,10 @@ mod tests {
     /// suppressed is the one that reverses a stored belief.
     #[test]
     fn a_negation_revises_rather_than_duplicating() {
-        let stored = [(id(7), "always use tabs for indentation in this repo".to_owned())];
+        let stored = [(
+            id(7),
+            "always use tabs for indentation in this repo".to_owned(),
+        )];
         assert_eq!(
             admit("never use tabs for indentation in this repo", &stored),
             Admission::Revises(id(7))
@@ -163,7 +165,10 @@ mod tests {
     /// negation word — which is why this is not a vocabulary test.
     #[test]
     fn a_changed_value_also_revises() {
-        let stored = [(id(3), "embeddings are produced by rten running CodeRankEmbed".to_owned())];
+        let stored = [(
+            id(3),
+            "embeddings are produced by rten running CodeRankEmbed".to_owned(),
+        )];
         assert_eq!(
             admit("embeddings are produced by rten running bge-small", &stored),
             Admission::Revises(id(3))
@@ -174,7 +179,10 @@ mod tests {
     fn the_closest_candidate_is_the_one_revised() {
         let stored = [
             (id(1), "the canvas server hot-reloads React apps".to_owned()),
-            (id(2), "always use tabs for indentation in this repo".to_owned()),
+            (
+                id(2),
+                "always use tabs for indentation in this repo".to_owned(),
+            ),
         ];
         assert_eq!(
             admit("never use tabs for indentation in this repo", &stored),
@@ -188,7 +196,10 @@ mod tests {
     fn an_exact_match_beats_a_similar_one() {
         let stored = [
             (id(1), "always use tabs for indentation".to_owned()),
-            (id(2), "Always use tabs for indentation in this repo.".to_owned()),
+            (
+                id(2),
+                "Always use tabs for indentation in this repo.".to_owned(),
+            ),
         ];
         assert_eq!(
             admit("always use tabs for indentation in this repo", &stored),
@@ -221,7 +232,10 @@ mod tests {
                 "embeddings are produced by rten running CodeRankEmbed",
                 "embeddings are produced by rten running bge-small",
             ),
-            ("Adam prefers tabs over spaces", "Adam prefers spaces over tabs"),
+            (
+                "Adam prefers tabs over spaces",
+                "Adam prefers spaces over tabs",
+            ),
             (
                 "stage all work on the Gortnite branch",
                 "stage all work on the main branch",

@@ -70,10 +70,7 @@ fn extern_block_surfaced_as_namespace() {
         s.contains("namespace extern \"C\""),
         "extern block not surfaced as namespace:\n{s}"
     );
-    assert!(
-        s.contains("pub fn libc_strlen"),
-        "foreign fn missing:\n{s}"
-    );
+    assert!(s.contains("pub fn libc_strlen"), "foreign fn missing:\n{s}");
     assert!(
         s.contains("pub static LIBC_ERRNO"),
         "foreign static missing:\n{s}"

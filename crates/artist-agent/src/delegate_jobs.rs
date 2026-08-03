@@ -136,11 +136,7 @@ impl DelegateJobs {
     /// Terminates on an abandoned job as well as a finished one: a record left
     /// running by a process that died is resolved by the registry, so this
     /// cannot hang on work that will never complete.
-    async fn wait_foreign(
-        &self,
-        id: &str,
-        budget: std::time::Duration,
-    ) -> Result<String, String> {
+    async fn wait_foreign(&self, id: &str, budget: std::time::Duration) -> Result<String, String> {
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             let job = self
@@ -505,6 +501,12 @@ mod tests {
         };
         let error = theirs.cancel(&id).await.unwrap_err();
         assert!(error.contains("another artist process"), "{error}");
-        assert!(theirs.cancel("a-nope").await.unwrap_err().contains("unknown"));
+        assert!(
+            theirs
+                .cancel("a-nope")
+                .await
+                .unwrap_err()
+                .contains("unknown")
+        );
     }
 }

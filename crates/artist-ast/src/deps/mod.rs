@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use crate::deps::extract::extract;
 use crate::deps::manifest::detect_aliases;
-use crate::deps::resolver::{build_suffix_index, resolve, ResolveCtx};
+use crate::deps::resolver::{ResolveCtx, build_suffix_index, resolve};
 
 /// Build a `DepGraph` from scratch by walking `root`, parsing every
 /// supported file, and resolving each import.
@@ -39,12 +39,10 @@ use crate::deps::resolver::{build_suffix_index, resolve, ResolveCtx};
 /// runs in parallel.
 pub fn build_graph(root: &Path) -> Result<DepGraph, DepError> {
     let start = Instant::now();
-    let root_canon = root
-        .canonicalize()
-        .map_err(|e| DepError::Io {
-            path: root.to_path_buf(),
-            source: e,
-        })?;
+    let root_canon = root.canonicalize().map_err(|e| DepError::Io {
+        path: root.to_path_buf(),
+        source: e,
+    })?;
 
     let aliases = detect_aliases(&root_canon);
     let idx = build_suffix_index(&root_canon);

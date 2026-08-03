@@ -443,11 +443,16 @@ impl Surface for PtySurface {
         }))))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        _secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         match step {
             Step::Key(press) => self.send(&key_bytes(press.chord())?),
             Step::Type { text, .. } => self.send(text.as_bytes()),
-            Step::Click(target) => Err(StepError::Unsupported {
+            Step::Click { target, .. } => Err(StepError::Unsupported {
                 anchor: target.anchor.clone(),
                 role: node
                     .map(|node| node.role.label().to_owned())
@@ -455,6 +460,16 @@ impl Surface for PtySurface {
                 name: node.map(|node| node.name.clone()).unwrap_or_default(),
                 action: "click",
             }),
+            // A horizontal wheel has no terminal equivalent: there is no escape
+            // sequence for it, and a curses application that scrolls sideways
+            // does it with its own keybinding. Saying so beats paging the
+            // screen vertically and reporting success.
+            Step::Scroll {
+                axis: crate::program::Axis::Horizontal,
+                ..
+            } => Err(StepError::Backend(
+                "a terminal has no horizontal scroll — use the application's own key for it".into(),
+            )),
             Step::Scroll { amount, .. } => {
                 let key = if *amount >= 0 { "PageDown" } else { "PageUp" };
                 let repeats = amount.unsigned_abs().clamp(1, 20);
@@ -464,6 +479,15 @@ impl Surface for PtySurface {
                 }
                 Ok(())
             }
+            // A terminal is a byte stream: a key is bytes, and a key held down
+            // is the same bytes repeating. There is no way to express "down but
+            // not up", so this refuses rather than sending the tap that a held
+            // key is not.
+            other @ (Step::KeyDown(_) | Step::KeyUp(_)) => Err(StepError::Backend(format!(
+                "a terminal cannot {:?} — it receives bytes, and a held key is not one. \
+                 Use `key` for the chord itself.",
+                other.action()
+            ))),
             // A terminal has no browser history and no per-element verbs. These
             // are routing mistakes rather than gaps, so they say what a terminal
             // does understand instead of failing bare.
@@ -472,11 +496,21 @@ impl Surface for PtySurface {
             | Step::Forward { .. }
             | Step::LongPress(_)
             | Step::Swipe { .. }
+            | Step::Pinch { .. }
+            | Step::Hover(_)
+            | Step::Press { .. }
+            | Step::Release { .. }
+            | Step::Drag { .. }
+            | Step::SetClipboard { .. }
+            | Step::GetClipboard { .. }
+            | Step::Upload { .. }
+            | Step::Dialog { .. }
             | Step::Invoke { .. }) => Err(StepError::Backend(format!(
                 "a terminal has no {:?} — drive it with key, type and scroll",
                 other.action()
             ))),
         }
+        .map(|()| None)
     }
 }
 
@@ -589,10 +623,11 @@ mod tests {
 
         let error = surface
             .apply(
-                &Step::Click(crate::program::Target {
+                &Step::click(crate::program::Target {
                     anchor: "kv7".into(),
                     label: Some("row".into()),
                 }),
+                None,
                 None,
             )
             .await

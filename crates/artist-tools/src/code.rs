@@ -299,7 +299,11 @@ impl PortableTool for CodeSurfaceTool {
             } else {
                 String::new()
             };
-            out.push_str(&format!("{name}  {} ({}){chain}\n", entry.kind, at.render()));
+            out.push_str(&format!(
+                "{name}  {} ({}){chain}\n",
+                entry.kind,
+                at.render()
+            ));
         }
         if out.trim().is_empty() {
             out.push_str("(no public surface found)\n");
@@ -713,7 +717,10 @@ pub struct AstQueryArgs {
 /// `Pattern::try_new` accepts `fn (` and returns a pattern rooted at an ERROR
 /// node, which matches nothing. Taking that as a successful compile is what
 /// made a typo indistinguishable from an honest miss.
-fn compile_usable(pattern: &str, lang: artist_ast::run::SupportLang) -> Option<artist_ast::run::Pattern> {
+fn compile_usable(
+    pattern: &str,
+    lang: artist_ast::run::SupportLang,
+) -> Option<artist_ast::run::Pattern> {
     let compiled = artist_ast::run::compile(pattern, lang).ok()?;
     (!artist_ast::run::pattern_is_malformed(&compiled)).then_some(compiled)
 }
@@ -739,7 +746,9 @@ fn empty_search(
             Some(name) => format!(
                 "nothing to search: no {name} file is in scope. Widen path or glob, or omit lang."
             ),
-            None => "nothing to search: no file in scope has a language with an adapter.".to_owned(),
+            None => {
+                "nothing to search: no file in scope has a language with an adapter.".to_owned()
+            }
         };
     }
     if parsed.is_empty() {

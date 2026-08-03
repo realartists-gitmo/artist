@@ -11,7 +11,7 @@
 //! already use, and is sub-millisecond per file).
 
 use crate::calls::graph::{CallGraph, CallKindCompat, CallTarget, CallableMeta, Qn, TypeMeta};
-use crate::calls::pass::{file_rel, qn_from, FilePass, RawEdge};
+use crate::calls::pass::{FilePass, RawEdge, file_rel, qn_from};
 use crate::calls::resolve;
 use crate::core::{CallSite, Declaration, DeclarationKind};
 use crate::deps::DepGraph;
@@ -134,9 +134,9 @@ pub fn extract_file(root: &Path, file: &Path) -> Option<FilePass> {
         &mut types,
     );
 
-     Some(FilePass {
-         file: file.to_path_buf(),
-         defined,
+    Some(FilePass {
+        file: file.to_path_buf(),
+        defined,
         callable_locations,
         imports: parse.imports,
         raw_edges,
@@ -180,10 +180,7 @@ fn walk(
             types.push((
                 qn,
                 TypeMeta {
-                    kind: d
-                        .native_kind
-                        .clone()
-                        .unwrap_or_else(|| d.kind.to_string()),
+                    kind: d.native_kind.clone().unwrap_or_else(|| d.kind.to_string()),
                     file: PathBuf::from(rel_file),
                     line: d.start_line as u32,
                     bases: d.bases.clone(),

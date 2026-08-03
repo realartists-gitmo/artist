@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -991,10 +991,7 @@ fn _call_site_from_call_scala<'a, D: Doc>(
     })
 }
 
-fn _call_site_from_instance<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
+fn _call_site_from_instance<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     // `new T(...)` — find the first identifier-like child after `new`.
     for c in node.children() {
         if !c.is_named() {
@@ -1029,15 +1026,15 @@ fn _split_callee_scala<'a, D: Doc>(
     let kind = node.kind();
     let kind: &str = kind.as_ref();
     match kind {
-        "identifier" | "operator_identifier" => {
-            Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None))
-        }
+        "identifier" | "operator_identifier" => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
         "field_expression" => {
             let value = node.field("value");
             let field = node.field("field")?;
             let name = String::from_utf8_lossy(&src[field.range()]).to_string();
-            let recv = value
-                .map(|v| collapse_ws(&String::from_utf8_lossy(&src[v.range()])));
+            let recv = value.map(|v| collapse_ws(&String::from_utf8_lossy(&src[v.range()])));
             Some((name, recv))
         }
         "generic_function" => {

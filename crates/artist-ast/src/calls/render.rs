@@ -36,8 +36,11 @@ pub fn render_callers_text_extended(
     type_groups: &[crate::calls::cli::TypeCallersGroup],
 ) -> String {
     let mut out = String::new();
-    let total: usize =
-        hits.len() + type_groups.iter().map(|g| g.implementations.len() + g.constructions.len()).sum::<usize>();
+    let total: usize = hits.len()
+        + type_groups
+            .iter()
+            .map(|g| g.implementations.len() + g.constructions.len())
+            .sum::<usize>();
     out.push_str(&header_line("caller", total, target));
 
     for h in hits {
@@ -250,12 +253,7 @@ fn colorize_qn(qn: &Qn) -> String {
     if let Some(idx) = s.rfind("::") {
         let head = &s[..idx];
         let tail = &s[idx + 2..];
-        format!(
-            "{}{}{}",
-            head.dimmed(),
-            "::".dimmed(),
-            tail.yellow()
-        )
+        format!("{}{}{}", head.dimmed(), "::".dimmed(), tail.yellow())
     } else {
         s.yellow().to_string()
     }

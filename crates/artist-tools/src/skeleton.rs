@@ -107,7 +107,10 @@ fn relevance(focus: &str, unit: &Unit) -> usize {
     let haystack = format!(
         "{} {}",
         unit.name.to_ascii_lowercase(),
-        unit.role.as_deref().unwrap_or_default().to_ascii_lowercase()
+        unit.role
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
     );
     terms
         .iter()
@@ -204,8 +207,10 @@ fn discover_units(root: &Path) -> Vec<(String, PathBuf)> {
                 .filter(|e| e.file_type().is_ok_and(|k| k.is_dir()))
                 .filter_map(|e| {
                     let name = e.file_name().to_str()?.to_owned();
-                    (!name.starts_with('.') && !is_supporting(Path::new(&name)) && holds_source(&e.path()))
-                        .then_some((name, e.path()))
+                    (!name.starts_with('.')
+                        && !is_supporting(Path::new(&name))
+                        && holds_source(&e.path()))
+                    .then_some((name, e.path()))
                 })
                 .collect();
             names.sort();
@@ -462,7 +467,8 @@ fn dev_only(units: &[(String, PathBuf)]) -> BTreeSet<(String, String)> {
                 }
                 if section.ends_with("dev-dependencies") {
                     dev.insert(import_key(key));
-                } else if section.ends_with("dependencies") || section.ends_with("build-dependencies")
+                } else if section.ends_with("dependencies")
+                    || section.ends_with("build-dependencies")
                 {
                     normal.insert(import_key(key));
                 }
@@ -471,10 +477,7 @@ fn dev_only(units: &[(String, PathBuf)]) -> BTreeSet<(String, String)> {
         if let Ok(text) = std::fs::read_to_string(root.join("package.json"))
             && let Ok(wire) = serde_json::from_str::<serde_json::Value>(&text)
         {
-            for (field, into) in [
-                ("dependencies", &mut normal),
-                ("devDependencies", &mut dev),
-            ] {
+            for (field, into) in [("dependencies", &mut normal), ("devDependencies", &mut dev)] {
                 if let Some(map) = wire.get(field).and_then(serde_json::Value::as_object) {
                     into.extend(map.keys().map(|key| import_key(key)));
                 }
@@ -918,7 +921,10 @@ fn modules_of(root: &Path) -> Vec<(String, Option<String>)> {
                     .iter()
                     .find_map(|entry| std::fs::read_to_string(path.join(entry)).ok())
                     .and_then(|text| first_doc_line(&text))
-            } else if path.extension().is_some_and(|ext| ext != "toml" && ext != "md") {
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext != "toml" && ext != "md")
+            {
                 std::fs::read_to_string(&path)
                     .ok()
                     .and_then(|text| first_doc_line(&text))
@@ -1475,7 +1481,11 @@ impl Baseline {
             note.push_str(&format!("\n {dependents} unit(s) break if it changes"));
         }
         if !uses.is_empty() {
-            let shown: Vec<&str> = uses.iter().map(String::as_str).take(REGION_USES_SHOWN).collect();
+            let shown: Vec<&str> = uses
+                .iter()
+                .map(String::as_str)
+                .take(REGION_USES_SHOWN)
+                .collect();
             let more = uses.len().saturating_sub(shown.len());
             note.push_str(&format!(
                 "{} it uses {}{}",
@@ -1618,8 +1628,16 @@ impl Baseline {
         let empty = BTreeSet::new();
         for (from, current) in &self.edges {
             let known = previous.get(from).unwrap_or(&empty);
-            added.extend(current.difference(known).map(|to| (from.clone(), to.clone())));
-            removed.extend(known.difference(current).map(|to| (from.clone(), to.clone())));
+            added.extend(
+                current
+                    .difference(known)
+                    .map(|to| (from.clone(), to.clone())),
+            );
+            removed.extend(
+                known
+                    .difference(current)
+                    .map(|to| (from.clone(), to.clone())),
+            );
         }
         for (from, known) in &previous {
             if !self.edges.contains_key(from) {
@@ -1747,7 +1765,12 @@ mod focus_tests {
 
     fn many_units(count: usize) -> Vec<(String, PathBuf)> {
         (0..count)
-            .map(|i| (format!("unit{i:02}"), PathBuf::from(format!("/p/unit{i:02}"))))
+            .map(|i| {
+                (
+                    format!("unit{i:02}"),
+                    PathBuf::from(format!("/p/unit{i:02}")),
+                )
+            })
             .collect()
     }
 
@@ -1787,10 +1810,7 @@ mod focus_tests {
     #[test]
     fn the_request_never_reorders_the_map() {
         let units = many_units(4);
-        let edges = BTreeMap::from([(
-            "unit03".to_owned(),
-            BTreeSet::from(["unit00".to_owned()]),
-        )]);
+        let edges = BTreeMap::from([("unit03".to_owned(), BTreeSet::from(["unit00".to_owned()]))]);
 
         let blind = assemble(units.clone(), &edges, DEFAULT_BUDGET, "");
         let asked = assemble(units, &edges, DEFAULT_BUDGET, "unit03 unit03 unit03");
@@ -1805,7 +1825,12 @@ mod focus_tests {
         let units = many_units(6);
         let edges = BTreeMap::new();
         let blind = assemble(units.clone(), &edges, DEFAULT_BUDGET, "");
-        let asked = assemble(units, &edges, DEFAULT_BUDGET, "fix the flaky deployment pipeline");
+        let asked = assemble(
+            units,
+            &edges,
+            DEFAULT_BUDGET,
+            "fix the flaky deployment pipeline",
+        );
         assert_eq!(blind.render(), asked.render());
     }
 
@@ -1848,7 +1873,11 @@ mod coupling_tests {
     #[test]
     fn units_that_always_move_together_without_importing_are_reported() {
         let found = hidden_coupling(
-            &history(&[&["client", "server"], &["client", "server"], &["client", "server"]]),
+            &history(&[
+                &["client", "server"],
+                &["client", "server"],
+                &["client", "server"],
+            ]),
             &BTreeMap::new(),
         );
         assert_eq!(found.len(), 1, "{found:?}");
@@ -1862,7 +1891,11 @@ mod coupling_tests {
     #[test]
     fn a_connected_pair_is_not_hidden_coupling() {
         let found = hidden_coupling(
-            &history(&[&["client", "server"], &["client", "server"], &["client", "server"]]),
+            &history(&[
+                &["client", "server"],
+                &["client", "server"],
+                &["client", "server"],
+            ]),
             &edge("client", "server"),
         );
         assert!(found.is_empty(), "{found:?}");

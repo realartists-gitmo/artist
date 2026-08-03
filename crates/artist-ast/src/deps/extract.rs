@@ -374,8 +374,7 @@ fn strip_quotes(s: &str) -> String {
     // ends_with against itself, but `t[1..t.len() - 1]` would panic on
     // `1..0`. Require a real pair (>= 2 bytes) before stripping.
     if t.len() >= 2
-        && ((t.starts_with('"') && t.ends_with('"'))
-            || (t.starts_with('\'') && t.ends_with('\'')))
+        && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
     {
         t[1..t.len() - 1].to_string()
     } else {
@@ -581,7 +580,11 @@ fn _walk_csharp<'a, D: Doc>(node: &Node<'a, D>, out: &mut Vec<RawImport>) {
         if kind == "using_directive" {
             let line = (c.start_pos().line() + 1) as u32;
             let stmt = c.text().into_owned();
-            let body = stmt.trim_start_matches("using").trim_end_matches(';').trim().to_string();
+            let body = stmt
+                .trim_start_matches("using")
+                .trim_end_matches(';')
+                .trim()
+                .to_string();
             let is_static = body.starts_with("static ");
             let rest = body.trim_start_matches("static ").trim().to_string();
 
@@ -614,7 +617,10 @@ fn _walk_csharp<'a, D: Doc>(node: &Node<'a, D>, out: &mut Vec<RawImport>) {
                 local_name: None,
                 raw_path: Some(dotted),
             });
-        } else if matches!(kind, "namespace_declaration" | "file_scoped_namespace_declaration") {
+        } else if matches!(
+            kind,
+            "namespace_declaration" | "file_scoped_namespace_declaration"
+        ) {
             // Recurse into namespace bodies; usings can live inside.
             _walk_csharp(&c, out);
         }
@@ -740,7 +746,11 @@ fn consume_cpp_include<'a, D: Doc>(node: &Node<'a, D>, out: &mut Vec<RawImport>)
             // `#include <vector>` — system header. Emit so it shows up in
             // external listings; the resolver won't find it inside the project.
             let raw = sub.text().into_owned();
-            let inner = raw.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+            let inner = raw
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string();
             if inner.is_empty() {
                 continue;
             }
@@ -835,7 +845,13 @@ fn consume_php_use<'a, D: Doc>(node: &Node<'a, D>, out: &mut Vec<RawImport>) {
                 let ik = inner.kind();
                 let ik = ik.as_ref();
                 if (ik == "qualified_name" || ik == "namespace_name") && prefix.is_none() {
-                    prefix = Some(inner.text().into_owned().trim_start_matches('\\').to_string());
+                    prefix = Some(
+                        inner
+                            .text()
+                            .into_owned()
+                            .trim_start_matches('\\')
+                            .to_string(),
+                    );
                 } else if ik == "namespace_use_group_clause" || ik == "namespace_use_clause" {
                     let text = inner.text().into_owned();
                     let (item, alias) = match text.split_once(" as ") {
@@ -910,12 +926,7 @@ fn _php_extract_string_arg<'a, D: Doc>(node: &Node<'a, D>) -> Option<String> {
     let k = k.as_ref();
     if k == "string" || k == "encapsed_string" {
         let raw = node.text().into_owned();
-        return Some(
-            raw.trim()
-                .trim_matches('\'')
-                .trim_matches('"')
-                .to_string(),
-        );
+        return Some(raw.trim().trim_matches('\'').trim_matches('"').to_string());
     }
     if k == "parenthesized_expression" {
         for inner in node.children() {
@@ -990,11 +1001,7 @@ fn consume_ruby_call<'a, D: Doc>(node: &Node<'a, D>, out: &mut Vec<RawImport>) {
         return;
     }
     let raw = path_arg.text().into_owned();
-    let path = raw
-        .trim()
-        .trim_matches('\'')
-        .trim_matches('"')
-        .to_string();
+    let path = raw.trim().trim_matches('\'').trim_matches('"').to_string();
     if path.is_empty() {
         return;
     }

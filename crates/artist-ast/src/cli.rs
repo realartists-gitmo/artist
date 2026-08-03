@@ -485,8 +485,8 @@ enum Commands {
     },
 }
 pub fn run() {
-    use clap::error::ErrorKind;
     use clap::CommandFactory;
+    use clap::error::ErrorKind;
 
     // Agent-friendly arg handling: instead of dying on a typo or unknown
     // flag, print the help text so the calling agent can self-correct
@@ -898,7 +898,9 @@ pub fn run() {
             compact,
         } => {
             if *include_external {
-                eprintln!("# note: --include-external is deprecated; unresolved imports are shown by default now (use --hide-external to drop them)");
+                eprintln!(
+                    "# note: --include-external is deprecated; unresolved imports are shown by default now (use --hide-external to drop them)"
+                );
             }
             let exit =
                 crate::deps::cli::run_graph(path, *json, !(*hide_external), !(*compact), *rebuild);
@@ -930,7 +932,9 @@ pub fn run() {
             compact,
         } => {
             if *include_ambiguous {
-                eprintln!("# note: --include-ambiguous is deprecated; ambiguous callers are shown by default now (use --hide-ambiguous to drop them)");
+                eprintln!(
+                    "# note: --include-ambiguous is deprecated; ambiguous callers are shown by default now (use --hide-ambiguous to drop them)"
+                );
             }
             let resolved = compose_target(target.as_deref(), file.as_deref(), symbol.as_deref());
             let exit = crate::calls::cli::run_callers(
@@ -983,7 +987,9 @@ pub fn run() {
             compact,
         } => {
             if *external {
-                eprintln!("# note: --external is deprecated; unresolved/external callees are shown by default now (use --hide-external to drop them)");
+                eprintln!(
+                    "# note: --external is deprecated; unresolved/external callees are shown by default now (use --hide-external to drop them)"
+                );
             }
             let resolved = compose_target(target.as_deref(), file.as_deref(), symbol.as_deref());
             let exit = crate::calls::cli::run_callees(

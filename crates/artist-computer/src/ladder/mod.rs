@@ -41,6 +41,15 @@ pub struct Probe {
     /// Whether an accessibility tree with real content was found.
     pub accessible_nodes: usize,
     pub mapped: bool,
+    /// Set when this window belongs to the Android container *and* the
+    /// accessibility bridge inside it is answering.
+    ///
+    /// Both halves matter. An Android window with no bridge has no rung 2 at
+    /// all — its accessibility tree is Android's, which AT-SPI cannot see, so
+    /// `accessible_nodes` is legitimately zero and the surface belongs on
+    /// pixels. Treating "is Android" alone as rung 2 would strand every window
+    /// on a rung nothing can drive.
+    pub android_bridge: bool,
 }
 
 /// An accessibility tree smaller than this is a stub, not an attachment.
@@ -75,6 +84,17 @@ pub fn select(probe: &Probe, adapters: &adapters::AdapterSet) -> Attachment {
     }
 
     // Rung 2: a real accessibility tree.
+    //
+    // Android first, because the two are mutually exclusive rather than ranked:
+    // an Android window's tree lives inside the container and reaches us over
+    // the bridge, never over AT-SPI. Checking AT-SPI first would not find it and
+    // would drop a perfectly driveable window to pixels.
+    if probe.android_bridge {
+        return Attachment {
+            rung: Rung::Accessibility,
+            maker: "android",
+        };
+    }
     if probe.accessible_nodes >= MIN_TREE_NODES {
         return Attachment {
             rung: Rung::Accessibility,
@@ -152,6 +172,50 @@ mod tests {
             select(&probe, &adapters::AdapterSet::default()).rung,
             Rung::Accessibility
         );
+    }
+
+    #[test]
+    fn an_android_window_with_a_live_bridge_is_accessibility_rung() {
+        let probe = Probe {
+            app_id: "com.android.settings".into(),
+            android_bridge: true,
+            // Zero, as it always is for Android: AT-SPI cannot see inside the
+            // container, and that is not a reason to descend.
+            accessible_nodes: 0,
+            ..Probe::default()
+        };
+        let attachment = select(&probe, &adapters::AdapterSet::default());
+        assert_eq!(attachment.rung, Rung::Accessibility);
+        assert_eq!(attachment.maker, "android");
+    }
+
+    #[test]
+    fn an_android_window_with_no_bridge_falls_to_pixels() {
+        // The honest outcome when the accessibility service is not installed:
+        // OCR can still drive it, and claiming rung 2 would strand it.
+        let probe = Probe {
+            app_id: "com.android.settings".into(),
+            android_bridge: false,
+            ..Probe::default()
+        };
+        assert_eq!(
+            select(&probe, &adapters::AdapterSet::default()).rung,
+            Rung::Pixels
+        );
+    }
+
+    #[test]
+    fn an_adapter_still_beats_a_live_android_bridge() {
+        // Rung 0 is the top of the ladder everywhere. An intent that does the
+        // job is cheaper than walking a tree, on Android as anywhere else.
+        let set =
+            adapters_with("name = \"maps\"\nmatch_app_id = [\"com.google.android.apps.maps\"]\n");
+        let probe = Probe {
+            app_id: "com.google.android.apps.maps".into(),
+            android_bridge: true,
+            ..Probe::default()
+        };
+        assert_eq!(select(&probe, &set).rung, Rung::Programmatic);
     }
 
     #[test]

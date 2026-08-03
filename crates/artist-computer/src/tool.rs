@@ -427,9 +427,15 @@ pub struct ComputerArgs {
     command: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
+    /// Source Chromium profile to clone into the isolated stage.
+    #[serde(default)]
+    browser_profile: Option<String>,
     /// Launch into the isolated display rather than onto a terminal.
     #[serde(default)]
     gui: bool,
+    /// Where to launch: the desktop stage, or the Android container on it.
+    #[serde(default)]
+    platform: Option<String>,
     /// For `find`: what to look for.
     #[serde(default)]
     query: Option<String>,
@@ -442,6 +448,17 @@ pub struct ComputerArgs {
     /// For `attach`: a devtools websocket url on this machine.
     #[serde(default)]
     endpoint: Option<String>,
+    /// For `resize`: the new size of the display, in pixels.
+    ///
+    /// The stage has one output that every window fills, so this is what
+    /// "resize the window" means here — and it is worth having because a
+    /// responsive application shows genuinely different things at different
+    /// widths, which is otherwise reachable only by restarting with a different
+    /// `[computer] screen` setting.
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
     /// How much to report after a program runs.
     ///
     /// `delta` is the default and is right almost always. `none` exists because
@@ -477,6 +494,8 @@ Modes:
 - `watch` — open a window on the user's own screen showing the display you are working on. Use it when the user asks to see what you are doing, or when you are stuck and want them able to help. They can act in it while you keep working; you will be told when they do.
 - `zoom` — one named element at full resolution, when the text is too small to read in a screenshot.
 - `screenshot` — a picture of a surface, alongside the usual structured view. Use it only when the structured view cannot answer the question — a chart, a canvas, a rendering fault, "does this look right". It costs far more context than `observe` and you still cannot act on a coordinate.
+- `focus` — give a surface keyboard focus, when several windows are open and you want a later `key` to reach a particular one.
+- `resize` — change the size of the isolated display: `{"mode":"resize","width":1280,"height":800}`. Use it to see a responsive layout at another width. There is one screen and every window fills it, so there is no minimize, maximize or move — a window here is already the whole display.
 - `close` — release a surface.
 
 Naming things: every element is shown as `role "name" (anchor)`. Use the bare anchor token to refer to it. NEVER use screen coordinates — they are deliberately not shown, and there is no way to act on one.
@@ -495,12 +514,22 @@ When you already know what a program will do, pass `"observe":"none"` to skip th
 Steps stop at the first failure, and a guardrail can abort the whole program before ANY step runs. So put an irreversible step (delete, send, pay, confirm) in its own single-step call, after the rest has already succeeded.
 
 The steps:
-- `{"click":{"anchor":…,"label":…}}` — activate an element.
+- `{"click":{"anchor":…,"label":…}}` — activate an element. Add `"button":"right"` for a context menu or `"middle"`; `"count":2` for a double click; `"modifiers":"ctrl"` or `"ctrl+shift"` to extend or range-select.
 - `{"type":{"anchor":…,"label":…,"text":…}}` — REPLACES what is in the field. Pass `"clear":false` to append instead.
-- `{"key":"Enter"}` — send a key to whatever holds focus. When the key will activate something in particular, name it: `{"key":{"chord":"Enter","label":"Delete account"}}`. That claim is checked against the focused element, and it is what lets a guardrail see a destructive Enter coming.
-- `{"scroll":{"amount":3}}` — positive scrolls down.
+- `{"key":"Enter"}` — send a key to whatever holds focus. Function keys (`F5`), media keys (`playpause`, `volumeup`), `Insert`, `Menu` and `PrintScreen` all work. When the key will activate something in particular, name it: `{"key":{"chord":"Enter","label":"Delete account"}}`. That claim is checked against the focused element, and it is what lets a guardrail see a destructive Enter coming.
+- `{"keyDown":"shift"}` / `{"keyUp":"shift"}` — hold a key across other steps, and let it go. For a game control or a modifier held over several actions. Anything still held is released when the program ends.
+- `{"hover":{"anchor":…,"label":…}}` — put the pointer on something without pressing. For menus and controls that only appear on hover; the pointer stays there so the next step can use what it revealed.
+- `{"press":{"anchor":…,"label":…}}` / `{"release":{}}` — hold a button down and let go. For a marquee selection or a canvas stroke.
+- `{"drag":{"from":{"anchor":…,"label":…},"to":{"anchor":…,"label":…}}}` — drag one element onto another. Both are checked like any anchor. For a slider or a resize handle with nothing to drop onto, use `"direction":"right"` and an optional `"distance"` instead of `to`. Add `"pressure":0.8` to draw the stroke with a stylus instead of the pointer, which is what a drawing application reads as line width; `"tilt":[x,y]` sets the nib angle.
+- `{"scroll":{"amount":3}}` — positive scrolls down. `"axis":"horizontal"` for a wide table or a timeline, where positive is right. Name an anchor to scroll the container holding it rather than the whole surface.
+- `{"longPress":{"anchor":…,"label":…}}`, `{"swipe":{"direction":"left"}}`, `{"pinch":{"scale":2.0}}` — touch gestures. Real ones, not slow clicks: on a touch surface a held contact means something a click cannot say. `scale` above 1 zooms in.
+- `{"setClipboard":{"text":…}}` / `{"getClipboard":{}}` — the clipboard. This is how text crosses between applications, and how to enter a character the keyboard layout cannot type. `getClipboard` reports what it read in the step outcome.
+- `{"upload":{"anchor":…,"label":…,"paths":["/home/…/report.pdf"]}}` — hand files to a file input. Paths on this machine; the agent shares your home directory, so a file you just wrote can be uploaded directly.
+- `{"dialog":{"accept":true}}` — decide in ADVANCE how the next browser dialog (`confirm`, `alert`, `prompt`) is answered, then trigger it in a later step. Unarmed dialogs are dismissed automatically, because a dialog nobody answers freezes the page. Add `"text"` to answer a `prompt`.
 - `{"navigate":{"url":…}}`, `{"back":{}}`, `{"forward":{}}` — browser surfaces. Use these rather than launching a second browser.
 - `{"invoke":{"anchor":…,"label":…,"action":…}}` — run one of the verbs an element lists after its name, e.g. a tab's `close`.
+
+Not every surface has every verb. A terminal has no pointer, a page has no touch, and a refusal says which verb the surface does understand — it is a routing correction, not a dead end.
 
 Example:
 {"mode":"do","surface":"pty:1",
@@ -522,86 +551,210 @@ Example:
             "required": ["anchor"],
             "additionalProperties": false
         });
+        // The step schemas are bound separately rather than written inline.
+        // `json!` is recursive, and one literal deep enough to hold every verb
+        // exceeds the macro recursion limit — but the real reason is that the
+        // verb list is the part of this tool most likely to be edited, and a
+        // named binding per verb is where a reader looks for it.
+        let button = json!({
+            "enum": ["left", "right", "middle"],
+            "default": "left"
+        });
+        let click = json!({
+            "type": "object",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "button": {"enum": ["left", "right", "middle"], "default": "left", "description": "`right` opens a context menu."},
+                "count": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1, "description": "2 is a double click."},
+                "modifiers": {"type": "string", "description": "Held for the click, e.g. `ctrl` or `ctrl+shift`."}
+            },
+            "required": ["anchor"],
+            "additionalProperties": false
+        });
+        let press = json!({
+            "type": "object",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "button": button
+            },
+            "required": ["anchor"],
+            "additionalProperties": false
+        });
+        let release = json!({
+            "type": "object",
+            "description": "Let go wherever the pointer now is.",
+            "properties": {"button": {"enum": ["left", "right", "middle"], "default": "left"}},
+            "additionalProperties": false
+        });
+        let drag = json!({
+            "type": "object",
+            "description": "Give either `to` or `direction`, never both.",
+            "properties": {
+                "from": target,
+                "to": target,
+                "direction": {"enum": ["up", "down", "left", "right"]},
+                "distance": {"type": "integer", "minimum": 1, "description": "Pixels, for the direction form."},
+                "button": {"enum": ["left", "right", "middle"], "default": "left"},
+                "modifiers": {"type": "string"},
+                "pressure": {"type": "number", "minimum": 0, "maximum": 1, "description": "Makes this a stylus stroke instead of a pointer drag. For a drawing application, which reads it as stroke width."},
+                "tilt": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "Degrees from vertical, [x, y]. Changes nib shape, not the path."}
+            },
+            "required": ["from"],
+            "additionalProperties": false
+        });
+        let swipe = json!({
+            "type": "object",
+            "description": "Omit the anchor to swipe the surface itself.",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "direction": {"enum": ["up", "down", "left", "right"]},
+                "distance": {"type": "integer", "minimum": 1}
+            },
+            "required": ["direction"],
+            "additionalProperties": false
+        });
+        let pinch = json!({
+            "type": "object",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "scale": {"type": "number", "exclusiveMinimum": 0, "description": "Above 1 zooms in, below 1 zooms out."}
+            },
+            "required": ["scale"],
+            "additionalProperties": false
+        });
+        let upload = json!({
+            "type": "object",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Absolute paths on this machine."}
+            },
+            "required": ["anchor", "paths"],
+            "additionalProperties": false
+        });
+        let dialog = json!({
+            "type": "object",
+            "description": "Armed BEFORE the step that triggers the dialog.",
+            "properties": {
+                "accept": {"type": "boolean", "default": false},
+                "text": {"type": "string", "description": "The answer to a `prompt`."}
+            },
+            "additionalProperties": false
+        });
+        let scroll = json!({
+            "type": "object",
+            "description": "Omit the anchor to scroll the surface; name an element to scroll the container holding it.",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "amount": {"type": "integer", "description": "Positive scrolls down, or right on the horizontal axis."},
+                "axis": {"enum": ["vertical", "horizontal"], "default": "vertical"}
+            },
+            "required": ["amount"],
+            "additionalProperties": false
+        });
+        let type_step = json!({
+            "type": "object",
+            "properties": {
+                "anchor": {"type": "string"},
+                "label": {"type": "string"},
+                "text": {"type": "string"},
+                "clear": {"type": "boolean", "default": true, "description": "Replace the field's contents. Set false to append."}
+            },
+            "required": ["anchor", "text"],
+            "additionalProperties": false
+        });
+        let key = json!({
+            "description": "A key or chord, e.g. `Enter`, `ctrl+c`, `Down`, `F5`, `playpause`. Give the object form to name what the key will activate.",
+            "oneOf": [
+                {"type": "string"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "chord": {"type": "string"},
+                        "label": {"type": "string", "description": "The focused element's name, checked before the key is sent."}
+                    },
+                    "required": ["chord", "label"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        // Every verb the backends implement appears here. An unlisted verb is
+        // unreachable: `additionalProperties: false` rejects it before it is
+        // ever parsed, which is how `longPress` and `swipe` stayed invisible
+        // while being fully built underneath.
+        let step = json!({
+            "type": "object",
+            "properties": {
+                "click": click,
+                "type": type_step,
+                "key": key,
+                "keyDown": {"type": "string", "description": "Hold a key. Release it with `keyUp`."},
+                "keyUp": {"type": "string"},
+                "hover": target,
+                "press": press,
+                "release": release,
+                "drag": drag,
+                "longPress": target,
+                "swipe": swipe,
+                "pinch": pinch,
+                "scroll": scroll,
+                "setClipboard": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": false
+                },
+                "getClipboard": {"type": "object", "additionalProperties": false},
+                "upload": upload,
+                "dialog": dialog,
+                "navigate": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"],
+                    "additionalProperties": false
+                },
+                "back": {"type": "object", "additionalProperties": false},
+                "forward": {"type": "object", "additionalProperties": false},
+                "invoke": {
+                    "type": "object",
+                    "description": "Run one of the verbs an element lists after its name.",
+                    "properties": {
+                        "anchor": {"type": "string"},
+                        "label": {"type": "string"},
+                        "action": {"type": "string"}
+                    },
+                    "required": ["anchor", "action"],
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        });
         json!({
             "type": "object",
             "properties": {
-                "mode": {"enum": ["surfaces", "launch", "attach", "watch", "observe", "find", "extract", "do", "zoom", "screenshot", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
+                "mode": {"enum": ["surfaces", "launch", "attach", "watch", "observe", "find", "extract", "do", "zoom", "screenshot", "focus", "resize", "close"], "description": "Defaults to `do` when steps are given, otherwise `surfaces`."},
                 "surface": {"type": "string", "description": "Surface id, from `surfaces`."},
                 "command": {"type": "string", "description": "For `launch`: the command to run, e.g. `htop`, `vim notes.md`, or `chromium https://example.com`."},
                 "cwd": {"type": "string", "description": "For `launch`: the working directory."},
                 "gui": {"type": "boolean", "default": false, "description": "For `launch`: run the program on the isolated display instead of a terminal. Use this for browsers and desktop applications."},
+                "platform": {"enum": ["linux", "android"], "default": "linux", "description": "For `launch`: where to run it. `android` starts the Android container on the display and treats `command` as a package id, e.g. `com.android.settings`. The first Android launch boots the container, which takes a while; there is one container per machine, so a second agent asking for it is refused."},
                 "full": {"type": "boolean", "default": false, "description": "Return the whole surface rather than a delta."},
                 "query": {"type": "string", "description": "For `find`: the element name to search for."},
                 "anchor": {"type": "string", "description": "For `zoom`: the element to look at closely."},
                 "fields": {"type": "array", "items": {"type": "string"}, "description": "For `extract`: the labels to read, e.g. [\"Total\", \"Delivery date\"]. Answers arrive without the surface."},
                 "endpoint": {"type": "string", "description": "For `attach`: the debugging port the user's browser was started with, e.g. \"9222\". A full ws:// devtools url also works."},
+                "width": {"type": "integer", "minimum": 1, "description": "For `resize`: the display width in pixels."},
+                "height": {"type": "integer", "minimum": 1, "description": "For `resize`: the display height in pixels."},
                 "observe": {"enum": ["delta", "none"], "default": "delta", "description": "For `do`: how much to report afterwards. `none` skips the observation when you already know what the program did — a failure still reports in full."},
                 "steps": {
                     "type": "array",
                     "description": "Actions, run in order, stopping at the first failure.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "click": target,
-                            "type": {
-                                "type": "object",
-                                "properties": {
-                                    "anchor": {"type": "string"},
-                                    "label": {"type": "string"},
-                                    "text": {"type": "string"},
-                                    "clear": {"type": "boolean", "default": true, "description": "Replace the field's contents. Set false to append."}
-                                },
-                                "required": ["anchor", "text"],
-                                "additionalProperties": false
-                            },
-                            "key": {
-                                "description": "A key or chord, e.g. `Enter`, `ctrl+c`, `Down`. Give the object form to name what the key will activate.",
-                                "oneOf": [
-                                    {"type": "string"},
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "chord": {"type": "string"},
-                                            "label": {"type": "string", "description": "The focused element's name, checked before the key is sent."}
-                                        },
-                                        "required": ["chord", "label"],
-                                        "additionalProperties": false
-                                    }
-                                ]
-                            },
-                            "scroll": {
-                                "type": "object",
-                                "description": "Omit the anchor to scroll the surface; name an element to scroll the container holding it.",
-                                "properties": {
-                                    "anchor": {"type": "string"},
-                                    "label": {"type": "string"},
-                                    "amount": {"type": "integer", "description": "Positive scrolls down."}
-                                },
-                                "required": ["amount"],
-                                "additionalProperties": false
-                            },
-                            "navigate": {
-                                "type": "object",
-                                "properties": {"url": {"type": "string"}},
-                                "required": ["url"],
-                                "additionalProperties": false
-                            },
-                            "back": {"type": "object", "additionalProperties": false},
-                            "forward": {"type": "object", "additionalProperties": false},
-                            "invoke": {
-                                "type": "object",
-                                "description": "Run one of the verbs an element lists after its name.",
-                                "properties": {
-                                    "anchor": {"type": "string"},
-                                    "label": {"type": "string"},
-                                    "action": {"type": "string"}
-                                },
-                                "required": ["anchor", "action"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "additionalProperties": false
-                    }
+                    "items": step
                 },
                 "settle": {
                     "type": "object",
@@ -645,7 +798,48 @@ Example:
                 // the probe finds; a terminal launch gets a PTY. Explicit rather
                 // than sniffed, because guessing wrong means either an invisible
                 // window or a display brought up for `ls`.
-                let id = if args.gui {
+                // Android is a distinct place with distinct rungs, so it is
+                // asked for rather than inferred. Guessing it from a dotted
+                // package-shaped string would be exactly the heuristic this
+                // subsystem refuses everywhere else.
+                let id = if args.platform.as_deref() == Some("android") {
+                    let package = command.trim().to_owned();
+                    // Boots the container on first use, and claims it for this
+                    // stage. A second agent asking is refused with the holder
+                    // named, because there is one container per machine.
+                    let android = self
+                        .registry
+                        .host()
+                        .ensure_android(crate::android::WindowMode::MultiWindow)
+                        .await?;
+                    android.launch_package(&package).await?;
+                    // Attached through the ordinary path, so the ladder still
+                    // chooses the rung: the accessibility bridge when it is
+                    // installed and answering, pixels when it is not.
+                    // No browser profile: the package is an Android app, and the
+                    // profile argument only means anything to a Chromium launch.
+                    let launched = self
+                        .registry
+                        .host()
+                        .launch(&package, &[], None, None)
+                        .await?;
+                    let id = self
+                        .registry
+                        .attach_with_declines(launched.surface, launched.declined);
+                    self.registry.remember(Restorable::Launched {
+                        program: package.clone(),
+                        args: Vec::new(),
+                        cwd: None,
+                    });
+                    self.recorder.record(artist_session::ComputerLaunched {
+                        surface: id.clone(),
+                        program: package,
+                        args: Vec::new(),
+                        cwd: None,
+                        gui: true,
+                    });
+                    id
+                } else if args.gui {
                     let mut words = split_command(&command);
                     if words.is_empty() {
                         return Err(StepError::Backend("`command` is empty".into()));
@@ -658,6 +852,7 @@ Example:
                             &program,
                             &words,
                             args.cwd.as_deref().map(std::path::Path::new),
+                            args.browser_profile.as_deref().map(std::path::Path::new),
                         )
                         .await?;
                     let id = self
@@ -870,6 +1065,34 @@ Example:
                     "this build has no graphical stage to watch".into(),
                 ))
             }
+            // Window management, such as it means anything here.
+            //
+            // The stage has one output and every toplevel is given all of it,
+            // so minimize, maximize, restore, move and workspaces describe
+            // nothing that exists — a window is already the screen, and there
+            // is nowhere else to put it. What *is* real is which window has
+            // focus when several are open, and how big the screen is, because
+            // viewport size changes what a responsive application draws.
+            "focus" => {
+                let id = self.require_surface(&args)?;
+                self.focus_surface(&id).await?;
+                Ok(ToolOutput::text(format!("{id} now has focus")))
+            }
+            "resize" => {
+                let (width, height) = match (args.width, args.height) {
+                    (Some(width), Some(height)) => (width, height),
+                    _ => {
+                        return Err(StepError::Backend(
+                            "resize needs both `width` and `height`".into(),
+                        ));
+                    }
+                };
+                self.resize_stage(width, height).await?;
+                Ok(ToolOutput::text(format!(
+                    "the display is now {width}x{height}. Observe again: what an application \
+                     shows at one size is not what it shows at another."
+                )))
+            }
             "close" => {
                 let id = self.require_surface(&args)?;
                 let closed = self.registry.close(&id);
@@ -1016,6 +1239,50 @@ impl ComputerTool {
                 self.render_surfaces()
             ))
         })
+    }
+
+    /// Give one surface's window keyboard focus.
+    ///
+    /// Only meaningful for a surface backed by a real window: a page, a
+    /// terminal and an adapter have no seat to be focused on, and saying so is
+    /// better than reporting success for a no-op.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    async fn focus_surface(&self, id: &str) -> Result<(), StepError> {
+        use crate::stage::Stage;
+
+        let attached = self.attached(id)?;
+        let window = attached.surface.window().ok_or_else(|| {
+            StepError::Backend(format!(
+                "{id} is not a window on the display — it is a {} surface, and focus is a \
+                 property of the seat.",
+                attached.surface.rung().label()
+            ))
+        })?;
+        let stage = self.registry.host().wayland_stage().await?;
+        stage.focus(window).await
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "stage-wayland")))]
+    async fn focus_surface(&self, _id: &str) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this build has no graphical stage to focus a window on".into(),
+        ))
+    }
+
+    /// Resize the display every window is given.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    async fn resize_stage(&self, width: u32, height: u32) -> Result<(), StepError> {
+        use crate::stage::Stage;
+
+        let stage = self.registry.host().wayland_stage().await?;
+        stage.resize(width, height).await
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "stage-wayland")))]
+    async fn resize_stage(&self, _width: u32, _height: u32) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this build has no graphical stage to resize".into(),
+        ))
     }
 
     fn attached(&self, id: &str) -> Result<Arc<Attached>, StepError> {
@@ -1709,6 +1976,153 @@ mod tests {
             description.contains("irreversible"),
             "the model must be told to isolate destructive steps"
         );
+    }
+
+    /// Every verb the backends implement must be reachable through the schema.
+    ///
+    /// This is the test that was missing. `longPress` and `swipe` were built
+    /// end to end — a `Step` variant, delivery on the stage's touch device, a
+    /// route through two surfaces — and appeared in neither the tool
+    /// description nor the JSON schema. Since the step object declares
+    /// `additionalProperties: false`, a verb absent from the schema is not
+    /// merely undocumented: it is rejected before it is ever parsed. The
+    /// implementation was complete and unreachable, and nothing failed.
+    ///
+    /// A new `Step` variant must be added to the vector below. The exhaustive
+    /// matches in every backend already force an author to think about each
+    /// surface; this forces them to think about whether the model can ask.
+    #[test]
+    fn every_step_the_backends_understand_is_in_the_schema() {
+        use crate::program::{Button, Direction, Step, Target};
+
+        let anchor = || Target {
+            anchor: "kv7".into(),
+            label: Some("Thing".into()),
+        };
+        let every = vec![
+            Step::click(anchor()),
+            Step::Type {
+                target: anchor(),
+                text: "x".into(),
+                clear: true,
+            },
+            Step::Key("Enter".into()),
+            Step::KeyDown("shift".into()),
+            Step::KeyUp("shift".into()),
+            Step::Hover(anchor()),
+            Step::Press {
+                target: anchor(),
+                button: Button::Left,
+            },
+            Step::Release {
+                button: Button::Left,
+            },
+            Step::Drag {
+                from: anchor(),
+                to: Some(anchor()),
+                direction: None,
+                distance: None,
+                button: Button::Left,
+                modifiers: None,
+                pressure: None,
+                tilt: None,
+            },
+            Step::LongPress(anchor()),
+            Step::Swipe {
+                target: None,
+                direction: Direction::Left,
+                distance: None,
+            },
+            Step::Pinch {
+                target: None,
+                scale: 2.0,
+            },
+            Step::Scroll {
+                target: None,
+                amount: 3,
+                axis: crate::program::Axis::Vertical,
+            },
+            Step::SetClipboard { text: "x".into() },
+            Step::GetClipboard {},
+            Step::Upload {
+                target: anchor(),
+                paths: vec!["/tmp/x".into()],
+            },
+            Step::Dialog {
+                accept: true,
+                text: None,
+            },
+            Step::Navigate {
+                url: "https://example.com".into(),
+            },
+            Step::Back {},
+            Step::Forward {},
+            Step::Invoke {
+                target: anchor(),
+                action: "close".into(),
+            },
+        ];
+
+        let tool = ComputerTool::new(SurfaceRegistry::new());
+        let schema = tool.parameters();
+        let listed = schema["properties"]["steps"]["items"]["properties"]
+            .as_object()
+            .expect("the step schema must be an object");
+
+        for step in &every {
+            assert!(
+                listed.contains_key(step.action()),
+                "`{}` is implemented but missing from the tool schema, so the model cannot \
+                 ask for it — `additionalProperties: false` rejects the call. Add it to \
+                 `parameters()` and to the description.",
+                step.action()
+            );
+        }
+
+        // And the other direction: a schema key with no backend behind it is a
+        // verb the model will try and always fail at.
+        let implemented: std::collections::HashSet<&str> =
+            every.iter().map(|step| step.action()).collect();
+        for key in listed.keys() {
+            assert!(
+                implemented.contains(key.as_str()),
+                "the schema offers `{key}`, which is not a step any backend implements"
+            );
+        }
+    }
+
+    /// The description has to name every verb too — the schema alone is a
+    /// grammar, not an explanation, and a verb nobody is told about is one
+    /// nobody uses.
+    #[test]
+    fn the_description_names_the_verbs_the_schema_accepts() {
+        let tool = ComputerTool::new(SurfaceRegistry::new());
+        let description = tool.description();
+        for verb in [
+            "click",
+            "type",
+            "key",
+            "keyDown",
+            "hover",
+            "press",
+            "release",
+            "drag",
+            "longPress",
+            "swipe",
+            "pinch",
+            "scroll",
+            "setClipboard",
+            "getClipboard",
+            "upload",
+            "dialog",
+            "navigate",
+            "invoke",
+        ] {
+            assert!(
+                description.contains(verb),
+                "the tool description never mentions `{verb}`"
+            );
+        }
     }
 
     /// A tool wired to a real recorder, so what it writes can be read back.

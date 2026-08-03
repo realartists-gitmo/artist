@@ -14,7 +14,7 @@
 use colored::Colorize;
 use serde::Serialize;
 
-use crate::squeeze::{squeeze, Squeezed};
+use crate::squeeze::{Squeezed, squeeze};
 
 /// Stable JSON schema identifier — bump on breaking changes.
 pub const JSON_SCHEMA_SQUEEZE: &str = "ast-bro.squeeze.v1";
@@ -347,7 +347,10 @@ mod tests {
             "repetitive input should squeeze, got header in:\n{}",
             txt.lines().next().unwrap_or("")
         );
-        assert!(txt.contains("# legend:"), "squeezed output must have a legend");
+        assert!(
+            txt.contains("# legend:"),
+            "squeezed output must have a legend"
+        );
 
         // JSON view confirms the decision + that the emitted body shrank.
         let json = render_json(&r, false);

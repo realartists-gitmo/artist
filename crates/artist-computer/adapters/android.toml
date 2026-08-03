@@ -1,0 +1,43 @@
+# Android deep links, through the container's intent system.
+#
+# The fourth shape rung 0 takes, and the only one that crosses a container
+# boundary: `waydroid app intent` hands an intent to Android's own resolver,
+# which is the same mechanism a link tap uses. Opening a URL this way is one
+# call; doing it by driving the UI means finding the address bar, focusing it,
+# clearing it, typing, and pressing enter — five steps that can each fail, to
+# reach a state the intent reaches atomically.
+#
+# `waydroid app intent` is used rather than `adb shell am start` deliberately:
+# it needs no device serial, so this file works without knowing anything about
+# which container is running.
+#
+# ## The cost, stated plainly
+#
+# An adapter *claims* an application, and rung 0 is the top of the ladder — so a
+# window belonging to a package matched here is driven programmatically and its
+# screen is no longer read. For a browser that is a real loss: the model can
+# navigate but cannot see the page it navigated to. The match list is therefore
+# kept deliberately short, and covers the apps where arriving somewhere is the
+# task. If you need to *read* one of these, delete or narrow this file — a
+# user adapter of the same name replaces it entirely.
+name = "android-intents"
+match_app_id = [
+    # Navigation apps: the destination is the point, and the map itself is not
+    # something a tree or an OCR pass reads usefully anyway.
+    "com.google.android.apps.maps",
+    "org.osmand.plus",
+    # The dialer and the store, where every task is "reach this screen".
+    "com.android.dialer",
+    "com.android.vending",
+]
+
+[[action]]
+name = "open"
+description = "Open a URL, geo: or tel: link in this app"
+cli = { argv = [
+    "waydroid",
+    "app",
+    "intent",
+    "android.intent.action.VIEW",
+    "{value}",
+] }

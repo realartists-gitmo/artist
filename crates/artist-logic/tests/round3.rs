@@ -25,8 +25,11 @@ fn ev(g: &mut ObjectGraph, root: ObjectId, s: &dyn GraphStructure) -> Evidential
 fn a_quantified_variable_reaches_inside_a_compound_argument() {
     let mut g = ObjectGraph::new();
     let (causes, omits) = (g.atom("causes"), g.atom("omits"));
-    let (header, cstdint, effect) =
-        (g.atom("rocksdb-slice.h"), g.atom("cstdint"), g.atom("build-fails"));
+    let (header, cstdint, effect) = (
+        g.atom("rocksdb-slice.h"),
+        g.atom("cstdint"),
+        g.atom("build-fails"),
+    );
     let cause = g.apply(omits, vec![header, cstdint]);
     let s = MapGraphStructure::new().fact(causes, vec![cause, effect]);
 
@@ -63,8 +66,7 @@ fn norms_and_defaults_can_be_quantified() {
 #[test]
 fn a_quantifier_reaches_into_an_intensional_context() {
     let mut g = ObjectGraph::new();
-    let (believes, adam, tested) =
-        (g.atom("believes"), g.atom("adam"), g.atom("tested"));
+    let (believes, adam, tested) = (g.atom("believes"), g.atom("adam"), g.atom("tested"));
     let f = g.atom("file-1");
     let inner = g.apply(tested, vec![f]);
     let quoted = g.apply(wk::QUOTE, vec![inner]);
@@ -104,7 +106,11 @@ fn a_denotation_is_not_answered_out_of_its_time() {
     let s = Present { term, now };
 
     let untensed = g.apply(wk::EQ, vec![term, now]);
-    assert_eq!(ev(&mut g, untensed, &s), Evidential::Supported, "the present is known");
+    assert_eq!(
+        ev(&mut g, untensed, &s),
+        Evidential::Supported,
+        "the present is known"
+    );
 
     let one = g.int(1);
     let past_true = g.apply(wk::EQ, vec![term, then]);
@@ -170,8 +176,7 @@ fn equality_is_reflexive_on_a_compound() {
 #[test]
 fn a_term_can_denote_an_entity() {
     let mut g = ObjectGraph::new();
-    let (author, commit, adam) =
-        (g.atom("author"), g.atom("commit-9f2"), g.atom("adam"));
+    let (author, commit, adam) = (g.atom("author"), g.atom("commit-9f2"), g.atom("adam"));
     let term = g.apply(author, vec![commit]);
     let s = MapGraphStructure::new().denotes(term, adam);
     let claim = g.apply(wk::EQ, vec![term, adam]);
@@ -193,7 +198,10 @@ fn competing_defaults_are_conflicted() {
     let hedged = g.apply(wk::USUALLY, vec![claim]);
     let r = GraphEvaluator::new().eval(&mut g, hedged, &s, 20_000);
     assert_eq!(r.evidential(), Evidential::Conflicted);
-    assert!(!r.is_definite(), "a contradiction is not a definite reading");
+    assert!(
+        !r.is_definite(),
+        "a contradiction is not a definite reading"
+    );
 }
 
 /// Quantities could be compared and never combined, so no total over durations,
@@ -229,7 +237,10 @@ fn a_cyclic_arithmetic_term_does_not_overflow_the_stack() {
     let cmp = g.apply(wk::LEQ, vec![v, loop_id]);
     let q = g.quantify(wk::FORALL, v, Some(wk::NAT_TYPE), cmp);
     let r = GraphEvaluator::new().eval(&mut g, q, &EmptyStructure, 5_000);
-    assert!(!r.is_definite(), "no verdict is available for a cyclic bound");
+    assert!(
+        !r.is_definite(),
+        "no verdict is available for a cyclic bound"
+    );
 }
 
 // --------------------------------------------------- evaluator audit, round 3
@@ -251,7 +262,11 @@ fn a_defeasible_member_does_not_become_a_definite_refutation() {
             }
             if pred == wk::USUALLY {
                 // A default on record for the *other* member's claim.
-                return if args.len() == 1 { Knowledge::Holds } else { Knowledge::Unknown };
+                return if args.len() == 1 {
+                    Knowledge::Holds
+                } else {
+                    Knowledge::Unknown
+                };
             }
             Knowledge::Unknown
         }
@@ -260,7 +275,11 @@ fn a_defeasible_member_does_not_become_a_definite_refutation() {
     let mut g = ObjectGraph::new();
     let p = g.atom("p");
     let (m0, m1) = (g.atom("m0"), g.atom("m1"));
-    let s = Split { p, conflicted: m0, defaulted: m1 };
+    let s = Split {
+        p,
+        conflicted: m0,
+        defaulted: m1,
+    };
     let _ = s.defaulted;
 
     let v = g.fresh();
@@ -285,7 +304,11 @@ fn usually_over_a_contested_claim_stays_contested() {
     struct Contested(ObjectId);
     impl GraphStructure for Contested {
         fn known(&self, pred: ObjectId, _a: &[ObjectId]) -> Knowledge {
-            if pred == self.0 { Knowledge::Conflicted } else { Knowledge::Unknown }
+            if pred == self.0 {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Unknown
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -305,14 +328,19 @@ fn a_partial_sum_has_no_lower_bound_either() {
     let mut g = ObjectGraph::new();
     let p = g.atom("p");
     let a = g.atom("a");
-    let s = MapGraphStructure::new().fact(p, vec![a]).denotes(a, g.int(5));
+    let s = MapGraphStructure::new()
+        .fact(p, vec![a])
+        .denotes(a, g.int(5));
 
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
     let dom = g.apply(wk::SET_PARTIAL, vec![a]);
     let total = g.bind(
         wk::SUM,
-        vec![artist_logic::object::Binding { var: v, domain: Some(dom) }],
+        vec![artist_logic::object::Binding {
+            var: v,
+            domain: Some(dom),
+        }],
         vec![body, v],
     );
     let zero = g.int(0);
@@ -326,7 +354,10 @@ fn a_partial_sum_has_no_lower_bound_either() {
     // …while `count` keeps its documented early decision.
     let counted = g.bind(
         wk::COUNT,
-        vec![artist_logic::object::Binding { var: v, domain: Some(dom) }],
+        vec![artist_logic::object::Binding {
+            var: v,
+            domain: Some(dom),
+        }],
         vec![body],
     );
     let one = g.int(1);
@@ -381,7 +412,14 @@ fn cyclic_terms_do_not_overflow_in_either_operand_order() {
     let p = g.atom("p");
     let v = g.fresh();
     let filter = g.apply(p, vec![v]);
-    let lam = g.bind(wk::LAMBDA, vec![artist_logic::object::Binding { var: v, domain: None }], vec![filter]);
+    let lam = g.bind(
+        wk::LAMBDA,
+        vec![artist_logic::object::Binding {
+            var: v,
+            domain: None,
+        }],
+        vec![filter],
+    );
     let w = g.apply(wk::WHERE_DOMAIN, vec![d, lam]);
     let node = g.get(w).cloned().expect("built");
     g.define(d, node);
@@ -405,7 +443,11 @@ fn a_missing_mirror_row_does_not_manufacture_a_conflicted_identity() {
             if pred != wk::SAME_AS {
                 return Knowledge::Unknown;
             }
-            if args == [self.a, self.b] { Knowledge::Holds } else { Knowledge::Fails }
+            if args == [self.a, self.b] {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -430,7 +472,9 @@ fn a_negated_default_is_not_a_default_negation() {
     let outer_not = g.apply(wk::NOT, vec![hedged]);
     let imp = g.apply(wk::IMPLIES, vec![antecedent, outer_not]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
-    let s = MapGraphStructure::new().fact(made, vec![file]).rule(needs, rule);
+    let s = MapGraphStructure::new()
+        .fact(made, vec![file])
+        .rule(needs, rule);
 
     let goal = g.apply(needs, vec![file]);
     assert_eq!(
@@ -462,7 +506,11 @@ fn ungroundedness_is_not_contradictory_evidence() {
     struct Both(ObjectId);
     impl GraphStructure for Both {
         fn known(&self, pred: ObjectId, _a: &[ObjectId]) -> Knowledge {
-            if pred == self.0 { Knowledge::Conflicted } else { Knowledge::Unknown }
+            if pred == self.0 {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Unknown
+            }
         }
     }
     let mut h2 = ObjectGraph::new();
@@ -471,7 +519,11 @@ fn ungroundedness_is_not_contradictory_evidence() {
     let claim = h2.apply(p, vec![a]);
     let r2 = GraphEvaluator::new().eval(&mut h2, claim, &Both(p), 10_000);
     assert_eq!(r2.evidential(), Evidential::Conflicted);
-    assert_eq!(r2.grounding, Grounding::Grounded, "a contradiction is perfectly grounded");
+    assert_eq!(
+        r2.grounding,
+        Grounding::Grounded,
+        "a contradiction is perfectly grounded"
+    );
 }
 
 /// A default is certain that the default applies, and defeasible because a
@@ -487,8 +539,16 @@ fn defeasibility_is_not_weakness() {
 
     let r = GraphEvaluator::new().eval(&mut g, hedged, &s, 20_000);
     assert_eq!(r.support, Bound::Certain, "the default certainly applies");
-    assert_eq!(r.derivation, Derivation::Default, "…and is certainly defeasible");
-    assert_eq!(r.defeated_by, vec![claim], "and it names what would defeat it");
+    assert_eq!(
+        r.derivation,
+        Derivation::Default,
+        "…and is certainly defeasible"
+    );
+    assert_eq!(
+        r.defeated_by,
+        vec![claim],
+        "and it names what would defeat it"
+    );
     assert!(!r.is_definite());
 
     // The axis survives every composition, including a short-circuit.
@@ -498,7 +558,11 @@ fn defeasibility_is_not_weakness() {
             .fact(wk::USUALLY, vec![claim])
             .world(g.atom("w"));
         let out = GraphEvaluator::new().eval(&mut g, node, &s2, 20_000);
-        assert_eq!(out.derivation, Derivation::Default, "{wrap:?} dropped the defeasibility");
+        assert_eq!(
+            out.derivation,
+            Derivation::Default,
+            "{wrap:?} dropped the defeasibility"
+        );
         assert!(!out.is_definite(), "{wrap:?} settled a default");
     }
 }

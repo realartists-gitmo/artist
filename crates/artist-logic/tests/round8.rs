@@ -84,7 +84,10 @@ fn the_sort_spelling_does_not_complete_prop() {
         let d = g.apply(wk::SORT_DOMAIN, vec![wk::PROP_TYPE]);
         g.quantify(wk::FORALL, v, Some(d), body)
     };
-    assert_ne!(ev.eval(&mut g, bare, &s, 50_000).evidential(), Evidential::Supported);
+    assert_ne!(
+        ev.eval(&mut g, bare, &s, 50_000).evidential(),
+        Evidential::Supported
+    );
     assert_ne!(
         ev.eval(&mut g, spelled, &s, 50_000).evidential(),
         Evidential::Supported,
@@ -106,7 +109,10 @@ fn a_declared_totality_survives_the_merge() {
             Determinacy::Total
         }
     }
-    assert_eq!(Determinacy::Unknown.merge(Determinacy::Total), Determinacy::Total);
+    assert_eq!(
+        Determinacy::Unknown.merge(Determinacy::Total),
+        Determinacy::Total
+    );
     assert_eq!(
         Determinacy::Indeterminate.merge(Determinacy::Total),
         Determinacy::Indeterminate,
@@ -143,7 +149,10 @@ fn an_extreme_credence_does_not_panic() {
             Knowledge::Holds
         }
         fn credence(&self, _p: ObjectId) -> Option<Credence> {
-            Some(Credence { lo: i64::MIN, hi: i64::MIN + 1 })
+            Some(Credence {
+                lo: i64::MIN,
+                hi: i64::MIN + 1,
+            })
         }
     }
     let mut g = ObjectGraph::new();
@@ -186,7 +195,11 @@ fn a_continuation_does_not_forget_what_the_scan_learned() {
     let ev = GraphEvaluator::new();
 
     let whole = ev.eval(&mut g, q, &s, 100_000);
-    assert_eq!(whole.evidential(), Evidential::Open, "nothing is known about a");
+    assert_eq!(
+        whole.evidential(),
+        Evidential::Open,
+        "nothing is known about a"
+    );
 
     for budget in [2u64, 3, 4, 6, 10] {
         let cut = ev.eval(&mut g, q, &s, budget);
@@ -212,7 +225,11 @@ fn a_continuation_does_not_forget_a_conflict() {
             if pred != self.p || args.len() != 1 {
                 return Knowledge::Unknown;
             }
-            if args[0] == self.contested { Knowledge::Conflicted } else { Knowledge::Holds }
+            if args[0] == self.contested {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Holds
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -227,7 +244,10 @@ fn a_continuation_does_not_forget_a_conflict() {
     let ev = GraphEvaluator::new();
 
     let whole = ev.eval(&mut g, q, &s, 100_000);
-    assert!(!whole.is_definite(), "a contested member is not a decided one");
+    assert!(
+        !whole.is_definite(),
+        "a contested member is not a decided one"
+    );
 
     for budget in [2u64, 3, 4, 6, 10] {
         let cut = ev.eval(&mut g, q, &s, budget);

@@ -45,11 +45,7 @@ pub(crate) struct MessageTools {
 }
 
 impl MessageTools {
-    pub fn new(
-        inbox: Inbox,
-        project: String,
-        seat: Option<crate::delegate::PermitSlot>,
-    ) -> Self {
+    pub fn new(inbox: Inbox, project: String, seat: Option<crate::delegate::PermitSlot>) -> Self {
         Self {
             inbox,
             project,
@@ -57,7 +53,13 @@ impl MessageTools {
         }
     }
 
-    fn send_to(&self, audience: &Audience, to: &str, body: &str, expects_reply: bool) -> Result<usize, MessageError> {
+    fn send_to(
+        &self,
+        audience: &Audience,
+        to: &str,
+        body: &str,
+        expects_reply: bool,
+    ) -> Result<usize, MessageError> {
         let recipients = match audience {
             Audience::Direct => vec![to.to_owned()],
             Audience::Group { id } => self
@@ -103,8 +105,7 @@ impl MessageTools {
         if let Some(seat) = &self.seat {
             seat.yield_seat().await;
         }
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
         let answer = loop {
             if let Some(text) = self.inbox.collect() {
                 break Some(text);
@@ -167,7 +168,13 @@ impl PortableTool for MessageTools {
         };
         // Reject an unknown name rather than writing into an inbox nobody
         // drains: silently accepting would look like delivery.
-        if !args.group && artist_registry::names().resolve(&args.target).ok().flatten().is_none() {
+        if !args.group
+            && artist_registry::names()
+                .resolve(&args.target)
+                .ok()
+                .flatten()
+                .is_none()
+        {
             return Err(MessageError(format!(
                 "no agent named {} on this machine",
                 args.target
@@ -229,7 +236,13 @@ impl PortableTool for QueryTool {
         } else {
             Audience::Direct
         };
-        if !args.group && artist_registry::names().resolve(&args.target).ok().flatten().is_none() {
+        if !args.group
+            && artist_registry::names()
+                .resolve(&args.target)
+                .ok()
+                .flatten()
+                .is_none()
+        {
             return Err(MessageError(format!(
                 "no agent named {} on this machine",
                 args.target
@@ -460,7 +473,10 @@ mod tests {
 
     fn tools(name: &str, root: &std::path::Path) -> MessageTools {
         MessageTools::new(
-            Inbox::with_store(name, artist_registry::Registry::at(root).messages_for_test()),
+            Inbox::with_store(
+                name,
+                artist_registry::Registry::at(root).messages_for_test(),
+            ),
             "/p".into(),
             None,
         )
@@ -526,7 +542,12 @@ mod tests {
         monet.inbox.store().create_group(&group).unwrap();
 
         let delivered = monet
-            .send_to(&Audience::Group { id: "g-1".into() }, "g-1", "standup", false)
+            .send_to(
+                &Audience::Group { id: "g-1".into() },
+                "g-1",
+                "standup",
+                false,
+            )
             .unwrap();
         assert_eq!(delivered, 2, "both members, not the sender");
         assert!(!monet.inbox.store().has_mail("Monet"));
@@ -755,10 +776,7 @@ mod tests {
         let error = with_directory(|root| {
             let me = register("s-me", "/p", "default", None);
             let tools = MessageTools::new(
-                Inbox::with_store(
-                    me,
-                    artist_registry::Registry::at(root).messages_for_test(),
-                ),
+                Inbox::with_store(me, artist_registry::Registry::at(root).messages_for_test()),
                 "/p".into(),
                 None,
             );

@@ -309,7 +309,9 @@ mod tests {
     fn an_id_cannot_escape_the_job_directory() {
         let root = tempfile::tempdir().unwrap();
         let table = jobs(root.path());
-        table.start("../../etc/passwd", "worker", "hostile").unwrap();
+        table
+            .start("../../etc/passwd", "worker", "hostile")
+            .unwrap();
 
         // The property, not the exact spelling: whatever the id flattens to,
         // it is one entry directly inside the table and nothing was written

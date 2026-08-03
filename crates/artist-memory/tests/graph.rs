@@ -69,13 +69,27 @@ async fn formulas_queries_and_residuals_persist() {
     // λx. stale(x)
     let x = g.fresh();
     let lam_body = g.apply(stale, vec![x]);
-    let lam = g.bind(wk::LAMBDA, vec![Binding { var: x, domain: Some(path) }], vec![lam_body]);
+    let lam = g.bind(
+        wk::LAMBDA,
+        vec![Binding {
+            var: x,
+            domain: Some(path),
+        }],
+        vec![lam_body],
+    );
     round_trip(&s, &g, lam).await;
 
     // count over a refined domain
     let c = g.fresh();
     let cnt_body = g.apply(corrected, vec![adam, c]);
-    let count = g.bind(wk::COUNT, vec![Binding { var: c, domain: Some(path) }], vec![cnt_body]);
+    let count = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: c,
+            domain: Some(path),
+        }],
+        vec![cnt_body],
+    );
     round_trip(&s, &g, count).await;
 
     // A quoted proposition, and an assertion about it.
@@ -108,7 +122,9 @@ async fn a_residual_survives_and_is_requeryable() {
 
     // A later process reloads it knowing only the id.
     let mut later = ObjectGraph::new();
-    let back = load_expression(&s, &mut later, residual).await.expect("load");
+    let back = load_expression(&s, &mut later, residual)
+        .await
+        .expect("load");
     let text = print(&later, back);
     assert!(text.starts_with("(exists"), "still a query: {text}");
     assert!(text.contains("where"), "domain refinement survived: {text}");
@@ -135,7 +151,9 @@ async fn cycles_externals_and_unknown_nodes_persist() {
 
     store_expression(&s, &g, liar).await.expect("store cycle");
     let mut fresh = ObjectGraph::new();
-    let back = load_expression(&s, &mut fresh, liar).await.expect("load cycle");
+    let back = load_expression(&s, &mut fresh, liar)
+        .await
+        .expect("load cycle");
     assert!(fresh.is_cyclic(back), "the cycle survived the database");
 
     // External ref, opaque node, and an integer past i64.
@@ -145,7 +163,10 @@ async fn cycles_externals_and_unknown_nodes_persist() {
         version: None,
         digest: Some([3u8; 32]),
     });
-    let opaque = g.intern(CoreNode::Opaque { tag: "future:v9".into(), payload: vec![1, 2, 3] });
+    let opaque = g.intern(CoreNode::Opaque {
+        tag: "future:v9".into(),
+        payload: vec![1, 2, 3],
+    });
     let huge = g.lit(LiteralValue::Int(
         BigInt::from(u64::MAX) * BigInt::from(u64::MAX),
     ));

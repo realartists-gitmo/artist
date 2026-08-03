@@ -90,7 +90,10 @@ pub async fn store_expression(
                 Vec::new(),
             ),
             CoreNode::Literal(v) => (KIND_LITERAL, String::new(), false, encode_literal(v)),
-            CoreNode::Apply { operator, operands: ops } => {
+            CoreNode::Apply {
+                operator,
+                operands: ops,
+            } => {
                 for (i, o) in ops.iter().enumerate() {
                     let (vh, vl) = split(*o);
                     operands.push(row5(hi, lo, i as i64, vh, vl));
@@ -101,7 +104,11 @@ pub async fn store_expression(
                 operands.push(row5(hi, lo, -1, oh, ol));
                 (KIND_APPLY, String::new(), false, Vec::new())
             }
-            CoreNode::Bind { binder, vars, bodies } => {
+            CoreNode::Bind {
+                binder,
+                vars,
+                bodies,
+            } => {
                 let (bh, bl) = split(*binder);
                 operands.push(row5(hi, lo, -1, bh, bl));
                 for (i, b) in bodies.iter().enumerate() {
@@ -127,9 +134,7 @@ pub async fn store_expression(
                 (KIND_BIND, String::new(), false, Vec::new())
             }
             CoreNode::External(r) => (KIND_EXTERNAL, r.namespace.clone(), true, encode_external(r)),
-            CoreNode::Opaque { tag, payload } => {
-                (KIND_OPAQUE, tag.clone(), true, payload.clone())
-            }
+            CoreNode::Opaque { tag, payload } => (KIND_OPAQUE, tag.clone(), true, payload.clone()),
         };
         objects.push(DataValue::List(vec![
             DataValue::from(hi),
@@ -141,12 +146,27 @@ pub async fn store_expression(
         ]));
     }
 
-    put(store, "?[hi, lo, kind, name, has_name, payload] <- $rows
-         :put object {hi, lo => kind, name, has_name, payload}", objects).await?;
-    put(store, "?[hi, lo, position, value_hi, value_lo] <- $rows
-         :put operand {hi, lo, position => value_hi, value_lo}", operands).await?;
-    put(store, "?[hi, lo, position, dom_hi, dom_lo] <- $rows
-         :put binder_var {hi, lo, position => dom_hi, dom_lo}", binder_vars).await?;
+    put(
+        store,
+        "?[hi, lo, kind, name, has_name, payload] <- $rows
+         :put object {hi, lo => kind, name, has_name, payload}",
+        objects,
+    )
+    .await?;
+    put(
+        store,
+        "?[hi, lo, position, value_hi, value_lo] <- $rows
+         :put operand {hi, lo, position => value_hi, value_lo}",
+        operands,
+    )
+    .await?;
+    put(
+        store,
+        "?[hi, lo, position, dom_hi, dom_lo] <- $rows
+         :put binder_var {hi, lo, position => dom_hi, dom_lo}",
+        binder_vars,
+    )
+    .await?;
     Ok(root)
 }
 
@@ -213,22 +233,32 @@ pub async fn load_all(store: &MemoryStore, g: &mut ObjectGraph) -> Result<Vec<Ob
             )),
             _ => None,
         };
-        vars.entry(owner).or_default().insert(int(r, 2)?, Binder { domain });
+        vars.entry(owner)
+            .or_default()
+            .insert(int(r, 2)?, Binder { domain });
     }
 
     for r in &objects.rows {
         let id = join(int(r, 0)?, int(r, 1)?);
         let kind = int(r, 2)?;
-        let name = r.get(3).and_then(DataValue::get_str).unwrap_or("").to_string();
+        let name = r
+            .get(3)
+            .and_then(DataValue::get_str)
+            .unwrap_or("")
+            .to_string();
         let has_name = matches!(r.get(4), Some(DataValue::Bool(true)));
         let payload = bytes(r, 5);
 
         let node = match kind {
-            KIND_ATOM => CoreNode::Atom { name: has_name.then_some(name) },
+            KIND_ATOM => CoreNode::Atom {
+                name: has_name.then_some(name),
+            },
             KIND_LITERAL => CoreNode::Literal(decode_literal(&payload)?),
             KIND_APPLY => {
                 let children = ops.get(&id).cloned().unwrap_or_default();
-                let operator = *children.get(&-1).ok_or_else(|| anyhow!("apply has no head"))?;
+                let operator = *children
+                    .get(&-1)
+                    .ok_or_else(|| anyhow!("apply has no head"))?;
                 CoreNode::Apply {
                     operator,
                     operands: children
@@ -240,7 +270,9 @@ pub async fn load_all(store: &MemoryStore, g: &mut ObjectGraph) -> Result<Vec<Ob
             }
             KIND_BIND => {
                 let children = ops.get(&id).cloned().unwrap_or_default();
-                let binder = *children.get(&-1).ok_or_else(|| anyhow!("bind has no binder"))?;
+                let binder = *children
+                    .get(&-1)
+                    .ok_or_else(|| anyhow!("bind has no binder"))?;
                 CoreNode::Bind {
                     binder,
                     vars: vars
@@ -394,5 +426,10 @@ fn decode_external(namespace: &str, b: &[u8]) -> Result<ExternalRef> {
     } else {
         None
     };
-    Ok(ExternalRef { namespace: namespace.to_string(), locator, version, digest })
+    Ok(ExternalRef {
+        namespace: namespace.to_string(),
+        locator,
+        version,
+        digest,
+    })
 }

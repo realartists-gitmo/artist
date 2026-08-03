@@ -107,7 +107,11 @@ impl AgentHook for SteeringHook {
         // Collected here, at the same boundary, so the reply target is bound
         // when the model is actually shown the message — not when it later
         // decides to answer.
-        if let Some(agent_mail) = self.inbox.as_ref().and_then(crate::messaging::Inbox::collect) {
+        if let Some(agent_mail) = self
+            .inbox
+            .as_ref()
+            .and_then(crate::messaging::Inbox::collect)
+        {
             blocks.push(agent_mail);
         }
 

@@ -113,7 +113,9 @@ impl Messages {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        let mut paths: Vec<PathBuf> = entries.filter_map(|entry| Some(entry.ok()?.path())).collect();
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .collect();
         paths.sort();
 
         let mut messages = Vec::with_capacity(paths.len());
@@ -142,10 +144,7 @@ impl Messages {
     pub fn create_group(&self, group: &Group) -> Result<()> {
         let dir = self.root.join("groups");
         fs::create_dir_all(&dir)?;
-        write_atomic(
-            &dir.join(sanitize(&group.id)),
-            &serde_json::to_vec(group)?,
-        )
+        write_atomic(&dir.join(sanitize(&group.id)), &serde_json::to_vec(group)?)
     }
 
     pub fn group(&self, id: &str) -> Result<Option<Group>> {
@@ -216,7 +215,9 @@ mod tests {
     fn a_message_reaches_its_recipient_and_only_them() {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path());
-        store.send(&message("Monet", "Bach", "look at this", 1)).unwrap();
+        store
+            .send(&message("Monet", "Bach", "look at this", 1))
+            .unwrap();
 
         assert!(store.has_mail("Bach"));
         assert!(!store.has_mail("Monet"));
@@ -303,7 +304,9 @@ mod tests {
             .unwrap();
 
         // A later arrival changes nothing about the recorded group.
-        store.send(&message("Basquiat", "Bach", "unrelated", 2)).unwrap();
+        store
+            .send(&message("Basquiat", "Bach", "unrelated", 2))
+            .unwrap();
         assert_eq!(store.group("g-1").unwrap().unwrap().members, ["Bach"]);
     }
 
@@ -339,16 +342,23 @@ mod tests {
         fs::write(inbox.join("00000000000000000001-corrupt"), b"not json").unwrap();
 
         assert_eq!(store.drain("Bach").unwrap().len(), 1);
-        assert!(!store.has_mail("Bach"), "the corrupt record was cleared too");
+        assert!(
+            !store.has_mail("Bach"),
+            "the corrupt record was cleared too"
+        );
     }
 
     #[test]
     fn discarding_an_inbox_drops_undelivered_mail() {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path());
-        store.send(&message("Monet", "Bach", "never read", 1)).unwrap();
+        store
+            .send(&message("Monet", "Bach", "never read", 1))
+            .unwrap();
         store.discard_inbox("Bach").unwrap();
         assert!(!store.has_mail("Bach"));
-        store.discard_inbox("Bach").expect("discarding twice is fine");
+        store
+            .discard_inbox("Bach")
+            .expect("discarding twice is fine");
     }
 }

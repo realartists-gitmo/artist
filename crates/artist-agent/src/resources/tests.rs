@@ -141,7 +141,9 @@ fn build_output_does_not_crowd_out_real_instructions() {
     // Enough to have exhausted the old 5,000-entry budget on its own.
     for index in 0..6_000 {
         write(
-            &root.path().join(format!("target/debug/deps/artifact{index}.rlib")),
+            &root
+                .path()
+                .join(format!("target/debug/deps/artifact{index}.rlib")),
             "",
         );
     }
@@ -185,7 +187,14 @@ fn the_order_is_the_trees_order() {
     assert_eq!(first, second);
     let names: Vec<_> = first
         .iter()
-        .map(|path| path.parent().unwrap().file_name().unwrap().to_str().unwrap())
+        .map(|path| {
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        })
         .collect();
     assert_eq!(names, ["alpha", "middle", "zebra"]);
 }

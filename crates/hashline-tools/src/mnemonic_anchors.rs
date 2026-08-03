@@ -258,7 +258,6 @@ pub(crate) fn handle_slot(handle: &str) -> Option<(bool, usize)> {
     })
 }
 
-
 /// A circular mnemonic-handle allocator over opaque binding strings.
 ///
 /// The file tools bind handles to line-content hashes. Nothing about the
@@ -512,7 +511,12 @@ mod tests {
     fn only_initial_overflow_lines_receive_pairs() {
         let capacity = words().len();
         let full_hashes = hashes(capacity + 2);
-        let (state, visible) = reconcile_handles(&PathAnchors::default(), &full_hashes, true, &SlotPreference::none());
+        let (state, visible) = reconcile_handles(
+            &PathAnchors::default(),
+            &full_hashes,
+            true,
+            &SlotPreference::none(),
+        );
         // `capacity + 2` handles and nothing else. This asserted `+ 4` while the
         // two allocator cursors lived in the same map as the bindings.
         assert_eq!(state.bindings.len(), capacity + 2);
@@ -526,7 +530,12 @@ mod tests {
     fn freed_one_word_goes_to_new_line_without_changing_live_pair() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 1);
-        let (state, original_visible) = reconcile_handles(&PathAnchors::default(), &original_hashes, true, &SlotPreference::none());
+        let (state, original_visible) = reconcile_handles(
+            &PathAnchors::default(),
+            &original_hashes,
+            true,
+            &SlotPreference::none(),
+        );
         let deleted_handle = original_visible[0].clone();
         let surviving_pair = original_visible.last().unwrap().clone();
         assert!(!deleted_handle.contains(' '));
@@ -534,7 +543,8 @@ mod tests {
 
         let mut next_hashes = original_hashes[1..].to_vec();
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
+        let (_, next_visible) =
+            reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
 
         assert_eq!(next_visible[capacity - 1], surviving_pair);
         assert_eq!(next_visible.last().unwrap(), &deleted_handle);
@@ -551,12 +561,18 @@ mod tests {
     fn live_pair_remains_stable_when_file_returns_below_capacity() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 1);
-        let (state, original_visible) = reconcile_handles(&PathAnchors::default(), &original_hashes, true, &SlotPreference::none());
+        let (state, original_visible) = reconcile_handles(
+            &PathAnchors::default(),
+            &original_hashes,
+            true,
+            &SlotPreference::none(),
+        );
         let surviving_pair = original_visible.last().unwrap().clone();
         assert!(surviving_pair.contains(' '));
 
         let next_hashes = original_hashes[1..].to_vec();
-        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
+        let (_, next_visible) =
+            reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
 
         assert_eq!(next_visible.last().unwrap(), &surviving_pair);
         assert_eq!(
@@ -571,12 +587,18 @@ mod tests {
     #[test]
     fn freed_primary_handle_waits_for_cursor_wrap() {
         let original_hashes = hashes(3);
-        let (state, original_visible) = reconcile_handles(&PathAnchors::default(), &original_hashes, true, &SlotPreference::none());
+        let (state, original_visible) = reconcile_handles(
+            &PathAnchors::default(),
+            &original_hashes,
+            true,
+            &SlotPreference::none(),
+        );
         let freed_handle = original_visible[0].clone();
 
         let mut next_hashes = original_hashes[1..].to_vec();
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
+        let (_, next_visible) =
+            reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
 
         assert_eq!(next_visible[0], original_visible[1]);
         assert_eq!(next_visible[1], original_visible[2]);
@@ -588,13 +610,19 @@ mod tests {
     fn freed_secondary_handle_waits_for_cursor_wrap() {
         let capacity = words().len();
         let original_hashes = hashes(capacity + 3);
-        let (state, original_visible) = reconcile_handles(&PathAnchors::default(), &original_hashes, true, &SlotPreference::none());
+        let (state, original_visible) = reconcile_handles(
+            &PathAnchors::default(),
+            &original_hashes,
+            true,
+            &SlotPreference::none(),
+        );
         let freed_handle = original_visible[capacity].clone();
 
         let mut next_hashes = original_hashes[..capacity].to_vec();
         next_hashes.extend_from_slice(&original_hashes[capacity + 1..]);
         next_hashes.push("new0000000000".to_owned());
-        let (_, next_visible) = reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
+        let (_, next_visible) =
+            reconcile_handles(&state, &next_hashes, true, &SlotPreference::none());
 
         assert_eq!(next_visible[capacity], original_visible[capacity + 1]);
         assert_eq!(next_visible[capacity + 1], original_visible[capacity + 2]);
@@ -651,12 +679,9 @@ mod tests {
     /// which is what `recover_cursor` did before the fields existed.
     #[test]
     fn a_missing_cursor_recovers_from_the_handles_in_use() {
-        let anchors = PathAnchors::from_flat(HashMap::from([(
-            words()[5].to_string(),
-            "aaa".to_string(),
-        )]));
+        let anchors =
+            PathAnchors::from_flat(HashMap::from([(words()[5].to_string(), "aaa".to_string())]));
         assert_eq!(anchors.primary_cursor, None);
         assert_eq!(anchors.cursor(true, words().len()), Some(5));
     }
-
 }

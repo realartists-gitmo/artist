@@ -1,5 +1,7 @@
 //! The Artist agent loop, built on Rig.
 
+mod ask_tool;
+mod ask_outbox;
 pub mod canvas;
 mod capture;
 mod code_search;
@@ -14,9 +16,9 @@ pub mod gemini_cache;
 pub mod handoff;
 mod identity;
 pub mod mcp;
+pub mod memory;
 mod message_tools;
 mod messaging;
-pub mod memory;
 pub mod openai_responses;
 pub mod prefix;
 pub mod profiles;
@@ -36,7 +38,7 @@ mod thinking;
 pub mod todo;
 mod tool_prompt;
 pub mod tool_registry;
-mod tool_set;
+pub mod tool_set;
 
 pub use statefulness::Statefulness;
 pub use steering::SteeringHandle;
@@ -72,8 +74,8 @@ use tokio_util::sync::CancellationToken;
 use capture::{CaptureHook, ToolMeta};
 use ttsr::{TtsrHook, TtsrShared, reminder_message};
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),
@@ -168,6 +170,10 @@ pub struct SessionHandles {
     pub recorder: Recorder,
     pub memory: Arc<dyn ConversationMemory>,
     pub conversation_id: String,
+    /// Identity already recorded for a resumed lineage. New sessions leave
+    /// this empty and claim an identity normally; resumed child agents reuse
+    /// their durable actor and display name instead of becoming a new agent.
+    pub recorded_identity: Option<RecordedIdentity>,
     /// Provider-private opaque context; currently only consumed by the opt-in OpenAI adapter.
     pub provider_context: artist_session::ProviderContextHandle,
     /// Effective model context window from the normalized catalog. Unknown
@@ -203,6 +209,10 @@ pub struct SessionHandles {
     /// The tools registered for the current attempt, published so surfaces
     /// outside the loop — a canvas today — invoke exactly what the model can.
     pub tools: ToolRegistryHandle,
+    /// Where a question to the user is posted, shared with every surface that
+    /// can render or answer one. `None` for a run with no user attached, which
+    /// is what makes the `ask` tool absent there rather than hanging.
+    pub ask: Option<artist_session::AskRegistry>,
     /// The session's frozen system prompt, held here because prompt-cache
     /// stability is a property of the session rather than of any one turn.
     /// See [`prefix`] for why this is a store rather than a convention.
@@ -229,9 +239,13 @@ impl Default for SessionHandles {
             recorder: Recorder::noop(),
             memory: Arc::new(InMemoryConversationMemory::new()),
             conversation_id: "default".to_owned(),
+            recorded_identity: None,
             provider_context: artist_session::ProviderContextHandle::noop(),
             effective_context_window: None,
             fast_mode: false,
+            // Inert handles have no user attached, so there is nobody to ask
+            // and the tool is correctly absent.
+            ask: None,
             cancel: CancellationToken::new(),
             attachments: None,
             providers: llm_provider::ProviderSet::default(),
@@ -246,6 +260,12 @@ impl Default for SessionHandles {
             statefulness: Statefulness::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedIdentity {
+    pub name: String,
+    pub actor: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -275,12 +295,41 @@ impl ChatMessage {
 /// The display stream carries the digest rather than the bytes: a screenshot is
 /// megabytes, the TUI only ever needs to name it, and the blob is already
 /// durable in the session attachment store by the time this is emitted.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolImage {
     /// Content-addressed id in the session attachment store.
     pub attachment: String,
     pub media_type: Option<String>,
     pub bytes: usize,
+}
+
+#[cfg(test)]
+mod prompt_event_wire_tests {
+    use super::PromptEvent;
+
+    #[test]
+    fn prompt_events_round_trip_for_frontend_streams() {
+        let events = [
+            PromptEvent::TextDelta("hello".into()),
+            PromptEvent::ReasoningSummaryDelta("thinking".into()),
+            PromptEvent::ToolCall {
+                id: "call-1".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            },
+            PromptEvent::CompletionUsage {
+                total_tokens: 42,
+                cached_input_tokens: 7,
+            },
+        ];
+        for event in events {
+            let encoded = serde_json::to_string(&event).unwrap();
+            assert_eq!(
+                serde_json::from_str::<PromptEvent>(&encoded).unwrap(),
+                event
+            );
+        }
+    }
 }
 
 /// Store a tool-result image, returning how to name it in the display stream.
@@ -769,12 +818,18 @@ where
     // a name placed any earlier gives each agent its own prefix and none of
     // them ever share a cached prompt. That costs most in exactly the case we
     // care about: a fan-out of subagents spawned together off one base prompt.
-    let identity = identity::session(
-        &handles.conversation_id,
-        &handles.conversation_id,
-        tools.project_root(),
-        &profile.name,
-    );
+    let identity = handles
+        .recorded_identity
+        .as_ref()
+        .map(|identity| identity::recorded(&identity.name, &identity.actor))
+        .unwrap_or_else(|| {
+            identity::session(
+                &handles.conversation_id,
+                &handles.conversation_id,
+                tools.project_root(),
+                &profile.name,
+            )
+        });
     let frozen_prompt = handles.prefix.freeze(
         &prefix::key(&handles.conversation_id, &profile.name),
         format!(
@@ -973,7 +1028,11 @@ where
                 ledger: ledger.as_ref(),
                 capabilities: &handles.capabilities,
             }
-            .ensure(model, frozen_prompt.as_str(), handles.statefulness.gemini_cache)
+            .ensure(
+                model,
+                frozen_prompt.as_str(),
+                handles.statefulness.gemini_cache,
+            )
             .await
         } else {
             None
@@ -1028,6 +1087,8 @@ where
                 // it is not itself a delegate, so it has none to yield.
                 parent_permit: None,
             }),
+            ask: handles.ask.clone(),
+            cancel: handles.cancel.clone(),
             inbox: Some(messaging::Inbox::new(identity.name.clone())),
             dynamic: mcp_tools
                 .iter()
@@ -1090,6 +1151,7 @@ where
                 .or_else(|| provider.reasoning_effort.clone()),
             agent: Some(identity.name.clone()),
             actor: Some(identity.actor.clone()),
+            profile: Some(profile.name.clone()),
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;

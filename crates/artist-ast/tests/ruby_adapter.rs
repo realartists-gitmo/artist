@@ -32,7 +32,10 @@ fn run(args: &[&str]) -> String {
 #[test]
 fn module_renders_as_namespace() {
     let s = run(&["map", FIXTURE]);
-    assert!(s.contains("namespace Billing"), "module → namespace missing:\n{s}");
+    assert!(
+        s.contains("namespace Billing"),
+        "module → namespace missing:\n{s}"
+    );
     assert!(s.contains("class Account"), "nested class missing:\n{s}");
 }
 
@@ -42,7 +45,10 @@ fn private_and_protected_visibility_tracked() {
     // not fields on the AST — the adapter tracks them as state in the
     // class-body walk and applies them to every following method.
     let s = run(&["map", FIXTURE]);
-    assert!(s.contains("private def secret"), "private method missing:\n{s}");
+    assert!(
+        s.contains("private def secret"),
+        "private method missing:\n{s}"
+    );
     assert!(
         s.contains("protected def helper"),
         "protected method missing:\n{s}"
@@ -66,7 +72,10 @@ fn attr_macros_and_rails_associations_surface() {
 fn constants_and_singleton_methods_render() {
     let s = run(&["map", FIXTURE]);
     assert!(s.contains("VERSION"), "constant missing:\n{s}");
-    assert!(s.contains("def self.find"), "singleton method missing:\n{s}");
+    assert!(
+        s.contains("def self.find"),
+        "singleton method missing:\n{s}"
+    );
 }
 
 #[test]

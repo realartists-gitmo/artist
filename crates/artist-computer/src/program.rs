@@ -78,11 +78,148 @@ impl From<&str> for KeyPress {
     }
 }
 
+/// Which pointer button an action uses.
+///
+/// Named rather than numbered: the model says `"right"`, and each backend maps
+/// that to its own spelling — evdev `BTN_RIGHT`, CDP `MouseButton::Right`. A
+/// numeric button in the tool schema would be a coordinate by another name,
+/// meaningful only to whoever knows the platform's numbering.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Button {
+    #[default]
+    Left,
+    Right,
+    Middle,
+}
+
+impl Button {
+    /// The Linux input event code. `BTN_LEFT` and its two neighbours.
+    pub fn evdev(self) -> u32 {
+        match self {
+            Self::Left => 0x110,
+            Self::Right => 0x111,
+            Self::Middle => 0x112,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+        }
+    }
+}
+
+/// Which way a scroll or a drag runs.
+///
+/// Horizontal exists because a wide table, a timeline and a carousel are all
+/// unreachable without it, and the vertical-only seat reported `ok` while moving
+/// nothing — the silent-success failure this subsystem is built to eliminate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
 /// One action.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Step {
-    Click(Target),
+    /// Activate an element.
+    ///
+    /// `button` and `count` default to a single left click, so the wire form
+    /// `{"click":{"anchor":…,"label":…}}` is unchanged. They are on `click`
+    /// rather than being three more verbs because "right-click" is one action
+    /// with a parameter, and a model that knows `click` then needs to learn
+    /// nothing new to open a context menu.
+    ///
+    /// `modifiers` is what makes a file list or a spreadsheet usable at all:
+    /// ctrl+click extends a selection and shift+click ranges it, and neither is
+    /// expressible as a click followed by a key.
+    Click {
+        #[serde(flatten)]
+        target: Target,
+        #[serde(default, skip_serializing_if = "is_default")]
+        button: Button,
+        /// 2 is a double click. Capped at 3 — nothing means anything past a
+        /// triple, and an unbounded count is a way to hang a client.
+        #[serde(default = "one", skip_serializing_if = "is_one")]
+        count: u8,
+        /// Held for the duration of the click, e.g. `"ctrl"` or `"ctrl+shift"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<String>,
+    },
+    /// Put the pointer over an element and leave it there.
+    ///
+    /// Not a click with the press removed: a hover menu, a tooltip and a
+    /// reveal-on-hover control are all things a person sees without committing
+    /// to anything, and there was no way to ask for one. The pointer stays where
+    /// it lands, because that is what makes the menu it opened stay open for the
+    /// next step.
+    Hover(Target),
+    /// Press a button on an element and hold it.
+    ///
+    /// Paired with [`Step::Release`]. Separate from `click` because the interval
+    /// between them is where the meaning lives — a marquee selection, a slider
+    /// grab, a canvas stroke. A button still held when the program ends is
+    /// released by the harness rather than left to poison the next program.
+    Press {
+        #[serde(flatten)]
+        target: Target,
+        #[serde(default, skip_serializing_if = "is_default")]
+        button: Button,
+    },
+    /// Let go, wherever the pointer currently is.
+    ///
+    /// Targets nothing by design: the whole point of a held press is that the
+    /// pointer has since moved somewhere the model may not be able to name.
+    Release {
+        #[serde(default, skip_serializing_if = "is_default")]
+        button: Button,
+    },
+    /// Drag from one element to another, or from one element in a direction.
+    ///
+    /// Two named endpoints is the anchor-native way to say "drag this onto
+    /// that", and it is what a file manager, a kanban board and a reorderable
+    /// list all need. The direction form covers the case with no second element
+    /// to name — a resize handle, a slider thumb, a canvas stroke — and keeps
+    /// the model out of coordinates there too.
+    ///
+    /// Exactly one of `to` or `direction` is required; both or neither is a hard
+    /// error rather than a guess about which was meant.
+    Drag {
+        from: Target,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<Target>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direction: Option<Direction>,
+        /// How far the direction form travels, in pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        distance: Option<u32>,
+        #[serde(default, skip_serializing_if = "is_default")]
+        button: Button,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<String>,
+        /// How hard, 0 to 1 — which makes this a stylus stroke rather than a
+        /// pointer drag.
+        ///
+        /// Folded into `drag` rather than given a verb of its own because it is
+        /// the same gesture with a different instrument: a line from here to
+        /// there. What changes is which device delivers it, and a drawing
+        /// application reads pressure to decide stroke width — so a drag with a
+        /// pressure asked for is refused where there is no tablet rather than
+        /// falling back to the pointer and drawing the right shape at the wrong
+        /// weight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pressure: Option<f32>,
+        /// Degrees from vertical, `[x, y]`. Changes the nib shape, not the path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tilt: Option<[f32; 2]>,
+    },
     /// Type into a named element.
     Type {
         #[serde(flatten)]
@@ -134,8 +271,71 @@ pub enum Step {
     Scroll {
         #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
         target: Option<Target>,
-        /// Positive scrolls down.
+        /// Positive scrolls down, or right on the horizontal axis.
         amount: i32,
+        #[serde(default, skip_serializing_if = "is_default")]
+        axis: Axis,
+    },
+    /// Two contacts moving apart or together, about an element.
+    ///
+    /// Stated as a scale rather than as two gaps in pixels — "zoom in twice" is
+    /// what a person means, and the contact geometry that produces it is the
+    /// harness's problem. Implemented on the stage's touch device since before
+    /// this verb existed; it simply had no way to be asked for.
+    Pinch {
+        #[serde(default, flatten, skip_serializing_if = "Option::is_none")]
+        target: Option<Target>,
+        /// Above 1 zooms in, below 1 zooms out.
+        scale: f32,
+    },
+    /// Hold a key down, and release it.
+    ///
+    /// Paired, like [`Step::Press`]. A game's movement key, a push-to-talk
+    /// control and a modifier held across several other actions are all things
+    /// a tap cannot express. A key still held at the end of a program is
+    /// released by the harness.
+    KeyDown(KeyPress),
+    KeyUp(KeyPress),
+    /// Put text on the clipboard.
+    ///
+    /// The clipboard is how text crosses an application boundary, and it is the
+    /// only way to enter a character the stage's keymap cannot produce. Both
+    /// were unreachable: the global was advertised and no selection was ever
+    /// set.
+    SetClipboard {
+        text: String,
+    },
+    /// Read the clipboard into the step report.
+    ///
+    /// The other half of a copy: an application's own copy button or `ctrl+c`
+    /// puts something on the clipboard, and without this the agent cannot see
+    /// what it got.
+    GetClipboard {},
+    /// Hand files to a file input or a drop target.
+    ///
+    /// Paths on the machine the stage shares `$HOME` with, so a file the agent
+    /// just wrote can be uploaded without a round trip through a picker.
+    Upload {
+        #[serde(flatten)]
+        target: Target,
+        paths: Vec<String>,
+    },
+    /// Decide in advance how the next dialog is answered.
+    ///
+    /// Armed *before* the step that triggers it, because a modal dialog blocks
+    /// the surface that raised it — on a page it blocks the renderer, so the
+    /// observation that would have shown the dialog cannot be taken. Arming is
+    /// the only ordering that works, and it makes the model state its intent
+    /// before the irreversible thing rather than after.
+    Dialog {
+        /// Accept it, or dismiss it. Dismiss is the default everywhere: a
+        /// `confirm()` guarding a delete is the case that matters, and the safe
+        /// answer to a question nobody armed for is no.
+        #[serde(default)]
+        accept: bool,
+        /// The answer to a `prompt()`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// Go to a URL. Browser surfaces only.
     ///
@@ -169,19 +369,59 @@ fn yes() -> bool {
     true
 }
 
+fn one() -> u8 {
+    1
+}
+
+fn is_one(count: &u8) -> bool {
+    *count == 1
+}
+
+/// So a defaulted enum field stays out of the serialized form, and the wire
+/// shape of an ordinary left click is exactly what it was before buttons
+/// existed.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
 impl Step {
+    /// An ordinary single left click with no modifiers.
+    ///
+    /// What almost every caller means, and what the wire form
+    /// `{"click":{"anchor":…}}` deserializes to. Spelling the three defaults out
+    /// at each construction site would bury the one case that is interesting.
+    pub fn click(target: Target) -> Self {
+        Self::Click {
+            target,
+            button: Button::Left,
+            count: 1,
+            modifiers: None,
+        }
+    }
+
     pub fn action(&self) -> &'static str {
         match self {
-            Self::Click(_) => "click",
+            Self::Click { .. } => "click",
             Self::Type { .. } => "type",
             Self::Key(_) => "key",
+            Self::KeyDown(_) => "keyDown",
+            Self::KeyUp(_) => "keyUp",
             Self::LongPress(_) => "longPress",
             Self::Swipe { .. } => "swipe",
+            Self::Pinch { .. } => "pinch",
+            Self::Hover(_) => "hover",
+            Self::Press { .. } => "press",
+            Self::Release { .. } => "release",
+            Self::Drag { .. } => "drag",
             Self::Scroll { .. } => "scroll",
             Self::Navigate { .. } => "navigate",
             Self::Back { .. } => "back",
             Self::Forward { .. } => "forward",
             Self::Invoke { .. } => "invoke",
+            Self::SetClipboard { .. } => "setClipboard",
+            Self::GetClipboard { .. } => "getClipboard",
+            Self::Upload { .. } => "upload",
+            Self::Dialog { .. } => "dialog",
         }
     }
 
@@ -189,13 +429,35 @@ impl Step {
     /// so has nothing to check.
     pub fn target(&self) -> Option<&Target> {
         match self {
-            Self::Click(target)
-            | Self::LongPress(target)
+            Self::LongPress(target) | Self::Hover(target) => Some(target),
+            Self::Click { target, .. }
+            | Self::Press { target, .. }
             | Self::Type { target, .. }
+            | Self::Upload { target, .. }
             | Self::Invoke { target, .. } => Some(target),
-            Self::Scroll { target, .. } | Self::Swipe { target, .. } => target.as_ref(),
-            Self::Key(_) => None,
+            // The element the drag starts on. The destination is checked
+            // separately by `resolve_drag_to`, because one step naming two
+            // elements needs both resolved and only one can be reported here.
+            Self::Drag { from, .. } => Some(from),
+            Self::Scroll { target, .. }
+            | Self::Swipe { target, .. }
+            | Self::Pinch { target, .. } => target.as_ref(),
+            Self::Key(_) | Self::KeyDown(_) | Self::KeyUp(_) | Self::Release { .. } => None,
             Self::Navigate { .. } | Self::Back { .. } | Self::Forward { .. } => None,
+            Self::SetClipboard { .. } | Self::GetClipboard { .. } | Self::Dialog { .. } => None,
+        }
+    }
+
+    /// The second element a step names, when it names two.
+    ///
+    /// Only `drag` does. It is resolved and label-checked exactly like the
+    /// first: a drag onto a stale anchor is the same error as a click on one,
+    /// and dropping a file on whatever happens to be at a remembered position
+    /// is precisely the failure anchors exist to prevent.
+    pub fn secondary_target(&self) -> Option<&Target> {
+        match self {
+            Self::Drag { to, .. } => to.as_ref(),
+            _ => None,
         }
     }
 
@@ -203,18 +465,53 @@ impl Step {
     /// to press. Without it a step report cannot be replayed.
     pub fn payload(&self) -> Option<&str> {
         match self {
-            Self::Type { text, .. } => Some(text),
-            Self::Key(press) => Some(press.chord()),
+            Self::Type { text, .. } | Self::SetClipboard { text } => Some(text),
+            Self::Key(press) | Self::KeyDown(press) | Self::KeyUp(press) => Some(press.chord()),
             Self::Navigate { url } => Some(url),
             Self::Invoke { action, .. } => Some(action),
-            Self::Click(_)
+            Self::Dialog { text, .. } => text.as_deref(),
+            // The first path only. A report is a record of what was asked for,
+            // not a second copy of the argument list.
+            Self::Upload { paths, .. } => paths.first().map(String::as_str),
+            Self::Click { .. }
             | Self::LongPress(_)
+            | Self::Hover(_)
+            | Self::Press { .. }
+            | Self::Release { .. }
+            | Self::Drag { .. }
             | Self::Scroll { .. }
             | Self::Swipe { .. }
+            | Self::Pinch { .. }
+            | Self::GetClipboard { .. }
             | Self::Back { .. }
             | Self::Forward { .. } => None,
         }
     }
+
+    /// Whether this step leaves the seat holding something down.
+    ///
+    /// A program that ends mid-gesture would poison the next one — the button
+    /// or key stays pressed on a seat that outlives the program, and the next
+    /// click arrives as a drag. `run_program` uses this to know what to let go
+    /// of, which is the same guarantee `gesture` already gives a touch contact.
+    pub fn holds(&self) -> Option<Held> {
+        match self {
+            Self::Press { button, .. } => Some(Held::Button(*button)),
+            Self::Release { button } => Some(Held::Released(*button)),
+            Self::KeyDown(press) => Some(Held::Key(press.chord().to_owned())),
+            Self::KeyUp(press) => Some(Held::KeyReleased(press.chord().to_owned())),
+            _ => None,
+        }
+    }
+}
+
+/// What a step left held, for the release-on-exit guard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Held {
+    Button(Button),
+    Released(Button),
+    Key(String),
+    KeyReleased(String),
 }
 
 /// How to decide the surface has finished reacting.
@@ -319,7 +616,10 @@ impl Expect {
 }
 
 /// A program: steps, how to wait, and where the model believes it lands.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not `Eq`: `pinch` carries a scale factor, and a float has no total equality.
+/// Nothing compares programs for identity — the derives exist for tests.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Program {
     pub steps: Vec<Step>,

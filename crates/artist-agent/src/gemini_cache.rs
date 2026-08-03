@@ -58,9 +58,8 @@ impl GeminiCache<'_> {
         // The model is part of the key, not just the content: a cache belongs
         // to the model it was created for and cannot be referenced from
         // another.
-        let digest = artist_session::content_digest(
-            format!("{model}\u{1f}{system_instruction}").as_bytes(),
-        );
+        let digest =
+            artist_session::content_digest(format!("{model}\u{1f}{system_instruction}").as_bytes());
         let namespace = "gemini/cached-content";
 
         if let Some(name) = ledger.get(namespace, &digest) {

@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ImportBinding, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -69,7 +69,9 @@ fn _node_to_decl<'a, D: Doc>(
                 inner.clone()
             };
             if _is_handled_top_level(effective.kind().as_ref()) {
-                if let Some(mut decl) = _node_to_decl(&effective, src, _inside_class, _inside_interface) {
+                if let Some(mut decl) =
+                    _node_to_decl(&effective, src, _inside_class, _inside_interface)
+                {
                     decl.start_byte = node.range().start;
                     decl.start_line = node.start_pos().line() + 1;
                     let ds_byte = _leading_doc_start_byte(node).unwrap_or(node.range().start);
@@ -535,7 +537,10 @@ fn _lexical_to_decl<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Declar
             "arrow_function" | "function_expression" | "function"
         ) {
             let body = v.field("body");
-            let end = body.as_ref().map(|b| b.range().start).unwrap_or(v.range().end);
+            let end = body
+                .as_ref()
+                .map(|b| b.range().start)
+                .unwrap_or(v.range().end);
             let text = String::from_utf8_lossy(&src[node.range().start..end]).to_string();
             let sig = collapse_ws(&text).trim_end_matches('{').trim().to_string();
 
@@ -815,23 +820,42 @@ fn _walk_calls_in_body<'a, D: Doc>(node: &Node<'a, D>, src: &[u8], out: &mut Vec
     }
 }
 
-fn _call_site_from_call<'a, D: Doc>(node: &Node<'a, D>, src: &[u8], is_construct: bool) -> Option<CallSite> {
+fn _call_site_from_call<'a, D: Doc>(
+    node: &Node<'a, D>,
+    src: &[u8],
+    is_construct: bool,
+) -> Option<CallSite> {
     // tree-sitter-typescript exposes the callee as the `function` field on
     // call_expression and `constructor` on new_expression.
-    let func = node.field("function").or_else(|| node.field("constructor"))?;
+    let func = node
+        .field("function")
+        .or_else(|| node.field("constructor"))?;
     let (name, receiver) = _extract_callee_name_ts(&func, src)?;
     let line = node.start_pos().line() as u32 + 1;
-    let kind = if is_construct { CallKind::Construct } else { CallKind::Call };
-    Some(CallSite { name, receiver, line, kind })
+    let kind = if is_construct {
+        CallKind::Construct
+    } else {
+        CallKind::Call
+    };
+    Some(CallSite {
+        name,
+        receiver,
+        line,
+        kind,
+    })
 }
 
-fn _extract_callee_name_ts<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<(String, Option<String>)> {
+fn _extract_callee_name_ts<'a, D: Doc>(
+    node: &Node<'a, D>,
+    src: &[u8],
+) -> Option<(String, Option<String>)> {
     let kind = node.kind();
     let kind: &str = kind.as_ref();
     match kind {
-        "identifier" | "property_identifier" => {
-            Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None))
-        }
+        "identifier" | "property_identifier" => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
         "member_expression" => {
             let object = node.field("object");
             let property = node.field("property")?;
@@ -839,7 +863,10 @@ fn _extract_callee_name_ts<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option
             let recv = object.map(|o| String::from_utf8_lossy(&src[o.range()]).to_string());
             Some((name, recv))
         }
-        _ => Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None)),
+        _ => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
     }
 }
 
@@ -895,14 +922,22 @@ fn _handle_import_stmt<'a, D: Doc>(
                 match ik {
                     "identifier" => {
                         let local = String::from_utf8_lossy(&src[inner.range()]).to_string();
-                        out.push(ImportBinding { local, module: source.clone(), line });
+                        out.push(ImportBinding {
+                            local,
+                            module: source.clone(),
+                            line,
+                        });
                     }
                     "namespace_import" => {
                         // namespace_import has children including `* as ident`
                         for ns in inner.children() {
                             if matches!(ns.kind().as_ref(), "identifier") {
                                 let local = String::from_utf8_lossy(&src[ns.range()]).to_string();
-                                out.push(ImportBinding { local, module: source.clone(), line });
+                                out.push(ImportBinding {
+                                    local,
+                                    module: source.clone(),
+                                    line,
+                                });
                             }
                         }
                     }
@@ -943,7 +978,13 @@ fn _handle_import_stmt<'a, D: Doc>(
 
 fn _unquote(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix('\'').or_else(|| s.strip_prefix('"')).unwrap_or(s);
-    let s = s.strip_suffix('\'').or_else(|| s.strip_suffix('"')).unwrap_or(s);
+    let s = s
+        .strip_prefix('\'')
+        .or_else(|| s.strip_prefix('"'))
+        .unwrap_or(s);
+    let s = s
+        .strip_suffix('\'')
+        .or_else(|| s.strip_suffix('"'))
+        .unwrap_or(s);
     s.to_string()
 }

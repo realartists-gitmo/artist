@@ -132,10 +132,8 @@ async fn a_rewrite_preview_grows_with_the_number_of_call_sites() {
     let mut samples = Vec::new();
     for n in LADDER {
         let body = calls(n);
-        let (_r, _s, tools) = bundle_with(&[
-            ("src/a.rs", body.clone()),
-            ("src/b.rs", body.clone()),
-        ]);
+        let (_r, _s, tools) =
+            bundle_with(&[("src/a.rs", body.clone()), ("src/b.rs", body.clone())]);
         let out = call(
             &tools.ast_rewrite,
             json!({"pattern": "target($N)", "replacement": "renamed($N)"}),
@@ -158,10 +156,7 @@ async fn a_rewrite_preview_grows_with_the_number_of_call_sites() {
 #[tokio::test]
 async fn applying_a_rewrite_leaves_no_matching_site_behind() {
     let body = calls(16);
-    let (root, _s, tools) = bundle_with(&[
-        ("src/a.rs", body.clone()),
-        ("src/b.rs", body.clone()),
-    ]);
+    let (root, _s, tools) = bundle_with(&[("src/a.rs", body.clone()), ("src/b.rs", body.clone())]);
     call(
         &tools.ast_rewrite,
         json!({
@@ -237,7 +232,9 @@ async fn a_query_limit_binds_and_responds() {
 async fn grep_grows_with_the_number_of_matching_lines() {
     let mut samples = Vec::new();
     for n in LADDER {
-        let body: String = (0..n).map(|i| format!("let x{i} = needleword;\n")).collect();
+        let body: String = (0..n)
+            .map(|i| format!("let x{i} = needleword;\n"))
+            .collect();
         let (_r, _s, tools) = bundle_with(&[("src/a.rs", body)]);
         let out = call(&tools.grep, json!({"query": "needleword"})).await;
         samples.push((n, grep_hits(&out)));
@@ -286,12 +283,10 @@ async fn find_grows_with_the_number_of_matching_paths() {
     let mut samples = Vec::new();
     for n in LADDER {
         let files: Vec<(String, String)> = (0..n)
-            .map(|i| (format!("src/zeppelin{i}.rs", ), "fn a() {}\n".to_owned()))
+            .map(|i| (format!("src/zeppelin{i}.rs",), "fn a() {}\n".to_owned()))
             .collect();
-        let borrowed: Vec<(&str, String)> = files
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.clone()))
-            .collect();
+        let borrowed: Vec<(&str, String)> =
+            files.iter().map(|(p, c)| (p.as_str(), c.clone())).collect();
         let (_r, _s, tools) = bundle_with(&borrowed);
         let out = call(&tools.find, json!({"query": "zeppelin"})).await;
         samples.push((n, rows_containing(&out, "zeppelin")));
@@ -313,13 +308,12 @@ async fn a_read_limit_bounds_the_window_and_responds_to_it() {
     let mut samples = Vec::new();
     for limit in [3usize, 11, 29] {
         let (_r, _s, tools) = bundle_with(&[("src/a.rs", body.clone())]);
-        let out = call(
-            &tools.read,
-            json!({"path": "src/a.rs", "limit": limit}),
-        )
-        .await;
+        let out = call(&tools.read, json!({"path": "src/a.rs", "limit": limit})).await;
         let shown = rows_containing(&out, "let line");
-        assert!(shown <= limit, "read returned {shown} lines for limit={limit}");
+        assert!(
+            shown <= limit,
+            "read returned {shown} lines for limit={limit}"
+        );
         samples.push((limit, shown));
     }
     tracks(
@@ -370,7 +364,9 @@ async fn an_outline_grows_with_the_number_of_declarations() {
 async fn the_public_surface_grows_with_the_number_of_exports() {
     let mut samples = Vec::new();
     for n in LADDER {
-        let body: String = (0..n).map(|i| format!("pub fn export{i}() {{}}\n")).collect();
+        let body: String = (0..n)
+            .map(|i| format!("pub fn export{i}() {{}}\n"))
+            .collect();
         let (_r, _s, tools) = bundle_with(&[("src/lib.rs", body)]);
         let out = call(&tools.code_surface, json!({"path": "src"})).await;
         samples.push((n, rows_containing(&out, "export")));
@@ -402,10 +398,8 @@ async fn blast_radius_grows_with_the_number_of_callers() {
                 format!("use crate::target;\npub fn c{i}() -> u32 {{ target() }}\n"),
             ));
         }
-        let borrowed: Vec<(&str, String)> = files
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.clone()))
-            .collect();
+        let borrowed: Vec<(&str, String)> =
+            files.iter().map(|(p, c)| (p.as_str(), c.clone())).collect();
         let (_r, _s, tools) = bundle_with(&borrowed);
         let out = call(&tools.code_impact, json!({"symbol": "target"})).await;
         samples.push((n, rows_containing(&out, "caller")));
@@ -534,11 +528,19 @@ struct Knob {
 }
 
 fn moves(tool: &'static str, param: &'static str, f: Fixture, a: Value, b: Value) -> Knob {
-    Knob { tool, param, binds: Binds::Moves(f, a, b) }
+    Knob {
+        tool,
+        param,
+        binds: Binds::Moves(f, a, b),
+    }
 }
 
 fn covered(tool: &'static str, param: &'static str, by: &'static str) -> Knob {
-    Knob { tool, param, binds: Binds::Covered(by) }
+    Knob {
+        tool,
+        param,
+        binds: Binds::Covered(by),
+    }
 }
 
 // --- fixtures --------------------------------------------------------------
@@ -665,7 +667,11 @@ const WIDE_RS: [&str; 6] = [
     "src/zeppelin4.rs",
     "src/zeppelin5.rs",
 ];
-const WIDE_MD: [&str; 3] = ["docs/zeppelin0.md", "docs/zeppelin1.md", "docs/zeppelin2.md"];
+const WIDE_MD: [&str; 3] = [
+    "docs/zeppelin0.md",
+    "docs/zeppelin1.md",
+    "docs/zeppelin2.md",
+];
 
 // --- the table -------------------------------------------------------------
 
@@ -673,96 +679,482 @@ fn knobs() -> Vec<Knob> {
     use Fixture::{Crate, Inherited, Wide};
     vec![
         // bash
-        moves("bash", "mode", Crate, json!({"mode": "list"}), json!({"mode": "exec", "command": "echo alpha"})),
-        moves("bash", "command", Crate, json!({"command": "echo alpha"}), json!({"command": "echo beta"})),
-        moves("bash", "background", Crate, json!({"command": "echo alpha"}), json!({"command": "echo alpha", "background": true})),
-        moves("bash", "sessionId", Crate, json!({"mode": "start", "sessionId": "probe-one", "command": "cat"}), json!({"mode": "start", "sessionId": "probe-two", "command": "cat"})),
-        moves("bash", "timeout", Crate, json!({"command": "sleep 2", "timeout": 1}), json!({"command": "sleep 2", "timeout": 30})),
-        moves("bash", "maxBytes", Crate, json!({"command": "seq 1 4000", "maxBytes": 64}), json!({"command": "seq 1 4000", "maxBytes": 20000})),
-        moves("bash", "cwd", Crate, json!({"command": "pwd"}), json!({"command": "pwd", "cwd": "src"})),
-        moves("bash", "env", Crate, json!({"command": "echo $PROBE", "env": {"PROBE": "alpha"}}), json!({"command": "echo $PROBE", "env": {"PROBE": "beta"}})),
-        covered("bash", "input", "tools.rs::bash_exec_and_persistent_session_work_from_root — needs a live session to send into"),
-        covered("bash", "waitMs", "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a live session"),
-        covered("bash", "signal", "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a running session"),
+        moves(
+            "bash",
+            "mode",
+            Crate,
+            json!({"mode": "list"}),
+            json!({"mode": "exec", "command": "echo alpha"}),
+        ),
+        moves(
+            "bash",
+            "command",
+            Crate,
+            json!({"command": "echo alpha"}),
+            json!({"command": "echo beta"}),
+        ),
+        moves(
+            "bash",
+            "background",
+            Crate,
+            json!({"command": "echo alpha"}),
+            json!({"command": "echo alpha", "background": true}),
+        ),
+        moves(
+            "bash",
+            "sessionId",
+            Crate,
+            json!({"mode": "start", "sessionId": "probe-one", "command": "cat"}),
+            json!({"mode": "start", "sessionId": "probe-two", "command": "cat"}),
+        ),
+        moves(
+            "bash",
+            "timeout",
+            Crate,
+            json!({"command": "sleep 2", "timeout": 1}),
+            json!({"command": "sleep 2", "timeout": 30}),
+        ),
+        moves(
+            "bash",
+            "maxBytes",
+            Crate,
+            json!({"command": "seq 1 4000", "maxBytes": 64}),
+            json!({"command": "seq 1 4000", "maxBytes": 20000}),
+        ),
+        moves(
+            "bash",
+            "cwd",
+            Crate,
+            json!({"command": "pwd"}),
+            json!({"command": "pwd", "cwd": "src"}),
+        ),
+        moves(
+            "bash",
+            "env",
+            Crate,
+            json!({"command": "echo $PROBE", "env": {"PROBE": "alpha"}}),
+            json!({"command": "echo $PROBE", "env": {"PROBE": "beta"}}),
+        ),
+        covered(
+            "bash",
+            "input",
+            "tools.rs::bash_exec_and_persistent_session_work_from_root — needs a live session to send into",
+        ),
+        covered(
+            "bash",
+            "waitMs",
+            "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a live session",
+        ),
+        covered(
+            "bash",
+            "signal",
+            "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a running session",
+        ),
         // read
-        moves("read", "path", Crate, json!({"path": "src/lib.rs"}), json!({"path": "src/other.rs"})),
-        moves("read", "offset", Crate, json!({"path": "src/lib.rs", "limit": 5}), json!({"path": "src/lib.rs", "offset": 20, "limit": 5})),
-        moves("read", "limit", Crate, json!({"path": "src/lib.rs", "limit": 3}), json!({"path": "src/lib.rs", "limit": 25})),
+        moves(
+            "read",
+            "path",
+            Crate,
+            json!({"path": "src/lib.rs"}),
+            json!({"path": "src/other.rs"}),
+        ),
+        moves(
+            "read",
+            "offset",
+            Crate,
+            json!({"path": "src/lib.rs", "limit": 5}),
+            json!({"path": "src/lib.rs", "offset": 20, "limit": 5}),
+        ),
+        moves(
+            "read",
+            "limit",
+            Crate,
+            json!({"path": "src/lib.rs", "limit": 3}),
+            json!({"path": "src/lib.rs", "limit": 25}),
+        ),
         // find
-        moves("find", "query", Wide, json!({"query": "zeppelin"}), json!({"query": "nothingmatchesthis"})),
-        moves("find", "path", Wide, json!({"query": "zeppelin", "path": "src"}), json!({"query": "zeppelin", "path": "docs"})),
-        moves("find", "glob", Wide, json!({"query": "zeppelin", "glob": "**/*.rs"}), json!({"query": "zeppelin", "glob": "**/*.md"})),
-        moves("find", "limit", Wide, json!({"query": "zeppelin", "limit": 1}), json!({"query": "zeppelin", "limit": 50})),
+        moves(
+            "find",
+            "query",
+            Wide,
+            json!({"query": "zeppelin"}),
+            json!({"query": "nothingmatchesthis"}),
+        ),
+        moves(
+            "find",
+            "path",
+            Wide,
+            json!({"query": "zeppelin", "path": "src"}),
+            json!({"query": "zeppelin", "path": "docs"}),
+        ),
+        moves(
+            "find",
+            "glob",
+            Wide,
+            json!({"query": "zeppelin", "glob": "**/*.rs"}),
+            json!({"query": "zeppelin", "glob": "**/*.md"}),
+        ),
+        moves(
+            "find",
+            "limit",
+            Wide,
+            json!({"query": "zeppelin", "limit": 1}),
+            json!({"query": "zeppelin", "limit": 50}),
+        ),
         // grep
-        moves("grep", "query", Crate, json!({"query": "needleword"}), json!({"query": "Greeter"})),
-        moves("grep", "path", Crate, json!({"query": "target", "path": "src/lib.rs"}), json!({"query": "target", "path": "src/other.rs"})),
-        moves("grep", "glob", Wide, json!({"query": "target", "glob": "**/*.rs"}), json!({"query": "target", "glob": "**/*.md"})),
-        moves("grep", "match", Crate, json!({"query": "a.c", "match": "regex"}), json!({"query": "a.c", "match": "literal"})),
-        moves("grep", "case", Crate, json!({"query": "NEEDLEWORD", "case": "sensitive"}), json!({"query": "NEEDLEWORD", "case": "insensitive"})),
-        moves("grep", "context", Crate, json!({"query": "needleword", "context": 0}), json!({"query": "needleword", "context": 5})),
-        moves("grep", "limit", Wide, json!({"query": "target", "limit": 1}), json!({"query": "target", "limit": 50})),
+        moves(
+            "grep",
+            "query",
+            Crate,
+            json!({"query": "needleword"}),
+            json!({"query": "Greeter"}),
+        ),
+        moves(
+            "grep",
+            "path",
+            Crate,
+            json!({"query": "target", "path": "src/lib.rs"}),
+            json!({"query": "target", "path": "src/other.rs"}),
+        ),
+        moves(
+            "grep",
+            "glob",
+            Wide,
+            json!({"query": "target", "glob": "**/*.rs"}),
+            json!({"query": "target", "glob": "**/*.md"}),
+        ),
+        moves(
+            "grep",
+            "match",
+            Crate,
+            json!({"query": "a.c", "match": "regex"}),
+            json!({"query": "a.c", "match": "literal"}),
+        ),
+        moves(
+            "grep",
+            "case",
+            Crate,
+            json!({"query": "NEEDLEWORD", "case": "sensitive"}),
+            json!({"query": "NEEDLEWORD", "case": "insensitive"}),
+        ),
+        moves(
+            "grep",
+            "context",
+            Crate,
+            json!({"query": "needleword", "context": 0}),
+            json!({"query": "needleword", "context": 5}),
+        ),
+        moves(
+            "grep",
+            "limit",
+            Wide,
+            json!({"query": "target", "limit": 1}),
+            json!({"query": "target", "limit": 50}),
+        ),
         // edit — both parameters take mnemonic anchors, which only exist after
         // a read of the same file, so a two-call driver cannot construct them.
-        covered("edit", "path", "tools.rs::all_file_tools_accept_external_absolute_paths"),
-        covered("edit", "replacements", "tools.rs::reads_then_edits_with_mnemonic_anchor"),
+        covered(
+            "edit",
+            "path",
+            "tools.rs::all_file_tools_accept_external_absolute_paths",
+        ),
+        covered(
+            "edit",
+            "replacements",
+            "tools.rs::reads_then_edits_with_mnemonic_anchor",
+        ),
         // write
-        moves("write", "path", Crate, json!({"path": "src/new_a.rs", "content": "fn a() {}\n"}), json!({"path": "src/new_b.rs", "content": "fn a() {}\n"})),
-        moves("write", "content", Crate, json!({"path": "src/new.rs", "content": "fn alpha() {}\n"}), json!({"path": "src/new.rs", "content": "fn beta() {}\n"})),
+        moves(
+            "write",
+            "path",
+            Crate,
+            json!({"path": "src/new_a.rs", "content": "fn a() {}\n"}),
+            json!({"path": "src/new_b.rs", "content": "fn a() {}\n"}),
+        ),
+        moves(
+            "write",
+            "content",
+            Crate,
+            json!({"path": "src/new.rs", "content": "fn alpha() {}\n"}),
+            json!({"path": "src/new.rs", "content": "fn beta() {}\n"}),
+        ),
         // code_map
-        moves("code_map", "path", Crate, json!({"path": "src/lib.rs"}), json!({"path": "src/other.rs"})),
-        moves("code_map", "budget", Crate, json!({"path": "src/lib.rs", "budget": 2}), json!({"path": "src/lib.rs", "budget": 200})),
-        moves("code_map", "includePrivate", Crate, json!({"path": "src/lib.rs", "includePrivate": false}), json!({"path": "src/lib.rs", "includePrivate": true})),
+        moves(
+            "code_map",
+            "path",
+            Crate,
+            json!({"path": "src/lib.rs"}),
+            json!({"path": "src/other.rs"}),
+        ),
+        moves(
+            "code_map",
+            "budget",
+            Crate,
+            json!({"path": "src/lib.rs", "budget": 2}),
+            json!({"path": "src/lib.rs", "budget": 200}),
+        ),
+        moves(
+            "code_map",
+            "includePrivate",
+            Crate,
+            json!({"path": "src/lib.rs", "includePrivate": false}),
+            json!({"path": "src/lib.rs", "includePrivate": true}),
+        ),
         // code_show
-        moves("code_show", "path", Crate, json!({"path": "src/lib.rs", "symbol": "top"}), json!({"path": "src/other.rs", "symbol": "top"})),
-        moves("code_show", "symbol", Crate, json!({"path": "src/lib.rs", "symbol": "top"}), json!({"path": "src/lib.rs", "symbol": "middle"})),
+        moves(
+            "code_show",
+            "path",
+            Crate,
+            json!({"path": "src/lib.rs", "symbol": "top"}),
+            json!({"path": "src/other.rs", "symbol": "top"}),
+        ),
+        moves(
+            "code_show",
+            "symbol",
+            Crate,
+            json!({"path": "src/lib.rs", "symbol": "top"}),
+            json!({"path": "src/lib.rs", "symbol": "middle"}),
+        ),
         // code_surface
-        moves("code_surface", "path", Crate, json!({"path": "src"}), json!({"path": "src/other.rs"})),
-        moves("code_surface", "tree", Crate, json!({"path": ".", "tree": false}), json!({"path": ".", "tree": true})),
+        moves(
+            "code_surface",
+            "path",
+            Crate,
+            json!({"path": "src"}),
+            json!({"path": "src/other.rs"}),
+        ),
+        moves(
+            "code_surface",
+            "tree",
+            Crate,
+            json!({"path": ".", "tree": false}),
+            json!({"path": ".", "tree": true}),
+        ),
         // Scoped to the crate root, not `src`: a re-export chain only exists
         // when the Rust resolver runs, and it is selected by finding a manifest
         // at the scope. Pointed at `src` this silently drops to the fallback
         // resolver, which sets every chain empty — so the probe would have been
         // measuring the fixture, not the knob.
-        moves("code_surface", "includeChain", Crate, json!({"path": ".", "includeChain": false}), json!({"path": ".", "includeChain": true})),
+        moves(
+            "code_surface",
+            "includeChain",
+            Crate,
+            json!({"path": ".", "includeChain": false}),
+            json!({"path": ".", "includeChain": true}),
+        ),
         // code_implements
-        moves("code_implements", "target", Crate, json!({"target": "Greeter"}), json!({"target": "NoSuchTrait"})),
-        moves("code_implements", "path", Crate, json!({"target": "Greeter", "path": "src"}), json!({"target": "Greeter", "path": "sub/src"})),
-        moves("code_implements", "direct", Inherited, json!({"target": "Base", "direct": true}), json!({"target": "Base", "direct": false})),
+        moves(
+            "code_implements",
+            "target",
+            Crate,
+            json!({"target": "Greeter"}),
+            json!({"target": "NoSuchTrait"}),
+        ),
+        moves(
+            "code_implements",
+            "path",
+            Crate,
+            json!({"target": "Greeter", "path": "src"}),
+            json!({"target": "Greeter", "path": "sub/src"}),
+        ),
+        moves(
+            "code_implements",
+            "direct",
+            Inherited,
+            json!({"target": "Base", "direct": true}),
+            json!({"target": "Base", "direct": false}),
+        ),
         // code_deps
-        moves("code_deps", "file", Crate, json!({"file": "src/other.rs"}), json!({"file": "src/deep.rs"})),
-        moves("code_deps", "direction", Crate, json!({"file": "src/other.rs", "direction": "forward"}), json!({"file": "src/other.rs", "direction": "reverse"})),
-        moves("code_deps", "depth", Crate, json!({"file": "src/deep.rs", "direction": "forward", "depth": 1}), json!({"file": "src/deep.rs", "direction": "forward", "depth": 5})),
-        moves("code_deps", "limit", Crate, json!({"file": "src/deep.rs", "direction": "forward", "depth": 5, "limit": 1}), json!({"file": "src/deep.rs", "direction": "forward", "depth": 5, "limit": 50})),
-        moves("code_deps", "excludeTests", Crate, json!({"file": "src/ring_a.rs", "direction": "reverse", "excludeTests": false}), json!({"file": "src/ring_a.rs", "direction": "reverse", "excludeTests": true})),
+        moves(
+            "code_deps",
+            "file",
+            Crate,
+            json!({"file": "src/other.rs"}),
+            json!({"file": "src/deep.rs"}),
+        ),
+        moves(
+            "code_deps",
+            "direction",
+            Crate,
+            json!({"file": "src/other.rs", "direction": "forward"}),
+            json!({"file": "src/other.rs", "direction": "reverse"}),
+        ),
+        moves(
+            "code_deps",
+            "depth",
+            Crate,
+            json!({"file": "src/deep.rs", "direction": "forward", "depth": 1}),
+            json!({"file": "src/deep.rs", "direction": "forward", "depth": 5}),
+        ),
+        moves(
+            "code_deps",
+            "limit",
+            Crate,
+            json!({"file": "src/deep.rs", "direction": "forward", "depth": 5, "limit": 1}),
+            json!({"file": "src/deep.rs", "direction": "forward", "depth": 5, "limit": 50}),
+        ),
+        moves(
+            "code_deps",
+            "excludeTests",
+            Crate,
+            json!({"file": "src/ring_a.rs", "direction": "reverse", "excludeTests": false}),
+            json!({"file": "src/ring_a.rs", "direction": "reverse", "excludeTests": true}),
+        ),
         // code_cycles
-        moves("code_cycles", "path", Crate, json!({"path": "src"}), json!({"path": "sub/src"})),
-        moves("code_cycles", "minSize", Crate, json!({"path": "src", "minSize": 2}), json!({"path": "src", "minSize": 40})),
+        moves(
+            "code_cycles",
+            "path",
+            Crate,
+            json!({"path": "src"}),
+            json!({"path": "sub/src"}),
+        ),
+        moves(
+            "code_cycles",
+            "minSize",
+            Crate,
+            json!({"path": "src", "minSize": 2}),
+            json!({"path": "src", "minSize": 40}),
+        ),
         // code_trace
-        moves("code_trace", "from", Crate, json!({"from": "top", "to": "bottom", "depth": 5}), json!({"from": "middle", "to": "bottom", "depth": 5})),
-        moves("code_trace", "to", Crate, json!({"from": "top", "to": "bottom", "depth": 5}), json!({"from": "top", "to": "middle", "depth": 5})),
-        moves("code_trace", "path", Crate, json!({"from": "top", "to": "bottom", "depth": 5, "path": "src"}), json!({"from": "top", "to": "bottom", "depth": 5, "path": "sub/src"})),
-        moves("code_trace", "depth", Crate, json!({"from": "top", "to": "bottom", "depth": 1}), json!({"from": "top", "to": "bottom", "depth": 5})),
+        moves(
+            "code_trace",
+            "from",
+            Crate,
+            json!({"from": "top", "to": "bottom", "depth": 5}),
+            json!({"from": "middle", "to": "bottom", "depth": 5}),
+        ),
+        moves(
+            "code_trace",
+            "to",
+            Crate,
+            json!({"from": "top", "to": "bottom", "depth": 5}),
+            json!({"from": "top", "to": "middle", "depth": 5}),
+        ),
+        moves(
+            "code_trace",
+            "path",
+            Crate,
+            json!({"from": "top", "to": "bottom", "depth": 5, "path": "src"}),
+            json!({"from": "top", "to": "bottom", "depth": 5, "path": "sub/src"}),
+        ),
+        moves(
+            "code_trace",
+            "depth",
+            Crate,
+            json!({"from": "top", "to": "bottom", "depth": 1}),
+            json!({"from": "top", "to": "bottom", "depth": 5}),
+        ),
         // code_impact
-        moves("code_impact", "symbol", Crate, json!({"symbol": "top"}), json!({"symbol": "target"})),
-        moves("code_impact", "path", Crate, json!({"symbol": "top", "path": "src"}), json!({"symbol": "top", "path": "sub/src"})),
-        moves("code_impact", "depth", Crate, json!({"symbol": "bottom", "depth": 1}), json!({"symbol": "bottom", "depth": 5})),
-        moves("code_impact", "mode", Crate, json!({"symbol": "top", "mode": "all"}), json!({"symbol": "top", "mode": "tests"})),
+        moves(
+            "code_impact",
+            "symbol",
+            Crate,
+            json!({"symbol": "top"}),
+            json!({"symbol": "target"}),
+        ),
+        moves(
+            "code_impact",
+            "path",
+            Crate,
+            json!({"symbol": "top", "path": "src"}),
+            json!({"symbol": "top", "path": "sub/src"}),
+        ),
+        moves(
+            "code_impact",
+            "depth",
+            Crate,
+            json!({"symbol": "bottom", "depth": 1}),
+            json!({"symbol": "bottom", "depth": 5}),
+        ),
+        moves(
+            "code_impact",
+            "mode",
+            Crate,
+            json!({"symbol": "top", "mode": "all"}),
+            json!({"symbol": "top", "mode": "tests"}),
+        ),
         // ast_query
-        moves("ast_query", "pattern", Crate, json!({"pattern": "target($N)"}), json!({"pattern": "fn $NAME() -> u32 { $$$BODY }"})),
-        moves("ast_query", "path", Wide, json!({"pattern": "target($N)", "path": "src"}), json!({"pattern": "target($N)", "path": "docs"})),
-        moves("ast_query", "glob", Wide, json!({"pattern": "target($N)", "glob": "**/zeppelin0.rs"}), json!({"pattern": "target($N)", "glob": "**/*.rs"})),
+        moves(
+            "ast_query",
+            "pattern",
+            Crate,
+            json!({"pattern": "target($N)"}),
+            json!({"pattern": "fn $NAME() -> u32 { $$$BODY }"}),
+        ),
+        moves(
+            "ast_query",
+            "path",
+            Wide,
+            json!({"pattern": "target($N)", "path": "src"}),
+            json!({"pattern": "target($N)", "path": "docs"}),
+        ),
+        moves(
+            "ast_query",
+            "glob",
+            Wide,
+            json!({"pattern": "target($N)", "glob": "**/zeppelin0.rs"}),
+            json!({"pattern": "target($N)", "glob": "**/*.rs"}),
+        ),
         // `target($N)` would be the obvious probe and a useless one: it parses
         // in both languages, so the override binds and the output still
         // matches. `let` exists only in Rust.
-        moves("ast_query", "lang", Crate, json!({"pattern": "let $V = $E;", "lang": "rust"}), json!({"pattern": "let $V = $E;", "lang": "python"})),
-        moves("ast_query", "limit", Wide, json!({"pattern": "target($N)", "limit": 1}), json!({"pattern": "target($N)", "limit": 50})),
+        moves(
+            "ast_query",
+            "lang",
+            Crate,
+            json!({"pattern": "let $V = $E;", "lang": "rust"}),
+            json!({"pattern": "let $V = $E;", "lang": "python"}),
+        ),
+        moves(
+            "ast_query",
+            "limit",
+            Wide,
+            json!({"pattern": "target($N)", "limit": 1}),
+            json!({"pattern": "target($N)", "limit": 50}),
+        ),
         // ast_rewrite
-        moves("ast_rewrite", "pattern", Wide, json!({"pattern": "target($N)", "replacement": "renamed($N)"}), json!({"pattern": "pub fn $N() -> u32 { $$$B }", "replacement": "renamed($N)"})),
-        moves("ast_rewrite", "replacement", Wide, json!({"pattern": "target($N)", "replacement": "alpha($N)"}), json!({"pattern": "target($N)", "replacement": "beta($N)"})),
-        moves("ast_rewrite", "path", Wide, json!({"pattern": "target($N)", "replacement": "renamed($N)", "path": "src"}), json!({"pattern": "target($N)", "replacement": "renamed($N)", "path": "docs"})),
-        moves("ast_rewrite", "glob", Wide, json!({"pattern": "target($N)", "replacement": "renamed($N)", "glob": "**/zeppelin0.rs"}), json!({"pattern": "target($N)", "replacement": "renamed($N)", "glob": "**/*.rs"})),
-        moves("ast_rewrite", "lang", Crate, json!({"pattern": "let $V = $E;", "replacement": "let $V = ($E);", "lang": "rust"}), json!({"pattern": "let $V = $E;", "replacement": "let $V = ($E);", "lang": "python"})),
-        moves("ast_rewrite", "apply", Wide, json!({"pattern": "target($N)", "replacement": "renamed($N)", "apply": false}), json!({"pattern": "target($N)", "replacement": "renamed($N)", "apply": true})),
+        moves(
+            "ast_rewrite",
+            "pattern",
+            Wide,
+            json!({"pattern": "target($N)", "replacement": "renamed($N)"}),
+            json!({"pattern": "pub fn $N() -> u32 { $$$B }", "replacement": "renamed($N)"}),
+        ),
+        moves(
+            "ast_rewrite",
+            "replacement",
+            Wide,
+            json!({"pattern": "target($N)", "replacement": "alpha($N)"}),
+            json!({"pattern": "target($N)", "replacement": "beta($N)"}),
+        ),
+        moves(
+            "ast_rewrite",
+            "path",
+            Wide,
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "path": "src"}),
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "path": "docs"}),
+        ),
+        moves(
+            "ast_rewrite",
+            "glob",
+            Wide,
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "glob": "**/zeppelin0.rs"}),
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "glob": "**/*.rs"}),
+        ),
+        moves(
+            "ast_rewrite",
+            "lang",
+            Crate,
+            json!({"pattern": "let $V = $E;", "replacement": "let $V = ($E);", "lang": "rust"}),
+            json!({"pattern": "let $V = $E;", "replacement": "let $V = ($E);", "lang": "python"}),
+        ),
+        moves(
+            "ast_rewrite",
+            "apply",
+            Wide,
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "apply": false}),
+            json!({"pattern": "target($N)", "replacement": "renamed($N)", "apply": true}),
+        ),
     ]
 }
 
@@ -777,9 +1169,7 @@ async fn every_advertised_parameter_is_accounted_for() {
 
     let missing: Vec<String> = advertised(&tools)
         .iter()
-        .filter(|(tool, param)| {
-            !table.iter().any(|k| k.tool == *tool && k.param == param)
-        })
+        .filter(|(tool, param)| !table.iter().any(|k| k.tool == *tool && k.param == param))
         .map(|(tool, param)| format!("{tool}.{param}"))
         .collect();
     assert!(

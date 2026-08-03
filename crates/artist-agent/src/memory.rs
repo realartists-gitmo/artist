@@ -386,11 +386,7 @@ impl PortableTool for MemoryTool {
                 let text = args
                     .text
                     .ok_or_else(|| MemoryError("mode=store needs text".into()))?;
-                match self
-                    .handle
-                    .remember("", "", &text, &text, "tool")
-                    .await
-                {
+                match self.handle.remember("", "", &text, &text, "tool").await {
                     // Reporting the retirement matters: without it the model
                     // cannot tell adding a belief from revising one, and would
                     // have no reason to look at what it just replaced.
@@ -435,11 +431,9 @@ impl PortableTool for MemoryTool {
                     .map_err(|e| MemoryError(e.to_string()))?;
                 let old = resolve(&prefix, &known).map_err(|e| MemoryError(e.to_string()))?;
                 match self.handle.supersede(old, &text, "tool").await {
-                    Ok(Some(id)) => Ok(format!(
-                        "Replaced [{}] with [{}].",
-                        handle(old),
-                        handle(id)
-                    )),
+                    Ok(Some(id)) => {
+                        Ok(format!("Replaced [{}] with [{}].", handle(old), handle(id)))
+                    }
                     Ok(None) => Ok("Nothing stored.".into()),
                     Err(err) => Err(MemoryError(err.to_string())),
                 }
@@ -498,10 +492,7 @@ pub(crate) fn capture_correction(writer: MemoryWriter, text: &str) {
         // Fire-and-forget, but not silent: a correction that fails to store is
         // exactly the write worth knowing about, and discarding the result made
         // an embedder failure indistinguishable from success.
-        match writer
-            .remember("", "", &text, &text, "correction")
-            .await
-        {
+        match writer.remember("", "", &text, &text, "correction").await {
             Ok(Remembered::Stored(_)) | Ok(Remembered::Restated(_)) => {}
             Ok(Remembered::NoId) => eprintln!("memory: correction produced no fact id"),
             Err(error) => eprintln!("memory: could not store correction: {error}"),
@@ -696,10 +687,7 @@ impl MemoryHook {
         };
         tokio::spawn(async move {
             let text = format!("Committed: {subject}");
-            match handle
-                .remember("", "", &text, &text, "commit")
-                .await
-            {
+            match handle.remember("", "", &text, &text, "commit").await {
                 Ok(Remembered::Stored(_)) | Ok(Remembered::Restated(_)) => {}
                 Ok(Remembered::NoId) => eprintln!("memory: commit note produced no fact id"),
                 Err(error) => eprintln!("memory: could not store commit note: {error}"),

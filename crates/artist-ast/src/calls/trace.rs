@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::calls::cli_helpers::resolve_target_qns;
 use crate::calls::graph::{CallEdge, CallGraph, CallTarget, Qn};
-use crate::core::{ParseResult, JSON_SCHEMA_TRACE};
+use crate::core::{JSON_SCHEMA_TRACE, ParseResult};
 
 /// Total inlined-body budget for one trace response. Beyond this, remaining
 /// hops are listed header-only with a note.
@@ -59,7 +59,10 @@ pub fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) 
     // from == to: a zero-hop "path".
     for f in froms {
         if to_set.contains(f) {
-            return Some(Found { start: f.clone(), hops: Vec::new() });
+            return Some(Found {
+                start: f.clone(),
+                hops: Vec::new(),
+            });
         }
     }
 
@@ -77,9 +80,13 @@ pub fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) 
         if depth >= max_depth {
             continue;
         }
-        let Some(edges) = calls.forward.get(&cur) else { continue };
+        let Some(edges) = calls.forward.get(&cur) else {
+            continue;
+        };
         for e in edges {
-            let CallTarget::Resolved(next) = &e.target else { continue };
+            let CallTarget::Resolved(next) = &e.target else {
+                continue;
+            };
             if visited.contains(next) {
                 continue;
             }
@@ -99,7 +106,10 @@ fn reconstruct(target: &Qn, parent: &HashMap<Qn, (Qn, CallEdge)>) -> Found {
     let mut hops: Vec<Hop> = Vec::new();
     let mut cur = target.clone();
     while let Some((prev, edge)) = parent.get(&cur) {
-        hops.push(Hop { qn: cur.clone(), via: edge.clone() });
+        hops.push(Hop {
+            qn: cur.clone(),
+            via: edge.clone(),
+        });
         cur = prev.clone();
     }
     hops.reverse();
@@ -124,7 +134,10 @@ struct BodyCache<'a> {
 
 impl<'a> BodyCache<'a> {
     fn new(root: &'a Path) -> Self {
-        Self { root, parsed: HashMap::new() }
+        Self {
+            root,
+            parsed: HashMap::new(),
+        }
     }
 
     fn parse(&mut self, file: &str) -> Option<&ParseResult> {
@@ -163,7 +176,10 @@ fn truncate_body(src: &str) -> String {
     }
     let slice = &src[..cut];
     let cut = slice.rfind('\n').map(|i| i + 1).unwrap_or(slice.len());
-    format!("{}… (body truncated — use `show` for the full text)\n", &src[..cut])
+    format!(
+        "{}… (body truncated — use `show` for the full text)\n",
+        &src[..cut]
+    )
 }
 
 fn meta_line(calls: &CallGraph, qn: &Qn) -> Option<u32> {
@@ -172,11 +188,7 @@ fn meta_line(calls: &CallGraph, qn: &Qn) -> Option<u32> {
 
 fn meta_loc(calls: &CallGraph, qn: &Qn) -> (String, u32, String) {
     match calls.callable_meta.get(qn) {
-        Some(m) => (
-            m.file.display().to_string(),
-            m.line,
-            m.kind.clone(),
-        ),
+        Some(m) => (m.file.display().to_string(), m.line, m.kind.clone()),
         None => (qn.file().to_string(), 0, String::new()),
     }
 }
@@ -262,7 +274,15 @@ fn render_found_text(
     let mut step = 1usize;
 
     // Node 0 — the start.
-    push_node_text(&mut out, calls, &found.start, step, None, cache, &mut budget);
+    push_node_text(
+        &mut out,
+        calls,
+        &found.start,
+        step,
+        None,
+        cache,
+        &mut budget,
+    );
     for hop in &found.hops {
         step += 1;
         out.push_str(&format!(
@@ -270,7 +290,15 @@ fn render_found_text(
             hop.via.kind.as_str(),
             hop.via.line,
         ));
-        push_node_text(&mut out, calls, &hop.qn, step, Some(&hop.via), cache, &mut budget);
+        push_node_text(
+            &mut out,
+            calls,
+            &hop.qn,
+            step,
+            Some(&hop.via),
+            cache,
+            &mut budget,
+        );
     }
     out
 }
@@ -288,8 +316,15 @@ fn push_node_text(
     let conf = via
         .map(|e| format!("  [{}]", e.confidence.as_str()))
         .unwrap_or_default();
-    let kind_tag = if kind.is_empty() { String::new() } else { format!("  [{}]", kind) };
-    out.push_str(&format!("{}. {}  {}:{}{}{}\n", step, qn, file, line, kind_tag, conf));
+    let kind_tag = if kind.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", kind)
+    };
+    out.push_str(&format!(
+        "{}. {}  {}:{}{}{}\n",
+        step, qn, file, line, kind_tag, conf
+    ));
 
     if *budget == 0 {
         out.push_str("       … (body budget reached — use `show` for this symbol)\n");
@@ -334,7 +369,11 @@ fn render_nopath_text(
         ));
         for qn in &sibs {
             let (_f, line, kind) = meta_loc(calls, qn);
-            let kind_tag = if kind.is_empty() { String::new() } else { format!("  [{}]", kind) };
+            let kind_tag = if kind.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", kind)
+            };
             out.push_str(&format!("   - {}  :{}{}\n", qn.name(), line, kind_tag));
         }
     }
@@ -358,7 +397,12 @@ fn siblings(calls: &CallGraph, target: &Qn) -> Vec<Qn> {
 
 // ---------- json ----------
 
-fn node_json(calls: &CallGraph, qn: &Qn, via: Option<&CallEdge>, cache: &mut BodyCache) -> serde_json::Value {
+fn node_json(
+    calls: &CallGraph,
+    qn: &Qn,
+    via: Option<&CallEdge>,
+    cache: &mut BodyCache,
+) -> serde_json::Value {
     let (file, line, kind) = meta_loc(calls, qn);
     let body = cache.body(qn, meta_line(calls, qn));
     serde_json::json!({
@@ -465,8 +509,8 @@ mod tests {
     fn finds_multi_hop_path() {
         // a -> b -> c
         let g = graph_with(vec![edge("f::a", "f::b"), edge("f::b", "f::c")]);
-        let found = find_path(&g, &[Qn::new("f::a")], &[Qn::new("f::c")], 12)
-            .expect("path a->c exists");
+        let found =
+            find_path(&g, &[Qn::new("f::a")], &[Qn::new("f::c")], 12).expect("path a->c exists");
         assert_eq!(found.start, Qn::new("f::a"));
         let chain: Vec<&str> = found.hops.iter().map(|h| h.qn.as_str()).collect();
         assert_eq!(chain, vec!["f::b", "f::c"]);

@@ -652,7 +652,10 @@ mod tests {
             &Overrides::default(),
             &[],
         );
-        assert_eq!(effective.statefulness, artist_agent::Statefulness::default());
+        assert_eq!(
+            effective.statefulness,
+            artist_agent::Statefulness::default()
+        );
         assert!(!effective.statefulness.chaining);
         assert!(!effective.statefulness.stored_prompt);
         assert!(!effective.statefulness.gemini_cache);
@@ -661,12 +664,8 @@ mod tests {
     #[test]
     fn a_global_opt_in_reaches_the_session() {
         let global = from_str("[statefulness]\nchaining = true\n");
-        let effective = EffectiveSettings::resolve(
-            &global,
-            &Settings::default(),
-            &Overrides::default(),
-            &[],
-        );
+        let effective =
+            EffectiveSettings::resolve(&global, &Settings::default(), &Overrides::default(), &[]);
         assert!(effective.statefulness.chaining);
         // Enabling one must not enable the others: they need different
         // endpoints and carry different risks.
@@ -681,10 +680,12 @@ mod tests {
     fn the_project_layer_overrides_the_global_one() {
         let global = from_str("[statefulness]\nchaining = true\nstored_prompt = true\n");
         let project = from_str("[statefulness]\nchaining = false\ngemini_cache = true\n");
-        let effective =
-            EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
 
-        assert!(!effective.statefulness.chaining, "project must be able to opt out");
+        assert!(
+            !effective.statefulness.chaining,
+            "project must be able to opt out"
+        );
         // Untouched by the project layer, so the global opinion stands.
         assert!(effective.statefulness.stored_prompt);
         assert!(effective.statefulness.gemini_cache);
@@ -709,8 +710,7 @@ mod tests {
         )
         .unwrap();
 
-        let effective =
-            load_effective(&config_root, &project, &Overrides::default(), &[]).unwrap();
+        let effective = load_effective(&config_root, &project, &Overrides::default(), &[]).unwrap();
 
         assert!(effective.statefulness.chaining, "global opinion survives");
         assert!(

@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::calls::cli_helpers::{resolve_target_full, SymbolKind};
+use crate::calls::cli_helpers::{SymbolKind, resolve_target_full};
 use crate::calls::graph::{CallEdge, CallGraph, CallKindCompat, CallTarget, Confidence, Qn};
 use crate::calls::{render, traverse};
 use crate::graph_cache;
@@ -77,10 +77,8 @@ pub fn run_callers(
                             return false;
                         }
                         if tests || exclude_tests {
-                            let is_test = crate::file_filter::is_test_file(
-                                &root.join(&edge.file),
-                                &root,
-                            );
+                            let is_test =
+                                crate::file_filter::is_test_file(&root.join(&edge.file), &root);
                             if exclude_tests {
                                 if is_test {
                                     return false;
@@ -100,13 +98,8 @@ pub fn run_callers(
                 // carry repo-relative file paths.
                 if tests || exclude_tests {
                     let keep = |file: &Path| {
-                        let is_test =
-                            crate::file_filter::is_test_file(&root.join(file), &root);
-                        if exclude_tests {
-                            !is_test
-                        } else {
-                            is_test
-                        }
+                        let is_test = crate::file_filter::is_test_file(&root.join(file), &root);
+                        if exclude_tests { !is_test } else { is_test }
                     };
                     group.implementations.retain(|i| keep(&i.file));
                     group.constructions.retain(|e| keep(&e.file));
@@ -123,13 +116,7 @@ pub fn run_callers(
     if json {
         println!(
             "{}",
-            render::render_callers_json_extended(
-                target,
-                depth.max(1),
-                &hits,
-                &type_groups,
-                pretty,
-            )
+            render::render_callers_json_extended(target, depth.max(1), &hits, &type_groups, pretty,)
         );
     } else {
         print!(
@@ -220,13 +207,7 @@ pub fn run_callees(
     } else {
         print!(
             "{}",
-            render::render_callees_text_extended(
-                calls,
-                &first,
-                &all_edges,
-                &type_groups,
-                external,
-            )
+            render::render_callees_text_extended(calls, &first, &all_edges, &type_groups, external,)
         );
     }
     0
@@ -455,8 +436,7 @@ fn methods_of_type(calls: &CallGraph, type_qn: &Qn) -> Vec<MethodInfo> {
         .forward
         .keys()
         .filter(|qn| {
-            qn.as_str().starts_with(&prefix)
-                && !qn.as_str()[prefix.len()..].contains("::")
+            qn.as_str().starts_with(&prefix) && !qn.as_str()[prefix.len()..].contains("::")
         })
         .map(|m_qn| {
             let (file, line) = calls
@@ -513,7 +493,7 @@ pub fn run_trace(
     json: bool,
     pretty: bool,
 ) -> i32 {
-    use crate::calls::trace::{render_trace, TraceOutcome};
+    use crate::calls::trace::{TraceOutcome, render_trace};
     let root = match find_root_for(path) {
         Ok(r) => r,
         Err(e) => {
@@ -548,4 +528,3 @@ pub fn run_trace(
         TraceOutcome::Unresolved => 2,
     }
 }
-

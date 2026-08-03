@@ -60,7 +60,10 @@ pub fn resolve_home(path_arg: &Path, cwd: &Path, marker: Marker) -> (PathBuf, bo
     let start_dir: PathBuf = if abs_path.is_dir() {
         abs_path.clone()
     } else {
-        abs_path.parent().map(Path::to_path_buf).unwrap_or(abs_path.clone())
+        abs_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(abs_path.clone())
     };
 
     let mut cur = start_dir.as_path();
@@ -123,9 +126,7 @@ pub fn find_root_for(file: &Path) -> Result<PathBuf, String> {
     loop {
         // Guard: with a manifest in hand, never treat $HOME or its
         // ancestors as a candidate root.
-        if nearest_manifest.is_some()
-            && home.as_deref().is_some_and(|h| h.starts_with(cur))
-        {
+        if nearest_manifest.is_some() && home.as_deref().is_some_and(|h| h.starts_with(cur)) {
             break;
         }
         if cur.join(".git").exists() {
@@ -151,9 +152,7 @@ pub fn find_root_for(file: &Path) -> Result<PathBuf, String> {
     Ok(if abs.is_dir() {
         abs
     } else {
-        abs.parent()
-            .ok_or("no parent directory")?
-            .to_path_buf()
+        abs.parent().ok_or("no parent directory")?.to_path_buf()
     })
 }
 
@@ -362,10 +361,7 @@ mod tests {
 
     #[test]
     fn compare_corpus_subset_explicit() {
-        assert_eq!(
-            compare_corpus("packages", "packages/a"),
-            CorpusRel::Subset
-        );
+        assert_eq!(compare_corpus("packages", "packages/a"), CorpusRel::Subset);
         assert_eq!(compare_corpus("packages", "packages"), CorpusRel::Subset);
     }
 
@@ -410,23 +406,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let cwd = dir.path();
         fs::create_dir_all(cwd.join(".ast-bro").join("index")).unwrap();
-        fs::write(
-            cwd.join(".ast-bro").join("index").join("meta.json"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(cwd.join(".ast-bro").join("index").join("meta.json"), "{}").unwrap();
         fs::create_dir_all(cwd.join("packages").join("xyz")).unwrap();
 
-        let (home, found) = resolve_home(
-            &cwd.join("packages").join("xyz"),
-            cwd,
-            Marker::SearchIndex,
-        );
+        let (home, found) =
+            resolve_home(&cwd.join("packages").join("xyz"), cwd, Marker::SearchIndex);
         assert!(found);
-        assert_eq!(
-            home.canonicalize().unwrap(),
-            cwd.canonicalize().unwrap()
-        );
+        assert_eq!(home.canonicalize().unwrap(), cwd.canonicalize().unwrap());
     }
 
     #[test]
@@ -438,10 +424,7 @@ mod tests {
         let (home, found) =
             resolve_home(&cwd.join("packages").join("xyz"), cwd, Marker::SearchIndex);
         assert!(!found);
-        assert_eq!(
-            home.canonicalize().unwrap(),
-            cwd.canonicalize().unwrap()
-        );
+        assert_eq!(home.canonicalize().unwrap(), cwd.canonicalize().unwrap());
     }
 
     #[test]
@@ -451,21 +434,13 @@ mod tests {
         let dir = tempdir().unwrap();
         let outer = dir.path();
         fs::create_dir_all(outer.join(".ast-bro").join("index")).unwrap();
-        fs::write(
-            outer.join(".ast-bro").join("index").join("meta.json"),
-            "{}",
-        )
-        .unwrap();
+        fs::write(outer.join(".ast-bro").join("index").join("meta.json"), "{}").unwrap();
         let inner = outer.join("inner");
         fs::create_dir_all(inner.join("sub")).unwrap();
 
-        let (home, found) =
-            resolve_home(&inner.join("sub"), &inner, Marker::SearchIndex);
+        let (home, found) = resolve_home(&inner.join("sub"), &inner, Marker::SearchIndex);
         assert!(!found);
-        assert_eq!(
-            home.canonicalize().unwrap(),
-            inner.canonicalize().unwrap()
-        );
+        assert_eq!(home.canonicalize().unwrap(), inner.canonicalize().unwrap());
     }
 
     #[test]
@@ -475,8 +450,7 @@ mod tests {
         let cwd = cwd_dir.path();
         fs::create_dir_all(outer.path().join("a")).unwrap();
 
-        let (home, found) =
-            resolve_home(&outer.path().join("a"), cwd, Marker::SearchIndex);
+        let (home, found) = resolve_home(&outer.path().join("a"), cwd, Marker::SearchIndex);
         assert!(!found);
         // Resolves to the path arg itself (canonicalized), not cwd.
         assert_eq!(

@@ -67,7 +67,10 @@ pub fn run(
         (None, None)
     };
     // Cache compiled patterns per language when lang is auto-detected.
-    let mut pattern_cache: std::collections::HashMap<ast_grep_language::SupportLang, Result<ast_grep_core::Pattern, String>> = std::collections::HashMap::new();
+    let mut pattern_cache: std::collections::HashMap<
+        ast_grep_language::SupportLang,
+        Result<ast_grep_core::Pattern, String>,
+    > = std::collections::HashMap::new();
 
     for path in &files {
         // Detect language first to avoid reading non-source files.
@@ -100,7 +103,7 @@ pub fn run(
                 eprintln!("{}: read failed: {}", path.display(), e);
                 error_count += 1;
                 continue;
-            },
+            }
         };
 
         if let Some(replacement) = rewrite_template {
@@ -179,7 +182,7 @@ pub fn run(
                         eprintln!("{}: {}", path.display(), e);
                     }
                     error_count += 1;
-                },
+                }
             }
         } else {
             let result = if let Some(ref compiled) = compiled_pattern {
@@ -206,14 +209,15 @@ pub fn run(
                         if json {
                             json_matches.push(m);
                         } else {
-                            let first_line = m
-                                .matched_text
-                                .lines()
-                                .next()
-                                .unwrap_or("");
+                            let first_line = m.matched_text.lines().next().unwrap_or("");
                             println!(
                                 "{}:{}:{}-{}:{}: {}",
-                                m.file, m.start_line, m.start_col, m.end_line, m.end_col, first_line
+                                m.file,
+                                m.start_line,
+                                m.start_col,
+                                m.end_line,
+                                m.end_col,
+                                first_line
                             );
                         }
                     }
@@ -221,7 +225,7 @@ pub fn run(
                 Err(e) => {
                     eprintln!("{}: {}", path.display(), e);
                     error_count += 1;
-                },
+                }
             }
         }
     }
@@ -285,9 +289,7 @@ pub fn run(
     // misconfiguration. Suppressed in JSON mode so machine consumers get a
     // clean stream.
     if attempted_files == 0 && !json {
-        eprintln!(
-            "ast-bro run: no source files processed (check paths, --glob, or --lang)"
-        );
+        eprintln!("ast-bro run: no source files processed (check paths, --glob, or --lang)");
     }
 
     // Exit code semantics:

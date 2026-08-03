@@ -7,7 +7,7 @@ use xxhash_rust::xxh3::xxh3_64;
 
 #[cfg(test)]
 use crate::mnemonic_anchors::pack_binding;
-use crate::mnemonic_anchors::{PathAnchors, binding_full, reconcile_handles};
+use crate::mnemonic_anchors::{binding_full, reconcile_handles, PathAnchors};
 
 /// Encode a 64-bit hash as 13 lowercase Crockford Base32 characters.
 fn hash_to_base32(mut hash: u64) -> String {
@@ -772,10 +772,12 @@ impl FileToolManager {
         let freed: Vec<usize> = before
             .keys()
             .filter(|handle| !after.contains_key(*handle))
-            .filter_map(|handle| match crate::mnemonic_anchors::handle_slot(handle) {
-                Some((true, slot)) => Some(slot),
-                _ => None,
-            })
+            .filter_map(
+                |handle| match crate::mnemonic_anchors::handle_slot(handle) {
+                    Some((true, slot)) => Some(slot),
+                    _ => None,
+                },
+            )
             .collect();
         if freed.is_empty() {
             return;
@@ -2079,10 +2081,7 @@ mod tests {
                 }],
             })
             .await;
-        assert!(
-            foreign.is_err(),
-            "an anchor from another file was accepted"
-        );
+        assert!(foreign.is_err(), "an anchor from another file was accepted");
         assert_eq!(
             tokio::fs::read_to_string(&p2).await.unwrap(),
             "delta\nepsilon\nzeta\n",

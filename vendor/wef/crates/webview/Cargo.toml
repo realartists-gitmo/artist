@@ -1,0 +1,23 @@
+[package]
+name = "gpui-webview"
+version = "0.1.0"
+edition = "2024"
+authors = ["sunli <scott_s829@163.com>"]
+license = "Apache-2.0"
+homepage = "https://github.com/longbridge/wef"
+repository = "https://github.com/longbridge/wef"
+
+[dependencies]
+# Artist keeps WEF on the exact same GPUI graph as the native shell. Mixing a
+# crates.io GPUI with the pinned Zed revision produces distinct Entity/Window
+# types and cannot be embedded.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f0abdd9" }
+gpui = { git = "https://github.com/zed-industries/zed" }
+wef = { path = "../wef" }
+schemars = "1"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+raw-window-handle = "0.6.2"
+rust-i18n = "3"
+
+image = { version = "0.25.6", default-features = false }

@@ -30,7 +30,7 @@ pub mod scala;
 pub mod typescript;
 
 pub use entry::SurfaceEntry;
-pub use entry_point::{discover, EntryPoint};
+pub use entry_point::{EntryPoint, discover};
 pub use options::{LangOverride, OutputMode, SurfaceError, SurfaceOptions};
 
 use std::path::Path;

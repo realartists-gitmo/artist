@@ -60,11 +60,7 @@ pub fn pattern_is_malformed(pattern: &Pattern) -> bool {
     pattern.has_error()
 }
 
-pub fn search(
-    source: &str,
-    lang: SupportLang,
-    pattern: &str,
-) -> Result<Vec<RunMatch>, String> {
+pub fn search(source: &str, lang: SupportLang, pattern: &str) -> Result<Vec<RunMatch>, String> {
     search_with_pattern(source, lang, &compile(pattern, lang)?)
 }
 

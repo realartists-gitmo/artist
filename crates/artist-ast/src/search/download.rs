@@ -117,9 +117,17 @@ pub fn cache_root() -> io::Result<PathBuf> {
     MIGRATED.get_or_init(|| {
         if old_dir.exists() && !new_dir.exists() {
             if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
-                eprintln!("warning: could not rename {} -> {}: {e}", old_dir.display(), new_dir.display());
+                eprintln!(
+                    "warning: could not rename {} -> {}: {e}",
+                    old_dir.display(),
+                    new_dir.display()
+                );
             } else {
-                eprintln!("info: auto-renamed {} -> {}", old_dir.display(), new_dir.display());
+                eprintln!(
+                    "info: auto-renamed {} -> {}",
+                    old_dir.display(),
+                    new_dir.display()
+                );
             }
         }
     });
@@ -238,14 +246,11 @@ fn build_client(timeout: Duration) -> io::Result<reqwest::blocking::Client> {
 
     // Add an extra CA bundle if the user pointed us at one. Useful behind corp
     // TLS-intercepting proxies whose root is exported as a PEM file.
-    let ca_bundle = std::env::var("AST_BRO_CA_BUNDLE")
-        .or_else(|_| std::env::var("AST_OUTLINE_CA_BUNDLE"));
+    let ca_bundle =
+        std::env::var("AST_BRO_CA_BUNDLE").or_else(|_| std::env::var("AST_OUTLINE_CA_BUNDLE"));
     if let Ok(bundle) = ca_bundle {
-        let pem = fs::read(&bundle).map_err(|e| {
-            io::Error::other(
-                format!("AST_BRO_CA_BUNDLE={bundle}: {e}"),
-            )
-        })?;
+        let pem = fs::read(&bundle)
+            .map_err(|e| io::Error::other(format!("AST_BRO_CA_BUNDLE={bundle}: {e}")))?;
         for cert in reqwest::Certificate::from_pem_bundle(&pem)
             .map_err(|e| io::Error::other(format!("invalid CA bundle: {e}")))?
         {
@@ -265,9 +270,7 @@ fn build_client(timeout: Duration) -> io::Result<reqwest::blocking::Client> {
         builder = builder.danger_accept_invalid_certs(true);
     }
 
-    builder
-        .build()
-        .map_err(io::Error::other)
+    builder.build().map_err(io::Error::other)
 }
 
 /// Check whether TLS strict mode is enabled via `AST_BRO_TLS_STRICT` or
@@ -308,9 +311,10 @@ fn download_to(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> io
         io::Error::other(msg)
     })?;
     if !resp.status().is_success() {
-        return Err(io::Error::other(
-            format!("GET {url} returned HTTP {}", resp.status()),
-        ));
+        return Err(io::Error::other(format!(
+            "GET {url} returned HTTP {}",
+            resp.status()
+        )));
     }
 
     let tmp = dest.with_extension("tmp");
@@ -320,9 +324,7 @@ fn download_to(client: &reqwest::blocking::Client, url: &str, dest: &Path) -> io
     let mut reader = resp;
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(io::Error::other)?;
+        let n = reader.read(&mut buf).map_err(io::Error::other)?;
         if n == 0 {
             break;
         }
@@ -350,8 +352,7 @@ fn manifest_path(dir: &Path) -> PathBuf {
 }
 
 fn write_manifest(dir: &Path, manifest: &Manifest) -> io::Result<()> {
-    let json = serde_json::to_vec_pretty(manifest)
-        .map_err(io::Error::other)?;
+    let json = serde_json::to_vec_pretty(manifest).map_err(io::Error::other)?;
     fs::write(manifest_path(dir), json)
 }
 
@@ -388,9 +389,7 @@ fn cache_is_valid(dir: &Path, info: &ModelInfo) -> io::Result<bool> {
         };
         let actual = sha256_file(&path)?;
         if &actual != expected {
-            eprintln!(
-                "ast-bro: cached {file} failed integrity check, will re-download"
-            );
+            eprintln!("ast-bro: cached {file} failed integrity check, will re-download");
             return Ok(false);
         }
     }

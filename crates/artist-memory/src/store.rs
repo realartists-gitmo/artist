@@ -5,11 +5,11 @@
 //! `DbInstance` is an `Arc` of storage handles internally and is cheap to
 //! clone, so each task gets its own clone rather than sharing a lock.
 
-use crate::schema::{DIM, INDEXES, RELATIONS, SCHEMA_VERSION};
 use crate::identity::{join, split};
+use crate::schema::{DIM, INDEXES, RELATIONS, SCHEMA_VERSION};
 use crate::types::{CodeHit, Fact, Hit, NewFact};
-use artist_logic::object::ObjectId;
 use anyhow::{Context, Result, anyhow};
+use artist_logic::object::ObjectId;
 use cozo::{DataValue, DbInstance, NamedRows, ScriptMutability, ScriptRunOptions};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -727,7 +727,8 @@ impl MemoryStore {
         let mut restored = 0usize;
         let mut missing = Vec::new();
         for (_, w) in expected.iter().filter(|(id, _)| !present.contains(id)) {
-            let reusable = w.embedding.len() == DIM && w.embedder == embedder && !embedder.is_empty();
+            let reusable =
+                w.embedding.len() == DIM && w.embedder == embedder && !embedder.is_empty();
             if !reusable {
                 missing.push(w.clone());
                 continue;

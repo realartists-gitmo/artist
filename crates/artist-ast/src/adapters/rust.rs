@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ImportBinding, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -627,10 +627,12 @@ fn _expand_use_tree<'a, D: Doc>(
             let module = full.join("::");
             let local = alias
                 .map(|a| String::from_utf8_lossy(&src[a.range()]).to_string())
-                .unwrap_or_else(|| {
-                    full.last().cloned().unwrap_or_default()
-                });
-            out.push(ImportBinding { local, module, line });
+                .unwrap_or_else(|| full.last().cloned().unwrap_or_default());
+            out.push(ImportBinding {
+                local,
+                module,
+                line,
+            });
         }
         "use_list" | "scoped_use_list" => {
             let mut new_prefix = prefix.clone();

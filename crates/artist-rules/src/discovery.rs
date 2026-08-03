@@ -381,8 +381,12 @@ mod tests {
                 .is_empty()
         };
 
-        assert!(matches(r#"{"click":{"anchor":"kv7","label":"Delete account"}}"#));
-        assert!(matches(r#"{"click":{"anchor":"kv7","label":"Send message"}}"#));
+        assert!(matches(
+            r#"{"click":{"anchor":"kv7","label":"Delete account"}}"#
+        ));
+        assert!(matches(
+            r#"{"click":{"anchor":"kv7","label":"Send message"}}"#
+        ));
         // Mid-stream, before the closing quote has arrived.
         assert!(matches(r#"{"click":{"anchor":"kv7","label":"Delete acc"#));
         // The anchor alone carries no meaning and must not fire anything.
@@ -392,9 +396,7 @@ mod tests {
 
     #[test]
     fn the_destructive_action_builtin_covers_what_it_claims_to() {
-        let set = crate::matcher::RuleSet::compile(vec![builtin(
-            "computer-destructive-actions",
-        )]);
+        let set = crate::matcher::RuleSet::compile(vec![builtin("computer-destructive-actions")]);
         let matches = |text: &str| {
             !set.scan_all(crate::types::MatchTarget::ToolArgs, text, Some("computer"))
                 .is_empty()
@@ -426,7 +428,14 @@ mod tests {
 
         // And the ordinary things stay quiet, or the rule is noise and gets
         // ignored where it matters.
-        for name in ["Compose", "Reply", "Settings", "Back", "Search", "Yesterday"] {
+        for name in [
+            "Compose",
+            "Reply",
+            "Settings",
+            "Back",
+            "Search",
+            "Yesterday",
+        ] {
             assert!(!matches(&label(name)), "{name} must not fire");
         }
     }

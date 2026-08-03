@@ -1,0 +1,462 @@
+diff --git a/rten-text/src/models/bpe.rs b/rten-text/src/models/bpe.rs
+index 35f1e4f..2ac94b9 100644
+--- a/rten-text/src/models/bpe.rs
++++ b/rten-text/src/models/bpe.rs
+@@ -145,6 +145,9 @@ fn bpe_merge(
+ /// Mapping from pairs of tokens to the rank and ID of the merged pair.
+ type MergeMap = FxHashMap<(TokenId, TokenId), (Rank, TokenId)>;
+ 
++/// Placeholder for a byte whose `<0xXX>` token the vocabulary omits.
++const NO_BYTE_TOKEN: TokenId = TokenId::MAX;
++
+ /// Build the BPE merge map that associates a rank and token ID to merged pairs
+ /// of tokens.
+ fn build_merge_map(
+@@ -289,6 +292,16 @@ pub struct BpeOptions<'a> {
+     /// When encoding a string piece, match the entire piece against the
+     /// vocabulary before applying merge rules.
+     pub ignore_merges: bool,
++
++    /// Treat the vocabulary as literal UTF-8 strings rather than GPT-2
++    /// byte-level encodings, falling back to `<0xXX>` tokens for bytes that
++    /// cannot be represented.
++    ///
++    /// This is the convention used by SentencePiece-derived tokenizers such as
++    /// Llama's and Gemma's. Those vocabularies contain entries like `▁hello`
++    /// and do not contain the 256 characters of the GPT-2 byte alphabet, so the
++    /// default byte-level path cannot load them at all.
++    pub byte_fallback: bool,
+ }
+ 
+ /// Byte Pair Encoding tokenizer used by GPT-2 [^1] and subsequently used by
+@@ -311,6 +324,10 @@ pub struct Bpe {
+     /// Map from byte values to token IDs.
+     byte_to_token_id: [TokenId; 256],
+ 
++    /// Whether the vocabulary is literal UTF-8 with `<0xXX>` escapes rather
++    /// than the GPT-2 byte alphabet. See [`BpeOptions::byte_fallback`].
++    byte_fallback: bool,
++
+     /// Map from byte values to printable character representation used in
+     /// vocabulary.
+     byte_to_char: [char; 256],
+@@ -343,6 +360,7 @@ impl Bpe {
+             added_tokens,
+             mut end_of_word_suffix,
+             ignore_merges,
++            byte_fallback,
+         } = config;
+ 
+         // Normalize empty end-of-word suffix to `None`.
+@@ -352,24 +370,39 @@ impl Bpe {
+ 
+         let merges = build_merge_map(&vocab, merges)?;
+ 
+-        // Build byte -> token ID mapping for encoding.
++        // Build byte -> token ID mapping for encoding. The two conventions
++        // disagree about what a vocabulary entry *is*, so they need different
++        // lookups: GPT-2 vocabularies are keyed by the byte alphabet, while
++        // SentencePiece ones are keyed by literal text plus `<0xXX>` escapes.
+         let mut byte_to_token_id = [0; 256];
+-        for (i, ch) in byte_to_char().into_iter().enumerate() {
+-            let mut ch_buf = [0u8; 4];
+-            let ch_str = ch.encode_utf8(&mut ch_buf);
+-            if let Some(id) = vocab.get(ch_str).copied() {
+-                byte_to_token_id[i] = id;
+-            } else {
+-                return Err(BpeError::MissingVocabEntry(ch_str.to_string()));
++        if byte_fallback {
++            for (b, slot) in byte_to_token_id.iter_mut().enumerate() {
++                let name = format!("<0x{b:02X}>");
++                // Not every such vocabulary defines all 256 escapes. A missing
++                // one only matters if that byte is actually encountered, so
++                // this is left as a sentinel and reported at encode time
++                // rather than refusing to load the model.
++                *slot = vocab.get(name.as_str()).copied().unwrap_or(NO_BYTE_TOKEN);
++            }
++        } else {
++            for (i, ch) in byte_to_char().into_iter().enumerate() {
++                let mut ch_buf = [0u8; 4];
++                let ch_str = ch.encode_utf8(&mut ch_buf);
++                if let Some(id) = vocab.get(ch_str).copied() {
++                    byte_to_token_id[i] = id;
++                } else {
++                    return Err(BpeError::MissingVocabEntry(ch_str.to_string()));
++                }
+             }
+         }
+ 
+-        // If the `ignore_merges` flag is set for this tokenizer, we'll need
+-        // to use the vocabulary during encoding.
++        // The vocabulary is needed during encoding if `ignore_merges` is set
++        // (whole pieces are looked up first) or if `byte_fallback` is set
++        // (every character is looked up).
+         //
+         // Otherwise we can re-use the hash/string allocations for
+         // `token_id_to_encoded_bytes`.
+-        let (vocab, token_id_to_encoded_bytes) = if ignore_merges {
++        let (vocab, token_id_to_encoded_bytes) = if ignore_merges || byte_fallback {
+             let token_id_to_encoded_bytes = vocab
+                 .iter()
+                 .map(|(token, id)| (*id, token.clone()))
+@@ -385,6 +418,7 @@ impl Bpe {
+             added_tokens,
+             byte_to_char: byte_to_char(),
+             byte_to_token_id,
++            byte_fallback,
+             end_of_word_suffix,
+             ignore_merges,
+             merges,
+@@ -413,12 +447,39 @@ impl Bpe {
+             }
+         }
+ 
+-        // Start with one token per byte.
+-        let mut tokens: Vec<TokenId> = piece
+-            .as_bytes()
+-            .iter()
+-            .map(|&b| self.byte_to_token_id[b.as_usize()])
+-            .collect();
++        // Start with one token per atom. What counts as an atom differs between
++        // the two vocabulary conventions: GPT-2 vocabularies are built over
++        // single bytes re-encoded as printable characters, whereas
++        // SentencePiece ones are built over whole characters, with `<0xXX>`
++        // escapes used only for characters the vocabulary lacks.
++        let mut tokens: Vec<TokenId> = if self.byte_fallback {
++            let vocab = self.vocab.as_ref();
++            let mut tokens = Vec::with_capacity(piece.len());
++            let mut buf = [0u8; 4];
++            for ch in piece.chars() {
++                let ch_str: &str = ch.encode_utf8(&mut buf);
++                match vocab.and_then(|v| v.get(ch_str)).copied() {
++                    Some(id) => tokens.push(id),
++                    // Unknown character: emit one byte-escape token per UTF-8
++                    // byte, which is exactly what the `ByteFallback` decoder on
++                    // the other side expects to reassemble.
++                    None => tokens.extend(
++                        ch_str
++                            .as_bytes()
++                            .iter()
++                            .map(|&b| self.byte_to_token_id[b.as_usize()])
++                            .filter(|&id| id != NO_BYTE_TOKEN),
++                    ),
++                }
++            }
++            tokens
++        } else {
++            piece
++                .as_bytes()
++                .iter()
++                .map(|&b| self.byte_to_token_id[b.as_usize()])
++                .collect()
++        };
+ 
+         // If the end-of-word suffix is enabled, replace the last byte's token
+         // with the one that corresponds to "{byte}{end_of_word_suffix}".
+@@ -683,6 +744,7 @@ ba r",
+                 end_of_word_suffix: end_of_word_suffix.clone(),
+                 ignore_merges: *ignore_merges,
+                 added_tokens: Default::default(),
++                byte_fallback: false,
+             };
+             let model = Bpe::new(bpe_opts).unwrap();
+             let tokenizer = Tokenizer::new(model, Default::default())
+diff --git a/rten-text/src/pre_tokenizers.rs b/rten-text/src/pre_tokenizers.rs
+index 84b8698..f40c9ba 100644
+--- a/rten-text/src/pre_tokenizers.rs
++++ b/rten-text/src/pre_tokenizers.rs
+@@ -3,6 +3,7 @@
+ 
+ use std::error::Error;
+ use std::fmt;
++use std::ops::Range;
+ 
+ use fancy_regex::Regex;
+ use unicode_categories::UnicodeCategories;
+@@ -88,6 +89,9 @@ pub const GPT2_REGEX: &str =
+     r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
+ 
+ /// Specifies how [`Split`] should handle delimiters between chunks.
++///
++/// These mirror the `SplitDelimiterBehavior` variants used by HuggingFace
++/// tokenizers, so that `tokenizer.json` files can be loaded faithfully.
+ #[derive(Copy, Clone, Debug, Default, PartialEq)]
+ pub enum SplitDelimiterBehavior {
+     /// Exclude the delimiter from the output.
+@@ -96,6 +100,18 @@ pub enum SplitDelimiterBehavior {
+ 
+     /// Add the delimiter to the output as its own chunk.
+     Isolate,
++
++    /// Append the delimiter to the chunk that precedes it.
++    ///
++    /// Used by SentencePiece-derived tokenizers such as Gemma's, which split on
++    /// a space and keep it attached to the word before it.
++    MergedWithPrevious,
++
++    /// Prepend the delimiter to the chunk that follows it.
++    MergedWithNext,
++
++    /// Emit runs of adjacent delimiters as a single chunk.
++    Contiguous,
+ }
+ 
+ #[derive(Clone, Debug, Default)]
+@@ -146,64 +162,82 @@ impl Split {
+ 
+ impl PreTokenizer for Split {
+     fn pre_tokenize<'a>(&self, text: &'a str) -> Result<Vec<&'a str>, PreTokenizeError> {
+-        let mut chunks = Vec::new();
+-        let mut last_match_end = 0;
++        // Segment the input into alternating kept/delimiter spans first, then
++        // apply the behaviour in one place. Doing it in two steps keeps the
++        // five behaviours from having to be threaded through both the inverted
++        // and non-inverted scanning loops.
++        let mut spans: Vec<(Range<usize>, bool)> = Vec::new();
++        let mut last_end = 0;
++        let push = |range: Range<usize>, is_delim: bool, spans: &mut Vec<_>| {
++            if !range.is_empty() {
++                spans.push((range, is_delim));
++            }
++        };
+ 
+         if self.invert {
++            // Matches are the content; the gaps between them are delimiters.
+             for match_ in self.regex.find_iter(text) {
+                 let match_ = match_?;
+-
+-                match self.delimiter {
+-                    SplitDelimiterBehavior::Isolate => {
+-                        let delim_text = &text[last_match_end..match_.range().start];
+-                        if !delim_text.is_empty() {
+-                            chunks.push(delim_text);
+-                        }
+-                    }
+-                    SplitDelimiterBehavior::Remove => {}
+-                }
+-
+-                if !match_.range().is_empty() {
+-                    chunks.push(match_.as_str());
+-                }
+-
+-                last_match_end = match_.range().end;
++                let range = match_.range();
++                push(last_end..range.start, true, &mut spans);
++                push(range.clone(), false, &mut spans);
++                last_end = range.end;
+             }
+         } else {
++            // Matches are the delimiters; `split` yields the content between.
+             for match_ in self.regex.split(text) {
+                 let match_ = match_?;
+-                let match_range = text
++                let range = text
+                     .as_bytes()
+                     .subslice_offsets(match_.as_bytes())
+                     .expect("should be sub-slice");
+-
+-                match self.delimiter {
+-                    SplitDelimiterBehavior::Isolate => {
+-                        let delim_text = &text[last_match_end..match_range.start];
+-                        if !delim_text.is_empty() {
+-                            chunks.push(delim_text);
+-                        }
+-                    }
+-                    SplitDelimiterBehavior::Remove => {}
+-                }
+-
+-                if !match_.is_empty() {
+-                    chunks.push(match_);
+-                }
+-
+-                last_match_end = match_range.end;
++                push(last_end..range.start, true, &mut spans);
++                push(range.clone(), false, &mut spans);
++                last_end = range.end;
+             }
+         }
+-
+-        match self.delimiter {
+-            SplitDelimiterBehavior::Isolate => {
+-                let delim_text = &text[last_match_end..];
+-                if !delim_text.is_empty() {
+-                    chunks.push(delim_text);
++        push(last_end..text.len(), true, &mut spans);
++
++        // Emitted ranges, each flagged with whether it is a delimiter, so that
++        // `Contiguous` can tell an adjacent delimiter from adjacent content
++        // without re-deriving anything from the string slices.
++        let mut out: Vec<(Range<usize>, bool)> = Vec::with_capacity(spans.len());
++        let mut pending: Option<Range<usize>> = None;
++
++        for (range, is_delim) in spans {
++            if !is_delim {
++                // A `MergedWithNext` delimiter may be waiting to join this one.
++                let start = pending.take().map_or(range.start, |p| p.start);
++                out.push((start..range.end, false));
++                continue;
++            }
++            match self.delimiter {
++                SplitDelimiterBehavior::Remove => {}
++                SplitDelimiterBehavior::Isolate => out.push((range, true)),
++                SplitDelimiterBehavior::MergedWithPrevious => match out.last_mut() {
++                    // Adjacent by construction, so widening the previous range
++                    // is exactly "append the delimiter to it".
++                    Some((prev, _)) => prev.end = range.end,
++                    // A leading delimiter has nothing to merge with; HuggingFace
++                    // emits it alone rather than dropping it.
++                    None => out.push((range, true)),
++                },
++                SplitDelimiterBehavior::MergedWithNext => {
++                    let start = pending.take().map_or(range.start, |p| p.start);
++                    pending = Some(start..range.end);
+                 }
++                SplitDelimiterBehavior::Contiguous => match out.last_mut() {
++                    Some((prev, true)) if prev.end == range.start => prev.end = range.end,
++                    _ => out.push((range, true)),
++                },
+             }
+-            SplitDelimiterBehavior::Remove => {}
+         }
++        // A trailing `MergedWithNext` delimiter has no chunk to attach to.
++        if let Some(range) = pending {
++            out.push((range, true));
++        }
++
++        let chunks: Vec<&'a str> = out.into_iter().map(|(r, _)| &text[r]).collect();
+ 
+         Ok(chunks)
+     }
+@@ -270,6 +304,77 @@ mod tests {
+         Bert, Digits, PreTokenizer, Sequence, Split, SplitDelimiterBehavior, SplitOptions,
+     };
+ 
++    /// The three behaviours added for SentencePiece-derived tokenizers. Gemma
++    /// splits on a literal space with `MergedWithPrevious`, which must keep the
++    /// space attached to the word before it rather than dropping or isolating
++    /// it.
++    #[test]
++    fn test_split_delimiter_behaviors() {
++        #[derive(Debug)]
++        struct Case<'a> {
++            behavior: SplitDelimiterBehavior,
++            input: &'a str,
++            expected: Vec<&'a str>,
++        }
++
++        let cases = [
++            Case {
++                behavior: SplitDelimiterBehavior::MergedWithPrevious,
++                input: "hello world foo",
++                expected: ["hello ", "world ", "foo"].into(),
++            },
++            // A leading delimiter has no previous chunk, so it stands alone
++            // rather than being dropped.
++            Case {
++                behavior: SplitDelimiterBehavior::MergedWithPrevious,
++                input: " leading",
++                expected: [" ", "leading"].into(),
++            },
++            Case {
++                behavior: SplitDelimiterBehavior::MergedWithPrevious,
++                input: "trailing ",
++                expected: ["trailing "].into(),
++            },
++            Case {
++                behavior: SplitDelimiterBehavior::MergedWithNext,
++                input: "hello world foo",
++                expected: ["hello", " world", " foo"].into(),
++            },
++            // A trailing delimiter has no following chunk to join.
++            Case {
++                behavior: SplitDelimiterBehavior::MergedWithNext,
++                input: "trailing ",
++                expected: ["trailing", " "].into(),
++            },
++            // Adjacent delimiters fold into one chunk.
++            Case {
++                behavior: SplitDelimiterBehavior::Contiguous,
++                input: "a  b",
++                expected: ["a", "  ", "b"].into(),
++            },
++            Case {
++                behavior: SplitDelimiterBehavior::Isolate,
++                input: "a  b",
++                expected: ["a", " ", " ", "b"].into(),
++            },
++            Case {
++                behavior: SplitDelimiterBehavior::Remove,
++                input: "a  b",
++                expected: ["a", "b"].into(),
++            },
++        ];
++
++        cases.test_each(|case| {
++            let split = Split::new(SplitOptions {
++                pattern: " ",
++                delimiter: case.behavior,
++                invert: false,
++            })
++            .unwrap();
++            assert_eq!(split.pre_tokenize(case.input).unwrap(), case.expected);
++        });
++    }
++
+     #[test]
+     fn test_bert() {
+         #[derive(Debug)]
+diff --git a/rten-text/src/tokenizer.rs b/rten-text/src/tokenizer.rs
+index 3b679f5..b22b68f 100644
+--- a/rten-text/src/tokenizer.rs
++++ b/rten-text/src/tokenizer.rs
+@@ -379,6 +379,15 @@ impl Tokenizer {
+                             json::pre_tokenizers::SplitDelimiter::Removed => {
+                                 pre_tokenizers::SplitDelimiterBehavior::Remove
+                             }
++                            json::pre_tokenizers::SplitDelimiter::MergedWithPrevious => {
++                                pre_tokenizers::SplitDelimiterBehavior::MergedWithPrevious
++                            }
++                            json::pre_tokenizers::SplitDelimiter::MergedWithNext => {
++                                pre_tokenizers::SplitDelimiterBehavior::MergedWithNext
++                            }
++                            json::pre_tokenizers::SplitDelimiter::Contiguous => {
++                                pre_tokenizers::SplitDelimiterBehavior::Contiguous
++                            }
+                         },
+                     };
+                     Box::new(pre_tokenizers::Split::new(opts)?)
+@@ -414,6 +423,7 @@ impl Tokenizer {
+                     added_tokens,
+                     end_of_word_suffix: model.end_of_word_suffix,
+                     ignore_merges: model.ignore_merges,
++                    byte_fallback: model.byte_fallback,
+                 };
+                 let model = Bpe::new(bpe_opts).map_err(FromJsonError::BpeError)?;
+ 
+diff --git a/rten-text/src/tokenizer/json.rs b/rten-text/src/tokenizer/json.rs
+index c38d363..108def5 100644
+--- a/rten-text/src/tokenizer/json.rs
++++ b/rten-text/src/tokenizer/json.rs
+@@ -81,6 +81,9 @@ pub mod pre_tokenizers {
+     pub(crate) enum SplitDelimiter {
+         Removed,
+         Isolated,
++        MergedWithPrevious,
++        MergedWithNext,
++        Contiguous,
+     }
+ 
+     #[derive(Deserialize)]
+@@ -147,6 +150,12 @@ pub mod models {
+         /// See https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py.
+         pub end_of_word_suffix: Option<String>,
+ 
++        /// Whether the vocabulary is literal UTF-8 with `<0xXX>` escapes
++        /// rather than the GPT-2 byte alphabet. Used by SentencePiece-derived
++        /// tokenizers such as Gemma's and Llama's.
++        #[serde(default)]
++        pub byte_fallback: bool,
++
+         /// When encoding a string piece, look up the piece in the vocabulary
+         /// before applying merge rules.
+         pub ignore_merges: bool,

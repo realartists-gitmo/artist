@@ -155,7 +155,9 @@ mod tests {
     fn a_delivered_message_is_attributed_to_its_sender() {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path());
-        store.send(&message("Monet", "Bach", "the parser is wrong", 1)).unwrap();
+        store
+            .send(&message("Monet", "Bach", "the parser is wrong", 1))
+            .unwrap();
 
         let inbox = Inbox::with_store("Bach", store);
         let injected = inbox.collect().expect("one message");
@@ -177,7 +179,9 @@ mod tests {
 
         // A message that arrives after delivery must not steal the reply: the
         // model has not seen it, so answering it would answer the wrong agent.
-        store.send(&message("Basquiat", "Bach", "later", 2)).unwrap();
+        store
+            .send(&message("Basquiat", "Bach", "later", 2))
+            .unwrap();
         assert_eq!(
             inbox.reply_target().unwrap().to,
             "Monet",
@@ -192,7 +196,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path());
         store.send(&message("Monet", "Bach", "first", 1)).unwrap();
-        store.send(&message("Basquiat", "Bach", "second", 2)).unwrap();
+        store
+            .send(&message("Basquiat", "Bach", "second", 2))
+            .unwrap();
 
         let inbox = Inbox::with_store("Bach", store);
         let injected = inbox.collect().expect("two messages");

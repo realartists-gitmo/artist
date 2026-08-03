@@ -4,12 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::deps::DepGraph;
 use crate::deps::render;
 use crate::deps::scc;
 use crate::deps::traverse;
-use crate::deps::DepGraph;
 use crate::graph_cache;
-use crate::project_root::{find_root_for, relative_posix, resolve_home, Marker};
+use crate::project_root::{Marker, find_root_for, relative_posix, resolve_home};
 use std::sync::Arc;
 
 pub fn run_deps(
@@ -103,10 +103,7 @@ pub fn run_reverse_deps(
     let canonical = match canonicalise_in_root(file, &graph) {
         Some(p) => p,
         None => {
-            eprintln!(
-                "# note: {} is not part of the dep graph",
-                file.display()
-            );
+            eprintln!("# note: {} is not part of the dep graph", file.display());
             return 2;
         }
     };
@@ -115,11 +112,7 @@ pub fn run_reverse_deps(
             return true;
         }
         let is_test = crate::file_filter::is_test_file(&e.target, &root);
-        if exclude_tests {
-            !is_test
-        } else {
-            is_test
-        }
+        if exclude_tests { !is_test } else { is_test }
     });
     if json {
         println!(
@@ -135,13 +128,7 @@ pub fn run_reverse_deps(
     0
 }
 
-pub fn run_cycles(
-    path: &Path,
-    min_size: usize,
-    json: bool,
-    pretty: bool,
-    rebuild: bool,
-) -> i32 {
+pub fn run_cycles(path: &Path, min_size: usize, json: bool, pretty: bool, rebuild: bool) -> i32 {
     let cwd = current_dir_or_dot();
     let (root, scope) = match resolve_dir_root_and_scope(path, &cwd) {
         Ok(rs) => rs,
@@ -165,10 +152,7 @@ pub fn run_cycles(
         cycles.retain(|c| c.members.iter().all(|m| graph.in_scope(m, &scope)));
     }
     if json {
-        println!(
-            "{}",
-            render::render_cycles_json(&graph, &cycles, pretty)
-        );
+        println!("{}", render::render_cycles_json(&graph, &cycles, pretty));
     } else {
         print!("{}", render::render_cycles_text(&graph, &cycles));
     }
@@ -220,7 +204,10 @@ pub fn run_graph(
         full.subgraph_for_scope(&scope)
     };
     if json {
-        println!("{}", render::render_graph_json(&graph, include_external, pretty));
+        println!(
+            "{}",
+            render::render_graph_json(&graph, include_external, pretty)
+        );
     } else {
         print!("{}", render::render_graph_text(&graph, include_external));
     }
@@ -264,7 +251,10 @@ fn find_root_for_with_cache(file: &Path) -> Result<PathBuf, String> {
 /// Load (or build) the unified graph for `root`, going through the shared
 /// in-memory `Arc` so repeated calls within one process — most importantly
 /// `ast-bro mcp` — reuse the same parsed graph instead of re-deserialising.
-fn load_unified(root: &Path, force_rebuild: bool) -> std::io::Result<Arc<crate::graph_cache::UnifiedGraph>> {
+fn load_unified(
+    root: &Path,
+    force_rebuild: bool,
+) -> std::io::Result<Arc<crate::graph_cache::UnifiedGraph>> {
     if force_rebuild {
         graph_cache::shared::rebuild(root)
     } else {

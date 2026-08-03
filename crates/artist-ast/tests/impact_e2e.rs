@@ -33,7 +33,10 @@ fn impact_on_type_finds_implementors() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    write(&root.join("Cargo.toml"), "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -51,8 +54,16 @@ pub fn create_animal() -> Box<dyn Animal> {
     let (out, code) = run_in(root, &["impact", "Animal", "--rebuild"]);
     assert_eq!(code, 0, "impact exited non-zero: {}", out);
 
-    assert!(out.contains("Dog"), "expected Dog (implementor of Animal), got:\n{}", out);
-    assert!(out.contains("struct"), "expected Dog to be labeled as struct, got:\n{}", out);
+    assert!(
+        out.contains("Dog"),
+        "expected Dog (implementor of Animal), got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("struct"),
+        "expected Dog to be labeled as struct, got:\n{}",
+        out
+    );
 }
 
 #[test]
@@ -60,7 +71,10 @@ fn impact_on_struct_finds_construction_sites() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    write(&root.join("Cargo.toml"), "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -86,7 +100,10 @@ fn impact_on_type_dependents_mode_not_empty() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    write(&root.join("Cargo.toml"), "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -96,9 +113,15 @@ impl MyTrait for MyImpl {}
 "#,
     );
 
-    let (out, code) = run_in(root, &["impact", "MyTrait", "--mode", "dependents", "--rebuild"]);
+    let (out, code) = run_in(
+        root,
+        &["impact", "MyTrait", "--mode", "dependents", "--rebuild"],
+    );
     assert_eq!(code, 0);
-    assert!(out.contains("MyImpl"), "dependents mode should show MyImpl for MyTrait");
+    assert!(
+        out.contains("MyImpl"),
+        "dependents mode should show MyImpl for MyTrait"
+    );
 }
 
 #[test]
@@ -106,7 +129,10 @@ fn impact_transitive_for_type() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    write(&root.join("Cargo.toml"), "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -132,7 +158,11 @@ pub fn factory() {
     assert_eq!(code, 0);
 
     // Depth 1: MyService is an implementor of Service.
-    assert!(out.contains("MyService"), "expected MyService (implementor), got:\n{}", out);
+    assert!(
+        out.contains("MyService"),
+        "expected MyService (implementor), got:\n{}",
+        out
+    );
 
     // Depth 2: make_service constructs the implementor (`MyService {}`),
     // so it depends on the base type transitively.
@@ -153,7 +183,10 @@ fn impact_transitive_for_callable() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    write(&root.join("Cargo.toml"), "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"smoke\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -165,9 +198,21 @@ pub fn caller2() { caller1(); }
 
     let (out, code) = run_in(root, &["impact", "target", "--depth", "2", "--rebuild"]);
     assert_eq!(code, 0);
-    assert!(out.contains("caller1"), "expected caller1 (depth 1), got:\n{}", out);
-    assert!(out.contains("caller2"), "expected caller2 (depth 2), got:\n{}", out);
-    assert!(out.contains("1 symbols transitively affected"), "expected 1 transitive symbol (caller2), got:\n{}", out);
+    assert!(
+        out.contains("caller1"),
+        "expected caller1 (depth 1), got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("caller2"),
+        "expected caller2 (depth 2), got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("1 symbols transitively affected"),
+        "expected 1 transitive symbol (caller2), got:\n{}",
+        out
+    );
 }
 
 /// `impact` holds the same edges as `callers`/`callees` and must render them at

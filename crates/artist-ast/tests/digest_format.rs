@@ -73,10 +73,7 @@ fn digest_legend_includes_overloads_when_overload_collapse_fires() {
 
 #[test]
 fn digest_legend_includes_deprecated_only_when_present() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-legend-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-legend-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("dep.rs");
     std::fs::write(&f, "#[deprecated]\npub fn old() {}\n").expect("write");
@@ -100,10 +97,7 @@ fn file_header_shows_size_label_and_char_count() {
         header.contains("[tiny]") || header.contains("[small]"),
         "missing size label:\n{header}"
     );
-    assert!(
-        header.contains("chars"),
-        "missing char count:\n{header}"
-    );
+    assert!(header.contains("chars"), "missing char count:\n{header}");
     // Token estimate was deliberately skipped — different tokenizers
     // produce different counts, char count is the honest metric.
     assert!(
@@ -143,10 +137,7 @@ fn rust_trait_renders_as_trait_not_interface() {
 #[test]
 fn deprecated_and_modifier_markers() {
     // Build a quick fixture inline.
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-digest-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-digest-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("dep.rs");
     std::fs::write(
@@ -178,10 +169,7 @@ fn deprecated_and_modifier_markers() {
 
 #[test]
 fn python_decorator_modifiers_and_deprecation() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-py-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-py-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("p.py");
     std::fs::write(
@@ -190,7 +178,10 @@ fn python_decorator_modifiers_and_deprecation() {
     )
     .expect("write");
     let s = run(&["digest", f.to_str().unwrap()]);
-    assert!(s.contains("[async]") && s.contains("[deprecated]"), "py async/deprecated:\n{s}");
+    assert!(
+        s.contains("[async]") && s.contains("[deprecated]"),
+        "py async/deprecated:\n{s}"
+    );
     assert!(s.contains("[classmethod]"), "py classmethod:\n{s}");
     assert!(s.contains("[static]"), "py staticmethod:\n{s}");
     assert!(s.contains("[property]"), "py property:\n{s}");
@@ -199,10 +190,7 @@ fn python_decorator_modifiers_and_deprecation() {
 
 #[test]
 fn typescript_modifiers_and_deprecation() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-ts-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-ts-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("s.ts");
     std::fs::write(
@@ -220,10 +208,7 @@ fn typescript_modifiers_and_deprecation() {
 
 #[test]
 fn kotlin_native_kind_data_and_sealed() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-kt-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-kt-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("k.kt");
     std::fs::write(
@@ -233,7 +218,10 @@ fn kotlin_native_kind_data_and_sealed() {
     .expect("write");
     let s = run(&["digest", f.to_str().unwrap()]);
     assert!(s.contains("data class"), "kotlin native data class:\n{s}");
-    assert!(s.contains("sealed class"), "kotlin native sealed class:\n{s}");
+    assert!(
+        s.contains("sealed class"),
+        "kotlin native sealed class:\n{s}"
+    );
     assert!(
         !s.contains("sealed sealed"),
         "modifier should not be re-emitted when already in native_kind:\n{s}"
@@ -244,10 +232,7 @@ fn kotlin_native_kind_data_and_sealed() {
 
 #[test]
 fn java_deprecation_annotation() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-java-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-java-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("J.java");
     std::fs::write(
@@ -256,7 +241,10 @@ fn java_deprecation_annotation() {
     )
     .expect("write");
     let s = run(&["digest", f.to_str().unwrap()]);
-    assert!(s.contains("[deprecated]"), "@Deprecated → [deprecated]:\n{s}");
+    assert!(
+        s.contains("[deprecated]"),
+        "@Deprecated → [deprecated]:\n{s}"
+    );
     assert!(s.contains("[static]"), "java static:\n{s}");
     assert!(s.contains("[abstract]"), "java abstract:\n{s}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -264,10 +252,7 @@ fn java_deprecation_annotation() {
 
 #[test]
 fn go_deprecation_doc_convention() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-go-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-go-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("g.go");
     std::fs::write(
@@ -285,10 +270,7 @@ fn go_deprecation_doc_convention() {
 
 #[test]
 fn overload_collapse() {
-    let dir = std::env::temp_dir().join(format!(
-        "ast-bro-overload-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("ast-bro-overload-test-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("ovl.rs");
     // Three free fns with the same name — different module-level overloads

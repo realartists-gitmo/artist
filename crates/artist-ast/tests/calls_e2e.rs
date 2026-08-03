@@ -35,7 +35,10 @@ fn rust_callers_finds_cross_file_caller() {
     let root = tmp.path();
 
     // Minimal Cargo project so the dep resolver detects this as a project root.
-    write(&root.join("Cargo.toml"), "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -67,7 +70,10 @@ pub fn greet() {
 fn rust_callees_lists_local_call() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname = \"smoke\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -95,10 +101,7 @@ fn python_callers_finds_cross_file_caller() {
         &root.join("pyproject.toml"),
         "[project]\nname = \"smoke\"\nversion = \"0.0.0\"\n",
     );
-    write(
-        &root.join("smoke/__init__.py"),
-        "",
-    );
+    write(&root.join("smoke/__init__.py"), "");
     write(
         &root.join("smoke/helper.py"),
         "def greet():\n    print('hi')\n",
@@ -295,7 +298,10 @@ fn typescript_callers_includes_arrow_const() {
 fn callers_with_file_filter_narrows_match() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     // Two functions named `helper` in different files. `use` brings each
     // into scope so pass A resolves the calls precisely (no receiver).
     write(
@@ -337,12 +343,17 @@ pub mod consumer_b;
 fn callers_with_flag_form_matches_positional_form() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
-    write(&root.join("src/lib.rs"), "pub mod h;\nuse crate::h::greet;\npub fn run() { greet(); }\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
+    write(
+        &root.join("src/lib.rs"),
+        "pub mod h;\nuse crate::h::greet;\npub fn run() { greet(); }\n",
+    );
     write(&root.join("src/h.rs"), "pub fn greet() {}\n");
 
-    let (positional_out, code1) =
-        run_in(root, &["callers", "src/h.rs:greet", ".", "--rebuild"]);
+    let (positional_out, code1) = run_in(root, &["callers", "src/h.rs:greet", ".", "--rebuild"]);
     assert_eq!(code1, 0);
 
     // `--file` / `--symbol` form. Note: omit the trailing positional path
@@ -350,16 +361,29 @@ fn callers_with_flag_form_matches_positional_form() {
     // optional-target when both are present, same shape as `find-related`.
     let (flag_out, code2) = run_in(
         root,
-        &["callers", "--file", "src/h.rs", "--symbol", "greet", "--rebuild"],
+        &[
+            "callers",
+            "--file",
+            "src/h.rs",
+            "--symbol",
+            "greet",
+            "--rebuild",
+        ],
     );
     assert_eq!(code2, 0);
 
     // Strip the header line which differs ("for 'X:Y'" vs "for 'X:Y'") —
     // both spell the target the same way after compose_target, so they
     // should match exactly. We compare the body lines for safety.
-    let body_pos: Vec<&str> = positional_out.lines().filter(|l| l.starts_with("src/")).collect();
+    let body_pos: Vec<&str> = positional_out
+        .lines()
+        .filter(|l| l.starts_with("src/"))
+        .collect();
     let body_flag: Vec<&str> = flag_out.lines().filter(|l| l.starts_with("src/")).collect();
-    assert_eq!(body_pos, body_flag, "flag form should match positional form");
+    assert_eq!(
+        body_pos, body_flag,
+        "flag form should match positional form"
+    );
     assert!(
         body_pos.iter().any(|l| l.contains("run")),
         "expected `run` in callers output, got:\n{}",
@@ -371,7 +395,10 @@ fn callers_with_flag_form_matches_positional_form() {
 fn callers_file_filter_unknown_path_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub fn foo() {}\n");
     let out = Command::new(bin())
         .args(["callers", "src/nope.rs:foo", "."])
@@ -379,7 +406,11 @@ fn callers_file_filter_unknown_path_errors() {
         .env("NO_COLOR", "1")
         .output()
         .expect("run");
-    assert_eq!(out.status.code(), Some(2), "expected exit 2 when file filter has no matches");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2 when file filter has no matches"
+    );
 }
 
 #[test]
@@ -389,14 +420,17 @@ fn passing_subdir_as_path_walks_up_to_project_root() {
     // `src/main.rs::run`. The `<file>:<symbol>` filter then silently missed.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
-    write(&root.join("src/lib.rs"), "pub mod h;\nuse crate::h::greet;\npub fn run() { greet(); }\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
+    write(
+        &root.join("src/lib.rs"),
+        "pub mod h;\nuse crate::h::greet;\npub fn run() { greet(); }\n",
+    );
     write(&root.join("src/h.rs"), "pub fn greet() {}\n");
 
-    let (out, code) = run_in(
-        root,
-        &["callers", "src/h.rs:greet", "./src", "--rebuild"],
-    );
+    let (out, code) = run_in(root, &["callers", "src/h.rs:greet", "./src", "--rebuild"]);
     assert_eq!(code, 0, "callers exited non-zero: {}", out);
     assert!(
         out.contains("run"),
@@ -409,7 +443,10 @@ fn passing_subdir_as_path_walks_up_to_project_root() {
 fn rust_callers_on_trait_returns_implementations() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -440,7 +477,10 @@ impl Animal for Cat { fn speak(&self) { println!("meow"); } }
 fn rust_callers_on_struct_returns_constructions() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -475,7 +515,10 @@ fn callees_on_subtype_walks_to_ancestor_and_lists_its_methods() {
     // bases + the methods declared on those bases.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -516,13 +559,20 @@ fn callees_on_root_type_reports_no_ancestors() {
     // without `impl X for` blocks) returns gracefully without errors.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         "pub trait Animal { fn speak(&self); }\n",
     );
     let (out, code) = run_in(root, &["callees", "Animal", ".", "--rebuild"]);
-    assert_eq!(code, 0, "callees on root type should not error, got exit {}", code);
+    assert_eq!(
+        code, 0,
+        "callees on root type should not error, got exit {}",
+        code
+    );
     assert!(
         out.contains("no ancestors"),
         "expected `no ancestors` notice, got:\n{}",
@@ -773,7 +823,15 @@ int run() {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim())
@@ -785,9 +843,9 @@ int run() {
     // whose name is a *type* never gets resolved to that type's constructors.
     // If the resolver is later taught to map type names → constructors, this
     // assertion will need to switch to the resolved qn.
-    let has_construct = matches.iter().any(|m| {
-        m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter")
-    });
+    let has_construct = matches
+        .iter()
+        .any(|m| m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter"));
     assert!(
         has_construct,
         "expected a construct edge targeting `Greeter`, got:\n{}",
@@ -922,16 +980,24 @@ function run(): int {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim())
         .unwrap_or_else(|e| panic!("invalid JSON ({}):\n{}", e, out));
     let matches = v["matches"].as_array().expect("matches array");
 
-    let has_construct = matches.iter().any(|m| {
-        m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter")
-    });
+    let has_construct = matches
+        .iter()
+        .any(|m| m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter"));
     assert!(
         has_construct,
         "expected a construct edge targeting `Greeter`, got:\n{}",
@@ -939,8 +1005,7 @@ function run(): int {
     );
 
     let has_member_call = matches.iter().any(|m| {
-        m["kind"] == "call"
-            && m["target"].as_str() == Some("src/Demo.php::Greeter::greet")
+        m["kind"] == "call" && m["target"].as_str() == Some("src/Demo.php::Greeter::greet")
     });
     assert!(
         has_member_call,
@@ -949,8 +1014,7 @@ function run(): int {
     );
 
     let has_scoped_call = matches.iter().any(|m| {
-        m["kind"] == "call"
-            && m["target"].as_str() == Some("src/Demo.php::Greeter::greetStatic")
+        m["kind"] == "call" && m["target"].as_str() == Some("src/Demo.php::Greeter::greetStatic")
     });
     assert!(
         has_scoped_call,
@@ -1014,16 +1078,24 @@ end
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim())
         .unwrap_or_else(|e| panic!("invalid JSON ({}):\n{}", e, out));
     let matches = v["matches"].as_array().expect("matches array");
 
-    let has_construct = matches.iter().any(|m| {
-        m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter")
-    });
+    let has_construct = matches
+        .iter()
+        .any(|m| m["kind"] == "construct" && m["target"].as_str() == Some("[unresolved] Greeter"));
     assert!(
         has_construct,
         "expected a construct edge targeting `Greeter`, got:\n{}",
@@ -1090,7 +1162,15 @@ function run(): void {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim())
@@ -1175,7 +1255,15 @@ function run(): int {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim())
@@ -1188,10 +1276,10 @@ function run(): int {
         .any(|m| m["target"].as_str() == Some("src/Demo.php::helper"));
     assert!(has_helper, "expected `helper` callee, got:\n{}", out);
 
-    let has_dollar_target = matches
-        .iter()
-        .any(|m| m["name"].as_str().is_some_and(|s| s.contains('$'))
-            || m["target"].as_str().is_some_and(|s| s.contains('$')));
+    let has_dollar_target = matches.iter().any(|m| {
+        m["name"].as_str().is_some_and(|s| s.contains('$'))
+            || m["target"].as_str().is_some_and(|s| s.contains('$'))
+    });
     assert!(
         !has_dollar_target,
         "no edge should reference a `$variable` callable, got:\n{}",
@@ -1234,7 +1322,14 @@ class Greeter extends Base {
     // verify by counting the callees of `caller`.
     let (out, code) = run_in(
         root,
-        &["callees", "caller", ".", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "caller",
+            ".",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
@@ -1270,7 +1365,15 @@ function run(): object {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "run", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "run",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
@@ -1375,7 +1478,15 @@ class Greeter {
     );
     let (out, code) = run_in(
         root,
-        &["callees", "caller", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "caller",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
@@ -1415,7 +1526,15 @@ end
     );
     let (out, code) = run_in(
         root,
-        &["callees", "caller_method", ".", "--rebuild", "--external", "--json", "--compact"],
+        &[
+            "callees",
+            "caller_method",
+            ".",
+            "--rebuild",
+            "--external",
+            "--json",
+            "--compact",
+        ],
     );
     assert_eq!(code, 0, "callees exited non-zero: {}", out);
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("json");
@@ -1476,7 +1595,10 @@ int Greeter::greet() { return 42; }
 fn callers_unknown_symbol_returns_error() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub fn a() {}\n");
     let out = Command::new(bin())
         .args(["callers", "nonexistent_sym_xyz", "."])
@@ -1484,7 +1606,11 @@ fn callers_unknown_symbol_returns_error() {
         .env("NO_COLOR", "1")
         .output()
         .expect("run");
-    assert_eq!(out.status.code(), Some(2), "expected exit 2 for unknown symbol");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2 for unknown symbol"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("no symbol matches"),
@@ -1518,7 +1644,10 @@ fn cache_mtime(root: &std::path::Path) -> Option<std::time::SystemTime> {
 fn deps_partial_invalidation_picks_up_new_import() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub mod a; pub mod b;\n");
     write(&root.join("src/a.rs"), "pub fn ping() {}\n");
     write(&root.join("src/b.rs"), "// no imports yet\n");
@@ -1529,7 +1658,10 @@ fn deps_partial_invalidation_picks_up_new_import() {
     let cache_before = cache_mtime(root).expect("cache should exist after first call");
 
     // Edit b.rs to import a. Bump mtime so delta detection fires reliably.
-    write(&root.join("src/b.rs"), "use crate::a;\npub fn pong() { a::ping(); }\n");
+    write(
+        &root.join("src/b.rs"),
+        "use crate::a;\npub fn pong() { a::ping(); }\n",
+    );
 
     // Same query without --rebuild should pick up the new edge.
     let (out2, code2) = run_in(root, &["deps", "src/b.rs"]);
@@ -1549,9 +1681,15 @@ fn deps_partial_invalidation_picks_up_new_import() {
 fn deps_partial_invalidation_drops_removed_file() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub mod a; pub mod gone;\n");
-    write(&root.join("src/a.rs"), "use crate::gone;\npub fn run() { gone::say(); }\n");
+    write(
+        &root.join("src/a.rs"),
+        "use crate::gone;\npub fn run() { gone::say(); }\n",
+    );
     write(&root.join("src/gone.rs"), "pub fn say() {}\n");
 
     // Prime + verify the edge exists.
@@ -1565,14 +1703,20 @@ fn deps_partial_invalidation_drops_removed_file() {
     // Re-query reverse-deps on a.rs — the partial update should have dropped
     // gone.rs entirely; asking reverse-deps for it should error out.
     let (_, code) = run_in(root, &["reverse-deps", "src/gone.rs"]);
-    assert_eq!(code, 2, "removed file should not be part of dep graph anymore");
+    assert_eq!(
+        code, 2,
+        "removed file should not be part of dep graph anymore"
+    );
 }
 
 #[test]
 fn calls_partial_invalidation_demotes_stale_target() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub mod a; pub mod b;\n");
     write(&root.join("src/a.rs"), "pub fn helper() {}\n");
     write(
@@ -1606,14 +1750,23 @@ fn calls_partial_invalidation_demotes_stale_target() {
 fn calls_partial_invalidation_picks_up_new_caller() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(&root.join("src/lib.rs"), "pub mod a;\n");
-    write(&root.join("src/a.rs"), "pub fn helper() {}\npub fn first() { helper(); }\n");
+    write(
+        &root.join("src/a.rs"),
+        "pub fn helper() {}\npub fn first() { helper(); }\n",
+    );
 
     // Prime — `helper` has one caller.
     let (out, _) = run_in(root, &["callers", "helper", "."]);
     assert!(out.contains("first"), "baseline missing first: {out}");
-    assert!(!out.contains("second"), "second should not exist yet: {out}");
+    assert!(
+        !out.contains("second"),
+        "second should not exist yet: {out}"
+    );
 
     // Add a second caller in the same file.
     write(
@@ -1636,7 +1789,10 @@ fn rust_callers_on_struct_finds_struct_literal_construction() {
     // covered above.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         r#"
@@ -1669,7 +1825,10 @@ fn callers_tests_flag_reaches_tests_through_production_intermediate() {
     // output, not reachability.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    write(&root.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n",
+    );
     write(
         &root.join("src/lib.rs"),
         "pub fn target() {}\npub fn wrapper() { target(); }\n",
@@ -1680,7 +1839,15 @@ fn callers_tests_flag_reaches_tests_through_production_intermediate() {
     );
     let (out, code) = run_in(
         root,
-        &["callers", "target", ".", "--depth", "2", "--tests", "--rebuild"],
+        &[
+            "callers",
+            "target",
+            ".",
+            "--depth",
+            "2",
+            "--tests",
+            "--rebuild",
+        ],
     );
     assert_eq!(code, 0, "callers exited non-zero: {}", out);
     assert!(

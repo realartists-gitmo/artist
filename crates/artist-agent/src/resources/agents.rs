@@ -73,7 +73,9 @@ pub fn nested(workspace: &Path, diagnostics: &mut Vec<String>) -> Vec<PathBuf> {
     let root_agents = workspace.join("AGENTS.md");
     for entry in walker.flatten() {
         if found.len() >= MAX_NESTED {
-            diagnostics.push(format!("nested AGENTS.md scan capped at {MAX_NESTED} files"));
+            diagnostics.push(format!(
+                "nested AGENTS.md scan capped at {MAX_NESTED} files"
+            ));
             break;
         }
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {

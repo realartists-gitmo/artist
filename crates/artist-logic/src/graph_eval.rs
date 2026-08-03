@@ -21,8 +21,8 @@
 
 use crate::certificate::{Certificate, Step};
 use crate::evidence::{
-    Bound, ComputeStatus, Credence, Derivation, Determinacy, DeterminacyBasis,
-    EvaluationResult, Evidential, Grounding, Mode,
+    Bound, ComputeStatus, Credence, Derivation, Determinacy, DeterminacyBasis, EvaluationResult,
+    Evidential, Grounding, Mode,
 };
 use crate::object::{CoreNode, LiteralValue, ObjectGraph, ObjectId, wk};
 use crate::registry::OperatorRegistry;
@@ -145,12 +145,18 @@ pub struct Extension {
 impl Extension {
     /// An exhaustive enumeration.
     pub fn complete(members: Vec<ObjectId>) -> Extension {
-        Extension { members, complete: true }
+        Extension {
+            members,
+            complete: true,
+        }
     }
 
     /// Some members, possibly not all.
     pub fn partial(members: Vec<ObjectId>) -> Extension {
-        Extension { members, complete: false }
+        Extension {
+            members,
+            complete: false,
+        }
     }
 }
 
@@ -426,13 +432,23 @@ impl Num {
         if den.to_i64() == Some(0) {
             return None;
         }
-        let (num, den) = if den < BigInt::from(0) { (-num, -den) } else { (num, den) };
+        let (num, den) = if den < BigInt::from(0) {
+            (-num, -den)
+        } else {
+            (num, den)
+        };
         let g = gcd(num.clone(), den.clone());
-        Some(Num { num: num / &g, den: den / &g })
+        Some(Num {
+            num: num / &g,
+            den: den / &g,
+        })
     }
 
     fn int(n: BigInt) -> Num {
-        Num { num: n, den: BigInt::from(1) }
+        Num {
+            num: n,
+            den: BigInt::from(1),
+        }
     }
 
     /// `mantissa × 10⁻ˢᶜᵃˡᵉ`, exactly.
@@ -468,7 +484,10 @@ impl Num {
         Num::new(&self.num * &o.den, &self.den * &o.num)
     }
     fn neg(&self) -> Num {
-        Num { num: -self.num.clone(), den: self.den.clone() }
+        Num {
+            num: -self.num.clone(),
+            den: self.den.clone(),
+        }
     }
 
     /// Whole-number value, when there is one.
@@ -499,7 +518,11 @@ fn gcd(a: BigInt, b: BigInt) -> BigInt {
         a = b;
         b = t;
     }
-    if a == BigInt::from(0) { BigInt::from(1) } else { a }
+    if a == BigInt::from(0) {
+        BigInt::from(1)
+    } else {
+        a
+    }
 }
 
 /// What an aggregate is known to be: a closed interval, or a lower bound when
@@ -657,9 +680,7 @@ impl Skeleton {
             }
             Skeleton::Atom(i) => Four::from_digit((digits >> (2 * *i as u64)) & 0b11),
             Skeleton::Not(x) => x.eval4(digits).not(),
-            Skeleton::And(xs) => {
-                xs.iter().map(|x| x.eval4(digits)).fold(Four::T, Four::and)
-            }
+            Skeleton::And(xs) => xs.iter().map(|x| x.eval4(digits)).fold(Four::T, Four::and),
             Skeleton::Or(xs) => xs.iter().map(|x| x.eval4(digits)).fold(Four::F, Four::or),
             Skeleton::Imp(a, b) => a.eval4(digits).implies(b.eval4(digits)),
         }
@@ -678,8 +699,6 @@ impl Skeleton {
         }
     }
 }
-
-
 
 /// What a body does across an unbounded region of an integer domain.
 ///
@@ -736,13 +755,21 @@ fn conjoin_tails(parts: &[Tail]) -> Tail {
 fn div_floor(a: &BigInt, b: &BigInt) -> BigInt {
     let (q, r) = (a / b, a % b);
     let zero = BigInt::from(0);
-    if r != zero && (r < zero) != (*b < zero) { q - 1 } else { q }
+    if r != zero && (r < zero) != (*b < zero) {
+        q - 1
+    } else {
+        q
+    }
 }
 
 fn div_ceil(a: &BigInt, b: &BigInt) -> BigInt {
     let (q, r) = (a / b, a % b);
     let zero = BigInt::from(0);
-    if r != zero && (r < zero) == (*b < zero) { q + 1 } else { q }
+    if r != zero && (r < zero) == (*b < zero) {
+        q + 1
+    } else {
+        q
+    }
 }
 
 /// Provenance accumulated beneath the node currently being evaluated.
@@ -898,8 +925,11 @@ impl Scan {
             // `and` loses a bound it could have kept — a weakening, which is
             // the direction that cannot be wrong.
             let acc = self.credence.unwrap_or(Credence::VACUOUS);
-            self.credence =
-                Some(if self.universal { acc.conjoin(c) } else { acc.disjoin(c) });
+            self.credence = Some(if self.universal {
+                acc.conjoin(c)
+            } else {
+                acc.disjoin(c)
+            });
         }
     }
 
@@ -981,13 +1011,23 @@ impl Scan {
 
     /// `(support, refutation, status)` for the scan as a whole.
     fn finish(&self, complete: bool) -> (Bound, Bound, ComputeStatus) {
-        let status =
-            if complete { self.worst } else { downgrade(self.worst, ComputeStatus::Stalled) };
+        let status = if complete {
+            self.worst
+        } else {
+            downgrade(self.worst, ComputeStatus::Stalled)
+        };
         // The meet side speaks for cases that were never examined, so it may
         // only be published when there were none.
-        let gated =
-            if complete && self.worst == ComputeStatus::Exact { self.gated } else { Bound::None };
-        if self.universal { (gated, self.free, status) } else { (self.free, gated, status) }
+        let gated = if complete && self.worst == ComputeStatus::Exact {
+            self.gated
+        } else {
+            Bound::None
+        };
+        if self.universal {
+            (gated, self.free, status)
+        } else {
+            (self.free, gated, status)
+        }
     }
 }
 
@@ -1044,7 +1084,9 @@ impl Default for GraphEvaluator {
 
 impl GraphEvaluator {
     pub fn new() -> Self {
-        GraphEvaluator { registry: OperatorRegistry::new() }
+        GraphEvaluator {
+            registry: OperatorRegistry::new(),
+        }
     }
 
     /// Evaluate `root`. The graph is mutable because a continuation is an
@@ -1117,16 +1159,26 @@ impl GraphEvaluator {
         if cert.conclusion() != Some(root) {
             cert.steps.clear();
         }
-        // **And never hand out a derivation the kernel rejects.**
+        // **Never hand out a derivation the kernel rejects.**
         //
-        // `cite` finds the last step concluding a node, which is the wrong step
-        // when the same node was evaluated under different variable bindings
-        // inside a quantifier — the citation is stale and the premise does not
-        // license what it is cited for. That is a real bug in citation hygiene
-        // and it predates the `Bound` repair; discarding here is the honest
-        // fallback rather than the fix, because a certificate its own checker
-        // refuses is worse than no certificate at all.
+        // This was a workaround: `cite` searched the whole trace for the last
+        // step concluding a node, which is the wrong step when that node was
+        // evaluated once per member inside a quantifier — the citation named a
+        // premise from a different instantiation, licensing nothing. Citations
+        // are now scoped to the evaluation that produced them (`cite_since`),
+        // and the `debug_assert` holds across the suite, including the
+        // certificate property test over three hundred generated cases with
+        // quantifiers.
+        //
+        // Kept as a guard rather than deleted, because "the evaluator agrees
+        // with its own checker" is exactly the invariant worth failing loudly
+        // on, and a release build should still degrade to no certificate rather
+        // than a rejectable one.
         if !cert.steps.is_empty() && cert.check(st.g).is_err() {
+            debug_assert!(
+                false,
+                "the evaluator emitted a derivation its own kernel rejects"
+            );
             cert.steps.clear();
         }
         (r, cert)
@@ -1248,9 +1300,29 @@ impl State<'_> {
 
     /// The index of the most recent step concluding `node`, if any — how a
     /// composite step finds the premises it rests on.
-    fn cite(&self, node: ObjectId) -> Option<usize> {
+    /// How many steps have been emitted so far.
+    ///
+    /// Taken *before* evaluating an operand so the citation that follows can be
+    /// restricted to steps this evaluation produced.
+    fn trace_mark(&self) -> usize {
+        self.trace.as_ref().map_or(0, |c| c.steps.len())
+    }
+
+    /// The step concluding `node`, **emitted at or after `mark`**.
+    ///
+    /// Searching the whole trace took the last step for a node anywhere in it,
+    /// which is the wrong step when that node was evaluated more than once under
+    /// different variable bindings inside a quantifier: the citation named a
+    /// premise from a different instantiation, which does not license the
+    /// conclusion it was cited for, and the kernel rejected the result. That was
+    /// papered over by discarding such certificates; this is the repair.
+    fn cite_since(&self, mark: usize, node: ObjectId) -> Option<usize> {
         let c = self.trace.as_ref()?;
-        c.steps.iter().rposition(|st| st.node() == node)
+        c.steps
+            .iter()
+            .skip(mark)
+            .rposition(|st| st.node() == node)
+            .map(|i| i + mark)
     }
 
     fn charge(&mut self, n: u64) -> bool {
@@ -1439,8 +1511,10 @@ impl State<'_> {
         // other. Evaluating the consequent first made `(implies A (forall …))`
         // refute at budget 32 and go open at 128 — a property test caught the
         // retraction. Left to right keeps each operand's share monotone.
+        let mark_a = self.trace_mark();
         let a = self.check(ante, env);
         let a = self.seal(a);
+        let mark_c = self.trace_mark();
         let c = self.check(conseq, env);
         let c = self.seal(c);
 
@@ -1452,10 +1526,6 @@ impl State<'_> {
         // designated and `T` when it is not, so either way it is designated.
         // Refutation needs `A` designated *and* `C` anti-designated.
         //
-        // The material shortcut — a refuted antecedent supporting the
-        // implication — is **not** available, because `refutation: Certain`
-        // asserts `⟦A⟧ ∈ {F,B}` and `B` is designated. That costs
-        // `(implies #false X)`, which is now `Open`.
         // `(a ⊃ b)⁺ = ¬a⁺ ∨ b⁺` and `(a ⊃ b)⁻ = a⁺ ∧ b⁻`, per bit.
         //
         // The first disjunct is what `Bound::Excluded` bought: an antecedent
@@ -1479,16 +1549,31 @@ impl State<'_> {
                 // Emitting only the antecedent produced a derivation the kernel
                 // rejected as `Unlicensed` — the evaluator and its own checker
                 // disagreeing, which a property test found on its first case.
-                let cites: Vec<(usize, usize)> = if holds {
-                    self.cite(conseq).map(|k| (k, 1)).into_iter().collect()
+                let cites: Vec<(usize, usize)> = if holds && c.support.is_certain() {
+                    // Licensed by a designated consequent.
+                    self.cite_since(mark_c, conseq)
+                        .map(|k| (k, 1))
+                        .into_iter()
+                        .collect()
+                } else if holds {
+                    // Licensed by `a⁺ = 0` — the antecedent, at position 0,
+                    // where the kernel reads the support bit negated.
+                    self.cite_since(mark_a, ante)
+                        .map(|k| (k, 0))
+                        .into_iter()
+                        .collect()
                 } else {
-                    self.cite(ante)
-                        .zip(self.cite(conseq))
+                    self.cite_since(mark_a, ante)
+                        .zip(self.cite_since(mark_c, conseq))
                         .map(|(a, c)| vec![(a, 0), (c, 1)])
                         .unwrap_or_default()
                 };
                 if !cites.is_empty() {
-                    self.emit(Step::Connective { node, premises: cites, holds });
+                    self.emit(Step::Connective {
+                        node,
+                        premises: cites,
+                        holds,
+                    });
                 }
                 scan.decided(holds, self.snapshot)
             }
@@ -1703,7 +1788,10 @@ impl State<'_> {
         }
         if let Some(CoreNode::Apply { operator, operands }) = self.g.get(r).cloned() {
             let parts = |me: &mut Self, atoms: &mut Vec<ObjectId>| -> Option<Vec<Skeleton>> {
-                operands.iter().map(|o| me.skeleton(*o, env, atoms, depth + 1)).collect()
+                operands
+                    .iter()
+                    .map(|o| me.skeleton(*o, env, atoms, depth + 1))
+                    .collect()
             };
             match operator {
                 wk::NOT if operands.len() == 1 => {
@@ -1734,11 +1822,13 @@ impl State<'_> {
     }
 
     fn dispatch(&mut self, resolved: ObjectId, env: &GraphEnv) -> EvaluationResult {
-
         match self.g.get(resolved) {
             None => self.unsupported(resolved),
             Some(CoreNode::Atom { .. }) if resolved == wk::TOP => {
-                self.emit(Step::Axiom { node: resolved, holds: true });
+                self.emit(Step::Axiom {
+                    node: resolved,
+                    holds: true,
+                });
                 // Total, and *derived*: a truth atom's condition is maximally
                 // sharp and owes nothing to a declaration. The kernel's `Axiom`
                 // rule already concluded this, so leaving it `Unknown` here made
@@ -1750,7 +1840,10 @@ impl State<'_> {
                 r
             }
             Some(CoreNode::Atom { .. }) if resolved == wk::BOT => {
-                self.emit(Step::Axiom { node: resolved, holds: false });
+                self.emit(Step::Axiom {
+                    node: resolved,
+                    holds: false,
+                });
                 // Total, and *derived*: a truth atom's condition is maximally
                 // sharp and owes nothing to a declaration. The kernel's `Axiom`
                 // rule already concluded this, so leaving it `Unknown` here made
@@ -1827,7 +1920,9 @@ impl State<'_> {
                 // Arity-guarded like `at` and `=` already are. `args.first()`
                 // alone silently discarded the rest, so `(not P Q)` evaluated as
                 // `(not P)` — a *different* proposition, answered confidently.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 self.negated = !self.negated;
                 let r = self.check(*a, env);
                 self.negated = !self.negated;
@@ -1841,7 +1936,9 @@ impl State<'_> {
             }
             wk::AND | wk::OR | wk::IMPLIES => {
                 if op == wk::IMPLIES {
-                    let [ante, conseq] = args else { return self.unsupported(node) };
+                    let [ante, conseq] = args else {
+                        return self.unsupported(node);
+                    };
                     return self.implication(node, *ante, *conseq, env);
                 }
                 // An operand list is exhaustive by construction, so a
@@ -1851,6 +1948,7 @@ impl State<'_> {
                     if self.exhausted() {
                         return self.out_of_budget(node);
                     }
+                    let mark = self.trace_mark();
                     // `implies` negates its first operand — and it must do so
                     // *before* checking it, not after. Negating the result left
                     // `self.negated` at the outer parity, so the cycle detector
@@ -1873,12 +1971,16 @@ impl State<'_> {
                     r = self.seal(r);
                     if scan.step(&r, self.snapshot) {
                         let holds = op != wk::AND;
-                        if let Some(k) = self.cite(*a) {
+                        if let Some(k) = self.cite_since(mark, *a) {
                             // The operand *slot*, not just the node: under
                             // content addressing `(implies P P)` repeats an id,
                             // and a premise identified by node alone can be
                             // read into the wrong position.
-                            self.emit(Step::Connective { node, premises: vec![(k, i)], holds });
+                            self.emit(Step::Connective {
+                                node,
+                                premises: vec![(k, i)],
+                                holds,
+                            });
                         }
                         return scan.decided(holds, self.snapshot);
                     }
@@ -1886,7 +1988,9 @@ impl State<'_> {
                 self.finish_scan(node, &scan, true)
             }
             wk::EQ => {
-                let [a, b] = args else { return self.unsupported(node) };
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
                 // Reflexivity needs no denotation: one id is one thing however
                 // uncomputable it is. `(= #1=(build artist) #1#)` — literally
                 // the same node twice — came back `Open` because `denote`
@@ -1923,7 +2027,9 @@ impl State<'_> {
                 }
             }
             wk::LEQ => {
-                let [a, b] = args else { return self.unsupported(node) };
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
                 if let (Some(x), Some(y)) = (self.numeric(*a, env), self.numeric(*b, env)) {
                     return EvaluationResult::certain(x <= y);
                 }
@@ -1963,7 +2069,9 @@ impl State<'_> {
                 self.stalled(node)
             }
             wk::CONTAINS | wk::STARTS_WITH | wk::ENDS_WITH => {
-                let [a, b] = args else { return self.unsupported(node) };
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
                 match (self.text(*a, env), self.text(*b, env)) {
                     (Some(x), Some(y)) => EvaluationResult::certain(match op {
                         wk::CONTAINS => x.contains(&y),
@@ -1987,7 +2095,9 @@ impl State<'_> {
                 // mention their arguments rather than using them, and rewriting
                 // through one is how "Lois believes Superman flies" becomes
                 // "Lois believes Clark Kent flies".
-                let [a, b] = args else { return self.unsupported(node) };
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
                 let (x, y) = (self.key(*a, env), self.key(*b, env));
                 if x == y {
                     return EvaluationResult::certain(true);
@@ -2044,7 +2154,9 @@ impl State<'_> {
                 // promote a default into a *settled reading* — which is the
                 // property that matters, and is not the same as keeping it out
                 // of `must`.
-                let [inner] = args else { return self.unsupported(node) };
+                let [inner] = args else {
+                    return self.unsupported(node);
+                };
                 let r = self.check(*inner, env);
                 // Both sides are tested together. Testing refutation first made
                 // `(usually Conflicted)` a definite `Refuted` — the operator
@@ -2100,7 +2212,9 @@ impl State<'_> {
                 // `(unless Exception P)` — P, defeated when the exception
                 // holds. The asymmetry matters: an exception that is merely
                 // *possible* does not defeat, or no default would ever survive.
-                let [exception, inner] = args else { return self.unsupported(node) };
+                let [exception, inner] = args else {
+                    return self.unsupported(node);
+                };
                 let e = self.check(*exception, env);
                 if e.support.is_certain() {
                     return self.stalled(node);
@@ -2118,7 +2232,9 @@ impl State<'_> {
                 // where the store is authoritative. Transitivity is left to
                 // stored rules rather than baked in, so a cycle in the store is
                 // visible as a conflict instead of being silently closed over.
-                let [a, b] = args else { return self.unsupported(node) };
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
                 let (x, y) = (self.key(*a, env), self.key(*b, env));
                 if x == y {
                     return EvaluationResult::certain(false);
@@ -2141,7 +2257,9 @@ impl State<'_> {
                 // Quantify over accessible worlds. Without a frame these were
                 // ordinary binary predicates over node ids — "necessarily P"
                 // was true iff a fact table happened to hold a row for it.
-                let [inner] = args else { return self.unsupported(node) };
+                let [inner] = args else {
+                    return self.unsupported(node);
+                };
                 let here = self.world;
                 let reachable: Vec<ObjectId> = self
                     .s
@@ -2172,7 +2290,9 @@ impl State<'_> {
                 self.finish_scan(node, &scan, true)
             }
             wk::IN_WORLD => {
-                let [w, inner] = args else { return self.unsupported(node) };
+                let [w, inner] = args else {
+                    return self.unsupported(node);
+                };
                 let target = self.key(*w, env);
                 let prev = self.world;
                 self.world = Some(target);
@@ -2188,7 +2308,9 @@ impl State<'_> {
                 // pick differently, and the choice is a modelling decision. A
                 // structure without one gets `Unsupported`, which is the honest
                 // answer rather than a quietly invented ordering.
-                let [cond, conseq] = args else { return self.unsupported(node) };
+                let [cond, conseq] = args else {
+                    return self.unsupported(node);
+                };
                 let Some(here) = self.world.or_else(|| self.s.worlds().first().copied()) else {
                     return self.unsupported(node);
                 };
@@ -2219,7 +2341,9 @@ impl State<'_> {
             wk::EVAL => {
                 // `(eval (quote X))` evaluates X. The inverse of `quote`, and
                 // the reason the pair is what makes the language reflective.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 let target = env.get(a).copied().unwrap_or(*a);
                 match self.g.get(target).cloned() {
                     Some(CoreNode::Apply { operator, operands })
@@ -2236,7 +2360,9 @@ impl State<'_> {
                 // Provability *within the current budget*, which is the only
                 // reading an evaluator can honestly offer: a failure to derive
                 // is not a proof of underivability, so this never refutes.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 let r = self.about(*a, env);
                 if r.support.is_certain() {
                     EvaluationResult::certain(true)
@@ -2264,7 +2390,9 @@ impl State<'_> {
                 // grounded. Where absence really does leave nothing to report,
                 // the arms below say so themselves — `Determinacy::Unknown`
                 // stalls, and `defeasible` stalls on an `Open` verdict.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 let r = self.about(*a, env);
                 match r.compute_status {
                     ComputeStatus::Exact | ComputeStatus::Stalled => {}
@@ -2275,9 +2403,7 @@ impl State<'_> {
                     // Grounding and determinacy are properties of the
                     // *sentence*, settled whether or not evidence bears on it —
                     // an unheard-of atom is perfectly grounded.
-                    wk::GROUNDED => {
-                        EvaluationResult::certain(r.grounding == Grounding::Grounded)
-                    }
+                    wk::GROUNDED => EvaluationResult::certain(r.grounding == Grounding::Grounded),
                     wk::DETERMINATE => match r.determinacy {
                         Determinacy::Total => EvaluationResult::certain(true),
                         Determinacy::Indeterminate => EvaluationResult::certain(false),
@@ -2293,9 +2419,9 @@ impl State<'_> {
                         // Nobody has said. Not "no".
                         Determinacy::Unknown => self.stalled(node),
                     },
-                    wk::PRESUMED => EvaluationResult::certain(
-                        r.determinacy_basis == DeterminacyBasis::Presumed,
-                    ),
+                    wk::PRESUMED => {
+                        EvaluationResult::certain(r.determinacy_basis == DeterminacyBasis::Presumed)
+                    }
                     // Derivation classifies a *conclusion*, so with no
                     // conclusion there is nothing to classify. `Observed` is the
                     // struct default, and reading it off an `Open` result would
@@ -2310,7 +2436,9 @@ impl State<'_> {
                 // since the axes landed and there was no way to ask for it, so
                 // *"what would change my mind about X"* was unaskable about a
                 // value the answer was already sitting in.
-                let [p, d] = args else { return self.unsupported(node) };
+                let [p, d] = args else {
+                    return self.unsupported(node);
+                };
                 let defeater = env.get(d).copied().unwrap_or(*d);
                 let r = self.about(*p, env);
                 // Same rule as the axis operators: truncation blocks, absence
@@ -2338,7 +2466,9 @@ impl State<'_> {
                 // one thing the unawareness literature agrees on — so it stalls
                 // rather than answering `Open` and letting the two states look
                 // alike to a caller who only checks the evidential axis.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 let r = self.about(*a, env);
                 match r.compute_status {
                     ComputeStatus::BudgetExhausted => return self.out_of_budget(node),
@@ -2346,7 +2476,9 @@ impl State<'_> {
                     ComputeStatus::Unsupported => return self.unsupported(node),
                     _ => {}
                 }
-                let Some(c) = r.credence else { return self.stalled(node) };
+                let Some(c) = r.credence else {
+                    return self.stalled(node);
+                };
                 match c.decided() {
                     Some(v) => EvaluationResult::certain(v),
                     // Expressible, graded, and the interval straddles even
@@ -2359,8 +2491,13 @@ impl State<'_> {
                     }
                 }
             }
-            wk::ASSERTED_BY | wk::BELIEVES | wk::SUPPORTS | wk::ATTACKS
-            | wk::DERIVED_FROM | wk::SOURCE | wk::DENOTES => {
+            wk::ASSERTED_BY
+            | wk::BELIEVES
+            | wk::SUPPORTS
+            | wk::ATTACKS
+            | wk::DERIVED_FROM
+            | wk::SOURCE
+            | wk::DENOTES => {
                 // Intensional relations: they are *about* their arguments, so
                 // the arguments are node ids to be looked up verbatim. No
                 // coreference substitution happens here even when the store
@@ -2371,8 +2508,7 @@ impl State<'_> {
                 // into another is coreference, and binding a quantified
                 // variable is not — conflating them made "for every x, someone
                 // believes something about x" unaskable.
-                let tuple: Vec<ObjectId> =
-                    args.iter().map(|a| self.key(*a, env)).collect();
+                let tuple: Vec<ObjectId> = args.iter().map(|a| self.key(*a, env)).collect();
                 self.resolve_or_derive(node, op, &tuple, env)
             }
             wk::ALWAYS | wk::EVENTUALLY => {
@@ -2380,7 +2516,9 @@ impl State<'_> {
                 // instants. `instants()` was implemented by `RelationalView` and
                 // never called, so `(eventually P)` fell through to the fact
                 // table as a binary predicate over node ids.
-                let [inner] = args else { return self.unsupported(node) };
+                let [inner] = args else {
+                    return self.unsupported(node);
+                };
                 let ts = self.s.instants();
                 if ts.is_empty() {
                     // A timeless structure makes a temporal claim
@@ -2411,8 +2549,12 @@ impl State<'_> {
             wk::DURING => {
                 // `(during t (interval a b))` — half-open, so adjacent
                 // intervals tile the line without overlapping.
-                let [t, iv] = args else { return self.unsupported(node) };
-                let Some(when) = self.instant_of(*t, env) else { return self.stalled(node) };
+                let [t, iv] = args else {
+                    return self.unsupported(node);
+                };
+                let Some(when) = self.instant_of(*t, env) else {
+                    return self.stalled(node);
+                };
                 let target = env.get(iv).copied().unwrap_or(*iv);
                 let Some(CoreNode::Apply { operator, operands }) = self.g.get(target).cloned()
                 else {
@@ -2421,7 +2563,9 @@ impl State<'_> {
                 if operator != wk::INTERVAL {
                     return self.unsupported(node);
                 }
-                let [from, to] = operands.as_slice() else { return self.unsupported(node) };
+                let [from, to] = operands.as_slice() else {
+                    return self.unsupported(node);
+                };
                 match (self.instant_of(*from, env), self.instant_of(*to, env)) {
                     (Some(a), Some(b)) => EvaluationResult::certain(a <= when && when < b),
                     _ => self.stalled(node),
@@ -2431,9 +2575,10 @@ impl State<'_> {
                 // Temporal order over instants. Symbolic instants resolve
                 // through the structure, so `(before (session-start s7) now)`
                 // is answerable without writing raw epoch integers.
-                let [a, b] = args else { return self.unsupported(node) };
-                if let (Some(x), Some(y)) = (self.instant_of(*a, env), self.instant_of(*b, env))
-                {
+                let [a, b] = args else {
+                    return self.unsupported(node);
+                };
+                if let (Some(x), Some(y)) = (self.instant_of(*a, env), self.instant_of(*b, env)) {
                     return EvaluationResult::certain(x < y);
                 }
                 // Not everything ordered is a *time*. "Run `cargo fmt` before
@@ -2453,7 +2598,9 @@ impl State<'_> {
                 // over a finite instant set. `always`/`eventually` cannot stand
                 // in for it: they range over *every* instant with no way to
                 // restrict to a window, which is the entire content of `since`.
-                let [p, q] = args else { return self.unsupported(node) };
+                let [p, q] = args else {
+                    return self.unsupported(node);
+                };
                 let ts = self.s.instants();
                 if ts.is_empty() {
                     return self.stalled(node);
@@ -2474,7 +2621,9 @@ impl State<'_> {
                 }
                 // No witnessed onset: the window is undefined, which is not the
                 // same as the claim being false.
-                let Some(from) = from else { return self.stalled(node) };
+                let Some(from) = from else {
+                    return self.stalled(node);
+                };
                 let mut scan = Scan::new(true);
                 for t in ts.into_iter().filter(|t| *t >= from) {
                     if self.exhausted() {
@@ -2496,7 +2645,9 @@ impl State<'_> {
                 // Reading `(obliged P)` as "P in every accessible world" makes a
                 // rule false exactly when it is broken, which destroys the only
                 // reason to record one.
-                let [inner] = args else { return self.unsupported(node) };
+                let [inner] = args else {
+                    return self.unsupported(node);
+                };
                 let target = self.key(*inner, env);
                 let direct = self.lookup(op, &[target]);
                 if let Some(r) = direct.verdict() {
@@ -2544,7 +2695,9 @@ impl State<'_> {
                 // The bridge from norms back to truth, and the reason keeping
                 // them apart costs nothing: a norm on file, plus the world
                 // failing to match it.
-                let [inner] = args else { return self.unsupported(node) };
+                let [inner] = args else {
+                    return self.unsupported(node);
+                };
                 let target = self.key(*inner, env);
                 let obliged = self.g.apply(wk::OBLIGED, vec![target]);
                 let holds = self.check(target, env);
@@ -2572,7 +2725,9 @@ impl State<'_> {
                 // `Unsupported` and never fell through to the store, making
                 // "this field is a `usize`" permanently unretrievable if you
                 // chose the reserved spelling to record it.
-                let [x, t] = args else { return self.unsupported(node) };
+                let [x, t] = args else {
+                    return self.unsupported(node);
+                };
                 let tuple = [self.key(*x, env), self.key(*t, env)];
                 self.resolve_or_derive(node, op, &tuple, env)
             }
@@ -2583,8 +2738,12 @@ impl State<'_> {
                 // Evaluate against the structure as it was at an instant.
                 // `always` and `eventually` derive from it by quantifying over
                 // every instant, and `since` by quantifying over a window.
-                let [t, inner] = args else { return self.unsupported(node) };
-                let Some(when) = self.instant_of(*t, env) else { return self.stalled(node) };
+                let [t, inner] = args else {
+                    return self.unsupported(node);
+                };
+                let Some(when) = self.instant_of(*t, env) else {
+                    return self.stalled(node);
+                };
                 let prev = self.instant;
                 self.instant = Some(when);
                 let r = self.check(*inner, env);
@@ -2593,7 +2752,9 @@ impl State<'_> {
             }
             wk::HOLDS => {
                 // Descend into a quotation — deliberately, never automatically.
-                let [a] = args else { return self.unsupported(node) };
+                let [a] = args else {
+                    return self.unsupported(node);
+                };
                 let target = env.get(a).copied().unwrap_or(*a);
                 match self.g.get(target) {
                     Some(CoreNode::Apply { operator, operands })
@@ -2609,9 +2770,13 @@ impl State<'_> {
             wk::QUOTE => self.unsupported(node),
             _ if env.rels.contains_key(&op) => {
                 let rel = &env.rels[&op];
-                let ground: Option<Vec<ObjectId>> =
-                    args.iter().map(|a| env.get(a).copied().or(Some(*a))).collect();
-                let Some(tuple) = ground else { return self.stalled(node) };
+                let ground: Option<Vec<ObjectId>> = args
+                    .iter()
+                    .map(|a| env.get(a).copied().or(Some(*a)))
+                    .collect();
+                let Some(tuple) = ground else {
+                    return self.stalled(node);
+                };
                 if rel.tuples.contains(&tuple) {
                     EvaluationResult::certain(true)
                 } else if rel.complete {
@@ -2644,14 +2809,9 @@ impl State<'_> {
                 // Not a built-in. Ask the registry; absence is its own answer.
                 if self.registry.has(op) {
                     let mut budget = self.budget.saturating_sub(self.spent);
-                    let r = self.registry.evaluate(
-                        self.g,
-                        node,
-                        op,
-                        args,
-                        &mut budget,
-                        self.snapshot,
-                    );
+                    let r =
+                        self.registry
+                            .evaluate(self.g, node, op, args, &mut budget, self.snapshot);
                     self.spent = self.spent.saturating_add(1);
                     // A registered operator is the one place a result crosses
                     // into the evaluator from code it does not control, so it is
@@ -2872,11 +3032,15 @@ impl State<'_> {
             if self.exhausted() {
                 return self.out_of_budget(node);
             }
-            let Some((binder, vars, bodies)) = self.g.open_binder(rule) else { continue };
+            let Some((binder, vars, bodies)) = self.g.open_binder(rule) else {
+                continue;
+            };
             if binder != wk::FORALL {
                 continue;
             }
-            let Some(imp) = bodies.first().copied() else { continue };
+            let Some(imp) = bodies.first().copied() else {
+                continue;
+            };
             let Some(CoreNode::Apply { operator, operands }) = self.g.get(imp).cloned() else {
                 continue;
             };
@@ -2929,7 +3093,6 @@ impl State<'_> {
         }
         self.stalled(node)
     }
-
 }
 
 /// A rule's conclusion matched against a goal.
@@ -3021,7 +3184,11 @@ impl State<'_> {
                 return None;
             }
         }
-        Some(GoalMatch { bindings: out, negated: false, defeasible: false })
+        Some(GoalMatch {
+            bindings: out,
+            negated: false,
+            defeasible: false,
+        })
     }
 
     /// Match one conclusion argument against one goal argument, structurally.
@@ -3063,8 +3230,14 @@ impl State<'_> {
         }
         match (self.g.get(pattern).cloned(), self.g.get(goal).cloned()) {
             (
-                Some(CoreNode::Apply { operator: po, operands: pa }),
-                Some(CoreNode::Apply { operator: go, operands: ga }),
+                Some(CoreNode::Apply {
+                    operator: po,
+                    operands: pa,
+                }),
+                Some(CoreNode::Apply {
+                    operator: go,
+                    operands: ga,
+                }),
             ) => {
                 if po != go || pa.len() != ga.len() {
                     return false;
@@ -3078,8 +3251,16 @@ impl State<'_> {
             // anything but `Apply` meant such a rule never matched. The slots are
             // de Bruijn on both sides, so they compare structurally.
             (
-                Some(CoreNode::Bind { binder: pb, vars: pv, bodies: pbod }),
-                Some(CoreNode::Bind { binder: gb, vars: gv, bodies: gbod }),
+                Some(CoreNode::Bind {
+                    binder: pb,
+                    vars: pv,
+                    bodies: pbod,
+                }),
+                Some(CoreNode::Bind {
+                    binder: gb,
+                    vars: gv,
+                    bodies: gbod,
+                }),
             ) => {
                 if pb != gb || pv != gv || pbod.len() != gbod.len() {
                     return false;
@@ -3144,7 +3325,9 @@ impl State<'_> {
         let (Some(v), Some(body)) = (vars.first(), bodies.first()) else {
             return self.unsupported(node);
         };
-        let Some(domain) = v.domain else { return self.unsupported(node) };
+        let Some(domain) = v.domain else {
+            return self.unsupported(node);
+        };
         let Some(members) = self.members_of(domain, env) else {
             // Unenumerable. Two very different reasons, and conflating them was
             // unsound: the domain may be *known* to be the integers — where
@@ -3185,14 +3368,19 @@ impl State<'_> {
                 // definite verdict in the opposite direction. Which answer you
                 // got depended on where the budget ran out.
                 let clean = scan.gated == Bound::Certain
-                        && scan.free == Bound::None
-                        && scan.worst == ComputeStatus::Exact;
+                    && scan.free == Bound::None
+                    && scan.worst == ComputeStatus::Exact;
                 r.continuation =
                     Some(self.narrow(binder, v, &members[i..], *body, complete && clean));
                 r.dependencies = members[i..].to_vec();
                 return r;
             }
             let scoped = env.with(v.var, *m);
+            // Scoped to this member's evaluation. The same body node is checked
+            // once per member, so a whole-trace search would cite whichever
+            // member happened to come last — a premise from a *different*
+            // instantiation, which licenses nothing and the kernel rejects.
+            let mark = self.trace_mark();
             let r = self.check(*body, &scoped);
             // **A member cut short mid-body belongs in the tail, not the
             // prefix.** The exhaustion test at the top of the loop leaves it
@@ -3204,10 +3392,9 @@ impl State<'_> {
             // continuation answerable.
             if r.compute_status == ComputeStatus::BudgetExhausted {
                 let mut out = self.out_of_budget(node);
-                let clean =
-                    scan.gated == Bound::Certain
-                        && scan.free == Bound::None
-                        && scan.worst == ComputeStatus::Exact;
+                let clean = scan.gated == Bound::Certain
+                    && scan.free == Bound::None
+                    && scan.worst == ComputeStatus::Exact;
                 out.continuation =
                     Some(self.narrow(binder, v, &members[i..], *body, complete && clean));
                 out.dependencies = members[i..].to_vec();
@@ -3234,12 +3421,9 @@ impl State<'_> {
                         Some(CoreNode::Bind { bodies, .. }) => bodies.first().copied(),
                         _ => None,
                     };
-                    let verifiable = stored.is_some_and(|b| {
-                        crate::certificate::instantiates(self.g, b, *m, inst, 0)
-                    });
-                    if verifiable
-                        && let Some(k) = self.cite(inst)
-                    {
+                    let verifiable = stored
+                        .is_some_and(|b| crate::certificate::instantiates(self.g, b, *m, inst, 0));
+                    if verifiable && let Some(k) = self.cite_since(mark, inst) {
                         self.emit(Step::Instance {
                             node,
                             premise: k,
@@ -3378,14 +3562,19 @@ impl State<'_> {
         if depth > 64 {
             return Tail::Unknown;
         }
-        let Some(node) = self.g.get(body).cloned() else { return Tail::Unknown };
+        let Some(node) = self.g.get(body).cloned() else {
+            return Tail::Unknown;
+        };
         let zero = BigInt::from(0);
         match node {
             CoreNode::Apply { operator, operands } if operator == wk::LEQ => {
-                let [a, b] = operands.as_slice() else { return Tail::Unknown };
-                let (Some(mut diff), Some(rhs)) =
-                    (self.lin_form(*a, var, env, 0), self.lin_form(*b, var, env, 0))
-                else {
+                let [a, b] = operands.as_slice() else {
+                    return Tail::Unknown;
+                };
+                let (Some(mut diff), Some(rhs)) = (
+                    self.lin_form(*a, var, env, 0),
+                    self.lin_form(*b, var, env, 0),
+                ) else {
                     return Tail::Unknown;
                 };
                 for (k, c) in rhs.0 {
@@ -3400,7 +3589,11 @@ impl State<'_> {
                 let k = diff.1;
                 if coeff == zero {
                     // The variable cancelled, so it is a constant fact.
-                    return if k <= zero { Tail::AllHold } else { Tail::NoneHold };
+                    return if k <= zero {
+                        Tail::AllHold
+                    } else {
+                        Tail::NoneHold
+                    };
                 }
                 let Some(lo) = lo else {
                     // Every integer, and a non-zero coefficient makes
@@ -3411,15 +3604,21 @@ impl State<'_> {
                 let lo = BigInt::from(lo);
                 if coeff > zero {
                     // Increasing in n: holds for n ≤ ⌊−k ÷ coeff⌋.
-                    if div_floor(&-k, &coeff) < lo { Tail::NoneHold } else { Tail::Mixed }
+                    if div_floor(&-k, &coeff) < lo {
+                        Tail::NoneHold
+                    } else {
+                        Tail::Mixed
+                    }
                 } else {
                     // Decreasing in n: holds for n ≥ ⌈−k ÷ coeff⌉.
-                    if div_ceil(&-k, &coeff) <= lo { Tail::AllHold } else { Tail::Mixed }
+                    if div_ceil(&-k, &coeff) <= lo {
+                        Tail::AllHold
+                    } else {
+                        Tail::Mixed
+                    }
                 }
             }
-            CoreNode::Apply { operator, operands }
-                if operator == wk::AND || operator == wk::OR =>
-            {
+            CoreNode::Apply { operator, operands } if operator == wk::AND || operator == wk::OR => {
                 let parts: Vec<Tail> = operands
                     .iter()
                     .map(|o| self.tail_verdict(*o, var, lo, env, depth + 1))
@@ -3431,7 +3630,9 @@ impl State<'_> {
                 }
             }
             CoreNode::Apply { operator, operands } if operator == wk::NOT => {
-                let [inner] = operands.as_slice() else { return Tail::Unknown };
+                let [inner] = operands.as_slice() else {
+                    return Tail::Unknown;
+                };
                 self.tail_verdict(*inner, var, lo, env, depth + 1).negate()
             }
             _ => Tail::Unknown,
@@ -3460,9 +3661,7 @@ impl State<'_> {
             return Some((m, BigInt::from(0)));
         }
         match self.g.get(r).cloned() {
-            Some(CoreNode::Literal(LiteralValue::Int(n))) => {
-                Some((BTreeMap::new(), n))
-            }
+            Some(CoreNode::Literal(LiteralValue::Int(n))) => Some((BTreeMap::new(), n)),
             Some(CoreNode::Apply { operator, operands }) => match (operator, operands.as_slice()) {
                 (wk::ADD, [a, b]) => {
                     let (mut x, xk) = self.lin_form(*a, var, env, depth + 1)?;
@@ -3510,8 +3709,7 @@ impl State<'_> {
         bodies: &[ObjectId],
         env: &GraphEnv,
     ) -> EvaluationResult {
-        let (Some(pred), Some(def), Some(scope)) =
-            (vars.first(), bodies.first(), bodies.last())
+        let (Some(pred), Some(def), Some(scope)) = (vars.first(), bodies.first(), bodies.last())
         else {
             return self.unsupported(node);
         };
@@ -3521,8 +3719,12 @@ impl State<'_> {
         }
         let mut domains = Vec::new();
         for p in &params {
-            let Some(d) = p.domain else { return self.unsupported(node) };
-            let Some(m) = self.members_of(d, env) else { return self.stalled(node) };
+            let Some(d) = p.domain else {
+                return self.unsupported(node);
+            };
+            let Some(m) = self.members_of(d, env) else {
+                return self.stalled(node);
+            };
             // A partial parameter domain means the fixpoint ranges over a
             // subset, so it can never be declared complete.
             if !m.complete {
@@ -3532,7 +3734,10 @@ impl State<'_> {
         }
         let candidates = product(&domains);
 
-        let mut rel = BoundRelation { tuples: Default::default(), complete: false };
+        let mut rel = BoundRelation {
+            tuples: Default::default(),
+            complete: false,
+        };
         let monotone = !self.occurs_negatively(*def, pred.var, false, 0);
         loop {
             if self.exhausted() {
@@ -3555,7 +3760,10 @@ impl State<'_> {
                 }
                 scoped.rels.insert(
                     pred.var,
-                    BoundRelation { tuples: rel.tuples.clone(), complete: monotone },
+                    BoundRelation {
+                        tuples: rel.tuples.clone(),
+                        complete: monotone,
+                    },
                 );
                 let r = self.check(*def, &scoped);
                 let contested = r.support.is_certain() && r.refutation.is_certain();
@@ -3625,9 +3833,9 @@ impl State<'_> {
                     self.occurs_negatively(*o, p, neg ^ flip, depth + 1)
                 })
             }
-            Some(CoreNode::Bind { bodies, .. }) => {
-                bodies.iter().any(|b| self.occurs_negatively(*b, p, neg, depth + 1))
-            }
+            Some(CoreNode::Bind { bodies, .. }) => bodies
+                .iter()
+                .any(|b| self.occurs_negatively(*b, p, neg, depth + 1)),
             _ => false,
         }
     }
@@ -3661,7 +3869,9 @@ impl State<'_> {
         env: &GraphEnv,
         rel_ty: ObjectId,
     ) -> EvaluationResult {
-        let Some(body) = bodies.first() else { return self.unsupported(node) };
+        let Some(body) = bodies.first() else {
+            return self.unsupported(node);
+        };
         let Some(CoreNode::Apply { operands, .. }) = self.g.get(rel_ty).cloned() else {
             return self.unsupported(node);
         };
@@ -3833,7 +4043,9 @@ impl State<'_> {
             // complete would let a universal over it be *supported* by the
             // defeaters the budget happened to reach.
             Some(CoreNode::Apply { operator, operands }) if operator == wk::DEFEATERS_DOMAIN => {
-                let [p] = operands.as_slice() else { return None };
+                let [p] = operands.as_slice() else {
+                    return None;
+                };
                 let r = self.about(*p, env);
                 // Truncation blocks, absence does not — the same rule the axis
                 // operators use, and stated once so the three sites cannot
@@ -3848,14 +4060,19 @@ impl State<'_> {
                     ComputeStatus::BudgetExhausted | ComputeStatus::Unsupported
                 );
                 let complete = !truncated && r.evidential() != Evidential::Open;
-                Some(Extension { members: r.defeated_by, complete })
+                Some(Extension {
+                    members: r.defeated_by,
+                    complete,
+                })
             }
             // `(sort S)` is the members of a sort. Without this arm the whole
             // node — the `(sort S)` application, not `S` — was handed to
             // `extension()`, which keys on the bare sort, so a sort wrapped in
             // its own reserved constructor enumerated nowhere.
             Some(CoreNode::Apply { operator, operands }) if operator == wk::SORT_DOMAIN => {
-                let [sort] = operands.as_slice() else { return None };
+                let [sort] = operands.as_slice() else {
+                    return None;
+                };
                 // `(sort Prop)` is `Prop`, and the never-complete rule below
                 // must not be escapable by spelling. A store's propositions are
                 // never all of them.
@@ -3867,7 +4084,9 @@ impl State<'_> {
                 })
             }
             Some(CoreNode::Apply { operator, operands }) if operator == wk::WHERE_DOMAIN => {
-                let [base, filter] = operands.as_slice() else { return None };
+                let [base, filter] = operands.as_slice() else {
+                    return None;
+                };
                 let base_ext = self.members_of(*base, env)?;
                 let mut out = Vec::new();
                 // The refinement is exact only when the base was exhaustive
@@ -3908,7 +4127,10 @@ impl State<'_> {
                         }
                     }
                 }
-                Some(Extension { members: out, complete: exact })
+                Some(Extension {
+                    members: out,
+                    complete: exact,
+                })
             }
             // The structure's own instant set, as a domain. `instants()` was
             // reachable only through `always`/`eventually`/`since`, so the
@@ -3970,7 +4192,11 @@ impl State<'_> {
         body: ObjectId,
         complete: bool,
     ) -> ObjectId {
-        let op = if complete { wk::SET_DOMAIN } else { wk::SET_PARTIAL };
+        let op = if complete {
+            wk::SET_DOMAIN
+        } else {
+            wk::SET_PARTIAL
+        };
         let remaining = self.g.apply(op, rest.to_vec());
         self.g.quantify(binder, v.var, Some(remaining), body)
     }
@@ -4111,8 +4337,10 @@ impl State<'_> {
         match self.g.get(id).cloned() {
             Some(CoreNode::Apply { operator, operands }) => {
                 let op = self.substitute(operator, env, depth + 1);
-                let args: Vec<ObjectId> =
-                    operands.iter().map(|o| self.substitute(*o, env, depth + 1)).collect();
+                let args: Vec<ObjectId> = operands
+                    .iter()
+                    .map(|o| self.substitute(*o, env, depth + 1))
+                    .collect();
                 if op == operator && args == operands {
                     return id;
                 }
@@ -4124,13 +4352,23 @@ impl State<'_> {
             // attribution whose content is itself general, stated per entity"
             // storable, indexable and inert. Rebuilding is safe precisely
             // because the slots carry no names to capture.
-            Some(CoreNode::Bind { binder, vars, bodies }) => {
-                let new_bodies: Vec<ObjectId> =
-                    bodies.iter().map(|b| self.substitute(*b, env, depth + 1)).collect();
+            Some(CoreNode::Bind {
+                binder,
+                vars,
+                bodies,
+            }) => {
+                let new_bodies: Vec<ObjectId> = bodies
+                    .iter()
+                    .map(|b| self.substitute(*b, env, depth + 1))
+                    .collect();
                 if new_bodies == bodies {
                     return id;
                 }
-                self.g.intern(CoreNode::Bind { binder, vars, bodies: new_bodies })
+                self.g.intern(CoreNode::Bind {
+                    binder,
+                    vars,
+                    bodies: new_bodies,
+                })
             }
             _ => id,
         }
@@ -4185,7 +4423,9 @@ impl State<'_> {
         if operator != wk::NTH {
             return None;
         }
-        let [s, i] = operands.as_slice() else { return None };
+        let [s, i] = operands.as_slice() else {
+            return None;
+        };
         let seq = self.sequence(*s, env)?;
         let idx = self.numeric(*i, env)?.to_int()?.to_usize()?;
         seq.get(idx).copied()
@@ -4287,14 +4527,18 @@ impl State<'_> {
         if operator != wk::QUANTITY {
             return None;
         }
-        let [amount, unit] = operands.as_slice() else { return None };
+        let [amount, unit] = operands.as_slice() else {
+            return None;
+        };
         let mut value = self.numeric(*amount, env)?;
         let mut unit = self.denote(*unit, env)?;
 
         // Walk to the base unit. Bounded so a cyclic `scale` chain — which a
         // store can perfectly well contain — cannot spin forever.
         for _ in 0..32 {
-            let Some(next) = self.scale_of(unit) else { break };
+            let Some(next) = self.scale_of(unit) else {
+                break;
+            };
             let (factor, base) = next;
             value = value.mul(&factor)?;
             if base == unit {
@@ -4437,7 +4681,9 @@ impl State<'_> {
                 // `len` takes text, not numbers, so it is handled before the
                 // operands are evaluated numerically.
                 if operator == wk::LEN {
-                    let [t] = operands.as_slice() else { return None };
+                    let [t] = operands.as_slice() else {
+                        return None;
+                    };
                     // Length of a sequence or of a text, whichever it is.
                     if let Some(items) = self.sequence(*t, env) {
                         return Some(Num::int(BigInt::from(items.len())));
@@ -4457,13 +4703,13 @@ impl State<'_> {
                 match (operator, v.as_slice()) {
                     // n-ary, matching the unbounded arity the kernel advertises.
                     (wk::ADD, []) => Some(Num::int(BigInt::from(0))),
-                    (wk::ADD, rest) => {
-                        rest.iter().try_fold(Num::int(BigInt::from(0)), |a, b| a.add(b))
-                    }
+                    (wk::ADD, rest) => rest
+                        .iter()
+                        .try_fold(Num::int(BigInt::from(0)), |a, b| a.add(b)),
                     (wk::MUL, []) => Some(Num::int(BigInt::from(1))),
-                    (wk::MUL, rest) => {
-                        rest.iter().try_fold(Num::int(BigInt::from(1)), |a, b| a.mul(b))
-                    }
+                    (wk::MUL, rest) => rest
+                        .iter()
+                        .try_fold(Num::int(BigInt::from(1)), |a, b| a.mul(b)),
                     // `-` is negation with one operand and subtraction with two,
                     // which is what every reader of the printed form expects.
                     (wk::NEG, [a]) => Some(a.neg()),
@@ -4558,7 +4804,12 @@ impl State<'_> {
         let (mut lo, mut hi) = (zero.clone(), zero.clone());
         for m in ext.members {
             if self.exhausted() {
-                return Some(AggregateBounds { lo, hi: None, complete: false, exact: false });
+                return Some(AggregateBounds {
+                    lo,
+                    hi: None,
+                    complete: false,
+                    exact: false,
+                });
             }
             let scoped = env.with(v.var, m);
             // `numeric`, not `number`: an aggregate whose contributions are
@@ -4618,7 +4869,9 @@ impl State<'_> {
             Some(CoreNode::Apply { operator, operands }) if operator == wk::SUBSTR => {
                 // `(substr s start len)` — character offsets, not bytes, so a
                 // multi-byte character cannot be split in half.
-                let [src, start, len] = operands.as_slice() else { return None };
+                let [src, start, len] = operands.as_slice() else {
+                    return None;
+                };
                 let s = self.text(*src, env)?;
                 let from = self.number(*start, env)?.to_usize()?;
                 let count = self.number(*len, env)?.to_usize()?;
@@ -4827,7 +5080,10 @@ impl GraphStructure for MapGraphStructure {
         self.closed.contains(&pred)
     }
     fn attribution(&self, proposition: ObjectId) -> Vec<ObjectId> {
-        self.attribution.get(&proposition).cloned().unwrap_or_default()
+        self.attribution
+            .get(&proposition)
+            .cloned()
+            .unwrap_or_default()
     }
     fn credence(&self, proposition: ObjectId) -> Option<Credence> {
         self.credences.get(&proposition).copied()
@@ -4836,12 +5092,14 @@ impl GraphStructure for MapGraphStructure {
     /// "units are data". No structure implemented this hook, so
     /// `(scale minutes 60 seconds)` could be written and never acted on.
     fn scale(&self, unit: ObjectId) -> Option<(BigInt, ObjectId)> {
-        self.facts.iter().find_map(|(pred, args)| match args.as_slice() {
-            [u, factor, base] if *pred == wk::SCALE && *u == unit => {
-                Some((self.ints.get(factor).cloned()?, *base))
-            }
-            _ => None,
-        })
+        self.facts
+            .iter()
+            .find_map(|(pred, args)| match args.as_slice() {
+                [u, factor, base] if *pred == wk::SCALE && *u == unit => {
+                    Some((self.ints.get(factor).cloned()?, *base))
+                }
+                _ => None,
+            })
     }
     fn rules(&self, pred: ObjectId) -> Vec<ObjectId> {
         self.rules.get(&pred).cloned().unwrap_or_default()

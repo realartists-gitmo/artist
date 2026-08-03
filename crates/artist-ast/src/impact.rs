@@ -15,11 +15,11 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::calls::cli::collect_type_callers;
-use crate::calls::cli_helpers::{resolve_target_full, ResolvedTarget, SymbolKind};
+use crate::calls::cli_helpers::{ResolvedTarget, SymbolKind, resolve_target_full};
 use crate::calls::graph::{CallEdge, CallGraph, CallTarget, Confidence, Qn};
 use crate::calls::traverse::{self, CallHit};
-use crate::deps::traverse as dep_traverse;
 use crate::deps::DepGraph;
+use crate::deps::traverse as dep_traverse;
 use crate::file_filter::is_test_file;
 use crate::graph_cache;
 
@@ -124,12 +124,7 @@ pub fn report_text(target: &str, root: &Path, opts: &ImpactOptions) -> Result<St
     Ok(render_text(&reports, count))
 }
 
-pub fn run_impact(
-    target: &str,
-    path: &Path,
-    opts: &ImpactOptions,
-    rebuild: bool,
-) -> i32 {
+pub fn run_impact(target: &str, path: &Path, opts: &ImpactOptions, rebuild: bool) -> i32 {
     let root = match crate::project_root::find_root_for(path) {
         Ok(r) => r,
         Err(e) => {
@@ -194,14 +189,21 @@ fn compute_impact(
     let (file_path, target_line, target_kind) = match c.kind {
         SymbolKind::Callable => {
             let meta = calls.callable_meta.get(&c.qn);
-            let file = meta.map(|m| m.file.clone()).unwrap_or_else(|| PathBuf::from(c.qn.file()));
+            let file = meta
+                .map(|m| m.file.clone())
+                .unwrap_or_else(|| PathBuf::from(c.qn.file()));
             let line = meta.map(|m| m.line).unwrap_or(0);
-            let kind = meta.map(|m| m.kind.as_str()).unwrap_or("function").to_string();
+            let kind = meta
+                .map(|m| m.kind.as_str())
+                .unwrap_or("function")
+                .to_string();
             (file, line, kind)
         }
         SymbolKind::Type => {
             let tmeta = calls.types.get(&c.qn);
-            let file = tmeta.map(|m| m.file.clone()).unwrap_or_else(|| PathBuf::from(c.qn.file()));
+            let file = tmeta
+                .map(|m| m.file.clone())
+                .unwrap_or_else(|| PathBuf::from(c.qn.file()));
             let line = tmeta.map(|m| m.line).unwrap_or(0);
             let kind = tmeta.map(|m| m.kind.as_str()).unwrap_or("type").to_string();
             (file, line, kind)
@@ -228,7 +230,9 @@ fn compute_impact(
 
     if matches!(opts.mode, ImpactMode::Dependents | ImpactMode::All) {
         sections.push(build_callers_section(c, calls, opts, root));
-        sections.push(build_file_reverse_deps_section(&file_path, deps, root, opts));
+        sections.push(build_file_reverse_deps_section(
+            &file_path, deps, root, opts,
+        ));
     }
 
     let mut transitive = BTreeMap::new();
@@ -299,56 +303,56 @@ fn compute_impact(
         //   depth 2: callers of those constructors; callables constructing
         //            an implementor
         //   depth 3+: `traverse::callers` from each construction site.
-        let mut seen_transitive: std::collections::HashSet<Qn> =
-            std::collections::HashSet::new();
-        let add_transitive = |depth: usize,
-                                  source: &Qn,
-                                  file: &Path,
-                                  line: u32,
-                                  confidence: Confidence,
-                                  is_test: bool,
-                                  transitive: &mut BTreeMap<usize, Vec<ImpactEntry>>,
-                                  test_calls: &mut Vec<CallHit>,
-                                  seen: &mut std::collections::HashSet<Qn>| {
-            if opts.exclude_tests && is_test {
-                return;
-            }
-            if opts.tests && !is_test {
-                return;
-            }
-            // Dedup before the test push too — the same source reached via
-            // several construction sites must appear once in both sections.
-            if !seen.insert(source.clone()) {
-                return;
-            }
-            if is_test {
-                test_calls.push(CallHit {
-                    depth,
-                    edge: CallEdge {
-                        source: source.clone(),
-                        target: CallTarget::Resolved(c.qn.clone()),
-                        kind: crate::calls::graph::CallKindCompat::Construct,
-                        line,
-                        file: file.to_path_buf(),
-                        confidence,
-                        receiver: None,
-                        candidates: Vec::new(),
-                    },
+        let mut seen_transitive: std::collections::HashSet<Qn> = std::collections::HashSet::new();
+        let add_transitive =
+            |depth: usize,
+             source: &Qn,
+             file: &Path,
+             line: u32,
+             confidence: Confidence,
+             is_test: bool,
+             transitive: &mut BTreeMap<usize, Vec<ImpactEntry>>,
+             test_calls: &mut Vec<CallHit>,
+             seen: &mut std::collections::HashSet<Qn>| {
+                if opts.exclude_tests && is_test {
+                    return;
+                }
+                if opts.tests && !is_test {
+                    return;
+                }
+                // Dedup before the test push too — the same source reached via
+                // several construction sites must appear once in both sections.
+                if !seen.insert(source.clone()) {
+                    return;
+                }
+                if is_test {
+                    test_calls.push(CallHit {
+                        depth,
+                        edge: CallEdge {
+                            source: source.clone(),
+                            target: CallTarget::Resolved(c.qn.clone()),
+                            kind: crate::calls::graph::CallKindCompat::Construct,
+                            line,
+                            file: file.to_path_buf(),
+                            confidence,
+                            receiver: None,
+                            candidates: Vec::new(),
+                        },
+                    });
+                }
+                transitive.entry(depth).or_default().push(ImpactEntry {
+                    qn: source.as_str().to_string(),
+                    file: file.display().to_string(),
+                    line,
+                    kind: calls
+                        .callable_meta
+                        .get(source)
+                        .map(|m| m.kind.clone())
+                        .unwrap_or_else(|| "function".into()),
+                    confidence: Some(confidence.as_str().to_string()),
+                    depth: Some(depth),
                 });
-            }
-            transitive.entry(depth).or_default().push(ImpactEntry {
-                qn: source.as_str().to_string(),
-                file: file.display().to_string(),
-                line,
-                kind: calls
-                    .callable_meta
-                    .get(source)
-                    .map(|m| m.kind.clone())
-                    .unwrap_or_else(|| "function".into()),
-                confidence: Some(confidence.as_str().to_string()),
-                depth: Some(depth),
-            });
-        };
+            };
 
         // Same predicate as the callable traversal above — filtering inside
         // the BFS keeps excluded edges from consuming --limit, and ambiguous
@@ -435,7 +439,9 @@ fn compute_impact(
         if let Some(impls) = calls.implementors.get(c.qn.name()) {
             for qn in impls {
                 let meta = calls.types.get(qn);
-                let file = meta.map(|m| m.file.clone()).unwrap_or_else(|| PathBuf::from(qn.file()));
+                let file = meta
+                    .map(|m| m.file.clone())
+                    .unwrap_or_else(|| PathBuf::from(qn.file()));
                 let line = meta.map(|m| m.line).unwrap_or(0);
                 let abs = root.join(&file);
                 // Implementors (depth 1) are shown in the callers section and
@@ -464,8 +470,7 @@ fn compute_impact(
                         // Skip ambiguous construction seeds when hidden, so
                         // they don't leak into depth-2 transitive/test output
                         // (matches build_callers_section's retain).
-                        if !opts.include_ambiguous
-                            && matches!(e.confidence, Confidence::Ambiguous)
+                        if !opts.include_ambiguous && matches!(e.confidence, Confidence::Ambiguous)
                         {
                             continue;
                         }
@@ -521,7 +526,10 @@ fn compute_impact(
         let total: usize = transitive.values().map(|v| v.len()).sum();
         report.transitive_count = total;
         let mut section = ImpactSection {
-            title: format!("! {} symbols transitively affected (depth {})", total, opts.depth),
+            title: format!(
+                "! {} symbols transitively affected (depth {})",
+                total, opts.depth
+            ),
             entries: Vec::new(),
         };
         for (depth, entries) in &transitive {
@@ -574,7 +582,10 @@ fn compute_impact(
                     .collect(),
             )
         };
-        sections.push(ImpactSection { title: display, entries });
+        sections.push(ImpactSection {
+            title: display,
+            entries,
+        });
     }
 
     report
@@ -603,9 +614,7 @@ fn build_callees_section(
     if c.kind == SymbolKind::Callable {
         let one_hop = traverse::callees_one_hop(calls, &c.qn);
         for e in one_hop {
-            if !opts.include_ambiguous
-                && matches!(e.confidence, Confidence::Ambiguous)
-            {
+            if !opts.include_ambiguous && matches!(e.confidence, Confidence::Ambiguous) {
                 continue;
             }
             edges.push(e);
@@ -614,35 +623,32 @@ fn build_callees_section(
     let entries: Vec<ImpactEntry> = edges
         .into_iter()
         .filter_map(|e| {
-                let (qn, file, line) = match &e.target {
-                    CallTarget::Resolved(q) => {
-                        let meta = calls.callable_meta.get(q);
-                        (
-                            q.as_str().to_string(),
-                            meta.map(|m| m.file.clone()).unwrap_or_else(|| e.file.clone()),
-                            meta.map(|m| m.line).unwrap_or(e.line),
-                        )
-                    }
-                    CallTarget::External(s) => {
-                        (format!("[external] {s}"), e.file.clone(), e.line)
-                    }
-                    CallTarget::Bare(s) => {
-                        (format!("[unresolved] {s}"), e.file.clone(), e.line)
-                    }
-                };
-                if !passes_test_flags(&file, root, opts) {
-                    return None;
+            let (qn, file, line) = match &e.target {
+                CallTarget::Resolved(q) => {
+                    let meta = calls.callable_meta.get(q);
+                    (
+                        q.as_str().to_string(),
+                        meta.map(|m| m.file.clone())
+                            .unwrap_or_else(|| e.file.clone()),
+                        meta.map(|m| m.line).unwrap_or(e.line),
+                    )
                 }
-                Some(ImpactEntry {
-                    qn,
-                    file: file.display().to_string(),
-                    line,
-                    kind: e.kind.as_str().to_string(),
-                    confidence: Some(e.confidence.as_str().to_string()),
-                    depth: None,
-                })
+                CallTarget::External(s) => (format!("[external] {s}"), e.file.clone(), e.line),
+                CallTarget::Bare(s) => (format!("[unresolved] {s}"), e.file.clone(), e.line),
+            };
+            if !passes_test_flags(&file, root, opts) {
+                return None;
+            }
+            Some(ImpactEntry {
+                qn,
+                file: file.display().to_string(),
+                line,
+                kind: e.kind.as_str().to_string(),
+                confidence: Some(e.confidence.as_str().to_string()),
+                depth: None,
             })
-            .collect();
+        })
+        .collect();
     ImpactSection {
         title: format!("→ calls ({})", entries.len()),
         entries,
@@ -814,7 +820,11 @@ fn render_text(reports: &[ImpactReport], candidate_count: usize) -> String {
             "{} {} {} ({}:{})\n",
             "⊕".bold(),
             r.target_kind.dimmed(),
-            r.target_qn.split("::").last().unwrap_or(&r.target_qn).yellow(),
+            r.target_qn
+                .split("::")
+                .last()
+                .unwrap_or(&r.target_qn)
+                .yellow(),
             colorize_file(&r.target_file),
             colorize_line(r.target_line),
         ));
@@ -932,4 +942,3 @@ fn name_or_raw_segment(qn: &str) -> &str {
         None => qn,
     }
 }
-

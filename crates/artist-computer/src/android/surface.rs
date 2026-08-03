@@ -61,7 +61,13 @@ fn to_node(node: &BridgeNode) -> Node {
         .into_iter()
         .find(|value| !value.trim().is_empty())
         .cloned()
-        .unwrap_or_else(|| node.res_id.rsplit('/').next().unwrap_or_default().to_owned());
+        .unwrap_or_else(|| {
+            node.res_id
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        });
 
     let mut actions: Vec<&str> = Vec::new();
     if node.clickable {
@@ -245,15 +251,21 @@ impl Surface for AndroidSurface {
         }))))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        _secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         let binding = |action: &'static str| -> Result<String, StepError> {
-            node.map(|node| node.binding.as_str().to_owned()).ok_or_else(|| {
-                StepError::Backend(format!("{action} on an Android surface needs an element"))
-            })
+            node.map(|node| node.binding.as_str().to_owned())
+                .ok_or_else(|| {
+                    StepError::Backend(format!("{action} on an Android surface needs an element"))
+                })
         };
 
         match step {
-            Step::Click(_) => {
+            Step::Click { .. } => {
                 let id = binding("a click")?;
                 self.bridge.act(&id, "click").await
             }
@@ -288,6 +300,9 @@ impl Surface for AndroidSurface {
                 other.action()
             ))),
         }
+        // No verb on this rung reports a value of its own; the observation
+        // afterwards is what says what happened.
+        .map(|()| None)
     }
 }
 

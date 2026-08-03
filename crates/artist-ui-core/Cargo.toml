@@ -1,0 +1,18 @@
+[package]
+name = "artist-ui-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# This crate is the frontend-agnostic seam between the session event log and the
+# two views (ratatui and gpui). It must never gain a dependency on a rendering
+# toolkit — `tests/no_toolkit_dependency.rs` fails the build if it does.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+artist-session = { path = "../artist-session" }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+
+[dev-dependencies]
+cargo_metadata = "0.23"

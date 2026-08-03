@@ -1,7 +1,13 @@
-mod syntax;
+//! The terminal's view of a streaming model response.
+//!
+//! Markdown parsing, fence tracking and syntax classification moved to
+//! `artist-ui-core` so the gpui frontend could share them. What stays here is
+//! everything that is genuinely about a terminal: the pastel palette, wrapping
+//! to a column count, and the two-space indent.
 
+use artist_ui_core::{InlineKind, InlineLine, MarkdownStream, TokenKind};
 use ratatui::{
-    style::Style,
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
 };
 use unicode_width::UnicodeWidthChar;
@@ -11,13 +17,7 @@ const INDENT: &str = "    ";
 #[derive(Default)]
 pub(crate) struct Renderer {
     started: bool,
-    fence: Option<FencedBlock>,
-}
-
-struct FencedBlock {
-    marker: char,
-    marker_len: usize,
-    highlighter: syntax::CodeHighlighter,
+    stream: MarkdownStream,
 }
 
 impl Renderer {
@@ -25,10 +25,10 @@ impl Renderer {
         let content_width = terminal_width.saturating_sub(INDENT.len()).max(1);
         let mut lines = Vec::new();
 
-        for (source_line, ends_line) in logical_lines(output) {
-            let code_line = self.fence.is_some();
-            let styled = self.style_line(source_line, ends_line);
-            let wrapped = if code_line {
+        for logical in self.stream.push(output) {
+            let code = logical.code;
+            let styled = style_line(&logical);
+            let wrapped = if code {
                 wrap_spans_by_character(styled, content_width)
             } else {
                 wrap_spans(styled, content_width)
@@ -40,7 +40,7 @@ impl Renderer {
                     self.started = true;
                     vec![
                         Span::raw("  "),
-                        Span::styled(" ", Style::default().fg(crate::theme::PASTEL_BLUSH)),
+                        Span::styled(" ", Style::default().fg(crate::theme::PASTEL_BLUSH)),
                     ]
                 };
                 prefixed.append(&mut spans);
@@ -52,152 +52,44 @@ impl Renderer {
 
     pub(crate) fn reset(&mut self) {
         self.started = false;
-        self.fence = None;
+        self.stream.reset();
     }
 
-    fn style_line(&mut self, line: &str, ends_line: bool) -> Vec<Span<'static>> {
-        if self
-            .fence
-            .as_ref()
-            .is_some_and(|fence| is_closing_fence(line, fence.marker, fence.marker_len))
-        {
-            self.fence = None;
-            return fence_spans(line);
-        }
-        if let Some(fence) = self.fence.as_mut() {
-            return fence.highlighter.highlight_line(line, ends_line);
-        }
-        if let Some((marker, marker_len, language)) = opening_fence(line) {
-            self.fence = Some(FencedBlock {
-                marker,
-                marker_len,
-                highlighter: syntax::CodeHighlighter::new(language),
-            });
-            return fence_spans(line);
-        }
-        markdown_spans(line)
+    #[cfg(test)]
+    pub(crate) fn open_fence_language(&self) -> Option<&str> {
+        self.stream.open_fence_language()
     }
 }
 
-fn logical_lines(output: &str) -> Vec<(&str, bool)> {
-    if output.is_empty() {
-        return vec![("", false)];
-    }
-    output
-        .split_inclusive('\n')
-        .map(|line| {
-            line.strip_suffix('\n')
-                .map_or((line, false), |line| (line, true))
-        })
+fn style_line(line: &InlineLine) -> Vec<Span<'static>> {
+    line.inlines
+        .iter()
+        .map(|inline| Span::styled(inline.text.clone(), style_for(inline.kind)))
         .collect()
 }
 
-fn fence_candidate(line: &str) -> Option<&str> {
-    let indent = line.bytes().take_while(|&value| value == b' ').count();
-    (indent <= 3).then_some(&line[indent..])
-}
+/// The terminal half of rule 3: semantic kind in, pastel palette out. The gpui
+/// frontend has its own copy of this function and is free to disagree with it.
+fn style_for(kind: InlineKind) -> Style {
+    use crate::theme::{PASTEL_BLUE, PASTEL_MINT, PASTEL_PINK, PASTEL_WHITE, PASTEL_YELLOW};
 
-fn opening_fence(line: &str) -> Option<(char, usize, &str)> {
-    let trimmed = fence_candidate(line)?;
-    let marker = trimmed.chars().next()?;
-    if !matches!(marker, '`' | '~') {
-        return None;
+    match kind {
+        InlineKind::Prose => Style::default().fg(PASTEL_WHITE),
+        InlineKind::Code | InlineKind::FenceDelimiter => Style::default().fg(PASTEL_BLUE),
+        InlineKind::StructuralMarker => Style::default().fg(PASTEL_MINT),
+        InlineKind::Syntax(token) => match token {
+            TokenKind::Plain => Style::default().fg(PASTEL_WHITE),
+            // Comments are the one place the terminal uses a named colour rather
+            // than an RGB pastel, because DIM needs a colour the terminal owns.
+            TokenKind::Comment => Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+            TokenKind::StringLit | TokenKind::Number => Style::default().fg(PASTEL_YELLOW),
+            TokenKind::Keyword => Style::default().fg(PASTEL_PINK),
+            TokenKind::Function => Style::default().fg(PASTEL_MINT),
+            TokenKind::Type => Style::default().fg(PASTEL_BLUE),
+        },
     }
-    let marker_len = trimmed.chars().take_while(|&value| value == marker).count();
-    if marker_len < 3 {
-        return None;
-    }
-    let language = trimmed[marker.len_utf8() * marker_len..]
-        .trim()
-        .split_ascii_whitespace()
-        .next()
-        .unwrap_or_default();
-    Some((marker, marker_len, language))
-}
-
-fn is_closing_fence(line: &str, marker: char, minimum_len: usize) -> bool {
-    let Some(trimmed) = fence_candidate(line) else {
-        return false;
-    };
-    let marker_len = trimmed.chars().take_while(|&value| value == marker).count();
-    marker_len >= minimum_len && trimmed[marker.len_utf8() * marker_len..].trim().is_empty()
-}
-
-fn fence_spans(line: &str) -> Vec<Span<'static>> {
-    vec![Span::styled(
-        line.to_owned(),
-        Style::default().fg(crate::theme::PASTEL_BLUE),
-    )]
-}
-
-fn markdown_spans(line: &str) -> Vec<Span<'static>> {
-    let marker_end = structural_marker_end(line);
-    let mut spans = Vec::new();
-    if marker_end > 0 {
-        spans.push(Span::styled(
-            line[..marker_end].to_owned(),
-            Style::default().fg(crate::theme::PASTEL_MINT),
-        ));
-    }
-    spans.extend(inline_spans(&line[marker_end..]));
-    spans
-}
-
-fn structural_marker_end(line: &str) -> usize {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    let rest = &line[indent..];
-    if rest.starts_with("> ") || rest.starts_with("- ") || rest.starts_with("+ ") {
-        return indent + 2;
-    }
-    if rest.starts_with("* ") {
-        return indent + 2;
-    }
-    if rest.starts_with('#') {
-        let hashes = rest.bytes().take_while(|&value| value == b'#').count();
-        if rest.as_bytes().get(hashes) == Some(&b' ') {
-            return indent + hashes + 1;
-        }
-    }
-    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-    if digits > 0
-        && matches!(rest.as_bytes().get(digits), Some(b'.' | b')'))
-        && rest.as_bytes().get(digits + 1) == Some(&b' ')
-    {
-        return indent + digits + 2;
-    }
-    0
-}
-
-fn inline_spans(text: &str) -> Vec<Span<'static>> {
-    let prose = Style::default().fg(crate::theme::PASTEL_WHITE);
-    let code = Style::default().fg(crate::theme::PASTEL_BLUE);
-    let mut spans = Vec::new();
-    let mut rest = text;
-
-    while let Some(start) = rest.find('`') {
-        if start > 0 {
-            spans.push(Span::styled(rest[..start].to_owned(), prose));
-        }
-        let marker_len = rest[start..]
-            .bytes()
-            .take_while(|&value| value == b'`')
-            .count();
-        let marker = &rest[start..start + marker_len];
-        let after_marker = &rest[start + marker_len..];
-        let Some(end) = after_marker.find(marker) else {
-            spans.push(Span::styled(rest[start..].to_owned(), code));
-            rest = "";
-            break;
-        };
-        spans.push(Span::styled(marker.to_owned(), code));
-        spans.push(Span::styled(after_marker[..end].to_owned(), code));
-        spans.push(Span::styled(marker.to_owned(), code));
-        rest = &after_marker[end + marker_len..];
-    }
-    if !rest.is_empty() || spans.is_empty() {
-        spans.push(Span::styled(rest.to_owned(), prose));
-    }
-    spans
 }
 
 #[derive(Clone)]
@@ -377,7 +269,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, ["   **bold** and `code`"]);
+        assert_eq!(lines, ["   **bold** and `code`"]);
         assert!(
             rendered
                 .lines
@@ -397,7 +289,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, ["   123456", "    7"]);
+        assert_eq!(lines, ["   123456", "    7"]);
         assert!(lines.iter().all(|line| line.width() <= 10));
     }
 
@@ -410,7 +302,7 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, ["   hello,", "    world!", "    next"]);
+        assert_eq!(lines, ["   hello,", "    world!", "    next"]);
         assert!(lines.iter().all(|line| line.width() <= 14));
     }
 
@@ -423,14 +315,14 @@ mod tests {
             .map(|line| line.to_string())
             .collect::<Vec<_>>();
 
-        assert_eq!(lines, ["   ok", "    extrao", "    rdinar", "    y"]);
+        assert_eq!(lines, ["   ok", "    extrao", "    rdinar", "    y"]);
         assert!(lines.iter().all(|line| line.width() <= 10));
     }
 
     #[test]
     fn preserves_leading_indentation_in_prose() {
         let rendered = Renderer::default().render("  nested item", 20);
-        assert_eq!(rendered.lines[0].to_string(), "     nested item");
+        assert_eq!(rendered.lines[0].to_string(), "     nested item");
     }
 
     #[test]
@@ -450,7 +342,7 @@ mod tests {
                 .iter()
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>(),
-            ["   before", "    `code`", "    after"]
+            ["   before", "    `code`", "    after"]
         );
     }
 
@@ -459,9 +351,9 @@ mod tests {
         let mut renderer = Renderer::default();
         assert_eq!(
             renderer.render("```rust\n", 80).lines[0].to_string(),
-            "   ```rust"
+            "   ```rust"
         );
-        assert!(renderer.fence.is_some());
+        assert_eq!(renderer.open_fence_language(), Some("rust"));
 
         let comment = renderer.render("// explanation", 80);
         let comment_span = comment
@@ -479,16 +371,37 @@ mod tests {
         );
 
         assert_eq!(renderer.render("```", 80).lines[0].to_string(), "    ```");
-        assert!(renderer.fence.is_none());
+        assert!(renderer.open_fence_language().is_none());
 
         renderer.render("~~~haskell", 80);
         renderer.render("    ~~~", 80);
-        assert!(renderer.fence.is_some());
+        assert!(renderer.open_fence_language().is_some());
         renderer.reset();
-        assert!(renderer.fence.is_none());
+        assert!(renderer.open_fence_language().is_none());
         assert_eq!(
             renderer.render("prose", 80).lines[0].to_string(),
-            "   prose"
+            "   prose"
         );
+    }
+
+    #[test]
+    fn syntax_highlighting_still_reaches_the_terminal_palette() {
+        let mut renderer = Renderer::default();
+        renderer.render("```rust\n", 80);
+        let rendered = renderer.render("fn main() { let answer = 42; }", 80);
+        let spans = rendered
+            .lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .collect::<Vec<_>>();
+
+        let color_of = |token: &str| {
+            spans
+                .iter()
+                .find(|span| span.content.contains(token))
+                .and_then(|span| span.style.fg)
+        };
+        assert_eq!(color_of("fn"), Some(crate::theme::PASTEL_PINK));
+        assert_eq!(color_of("42"), Some(crate::theme::PASTEL_YELLOW));
     }
 }

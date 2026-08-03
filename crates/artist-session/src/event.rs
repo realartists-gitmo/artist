@@ -47,6 +47,10 @@ pub enum SessionEvent {
     RunStarted(RunStarted),
     RunUsage(RunUsage),
     RunFinished(RunFinished),
+    TaskStarted(TaskStarted),
+    TaskUpdated(TaskUpdated),
+    TaskFinished(TaskFinished),
+    ChangeRecorded(ChangeRecorded),
     TurnUser(TurnUser),
     ModelTurn(ModelTurn),
     ToolResult(ToolResultEvent),
@@ -127,6 +131,10 @@ event_kinds!(
     (RunStarted, RunStarted, "run.started"),
     (RunUsage, RunUsage, "run.usage"),
     (RunFinished, RunFinished, "run.finished"),
+    (TaskStarted, TaskStarted, "task.started"),
+    (TaskUpdated, TaskUpdated, "task.updated"),
+    (TaskFinished, TaskFinished, "task.finished"),
+    (ChangeRecorded, ChangeRecorded, "change.recorded"),
     (TurnUser, TurnUser, "turn.user"),
     (ModelTurn, ModelTurn, "model.turn"),
     (ToolResult, ToolResultEvent, "tool.result"),
@@ -462,6 +470,51 @@ pub struct RunStarted {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// Durable routing profile. Absent in logs written before workspace hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// A Bash process became an addressable session object.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskStarted {
+    /// Durable tool-call id, unique within the lineage.
+    pub task: String,
+    pub command: String,
+    #[serde(default)]
+    pub persistent: bool,
+}
+
+/// Incremental output or metadata for a running Bash task.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskUpdated {
+    pub task: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+}
+
+/// Terminal state of a Bash task.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TaskFinished {
+    pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub interrupted: bool,
+}
+
+/// A file mutation causally associated with one tool call.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ChangeRecorded {
+    pub tool_call_id: String,
+    pub path: String,
+    pub before_digest: String,
+    pub after_digest: String,
+    /// Inline for ordinary changes; large diffs live in the attachment store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_attachment: Option<String>,
 }
 
 /// What one completion call cost, and how much of it the provider served from
@@ -766,7 +819,10 @@ mod tests {
     /// no cache evidence, rather than as an unknown kind.
     #[test]
     fn usage_tolerates_a_payload_written_before_the_cache_field() {
-        let stored = envelope("run.usage", serde_json::json!({"provider": "x", "model": "y"}));
+        let stored = envelope(
+            "run.usage",
+            serde_json::json!({"provider": "x", "model": "y"}),
+        );
         assert_eq!(
             stored.event(),
             SessionEvent::from(RunUsage {

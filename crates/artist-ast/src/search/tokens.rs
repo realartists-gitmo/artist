@@ -44,11 +44,7 @@ pub fn split_identifier(token: &str) -> Vec<String> {
             .collect()
     };
 
-    if parts.len() >= 2 {
-        parts
-    } else {
-        Vec::new()
-    }
+    if parts.len() >= 2 { parts } else { Vec::new() }
 }
 
 /// Split text into lowercase identifier-like tokens for BM25 indexing.
@@ -186,8 +182,14 @@ mod tests {
             toks,
             vec![
                 "def",
-                "getuserbyid", "get", "user", "by", "id",
-                "user_id", "user", "id"
+                "getuserbyid",
+                "get",
+                "user",
+                "by",
+                "id",
+                "user_id",
+                "user",
+                "id"
             ]
         );
     }

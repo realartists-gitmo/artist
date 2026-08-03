@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -52,10 +52,7 @@ fn _node_to_decl<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Declarati
     } else if kind == "assignment" {
         // tree-sitter-ruby uses one `assignment` kind for both regular and
         // constant assignments — distinguish by the LHS shape.
-        if node
-            .field("left")
-            .is_some_and(|l| l.kind() == "constant")
-        {
+        if node.field("left").is_some_and(|l| l.kind() == "constant") {
             return _constant_to_decl(node, src);
         }
         return _assignment_to_decl(node, src);
@@ -130,7 +127,11 @@ fn _class_to_decl<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Declarat
             if child.kind() == "identifier" {
                 let text = collapse_ws(&child.text()).trim().to_string();
                 if matches!(text.as_str(), "private" | "protected" | "public") {
-                    current_vis = if text == "public" { String::new() } else { text };
+                    current_vis = if text == "public" {
+                        String::new()
+                    } else {
+                        text
+                    };
                     continue;
                 }
             }
@@ -211,10 +212,7 @@ fn _method_to_decl<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Declara
     })
 }
 
-fn _singleton_method_to_decl<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<Declaration> {
+fn _singleton_method_to_decl<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Declaration> {
     let name = field_text(node, "name").unwrap_or_else(|| "?".to_string());
     let object = node
         .field("object")
@@ -499,9 +497,5 @@ fn _looks_like_constant_ruby(text: &str) -> bool {
 }
 
 fn _last_const_segment_ruby(text: &str) -> String {
-    text.rsplit("::")
-        .next()
-        .unwrap_or(text)
-        .trim()
-        .to_string()
+    text.rsplit("::").next().unwrap_or(text).trim().to_string()
 }

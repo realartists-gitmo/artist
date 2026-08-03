@@ -67,15 +67,49 @@ pub trait Surface: Send + Sync {
     ///
     /// The node is borrowed from the current epoch: the anchor has resolved and
     /// the label has been checked, so a backend only has to act.
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError>;
+    ///
+    /// `secondary` is the second element a step names, and only `drag` names
+    /// one. It is resolved and label-checked identically to the first — a drag
+    /// onto a stale anchor has to fail as loudly as a click on one, or the file
+    /// lands wherever that anchor's element used to be.
+    /// `Ok(Some(text))` is an outcome worth reporting in the step's own line —
+    /// what `getClipboard` read, and nothing else so far. Every other verb
+    /// returns `Ok(None)` and is reported as `ok`, because the surface
+    /// observation afterwards is what says what happened.
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError>;
 
     async fn pixels(&self) -> Result<Option<crate::model::Frame>, StepError> {
         Ok(None)
     }
 
+    /// Let go of whatever this surface's input device is still holding.
+    ///
+    /// A no-op for every backend whose actions are self-contained: a CDP click
+    /// and an AT-SPI action cannot leave anything pressed. It matters only where
+    /// there is a real seat behind the surface.
+    async fn relax(&self) -> Result<(), StepError> {
+        Ok(())
+    }
+
     /// Nested surfaces — a browser window's page targets. One level only.
     fn children(&self) -> Vec<Arc<dyn Surface>> {
         Vec::new()
+    }
+
+    /// The window on the stage this surface is drawn in, when it is drawn at
+    /// all.
+    ///
+    /// `None` for a page, a terminal and an adapter: they have content but no
+    /// window of their own, so anything that is a property of the seat — focus,
+    /// most obviously — does not apply to them and should say so rather than
+    /// silently doing nothing.
+    fn window(&self) -> Option<crate::stage::WindowKey> {
+        None
     }
 }
 
@@ -136,6 +170,19 @@ pub async fn run_program(
                 break;
             }
         };
+        // Resolved before the step is armed or dispatched, like the primary.
+        // A drag whose destination is stale must not begin: the press would
+        // land, the motion would run, and the release would drop the thing
+        // somewhere nobody named.
+        let secondary = match resolve_target(book, step.secondary_target()) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                reports.push(report_for(step, None, error.to_string()));
+                failed_step = Some(index as u32);
+                failure = Some(error);
+                break;
+            }
+        };
 
         // Arm before the *last* step so nothing that step provokes is missed.
         let watch = if index + 1 == program.steps.len() {
@@ -144,10 +191,16 @@ pub async fn run_program(
             None
         };
 
-        let outcome = surface.apply(step, resolved.as_ref()).await;
+        let outcome = surface
+            .apply(step, resolved.as_ref(), secondary.as_ref())
+            .await;
         let resolved_name = resolved.as_ref().map(|node| node.name.clone());
         match outcome {
-            Ok(()) => reports.push(report_for(step, resolved_name, "ok".into())),
+            Ok(note) => reports.push(report_for(
+                step,
+                resolved_name,
+                note.unwrap_or_else(|| "ok".into()),
+            )),
             Err(error) => {
                 reports.push(report_for(step, resolved_name, error.to_string()));
                 failed_step = Some(index as u32);
@@ -159,6 +212,23 @@ pub async fn run_program(
         if let Some(watch) = watch {
             settled = Some(watch.wait().await);
         }
+    }
+
+    // Let go of anything the program was holding, before the surface is read.
+    //
+    // Two cases need it and they are different. A program that *asked* to hold
+    // something — `press` with no `release`, `keyDown` with no `keyUp` — has
+    // left the seat armed on purpose and simply never disarmed it. A program
+    // that *failed* may have died between a press and its release. Either way
+    // the seat outlives the program, so the next one would begin with a button
+    // or a modifier already down, and that corruption surfaces somewhere else
+    // entirely: a click that arrives as a drag, or typing that arrives as
+    // shortcuts. The snapshot is taken afterwards so it describes a surface
+    // nothing is still pressing on.
+    if failure.is_some() || program.steps.iter().any(|step| step.holds().is_some()) {
+        // A failure to relax is not worth replacing the real error with: the
+        // program's own outcome is what the model needs to see.
+        let _ = surface.relax().await;
     }
 
     let snapshot = surface.snapshot().await?;
@@ -265,7 +335,30 @@ fn resolve_step(book: &AnchorBook, step: &Step) -> Result<Option<Node>, StepErro
         return Ok(Some(focused));
     }
 
-    let Some(Target { anchor, label }) = step.target() else {
+    // `keyDown` and `keyUp` aim at focus exactly as `key` does, and carry the
+    // same optional claim about what they will activate.
+    if let Step::KeyDown(press) | Step::KeyUp(press) = step {
+        let Some(claimed) = press.label() else {
+            return Ok(None);
+        };
+        let Some(focused) = book.focused() else {
+            return Ok(None);
+        };
+        let focused = focused.clone();
+        check_label("focus", Some(claimed), &focused)?;
+        return Ok(Some(focused));
+    }
+
+    resolve_target(book, step.target())
+}
+
+/// Resolve one anchor and verify the model's label still describes it.
+///
+/// Shared by the primary and the secondary target so the two cannot drift into
+/// different strictness — a drag destination checked more loosely than its
+/// source would be a hole in exactly the guarantee anchors provide.
+fn resolve_target(book: &AnchorBook, target: Option<&Target>) -> Result<Option<Node>, StepError> {
+    let Some(Target { anchor, label }) = target else {
         return Ok(None);
     };
     let node = book.resolve(anchor).map_err(StepError::Anchor)?.clone();
@@ -358,7 +451,12 @@ mod tests {
             Ok(SettleWatch::ready(SettleOutcome::Settled { after_ms: 1 }))
         }
 
-        async fn apply(&self, step: &Step, _node: Option<&Node>) -> Result<(), StepError> {
+        async fn apply(
+            &self,
+            step: &Step,
+            _node: Option<&Node>,
+            _secondary: Option<&Node>,
+        ) -> Result<Option<String>, StepError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -366,7 +464,7 @@ mod tests {
             if self.fail_on == Some(step.action()) {
                 return Err(StepError::Backend("backend refused".into()));
             }
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -382,7 +480,7 @@ mod tests {
     }
 
     fn click(anchor: &str, label: &str) -> Step {
-        Step::Click(Target {
+        Step::click(Target {
             anchor: anchor.into(),
             label: Some(label.into()),
         })

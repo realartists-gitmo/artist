@@ -66,6 +66,12 @@ def load_text_only(model_id: str, token: str | None):
         dtype=torch.float32,  # rten runs fp32; bf16 weights would need a cast anyway
         attn_implementation="eager",  # SDPA/flash trace into ops rten does not have
     )
+    # `dtype=torch.float32` above is not sufficient: the checkpoint config
+    # declares `dtype: bfloat16` and transformers honours it for submodules, so
+    # activations come back BFloat16 and `.numpy()` refuses them. rten runs
+    # fp32, so cast the whole module rather than patching at the boundary —
+    # a bf16 graph would otherwise be traced and every op would carry the type.
+    model = model.float()
     model.eval()
 
     total_before = sum(p.numel() for p in model.parameters())
@@ -157,6 +163,122 @@ class EncoderWrapper(torch.nn.Module):
         ).last_hidden_state
 
 
+def _exporter_kwargs(opset: int, dynamo: bool) -> dict:
+    """Exporter-specific arguments.
+
+    `opset_version` must NOT be passed on the dynamo path. The dynamo exporter
+    emits a graph containing ONNX *functions*, and asking for any specific
+    opset runs a version-conversion pass that refuses to touch functions:
+
+        ValueError: The model contains functions. The version conversion pass
+        does not support functions.
+
+    Omitting it lets the graph keep its native opset and skips the pass
+    entirely. `do_constant_folding` is likewise a TorchScript-only knob.
+    """
+    if dynamo:
+        return {"dynamo": True}
+    return {"opset_version": opset, "do_constant_folding": True, "dynamo": False}
+
+
+class DecoderWrapper(torch.nn.Module):
+    """`decoder_input_ids`, `encoder_hidden_states`, `encoder_attention_mask` -> `logits`.
+
+    Same mask problem as the encoder, same seam: both `attention_mask` and
+    `encoder_attention_mask` are used as prebuilt dicts when given as dicts.
+
+    The decoder does **merged attention** — it concatenates the self-attention
+    and cross-attention masks along the key axis and runs one attention over
+    `[decoder_keys | encoder_keys]`. That is why the two masks must agree on
+    query length, and why the cross mask is broadcast over queries rather than
+    being a separate pass.
+
+    Self-attention here is *causal*, unlike the encoder's bidirectional case:
+
+        full_attention     keep when q >= kv
+        sliding_attention  keep when 0 <= q - kv < sliding_window
+
+    matching `sliding_window_mask_function(..., is_causal=True)`, which sets
+    `left = sliding_window` and `right = 0`.
+
+    **No KV cache.** This graph recomputes the whole prefix at every step. For
+    this workload that is a defensible starting point — outputs are short
+    s-expressions, tens of tokens — and it isolates "does the architecture
+    export and match" from the separate plumbing problem of threading an
+    `EncoderDecoderCache` through ONNX, which the legacy exporter is documented
+    not to support.
+    """
+
+    def __init__(self, model, dec_len: int, enc_len: int):
+        super().__init__()
+        self.model = model
+        self.decoder = model.model.decoder
+        self.lm_head = model.lm_head
+        self.dec_len = dec_len
+        self.enc_len = enc_len
+        self.sliding_window = int(getattr(self.decoder.config, "sliding_window", 512))
+
+    def forward(self, decoder_input_ids, encoder_hidden_states, encoder_attention_mask):
+        neg = torch.finfo(torch.float32).min
+        q = self.dec_len
+
+        idx = torch.arange(q, device=decoder_input_ids.device)
+        dist = idx[:, None] - idx[None, :]
+        causal = dist >= 0
+        sliding = causal & (dist < self.sliding_window)
+
+        batch = decoder_input_ids.shape[0]
+
+        def to_float(keep: torch.Tensor) -> torch.Tensor:
+            return torch.zeros_like(keep, dtype=torch.float32).masked_fill(~keep, neg)
+
+        self_masks = {
+            "full_attention": to_float(causal[None, None].expand(batch, 1, q, q)),
+            "sliding_attention": to_float(sliding[None, None].expand(batch, 1, q, q)),
+        }
+        enc_keep = encoder_attention_mask.to(torch.bool)[:, None, None, :].expand(
+            batch, 1, q, self.enc_len
+        )
+        cross_masks = {"full_attention": to_float(enc_keep)}
+
+        out = self.decoder(
+            input_ids=decoder_input_ids,
+            attention_mask=self_masks,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=cross_masks,
+            use_cache=False,
+        )
+        return self.lm_head(out.last_hidden_state)
+
+
+def export_decoder(
+    model, out_dir: Path, opset: int, dynamo: bool, dec_len: int, enc_len: int
+) -> Path:
+    wrapper = DecoderWrapper(model, dec_len, enc_len).eval()
+    hidden = model.config.decoder.hidden_size
+    dec_ids = torch.ones(1, dec_len, dtype=torch.int64)
+    enc_hidden = torch.zeros(1, enc_len, hidden, dtype=torch.float32)
+    enc_mask = torch.ones(1, enc_len, dtype=torch.int64)
+    path = out_dir / "decoder.onnx"
+    log(f"exporting decoder (dec_len={dec_len}, enc_len={enc_len}, dynamo={dynamo})")
+    torch.onnx.export(
+        wrapper,
+        (dec_ids, enc_hidden, enc_mask),
+        str(path),
+        input_names=["decoder_input_ids", "encoder_hidden_states", "encoder_attention_mask"],
+        output_names=["logits"],
+        dynamic_axes={
+            "decoder_input_ids": {0: "batch"},
+            "encoder_hidden_states": {0: "batch"},
+            "encoder_attention_mask": {0: "batch"},
+            "logits": {0: "batch"},
+        },
+        **_exporter_kwargs(opset, dynamo),
+    )
+    log(f"  wrote {path} ({path.stat().st_size/1e6:.1f} MB)")
+    return path
+
+
 def export_encoder(model, out_dir: Path, opset: int, dynamo: bool, seq_len: int) -> Path:
     """Export the encoder.
 
@@ -199,12 +321,77 @@ def export_encoder(model, out_dir: Path, opset: int, dynamo: bool, seq_len: int)
             "attention_mask": {0: "batch"},
             "encoder_hidden_states": {0: "batch"},
         },
-        opset_version=opset,
-        do_constant_folding=True,
-        dynamo=dynamo,
+        **_exporter_kwargs(opset, dynamo),
     )
     log(f"  wrote {path} ({path.stat().st_size/1e6:.1f} MB)")
     return path
+
+
+def export_cached_decoder(model, out_dir: Path, opset: int, dynamo: bool, enc_len: int):
+    """Export the two graphs that make cached generation work.
+
+    `cross_proj.onnx` runs once per input; `decoder_step.onnx` runs per token.
+    Splitting them is the whole point: the cross-attention K/V depend only on
+    the encoder output, so recomputing them every step is pure waste.
+
+    `past_len` is dynamic here, unlike everywhere else in this file — it has to
+    be, since it grows by one per step. That was unaffordable before because
+    symbolic shapes met untraceable mask construction; with the masks prebuilt
+    the dynamo exporter handles it.
+    """
+    from cached_decoder import CachedDecoderStep, CrossProjector
+
+    cfg = model.model.decoder.config
+    layers = int(cfg.num_hidden_layers)
+    kv_heads = int(getattr(cfg, "num_key_value_heads", 1))
+    head_dim = int(getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads))
+    hidden = int(cfg.hidden_size)
+
+    proj = CrossProjector(model).eval()
+    enc_hidden = torch.zeros(1, enc_len, hidden)
+    proj_path = out_dir / "cross_proj.onnx"
+    log("exporting cross projector")
+    torch.onnx.export(
+        proj, (enc_hidden,), str(proj_path),
+        input_names=["encoder_hidden_states"],
+        output_names=["cross_k", "cross_v"],
+        dynamic_axes={"encoder_hidden_states": {0: "batch"},
+                      "cross_k": {1: "batch"}, "cross_v": {1: "batch"}},
+        **_exporter_kwargs(opset, dynamo),
+    )
+    log(f"  wrote {proj_path} ({proj_path.stat().st_size/1e6:.1f} MB)")
+
+    step = CachedDecoderStep(model, enc_len).eval()
+    past = 3  # non-zero and non-one, so the trace cannot special-case it
+    args = (
+        torch.ones(1, 1, dtype=torch.int64),
+        torch.zeros(layers, 1, kv_heads, past, head_dim),
+        torch.zeros(layers, 1, kv_heads, past, head_dim),
+        torch.zeros(layers, 1, kv_heads, enc_len, head_dim),
+        torch.zeros(layers, 1, kv_heads, enc_len, head_dim),
+        torch.ones(1, enc_len, dtype=torch.int64),
+    )
+    step_path = out_dir / "decoder_step.onnx"
+    log(f"exporting cached decoder step (layers={layers}, kv_heads={kv_heads}, head_dim={head_dim})")
+    torch.onnx.export(
+        step, args, str(step_path),
+        input_names=["decoder_input_ids", "past_self_k", "past_self_v",
+                     "cross_k", "cross_v", "encoder_attention_mask"],
+        output_names=["logits", "present_self_k", "present_self_v"],
+        dynamic_axes={
+            "decoder_input_ids": {0: "batch"},
+            "past_self_k": {1: "batch", 3: "past_len"},
+            "past_self_v": {1: "batch", 3: "past_len"},
+            "cross_k": {1: "batch"}, "cross_v": {1: "batch"},
+            "encoder_attention_mask": {0: "batch"},
+            "logits": {0: "batch"},
+            "present_self_k": {1: "batch", 3: "total_len"},
+            "present_self_v": {1: "batch", 3: "total_len"},
+        },
+        **_exporter_kwargs(opset, dynamo),
+    )
+    log(f"  wrote {step_path} ({step_path.stat().st_size/1e6:.1f} MB)")
+    return proj_path, step_path
 
 
 def verify_onnx(path: Path) -> None:
@@ -234,11 +421,13 @@ def main() -> int:
     ap.add_argument("--token", default=None, help="HF token; the repo is gated")
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument("--seq-len", type=int, default=128, help="fixed encoder length")
+    ap.add_argument("--dec-len", type=int, default=64, help="fixed decoder length")
     ap.add_argument(
-        "--dynamo",
+        "--torchscript",
         action="store_true",
-        help="use torch 2.9's dynamo exporter; it fails on this model (see export_encoder)",
+        help="use the legacy TorchScript exporter instead of dynamo (slower graph, no KV cache)",
     )
+    ap.add_argument("--no-cache", action="store_true", help="skip the cached decoder graphs")
     ap.add_argument(
         "--encoder-only",
         action="store_true",
@@ -249,14 +438,22 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     model, config = load_text_only(args.model_id, args.token)
 
-    enc = export_encoder(model, args.out, args.opset, args.dynamo, args.seq_len)
+    enc = export_encoder(model, args.out, args.opset, (not args.torchscript), args.seq_len)
     verify_onnx(enc)
 
     if args.encoder_only:
         log("encoder-only requested; stopping. Run the rten check next.")
         return 0
 
-    log("decoder export not implemented yet — encoder must clear rten first")
+    dec = export_decoder(model, args.out, args.opset, (not args.torchscript), args.dec_len, args.seq_len)
+    verify_onnx(dec)
+
+    if not args.no_cache:
+        proj_p, step_p = export_cached_decoder(
+            model, args.out, args.opset, (not args.torchscript), args.seq_len
+        )
+        verify_onnx(proj_p)
+        verify_onnx(step_p)
     return 0
 
 

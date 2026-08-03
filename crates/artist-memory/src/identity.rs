@@ -75,7 +75,10 @@ impl std::fmt::Display for HandleError {
         match self {
             HandleError::Unknown => write!(f, "no fact matches that id"),
             HandleError::Ambiguous(n) => {
-                write!(f, "that id is ambiguous — {n} facts match; use more characters")
+                write!(
+                    f,
+                    "that id is ambiguous — {n} facts match; use more characters"
+                )
             }
         }
     }

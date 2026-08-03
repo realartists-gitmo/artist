@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ImportBinding, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -345,11 +345,17 @@ fn _call_site_from_call<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<Ca
     })
 }
 
-fn _extract_callee_name<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<(String, Option<String>)> {
+fn _extract_callee_name<'a, D: Doc>(
+    node: &Node<'a, D>,
+    src: &[u8],
+) -> Option<(String, Option<String>)> {
     let kind = node.kind();
     let kind: &str = kind.as_ref();
     match kind {
-        "identifier" => Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None)),
+        "identifier" => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
         "attribute" => {
             // obj.method or pkg.mod.fn — last attribute is the name, prefix is receiver.
             let object = node.field("object");
@@ -358,7 +364,10 @@ fn _extract_callee_name<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<(S
             let recv = object.map(|o| String::from_utf8_lossy(&src[o.range()]).to_string());
             Some((name, recv))
         }
-        _ => Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None)),
+        _ => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
     }
 }
 
@@ -401,7 +410,11 @@ fn _handle_import_statement<'a, D: Doc>(
             "dotted_name" => {
                 let module = String::from_utf8_lossy(&src[child.range()]).to_string();
                 let local = module.split('.').next_back().unwrap_or(&module).to_string();
-                out.push(ImportBinding { local, module, line });
+                out.push(ImportBinding {
+                    local,
+                    module,
+                    line,
+                });
             }
             "aliased_import" => {
                 let name = child.field("name");
@@ -409,7 +422,11 @@ fn _handle_import_statement<'a, D: Doc>(
                 if let (Some(n), Some(a)) = (name, alias) {
                     let module = String::from_utf8_lossy(&src[n.range()]).to_string();
                     let local = String::from_utf8_lossy(&src[a.range()]).to_string();
-                    out.push(ImportBinding { local, module, line });
+                    out.push(ImportBinding {
+                        local,
+                        module,
+                        line,
+                    });
                 }
             }
             _ => {}
@@ -467,7 +484,11 @@ fn _handle_import_from<'a, D: Doc>(
                         format!("{}.{}", module_prefix, bare)
                     };
                     let local = String::from_utf8_lossy(&src[a.range()]).to_string();
-                    out.push(ImportBinding { local, module, line });
+                    out.push(ImportBinding {
+                        local,
+                        module,
+                        line,
+                    });
                 }
             }
             "wildcard_import" => { /* `from X import *` — no specific local */ }

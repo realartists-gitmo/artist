@@ -132,7 +132,10 @@ pub fn render_graph_text(graph: &DepGraph, include_external: bool) -> String {
         for (file, externals) in &graph.external {
             let s = graph.rel(file);
             for ext in externals {
-                grouped.entry(s.clone()).or_default().push((ext.clone(), None));
+                grouped
+                    .entry(s.clone())
+                    .or_default()
+                    .push((ext.clone(), None));
             }
         }
     }

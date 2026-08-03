@@ -224,7 +224,10 @@ fn waydroid() -> Check {
             "sudo systemctl start waydroid-container",
         );
     }
-    Check::ok("waydroid", "installed, provisioned, and its container service is up")
+    Check::ok(
+        "waydroid",
+        "installed, provisioned, and its container service is up",
+    )
 }
 
 /// Binder, in whichever of its three forms this kernel provides.
@@ -282,7 +285,6 @@ fn adb() -> Check {
         ),
     }
 }
-
 
 /// `$XDG_RUNTIME_DIR`, and whether it is private.
 ///

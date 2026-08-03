@@ -83,7 +83,14 @@ fn no_composition_loses_the_provenance_of_a_default() {
     let r = GraphEvaluator::new().eval(&mut g, q, &s, 50_000);
     assert_eq!(r.derivation, Derivation::Default, "the scan dropped it");
 
-    let counted = g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(dom) }], vec![hedged]);
+    let counted = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![hedged],
+    );
     let zero = g.int(0);
     let cmp = g.apply(wk::LEQ, vec![zero, counted]);
     let r = GraphEvaluator::new().eval(&mut g, cmp, &s, 50_000);
@@ -118,7 +125,10 @@ fn a_rule_chain_does_not_launder_a_default_into_a_fact() {
         let imp = g.apply(wk::IMPLIES, vec![by, cy]);
         g.quantify(wk::FORALL, y, None, imp)
     };
-    let s = MapGraphStructure::new().fact(a, vec![k]).rule(b, r1).rule(c, r2);
+    let s = MapGraphStructure::new()
+        .fact(a, vec![k])
+        .rule(b, r1)
+        .rule(c, r2);
 
     let goal_b = g.apply(b, vec![k]);
     let rb = GraphEvaluator::new().eval(&mut g, goal_b, &s, 100_000);
@@ -132,7 +142,10 @@ fn a_rule_chain_does_not_launder_a_default_into_a_fact() {
         "one more hop must not turn a default into an observed fact"
     );
     assert!(!rc.is_definite());
-    assert!(!rc.defeated_by.is_empty(), "and the defeater must survive the hop");
+    assert!(
+        !rc.defeated_by.is_empty(),
+        "and the defeater must survive the hop"
+    );
 }
 
 /// A `letrec` fixpoint built from defaults was published as an observed
@@ -150,8 +163,14 @@ fn a_fixpoint_built_from_defaults_stays_defeasible() {
     let node = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: pv, domain: Some(rel_ty) },
-            Binding { var: xv, domain: Some(dom) },
+            Binding {
+                var: pv,
+                domain: Some(rel_ty),
+            },
+            Binding {
+                var: xv,
+                domain: Some(dom),
+            },
         ],
         vec![hedged, scope],
     );
@@ -268,9 +287,16 @@ fn a_contested_identity_is_neither_flattened_nor_discarded() {
     }
 
     // …and the cases the table was written for still work.
-    let s = Table { fwd: Holds, rev: Fails, a, b };
+    let s = Table {
+        fwd: Holds,
+        rev: Fails,
+        a,
+        b,
+    };
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, claim, &s, 10_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, claim, &s, 10_000)
+            .evidential(),
         Evidential::Supported,
         "a missing mirror row is not evidence against"
     );
@@ -312,10 +338,11 @@ fn a_denotation_survives_a_quantifier() {
     let mut g = ObjectGraph::new();
     let (duration, ta, tb) = (g.atom("duration"), g.atom("t-a"), g.atom("t-b"));
     let (da, db) = (g.apply(duration, vec![ta]), g.apply(duration, vec![tb]));
-    let (three, nine, twelve, ten, eight) =
-        (g.int(3), g.int(9), g.int(12), g.int(10), g.int(8));
+    let (three, nine, twelve, ten, eight) = (g.int(3), g.int(9), g.int(12), g.int(10), g.int(8));
     let dom = g.apply(wk::SET_DOMAIN, vec![ta, tb]);
-    let s = MapGraphStructure::new().denotes(da, three).denotes(db, nine);
+    let s = MapGraphStructure::new()
+        .denotes(da, three)
+        .denotes(db, nine);
     let ev = GraphEvaluator::new();
 
     // ∀t. duration(t) ≤ 10
@@ -323,21 +350,33 @@ fn a_denotation_survives_a_quantifier() {
     let dv = g.apply(duration, vec![v]);
     let body = g.apply(wk::LEQ, vec![dv, ten]);
     let q = g.quantify(wk::FORALL, v, Some(dom), body);
-    assert_eq!(ev.eval(&mut g, q, &s, 100_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, q, &s, 100_000).evidential(),
+        Evidential::Supported
+    );
 
     // ∃t. 8 ≤ duration(t)
     let body2 = g.apply(wk::LEQ, vec![eight, dv]);
     let q2 = g.quantify(wk::EXISTS, v, Some(dom), body2);
-    assert_eq!(ev.eval(&mut g, q2, &s, 100_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, q2, &s, 100_000).evidential(),
+        Evidential::Supported
+    );
 
     // Σ duration(t) = 12
     let total = g.bind(
         wk::SUM,
-        vec![Binding { var: v, domain: Some(dom) }],
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
         vec![wk::TOP, dv],
     );
     let claim = g.apply(wk::EQ, vec![total, twelve]);
-    assert_eq!(ev.eval(&mut g, claim, &s, 100_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &s, 100_000).evidential(),
+        Evidential::Supported
+    );
 }
 
 /// …and a rule whose antecedent reads a denoted value fires.
@@ -358,7 +397,9 @@ fn a_rule_can_read_a_denoted_value() {
     let s = MapGraphStructure::new().denotes(dt, nine).rule(long, rule);
     let goal = g.apply(long, vec![t]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &s, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &s, 100_000)
+            .evidential(),
         Evidential::Supported
     );
 }
@@ -388,7 +429,10 @@ fn text_operators_read_a_denoted_string() {
     let n = g.apply(wk::LEN, vec![term]);
     let ten = g.int(10);
     let claim = g.apply(wk::EQ, vec![n, ten]);
-    assert_eq!(ev.eval(&mut g, claim, &s, 20_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &s, 20_000).evidential(),
+        Evidential::Supported
+    );
 }
 
 /// **A rule may conclude a reserved relation.** `derive` was called from one
@@ -398,8 +442,12 @@ fn text_operators_read_a_denoted_string() {
 #[test]
 fn a_rule_can_conclude_a_reserved_relation() {
     let mut g = ObjectGraph::new();
-    let (on_ci, uses, flag, job) =
-        (g.atom("on-ci"), g.atom("uses"), g.atom("release-flag"), g.atom("job-7"));
+    let (on_ci, uses, flag, job) = (
+        g.atom("on-ci"),
+        g.atom("uses"),
+        g.atom("release-flag"),
+        g.atom("job-7"),
+    );
 
     // ∀x. on-ci(x) → forbidden(uses(x, --release))
     let x = g.fresh();
@@ -409,11 +457,15 @@ fn a_rule_can_conclude_a_reserved_relation() {
     let imp = g.apply(wk::IMPLIES, vec![ante, cons]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
 
-    let s = MapGraphStructure::new().fact(on_ci, vec![job]).rule(wk::FORBIDDEN, rule);
+    let s = MapGraphStructure::new()
+        .fact(on_ci, vec![job])
+        .rule(wk::FORBIDDEN, rule);
     let concrete = g.apply(uses, vec![job, flag]);
     let goal = g.apply(wk::FORBIDDEN, vec![concrete]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &s, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &s, 100_000)
+            .evidential(),
         Evidential::Supported,
         "a norm that can only ever be a ground term cannot govern a class"
     );
@@ -426,10 +478,14 @@ fn a_rule_can_conclude_a_reserved_relation() {
     let c2 = h.apply(wk::TYPE_OF, vec![y, u64_ty]);
     let i2 = h.apply(wk::IMPLIES, vec![a2, c2]);
     let r2 = h.quantify(wk::FORALL, y, None, i2);
-    let s2 = MapGraphStructure::new().fact(named_id, vec![field]).rule(wk::TYPE_OF, r2);
+    let s2 = MapGraphStructure::new()
+        .fact(named_id, vec![field])
+        .rule(wk::TYPE_OF, r2);
     let goal2 = h.apply(wk::TYPE_OF, vec![field, u64_ty]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut h, goal2, &s2, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut h, goal2, &s2, 100_000)
+            .evidential(),
         Evidential::Supported
     );
 }
@@ -446,17 +502,26 @@ fn forbidding_and_obliging_a_negation_are_the_same_claim() {
 
     let from_obliged = MapGraphStructure::new().fact(wk::OBLIGED, vec![negated]);
     let forbidden = g.apply(wk::FORBIDDEN, vec![act]);
-    assert_eq!(ev.eval(&mut g, forbidden, &from_obliged, 20_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, forbidden, &from_obliged, 20_000)
+            .evidential(),
+        Evidential::Supported
+    );
 
     let from_forbidden = MapGraphStructure::new().fact(wk::FORBIDDEN, vec![act]);
     let obliged_not = g.apply(wk::OBLIGED, vec![negated]);
     assert_eq!(
-        ev.eval(&mut g, obliged_not, &from_forbidden, 20_000).evidential(),
+        ev.eval(&mut g, obliged_not, &from_forbidden, 20_000)
+            .evidential(),
         Evidential::Supported,
         "the identity must read left-to-right as well"
     );
 
     // …and forbidding still does not permit.
     let permitted = g.apply(wk::PERMITTED, vec![act]);
-    assert_eq!(ev.eval(&mut g, permitted, &from_forbidden, 20_000).evidential(), Evidential::Open);
+    assert_eq!(
+        ev.eval(&mut g, permitted, &from_forbidden, 20_000)
+            .evidential(),
+        Evidential::Open
+    );
 }

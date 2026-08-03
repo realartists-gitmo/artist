@@ -3,11 +3,11 @@
 //! derived projection. Legacy markdown-only sessions are converted on first
 //! open.
 
-use anyhow::{Context, Result, bail};
-use artist_session::{
+use crate::{
     AttachmentStore, Envelope, EventLogReader, EventLogWriter, LegacyTurn, Recorder,
     SessionCreated, SessionEvent, WriterTask, spawn_writer,
 };
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,6 +44,14 @@ pub struct Session {
     /// Session this one was forked from, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Session {
@@ -54,7 +62,7 @@ impl Session {
     }
 
     fn has_event_log(&self) -> bool {
-        self.dir().join(artist_session::EVENTS_FILE).exists()
+        self.dir().join(crate::EVENTS_FILE).exists()
     }
 }
 
@@ -64,9 +72,9 @@ impl Session {
 pub struct ActiveSession {
     pub session: Session,
     pub recorder: Recorder,
-    pub memory: artist_session::SessionMemory,
+    pub memory: crate::SessionMemory,
     pub attachments: AttachmentStore,
-    pub provider_context: artist_session::ProviderContextHandle,
+    pub provider_context: crate::ProviderContextHandle,
     task: WriterTask,
 }
 
@@ -138,6 +146,8 @@ impl SessionStore {
             project: project.clone(),
             transcript: dir.join("transcript.md"),
             parent: None,
+            archived: false,
+            pinned: false,
         };
         let mut index = self.read_index()?;
         match index.projects.iter_mut().find(|p| p.path == project) {
@@ -203,12 +213,12 @@ impl SessionStore {
                     content: turn.content,
                 });
                 Envelope {
-                    v: artist_session::SCHEMA_VERSION,
+                    v: crate::SCHEMA_VERSION,
                     seq: seq as u64,
                     ts: 0,
                     session: session.id.clone(),
                     run: None,
-                    lineage: artist_session::MAIN_LINEAGE.to_owned(),
+                    lineage: crate::MAIN_LINEAGE.to_owned(),
                     kind: event.kind().to_owned(),
                     payload: event.payload(),
                 }
@@ -222,6 +232,13 @@ impl SessionStore {
     /// rewind references stay valid) with a fresh `session.created`
     /// carrying the parent pointer. The parent session is untouched.
     pub fn fork(&self, parent_id: &str, up_to_seq: u64) -> Result<ActiveSession> {
+        open_session_dir(self.fork_snapshot(parent_id, up_to_seq)?)
+    }
+
+    /// Fork a session without opening a writer for the new session. Frontends
+    /// use this when the fork is a navigation operation rather than an active
+    /// agent run; the next submitted turn opens it normally.
+    pub fn fork_snapshot(&self, parent_id: &str, up_to_seq: u64) -> Result<Session> {
         let (parent, events) = self.peek(parent_id)?;
         let duration = SystemTime::now().duration_since(UNIX_EPOCH)?;
         let now = duration.as_millis() as u64;
@@ -237,7 +254,7 @@ impl SessionStore {
                     // fork's, keeping the seq slot.
                     writer.append(
                         None,
-                        artist_session::MAIN_LINEAGE,
+                        crate::MAIN_LINEAGE,
                         &SessionEvent::SessionCreated(SessionCreated {
                             project: parent.project.display().to_string(),
                             label: parent.label.clone(),
@@ -268,7 +285,7 @@ impl SessionStore {
         let fork_events = EventLogReader::new(&dir).read_all()?;
         fs::write(
             dir.join("transcript.md"),
-            artist_session::render_markdown(&fork_events),
+            crate::render_markdown(&fork_events),
         )?;
         let session = Session {
             id,
@@ -277,6 +294,8 @@ impl SessionStore {
             project: parent.project.clone(),
             transcript: dir.join("transcript.md"),
             parent: Some(parent.id.clone()),
+            archived: false,
+            pinned: false,
         };
         let _lock = self.lock_index()?;
         let mut index = self.read_index()?;
@@ -288,7 +307,7 @@ impl SessionStore {
             }),
         }
         self.write_index(&index)?;
-        open_session_dir(session)
+        Ok(session)
     }
 
     /// One-shot conversion of a legacy markdown session into an event-log
@@ -305,7 +324,7 @@ impl SessionStore {
             let mut writer = EventLogWriter::open(&dir, &session.id)?;
             writer.append(
                 None,
-                artist_session::MAIN_LINEAGE,
+                crate::MAIN_LINEAGE,
                 &SessionEvent::SessionCreated(SessionCreated {
                     project: session.project.display().to_string(),
                     label: session.label.clone(),
@@ -316,7 +335,7 @@ impl SessionStore {
             for turn in turns {
                 writer.append(
                     None,
-                    artist_session::MAIN_LINEAGE,
+                    crate::MAIN_LINEAGE,
                     &SessionEvent::LegacyTurn(LegacyTurn {
                         role: match turn.role {
                             Role::User => "user".into(),
@@ -365,6 +384,40 @@ impl SessionStore {
             .find(|p| p.path == path)
             .map(|p| p.sessions)
             .unwrap_or_default())
+    }
+
+    /// Change the human-facing session label without rewriting its immutable
+    /// event history. The index owns mutable library metadata.
+    pub fn rename(&self, id: &str, label: Option<&str>) -> Result<Session> {
+        let label = label
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.chars().take(80).collect::<String>());
+        self.update_session(id, |session| session.label = label.clone())
+    }
+
+    /// Hide or restore a session from the normal workspace list.
+    pub fn set_archived(&self, id: &str, archived: bool) -> Result<Session> {
+        self.update_session(id, |session| session.archived = archived)
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<Session> {
+        self.update_session(id, |session| session.pinned = pinned)
+    }
+
+    fn update_session(&self, id: &str, update: impl FnOnce(&mut Session)) -> Result<Session> {
+        let _lock = self.lock_index()?;
+        let mut index = self.read_index()?;
+        let session = index
+            .projects
+            .iter_mut()
+            .flat_map(|project| &mut project.sessions)
+            .find(|session| session.id == id)
+            .context("session not found")?;
+        update(session);
+        let result = session.clone();
+        self.write_index(&index)?;
+        Ok(result)
     }
 
     /// Delete a session's files and index entry. Refuses when the session is
@@ -430,8 +483,8 @@ fn open_session_dir(session: Session) -> Result<ActiveSession> {
     let existing_events = EventLogReader::new(&dir).read_all()?;
     let (recorder, task) = spawn_writer(writer, Some(session.transcript.clone()));
     let provider_context =
-        artist_session::ProviderContextHandle::from_events(&existing_events, recorder.clone());
-    let memory = artist_session::SessionMemory::new(
+        crate::ProviderContextHandle::from_events(&existing_events, recorder.clone());
+    let memory = crate::SessionMemory::new(
         session.id.clone(),
         &dir,
         recorder.clone(),
@@ -490,7 +543,7 @@ fn project_key(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artist_session::{ContentBlock, TurnUser};
+    use crate::{ContentBlock, TurnUser};
 
     fn user_turn(text: &str) -> TurnUser {
         TurnUser {
@@ -551,6 +604,8 @@ mod tests {
             project: project_canonical.clone(),
             transcript,
             parent: None,
+            archived: false,
+            pinned: false,
         };
         let index = Index {
             projects: vec![Project {
@@ -566,13 +621,7 @@ mod tests {
             .map(|envelope| envelope.kind.clone())
             .collect();
         assert_eq!(kinds, ["session.created", "legacy.turn", "legacy.turn"]);
-        assert!(
-            active
-                .session
-                .dir()
-                .join(artist_session::EVENTS_FILE)
-                .exists()
-        );
+        assert!(active.session.dir().join(crate::EVENTS_FILE).exists());
         assert!(active.session.transcript.ends_with("transcript.md"));
         active.close().await?;
 
@@ -592,7 +641,7 @@ mod tests {
         let active = store.create(&project, None)?;
         let id = active.session.id.clone();
         active.recorder.record(user_turn("q"));
-        active.recorder.record(artist_session::ModelTurn {
+        active.recorder.record(crate::ModelTurn {
             turn: 1,
             content: vec![ContentBlock::Text { text: "a".into() }],
             total_tokens: 10,
@@ -602,10 +651,10 @@ mod tests {
         active.close().await?;
 
         let (active, events) = store.open(&id)?;
-        let history = artist_session::build_history(
+        let history = crate::build_history(
             &events,
             &active.attachments,
-            &artist_session::HistoryOptions::default(),
+            &crate::HistoryOptions::default(),
         )?;
         assert_eq!(history.len(), 2);
         active.close().await?;
@@ -621,14 +670,14 @@ mod tests {
         let active = store.create(&project, Some("root"))?;
         let parent_id = active.session.id.clone();
         active.recorder.record(user_turn("one"));
-        active.recorder.record(artist_session::ModelTurn {
+        active.recorder.record(crate::ModelTurn {
             turn: 1,
             content: vec![ContentBlock::Text { text: "a1".into() }],
             total_tokens: 0,
             partial: false,
         });
         active.recorder.record(user_turn("two"));
-        active.recorder.record(artist_session::ModelTurn {
+        active.recorder.record(crate::ModelTurn {
             turn: 1,
             content: vec![ContentBlock::Text { text: "a2".into() }],
             total_tokens: 0,
@@ -650,10 +699,10 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        let history = artist_session::build_history(
+        let history = crate::build_history(
             &events,
             &fork.attachments,
-            &artist_session::HistoryOptions::default(),
+            &crate::HistoryOptions::default(),
         )?;
         assert_eq!(history.len(), 2, "user one + assistant a1 only");
         fork.close().await?;
@@ -662,6 +711,52 @@ mod tests {
         let (parent, parent_events) = store.open(&parent_id)?;
         assert_eq!(parent_events.len(), 5);
         parent.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fork_snapshot_releases_writer_for_frontend_navigation() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("proj");
+        fs::create_dir(&project)?;
+        let store = SessionStore::new(temp.path().join("config"));
+        let active = store.create(&project, Some("root"))?;
+        let parent_id = active.session.id.clone();
+        active.recorder.record(user_turn("one"));
+        active.recorder.flush().await;
+
+        let snapshot = store.fork_snapshot(&parent_id, 1)?;
+        assert_eq!(snapshot.parent.as_deref(), Some(parent_id.as_str()));
+        let snapshot_id = snapshot.id.clone();
+
+        // A navigation-only fork must not retain the event-log writer lock.
+        let (opened, events) = store.open(&snapshot_id)?;
+        assert_eq!(events.len(), 2);
+        opened.close().await?;
+        active.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mutable_session_metadata_round_trips() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("proj");
+        fs::create_dir(&project)?;
+        let store = SessionStore::new(temp.path().join("config"));
+        let active = store.create(&project, Some("before"))?;
+        let id = active.session.id.clone();
+        active.close().await?;
+
+        let renamed = store.rename(&id, Some("  after  "))?;
+        assert_eq!(renamed.label.as_deref(), Some("after"));
+        let archived = store.set_archived(&id, true)?;
+        assert!(archived.archived);
+        let pinned = store.set_pinned(&id, true)?;
+        assert!(pinned.pinned);
+        let listed = store.list()?;
+        assert_eq!(listed[0].label.as_deref(), Some("after"));
+        assert!(listed[0].archived);
+        assert!(listed[0].pinned);
         Ok(())
     }
 }

@@ -26,10 +26,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use crate::graph_cache::UnifiedGraph;
 use crate::graph_cache::cache;
 use crate::graph_cache::delta::{apply_delta_to_calls, apply_delta_to_deps, refresh_records};
-use crate::graph_cache::UnifiedGraph;
-use crate::search::cache::{compute_delta, Delta, FileRecord};
+use crate::search::cache::{Delta, FileRecord, compute_delta};
 
 /// One registry slot: the parsed graph plus the fingerprints it reflects.
 /// Both behind `Arc` so cloning the entry out of the lock (to avoid holding
@@ -51,7 +51,10 @@ fn registry() -> &'static Registry {
 }
 
 fn store(key: PathBuf, graph: Arc<UnifiedGraph>, records: Arc<Vec<FileRecord>>) {
-    registry().write().unwrap().insert(key, Entry { graph, records });
+    registry()
+        .write()
+        .unwrap()
+        .insert(key, Entry { graph, records });
 }
 
 /// Get the unified graph for `root`, building (and persisting) it if no

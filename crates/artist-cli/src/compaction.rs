@@ -1,5 +1,6 @@
-use crate::{sessions::ActiveSession, settings::CompactionConfig};
+use crate::settings::CompactionConfig;
 use anyhow::{Context, Result};
+use artist_session::ActiveSession;
 use artist_session::ConversationCompacted;
 use llm_provider::SavedProvider;
 use rig_core::completion::Message;

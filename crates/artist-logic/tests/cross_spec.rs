@@ -22,7 +22,11 @@ use artist_logic::object::{ObjectId, wk};
 /// Returns `(graph, [(value-name, node)], structure)`. `B` is reachable only
 /// because `MapGraphStructure::conflicting` exists — it did not for most of this
 /// suite's life, and the one soundness bug the property test missed lived there.
-fn four_valued() -> (ObjectGraph, Vec<(&'static str, ObjectId)>, MapGraphStructure) {
+fn four_valued() -> (
+    ObjectGraph,
+    Vec<(&'static str, ObjectId)>,
+    MapGraphStructure,
+) {
     let mut g = ObjectGraph::new();
     let a = g.atom("a");
     let (t, f, n, b) = (g.atom("t"), g.atom("f"), g.atom("n"), g.atom("b"));
@@ -86,7 +90,10 @@ fn implication_is_never_stronger_than_the_strong_reading() {
             let designated = matches!(truth, "T" | "B");
             let anti = matches!(truth, "F" | "B");
             if got == Evidential::Supported || got == Evidential::Conflicted {
-                assert!(designated, "({an} → {bn}) claimed support; truth is {truth}");
+                assert!(
+                    designated,
+                    "({an} → {bn}) claimed support; truth is {truth}"
+                );
             }
             if got == Evidential::Refuted || got == Evidential::Conflicted {
                 assert!(anti, "({an} → {bn}) claimed refutation; truth is {truth}");
@@ -132,7 +139,11 @@ fn non_contradiction_is_not_unconditionally_valid() {
             DeterminacyBasis::Presumed,
             "it needs bivalence, so it must say so"
         );
-        assert_ne!(r.determinacy, Determinacy::Total, "and must not claim established totality");
+        assert_ne!(
+            r.determinacy,
+            Determinacy::Total,
+            "and must not claim established totality"
+        );
     }
 }
 
@@ -148,7 +159,11 @@ fn self_implication_is_unconditional() {
 
     let r = GraphEvaluator::new().eval(&mut g, identity, &EmptyStructure, 100_000);
     assert_eq!(r.evidential(), Evidential::Supported);
-    assert_eq!(r.determinacy_basis, DeterminacyBasis::Derived, "nothing presumed");
+    assert_eq!(
+        r.determinacy_basis,
+        DeterminacyBasis::Derived,
+        "nothing presumed"
+    );
     assert_eq!(r.determinacy, Determinacy::Total);
 }
 
@@ -164,7 +179,11 @@ fn excluded_middle_is_still_not_valid() {
 
     let r = GraphEvaluator::new().eval(&mut g, lem, &EmptyStructure, 100_000);
     if r.evidential() == Evidential::Supported {
-        assert_eq!(r.determinacy_basis, DeterminacyBasis::Presumed, "`N ∨ N = N`");
+        assert_eq!(
+            r.determinacy_basis,
+            DeterminacyBasis::Presumed,
+            "`N ∨ N = N`"
+        );
     }
 }
 
@@ -181,19 +200,38 @@ fn unconditionality_is_a_property_of_gamma() {
     let both = g.apply(wk::AND, vec![wk::TOP, wk::TOP]);
 
     for (what, steps) in [
-        ("axiom", vec![Step::Axiom { node: wk::TOP, holds: true }]),
+        (
+            "axiom",
+            vec![Step::Axiom {
+                node: wk::TOP,
+                holds: true,
+            }],
+        ),
         (
             "negation over an axiom",
             vec![
-                Step::Axiom { node: wk::TOP, holds: true },
-                Step::Negation { node: not_top, premise: 0 },
+                Step::Axiom {
+                    node: wk::TOP,
+                    holds: true,
+                },
+                Step::Negation {
+                    node: not_top,
+                    premise: 0,
+                },
             ],
         ),
         (
             "connective over axioms",
             vec![
-                Step::Axiom { node: wk::TOP, holds: true },
-                Step::Connective { node: both, premises: vec![(0, 0), (0, 1)], holds: true },
+                Step::Axiom {
+                    node: wk::TOP,
+                    holds: true,
+                },
+                Step::Connective {
+                    node: both,
+                    premises: vec![(0, 0), (0, 1)],
+                    holds: true,
+                },
             ],
         ),
     ] {
@@ -229,9 +267,21 @@ fn no_kernel_rule_certifies_a_default() {
         // exception refuted outright. Still not certifiable.
         let attempt = Certificate {
             steps: vec![
-                Step::Told { node: pa, holds: true, sources: vec![adam] },
-                Step::Told { node: ea, holds: false, sources: vec![adam] },
-                Step::Connective { node, premises: vec![(0, 1)], holds: true },
+                Step::Told {
+                    node: pa,
+                    holds: true,
+                    sources: vec![adam],
+                },
+                Step::Told {
+                    node: ea,
+                    holds: false,
+                    sources: vec![adam],
+                },
+                Step::Connective {
+                    node,
+                    premises: vec![(0, 1)],
+                    holds: true,
+                },
             ],
         };
         assert!(
@@ -252,8 +302,15 @@ fn a_default_still_evaluates() {
     let s = MapGraphStructure::new().fact(p, vec![a]);
 
     let r = GraphEvaluator::new().eval(&mut g, hedged, &s, 100_000);
-    assert_eq!(r.evidential(), Evidential::Supported, "the default holds, unrefuted");
-    assert!(!r.defeated_by.is_empty(), "and it names what would overturn it");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "the default holds, unrefuted"
+    );
+    assert!(
+        !r.defeated_by.is_empty(),
+        "and it names what would overturn it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +424,13 @@ fn a_settled_bit_may_sit_on_an_ungrounded_node() {
     let disj = g.apply(wk::OR, vec![ba, q]);
     let r = GraphEvaluator::new().eval(&mut g, disj, &s, 100_000);
     assert_eq!(r.support, Bound::Certain, "B ∨ x is designated for every x");
-    assert!(!r.refutation.is_settled(), "and the refutation bit is not settled");
-    assert_eq!(r.grounding, Grounding::StableLoop, "so the node is not grounded");
+    assert!(
+        !r.refutation.is_settled(),
+        "and the refutation bit is not settled"
+    );
+    assert_eq!(
+        r.grounding,
+        Grounding::StableLoop,
+        "so the node is not grounded"
+    );
 }

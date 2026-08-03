@@ -126,6 +126,39 @@ it on our behalf. `GetSession` also returns the session's `wayland_display` and
 `xdg_runtime_dir`, which is how a session belonging to a *dead stage* is told
 apart from ours and restarted rather than adopted.
 
+**Rung 2 is built and proven.** A resident `AccessibilityService`
+(`crates/artist-computer/android-service/`, built by
+`scripts/build-android-service.sh` — aapt2, javac, d8, apksigner, no Gradle)
+pushes node trees and content-changed events over a loopback socket reached by
+`adb forward`. Verified against a live container: 79 nodes off the running
+Settings app with bounds in compositor screen coordinates, `performAction`
+clicks landing, and a stale node id refused with
+`stale node 1:5 — the tree has changed, observe it again`. Node identity is
+generational, so an id from a previous tree fails loudly rather than resolving
+against whatever now sits at that index.
+
+Two things had to be solved to get there, neither of them documented anywhere:
+
+* **adb refuses the first connection.** `device unauthorized`, answered by a
+  dialog on the device — a screen the agent cannot yet drive. Because the
+  container's `/data` is a host bind mount, `adb::authorize` writes the public
+  key straight into `misc/adb/adb_keys`, which is what tapping "always allow"
+  would have written. Appended, never replaced, so a key the user relies on is
+  not revoked.
+* **`sys.boot_completed` is not readiness.** With the property reading `1`,
+  zygote running and 63 services registered, `cmd package` still answered
+  "Can't find service: package". System services register progressively and
+  `pm`, `settings` and `am` are late; `Adb::wait_for_services` waits for the
+  package service itself.
+
+**Signing in.** Apps in the container start signed out and there is no way round
+it from here. The flow is: bring the stage up, open a viewer onto it
+(`cargo run -p artist-computer --example watch`), and sign in by hand once. The
+Android data directory persists at `~/.local/share/waydroid/data`, so it is once
+per container rather than once per session. The viewer counts human actions, so
+the agent is told a person intervened rather than inferring it from a screen that
+changed under it.
+
 **Rungs.** Rung 2 is the strongest rung on Android — the a11y tree is a
 first-class TalkBack product surface, not a bolt-on; ~70–80% of mainstream apps
 substantially driveable (UNCERTAIN). Compose apps hide `resource-id` unless they

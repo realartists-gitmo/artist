@@ -4,7 +4,14 @@
 
 use std::path::Path;
 
-pub fn run_callers_text(target: &str, root: &Path, depth: usize, limit: usize, include_ambiguous: bool, json: bool) -> String {
+pub fn run_callers_text(
+    target: &str,
+    root: &Path,
+    depth: usize,
+    limit: usize,
+    include_ambiguous: bool,
+    json: bool,
+) -> String {
     use crate::calls::build::build_call_graph;
     use crate::calls::{render, traverse};
     use crate::graph_cache;
@@ -31,8 +38,7 @@ pub fn run_callers_text(target: &str, root: &Path, depth: usize, limit: usize, i
         // Filter inside the traversal so dropped ambiguous edges don't
         // consume the limit (mirrors the CLI's run_callers).
         hits.extend(traverse::callers(calls, qn, depth.max(1), limit, |e| {
-            include_ambiguous
-                || !matches!(e.confidence, crate::calls::graph::Confidence::Ambiguous)
+            include_ambiguous || !matches!(e.confidence, crate::calls::graph::Confidence::Ambiguous)
         }));
     }
     if hits.len() > limit {
@@ -70,7 +76,13 @@ pub fn run_trace_text(from: &str, to: &str, root: &Path, depth: usize, json: boo
     out
 }
 
-pub fn run_callees_text(target: &str, root: &Path, depth: usize, external: bool, json: bool) -> String {
+pub fn run_callees_text(
+    target: &str,
+    root: &Path,
+    depth: usize,
+    external: bool,
+    json: bool,
+) -> String {
     use crate::calls::build::build_call_graph;
     use crate::calls::graph::Qn;
     use crate::calls::{render, traverse};
@@ -103,7 +115,10 @@ pub fn run_callees_text(target: &str, root: &Path, depth: usize, external: bool,
             }
         }
     }
-    let first = qns.first().cloned().unwrap_or_else(|| Qn::new(target.to_string()));
+    let first = qns
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Qn::new(target.to_string()));
     if json {
         render::render_callees_json(&first, depth.max(1), &all_edges, true)
     } else {

@@ -110,9 +110,12 @@ pub fn parse_file_for_hook(path: &Path) -> Option<ParseResult> {
             source.as_bytes(),
             lang.ast_grep(source.clone()).root(),
         ),
-        SupportLang::TypeScript | SupportLang::Tsx | SupportLang::JavaScript => {
-            TypeScriptAdapter.parse(path, source.as_bytes(), lang.ast_grep(source.clone()).root())
-        }
+        SupportLang::TypeScript | SupportLang::Tsx | SupportLang::JavaScript => TypeScriptAdapter
+            .parse(
+                path,
+                source.as_bytes(),
+                lang.ast_grep(source.clone()).root(),
+            ),
         SupportLang::CSharp => CSharpAdapter.parse(
             path,
             source.as_bytes(),

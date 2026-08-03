@@ -23,8 +23,8 @@ use num_bigint::BigInt;
 fn round_trip(g: &ObjectGraph, root: ObjectId) -> String {
     let before = print(g, root);
     let mut fresh = ObjectGraph::new();
-    let back = parse(&mut fresh, &before)
-        .unwrap_or_else(|e| panic!("parse failed for {before}: {e}"));
+    let back =
+        parse(&mut fresh, &before).unwrap_or_else(|e| panic!("parse failed for {before}: {e}"));
     let after = print(&fresh, back);
     assert_eq!(before, after, "round trip changed the expression");
     before
@@ -40,9 +40,14 @@ fn every_literal_variant_round_trips() {
         g.lit(LiteralValue::Int(42.into())),
         g.lit(LiteralValue::Int(BigInt::from(-7))),
         g.lit(LiteralValue::Int(big)),
-        g.lit(LiteralValue::Decimal { mantissa: (-12345).into(), scale: 3 }),
+        g.lit(LiteralValue::Decimal {
+            mantissa: (-12345).into(),
+            scale: 3,
+        }),
         g.lit(LiteralValue::Text("plain".into())),
-        g.lit(LiteralValue::Text("with \"quotes\" and \\ backslash".into())),
+        g.lit(LiteralValue::Text(
+            "with \"quotes\" and \\ backslash".into(),
+        )),
         g.lit(LiteralValue::Bool(true)),
         g.lit(LiteralValue::Bool(false)),
         g.lit(LiteralValue::Bytes(vec![0, 1, 2, 255])),
@@ -57,7 +62,11 @@ fn every_literal_variant_round_trips() {
 fn literal_bool_is_distinct_from_the_top_atom() {
     let mut g = ObjectGraph::new();
     let lit = g.lit(LiteralValue::Bool(true));
-    assert_ne!(lit, wk::TOP, "Literal(Bool(true)) must not be the `true` atom");
+    assert_ne!(
+        lit,
+        wk::TOP,
+        "Literal(Bool(true)) must not be the `true` atom"
+    );
     round_trip(&g, lit);
 }
 
@@ -104,8 +113,14 @@ fn external_and_opaque_nodes_round_trip() {
         version: None,
         digest: None,
     });
-    let opaque = g.intern(CoreNode::Opaque { tag: "future:v9".into(), payload: vec![1, 2, 3] });
-    let empty = g.intern(CoreNode::Opaque { tag: "e".into(), payload: Vec::new() });
+    let opaque = g.intern(CoreNode::Opaque {
+        tag: "future:v9".into(),
+        payload: vec![1, 2, 3],
+    });
+    let empty = g.intern(CoreNode::Opaque {
+        tag: "e".into(),
+        payload: Vec::new(),
+    });
 
     let holder = g.atom("holds");
     let root = g.apply(holder, vec![full, bare, opaque, empty]);
@@ -117,8 +132,12 @@ fn external_and_opaque_nodes_round_trip() {
 #[test]
 fn binders_domains_and_multiple_bodies_round_trip() {
     let mut g = ObjectGraph::new();
-    let (path, stale, corrected, adam) =
-        (g.atom("Path"), g.atom("stale"), g.atom("corrected"), g.atom("adam"));
+    let (path, stale, corrected, adam) = (
+        g.atom("Path"),
+        g.atom("stale"),
+        g.atom("corrected"),
+        g.atom("adam"),
+    );
 
     let f = g.fresh();
     let a = g.apply(stale, vec![f]);
@@ -131,7 +150,14 @@ fn binders_domains_and_multiple_bodies_round_trip() {
     let r = g.fresh();
     let d1 = g.apply(stale, vec![r]);
     let d2 = g.apply(corrected, vec![adam, r]);
-    let rec = g.bind(wk::LETREC, vec![Binding { var: r, domain: None }], vec![d1, d2]);
+    let rec = g.bind(
+        wk::LETREC,
+        vec![Binding {
+            var: r,
+            domain: None,
+        }],
+        vec![d1, d2],
+    );
     round_trip(&g, rec);
 
     // A refined domain, which is an ordinary expression.
@@ -152,7 +178,10 @@ fn sharing_and_cycles_survive() {
     let shared = g.apply(p, vec![a]);
     let root = g.apply(wk::AND, (0..8).map(|_| shared).collect());
     let text = round_trip(&g, root);
-    assert!(text.contains("#1="), "sharing should emit a datum label: {text}");
+    assert!(
+        text.contains("#1="),
+        "sharing should emit a datum label: {text}"
+    );
     assert!(text.contains("#1#"), "and refer back to it: {text}");
 
     // The liar: a node whose body mentions itself.
@@ -167,7 +196,10 @@ fn sharing_and_cycles_survive() {
     let printed = print(&h, liar);
     let mut fresh = ObjectGraph::new();
     let back = parse(&mut fresh, &printed).expect("cycle must reparse");
-    assert!(fresh.is_cyclic(back), "the cycle did not survive: {printed}");
+    assert!(
+        fresh.is_cyclic(back),
+        "the cycle did not survive: {printed}"
+    );
 }
 
 /// Atom names that need quoting, including ones that would otherwise read as
@@ -176,7 +208,15 @@ fn sharing_and_cycles_survive() {
 fn awkward_atom_names_round_trip() {
     let mut g = ObjectGraph::new();
     let holder = g.atom("holds");
-    let names = ["has spaces", "42", "-7", "with(paren", "with\"quote", "with#hash", "with|bar"];
+    let names = [
+        "has spaces",
+        "42",
+        "-7",
+        "with(paren",
+        "with\"quote",
+        "with#hash",
+        "with|bar",
+    ];
     let atoms: Vec<ObjectId> = names.iter().map(|n| g.atom(n)).collect();
     let root = g.apply(holder, atoms);
     round_trip(&g, root);

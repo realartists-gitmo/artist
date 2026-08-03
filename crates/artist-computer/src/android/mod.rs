@@ -47,6 +47,19 @@ use crate::stage::{
 
 pub use session::WindowMode;
 
+/// How long to wait for Android's system services after the container is up.
+const SERVICES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Where Waydroid bind-mounts the container's `/data` from.
+///
+/// Fixed by Waydroid rather than chosen by us, and the same path its own session
+/// dictionary reports as `waydroid_data`.
+fn waydroid_data_dir() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("waydroid/data")
+}
+
 /// An Android container presented as a stage.
 pub struct AndroidStage {
     /// The Wayland stage Android is rendering onto. Every input verb is
@@ -56,6 +69,12 @@ pub struct AndroidStage {
     session: session::Session,
     adb: adb::Adb,
     identity: identity::Identity,
+    /// The accessibility bridge, when its APK is installed and answering.
+    ///
+    /// Optional on purpose: a container without it is still driveable at rung 3,
+    /// and refusing to open the stage because an optional rung is missing would
+    /// make the better path a prerequisite for the worse one.
+    bridge: Option<Arc<bridge::Bridge>>,
 }
 
 impl AndroidStage {
@@ -67,13 +86,33 @@ impl AndroidStage {
     pub async fn open(inner: Arc<dyn Stage>, mode: WindowMode) -> Result<Self, StepError> {
         let session = session::Session::start(inner.as_ref(), mode).await?;
         let ip = session.ip_address().await?;
+
+        // Before connecting, not after: the first connection to an
+        // unauthorized container is refused outright, and the refusal is
+        // answered by a dialog on a screen nothing can drive yet.
+        adb::authorize(&waydroid_data_dir())?;
         let adb = adb::Adb::connect(&ip).await?;
+        // `boot_completed` is not enough — see `wait_for_services`.
+        adb.wait_for_services(SERVICES_TIMEOUT).await?;
         let identity = identity::Identity::new(adb.clone());
+
+        // Best effort. A failure here is the ordinary "bridge not installed"
+        // case, and it is reported by the ladder as a declined rung rather than
+        // as an error that stops Android working at all.
+        let bridge = match bridge::Bridge::connect(&adb).await {
+            Ok(bridge) => Some(Arc::new(bridge)),
+            Err(error) => {
+                eprintln!("artist: no Android accessibility bridge ({error}); rung 3 only");
+                None
+            }
+        };
+
         Ok(Self {
             inner,
             session,
             adb,
             identity,
+            bridge,
         })
     }
 
@@ -164,7 +203,12 @@ impl Stage for AndroidStage {
         // nothing here can signal it. Reported as the session's, which is the
         // process that would actually have to be stopped.
         Ok(AppHandle {
-            pid: self.session.info().await?.and_then(|info| info.pid).unwrap_or(0),
+            pid: self
+                .session
+                .info()
+                .await?
+                .and_then(|info| info.pid)
+                .unwrap_or(0),
             command,
         })
     }
@@ -189,23 +233,91 @@ impl Stage for AndroidStage {
         self.inner.text(window, text).await
     }
 
-    async fn pointer(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError> {
+    async fn pointer(
+        &self,
+        window: WindowKey,
+        pointing: crate::stage::Pointing,
+    ) -> Result<(), StepError> {
         // Thawed first, every time. A frozen container accepts input events and
         // does nothing with them, so the step reports success against a screen
         // that could not have changed — the single most confusing failure this
         // subsystem can produce.
         self.session.thaw().await?;
-        self.inner.pointer(window, at, button).await
+        self.inner.pointer(window, pointing).await
     }
 
-    async fn scroll(&self, window: WindowKey, at: Rect, amount: i32) -> Result<(), StepError> {
+    async fn scroll(
+        &self,
+        window: WindowKey,
+        at: Rect,
+        amount: i32,
+        axis: crate::program::Axis,
+    ) -> Result<(), StepError> {
         self.session.thaw().await?;
-        self.inner.scroll(window, at, amount).await
+        self.inner.scroll(window, at, amount, axis).await
     }
 
     async fn gesture(&self, window: WindowKey, gesture: &Gesture) -> Result<(), StepError> {
         self.session.thaw().await?;
         self.inner.gesture(window, gesture).await
+    }
+
+    async fn hover(&self, window: WindowKey, at: Rect) -> Result<(), StepError> {
+        self.session.thaw().await?;
+        self.inner.hover(window, at).await
+    }
+
+    async fn press(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError> {
+        self.session.thaw().await?;
+        self.inner.press(window, at, button).await
+    }
+
+    async fn release(&self, window: WindowKey, button: u32) -> Result<(), StepError> {
+        self.inner.release(window, button).await
+    }
+
+    async fn drag(
+        &self,
+        window: WindowKey,
+        from: Rect,
+        to: Rect,
+        button: u32,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        self.session.thaw().await?;
+        self.inner.drag(window, from, to, button, modifiers).await
+    }
+
+    async fn key_hold(
+        &self,
+        window: WindowKey,
+        stroke: &str,
+        pressed: bool,
+    ) -> Result<(), StepError> {
+        self.session.thaw().await?;
+        self.inner.key_hold(window, stroke, pressed).await
+    }
+
+    /// The container's clipboard is not the stage's.
+    ///
+    /// Android keeps its own, inside the container, and the Wayland selection
+    /// the stage owns is invisible to it. Answering with the stage's clipboard
+    /// would hand back whatever the *host* copied and present it as the phone's
+    /// — so this refuses until there is a bridge call for it.
+    async fn clipboard_get(&self) -> Result<Option<String>, StepError> {
+        Err(StepError::Backend(
+            "the Android container keeps its own clipboard, which the stage cannot read".into(),
+        ))
+    }
+
+    async fn clipboard_set(&self, _text: &str) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "the Android container keeps its own clipboard, which the stage cannot write".into(),
+        ))
+    }
+
+    async fn relax(&self, window: WindowKey) -> Result<(), StepError> {
+        self.inner.relax(window).await
     }
 
     async fn capture(&self, window: Option<WindowKey>) -> Result<Frame, StepError> {
@@ -214,6 +326,10 @@ impl Stage for AndroidStage {
 
     fn seat(&self) -> SeatCaps {
         self.inner.seat()
+    }
+
+    fn bridge(&self) -> Option<Arc<bridge::Bridge>> {
+        self.bridge.clone()
     }
 
     fn damage(&self) -> tokio::sync::broadcast::Receiver<Damage> {

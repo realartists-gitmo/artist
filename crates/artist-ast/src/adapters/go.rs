@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -841,14 +841,13 @@ fn _split_callee_go<'a, D: Doc>(
             let field = node.field("field")?;
             let operand = node.field("operand");
             let name = String::from_utf8_lossy(&src[field.range()]).to_string();
-            let receiver = operand
-                .map(|o| collapse_ws(&String::from_utf8_lossy(&src[o.range()])));
+            let receiver = operand.map(|o| collapse_ws(&String::from_utf8_lossy(&src[o.range()])));
             Some((name, receiver, CallKind::Call))
         }
         "index_expression" | "parenthesized_expression" => {
-            let inner = node.field("operand").or_else(|| {
-                node.children().find(|c| c.is_named())
-            })?;
+            let inner = node
+                .field("operand")
+                .or_else(|| node.children().find(|c| c.is_named()))?;
             _split_callee_go(&inner, src)
         }
         _ => {

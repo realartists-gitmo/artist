@@ -26,4 +26,15 @@ accelerate==1.11.0
 
 # torch 2.9 routes `torch.onnx.export` through the dynamo exporter, which
 # builds graphs via onnxscript. Not optional despite being undeclared by torch.
-onnxscript==0.5.4
+#
+# MUST be >= 0.7.x. On 0.5.4 the dynamo export dies at the very last step:
+#
+#   ValueError: The model contains functions. The version conversion pass does
+#   not support functions. (_ConvertVersionPassRequiresInline)
+#
+# `_compat.export_compat` calls `convert_version` unconditionally, so there is
+# no flag to skip it and no opset that avoids it. 0.7.1 inlines first and the
+# export succeeds. This pin is what stands between us and a KV-cached decoder:
+# the dynamo exporter is the only one that can serialise transformers'
+# DynamicCache, and it is the only one that works on this model's masks.
+onnxscript==0.7.1

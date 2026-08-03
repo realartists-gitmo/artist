@@ -11,11 +11,6 @@ tw = "test --release --workspace"
 
 
 [env]
-# The product profile's fat-LTO bin compile can exceed zccache's default 180s
-# wedge budget; at Low child priority it gets starved under load and the client
-# kills the daemon mid-compile (zccache#666).
-ZCCACHE_WEDGE_RECV_TIMEOUT_SECS = "1800"
-ZCCACHE_COMPILE_PRIORITY = "normal"
 # mnestic-rocks 0.1.10 (the memory store's RocksDB backend) vendors a RocksDB
 # whose headers rely on <cstdint> arriving transitively. GCC 13 stopped doing
 # that, so a cold build dies with a wall of "uint64_t has not been declared" in

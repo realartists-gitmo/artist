@@ -125,10 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // inode rather than by name, a container started against a previous run's
     // socket would keep rendering into the dead one while every path comparison
     // said it belonged to us.
-    let dir = std::path::Path::new(&runtime_dir).join(format!(
-        "artist-waydroid-gate-{}",
-        std::process::id()
-    ));
+    let dir = std::path::Path::new(&runtime_dir)
+        .join(format!("artist-waydroid-gate-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
 
     println!("== stage ==");
@@ -282,7 +280,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(&path, png)?;
                 println!();
                 println!("== capture ==");
-                println!("  {}x{} written to {}", frame.width, frame.height, path.display());
+                println!(
+                    "  {}x{} written to {}",
+                    frame.width,
+                    frame.height,
+                    path.display()
+                );
                 println!("  a non-black frame here is also the dmabuf import path proving itself");
             }
             Err(error) => eprintln!("  could not encode the capture: {error}"),
@@ -333,7 +336,9 @@ fn poke(
                 height: 0,
             };
             if index % 2 == 0 {
-                let _ = stage.pointer(key, point, 0x110).await;
+                let _ = stage
+                    .pointer(key, artist_computer::stage::Pointing::at(point))
+                    .await;
             } else {
                 let _ = stage.key(key, "Escape").await;
             }
@@ -458,17 +463,25 @@ impl Stats {
             return;
         }
 
-        println!("  {} events ({} lagged, {} unattributed to a window)",
-            self.events, self.lagged, self.unattributed);
-        println!("  {} of {} carried real damage rectangles from the client",
-            self.precise, self.events);
+        println!(
+            "  {} events ({} lagged, {} unattributed to a window)",
+            self.events, self.lagged, self.unattributed
+        );
+        println!(
+            "  {} of {} carried real damage rectangles from the client",
+            self.precise, self.events
+        );
         for (bucket, count) in &self.buckets {
             let share = 100.0 * *count as f64 / self.events as f64;
             println!("    {bucket:>8}  {count:>6}  {share:>5.1}%");
         }
         let mean = self.total_fraction / self.events as f64;
-        println!("  mean {:.2}% of window, smallest {:.3}%, largest {:.1}%",
-            100.0 * mean, 100.0 * self.smallest, 100.0 * self.largest);
+        println!(
+            "  mean {:.2}% of window, smallest {:.3}%, largest {:.1}%",
+            100.0 * mean,
+            100.0 * self.smallest,
+            100.0 * self.largest
+        );
 
         let degenerate_share = self.degenerate as f64 / self.events as f64;
         println!();
@@ -477,22 +490,28 @@ impl Stats {
         // they call for completely different work. Silence about which one we
         // are in is how a measurement becomes folklore.
         if self.precise == 0 {
-            println!("  VERDICT: NO DAMAGE INFORMATION. The client committed {} buffers",
-                self.events);
+            println!(
+                "  VERDICT: NO DAMAGE INFORMATION. The client committed {} buffers",
+                self.events
+            );
             println!("  without attaching a single damage rectangle, so every region above is");
             println!("  the compositor's own conservative bound rather than anything Waydroid");
             println!("  said. SurfaceFlinger's rects are not reaching the wire at all — which");
             println!("  is a different problem from them arriving and being coarse, and is not");
             println!("  fixable from our side of the socket.");
         } else if degenerate_share > 0.5 {
-            println!("  VERDICT: DEGENERATE. {:.0}% of frames damage the whole surface,",
-                100.0 * degenerate_share);
+            println!(
+                "  VERDICT: DEGENERATE. {:.0}% of frames damage the whole surface,",
+                100.0 * degenerate_share
+            );
             println!("  and the rectangles are real rather than synthesized. Damage carries no");
             println!("  usable location information here: settle must fall back to frame");
             println!("  differencing, and incremental OCR loses its 15x.");
         } else {
-            println!("  VERDICT: TIGHT. {:.0}% of frames damage a real sub-region.",
-                100.0 * (1.0 - degenerate_share));
+            println!(
+                "  VERDICT: TIGHT. {:.0}% of frames damage a real sub-region.",
+                100.0 * (1.0 - degenerate_share)
+            );
             println!("  damage.rs needs no Android-specific work: settle predicates and");
             println!("  incremental OCR carry over as designed.");
         }

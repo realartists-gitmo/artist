@@ -1,5 +1,6 @@
 mod activity_indicator;
 mod args;
+mod ask_ui;
 mod canvas_host;
 mod canvas_window;
 mod chat_ui;
@@ -18,7 +19,6 @@ mod models;
 mod prompt;
 mod provider_commands;
 mod response_output;
-mod sessions;
 mod settings;
 mod slash_commands;
 mod startup_splash;
@@ -32,20 +32,100 @@ mod tool_ui;
 
 use anyhow::{Context, Result, bail};
 use args::{Cli, Command, ProfilesCommand, RulesCommand, SessionsCommand};
+use artist_session::{ActiveSession, SessionStore};
 use artist_tools::{ToolBundle, Workspace};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
 use rig_core::memory::ConversationMemory;
-use sessions::{ActiveSession, SessionStore};
+use serde::Deserialize;
 use std::{
-    io::IsTerminal,
+    collections::HashSet,
+    io::{BufRead, IsTerminal},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FrontendControl {
+    Steer { message: String },
+    Answer { answer: artist_session::Answer },
+    Stop,
+}
+
+#[derive(Debug)]
+pub enum EmbeddedEvent {
+    Prompt(artist_agent::PromptEvent),
+    Question(artist_session::Question),
+    Session(String),
+}
+
+/// Reusable non-terminal runtime owned by a session host. Provider state, MCP
+/// connections, extensions, and their caches live for the host lifetime rather
+/// than being reconstructed by a child process for every prompt.
+pub struct EmbeddedRuntime {
+    store: ProviderStore,
+    provider_path: std::path::PathBuf,
+    mcp: artist_agent::mcp::McpManager,
+    extensions: Arc<artist_extensions::Manager>,
+    extension_control: extension_control::ExtensionControl,
+}
+
+impl EmbeddedRuntime {
+    pub async fn open(project: &std::path::Path) -> Result<Self> {
+        std::env::set_current_dir(project)
+            .with_context(|| format!("enter project {}", project.display()))?;
+        let provider_path = config_path()?;
+        let store = ProviderStore::load(&provider_path)?;
+        let config_root = provider_path
+            .parent()
+            .context("providers path has no parent")?;
+        let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
+        let extension_control = extension_control::ExtensionControl::default();
+        let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;
+        Ok(Self {
+            store,
+            provider_path,
+            mcp,
+            extensions,
+            extension_control,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn turn(
+        &mut self,
+        input: &str,
+        session: &str,
+        lineage: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        profile: Option<&str>,
+        events: tokio::sync::mpsc::UnboundedSender<EmbeddedEvent>,
+        controls: &mut tokio::sync::mpsc::UnboundedReceiver<FrontendControl>,
+    ) -> Result<()> {
+        execute_prompt(
+            &mut self.store,
+            &self.provider_path,
+            input,
+            Some(session),
+            provider,
+            model,
+            profile,
+            Some(lineage),
+            &self.mcp,
+            &self.extensions,
+            &self.extension_control,
+            Some(&events),
+            Some(controls),
+        )
+        .await
+    }
+}
 use store::{ProviderStore, config_path};
 
 #[tokio::main]
-async fn main() {
+pub async fn main() {
     if let Err(error) = run().await {
         eprintln!("Error: {error:#}");
         std::process::exit(1);
@@ -85,16 +165,26 @@ async fn run() -> Result<()> {
         let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
         let extension_control = extension_control::ExtensionControl::default();
         let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;
-        return execute_prompt(
+        let result = execute_prompt(
             &mut store,
             &path,
             &prompt,
             cli.resume.as_deref(),
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            cli.profile.as_deref(),
+            cli.lineage.as_deref(),
             &mcp,
             &extensions,
             &extension_control,
+            None,
+            None,
         )
         .await;
+        if std::env::var("ARTIST_EVENT_STREAM").as_deref() == Ok("jsonl") {
+            eprintln!("ARTIST_EVENT_STREAM_DONE=1");
+        }
+        return result;
     }
     match cli.command {
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -354,11 +444,26 @@ async fn execute_prompt(
     path: &std::path::Path,
     input: &str,
     resume: Option<&str>,
+    provider_override: Option<&str>,
+    model_override: Option<&str>,
+    profile_override: Option<&str>,
+    lineage_override: Option<&str>,
     mcp: &artist_agent::mcp::McpManager,
     extensions: &Arc<artist_extensions::Manager>,
     extension_control: &extension_control::ExtensionControl,
+    embedded_events: Option<&tokio::sync::mpsc::UnboundedSender<EmbeddedEvent>>,
+    mut embedded_controls: Option<&mut tokio::sync::mpsc::UnboundedReceiver<FrontendControl>>,
 ) -> Result<()> {
-    let selected = default_index(store)?;
+    let selected = match provider_override {
+        Some(reference) => store
+            .providers
+            .iter()
+            .position(|provider| {
+                provider.id.as_str() == reference || provider.name.eq_ignore_ascii_case(reference)
+            })
+            .with_context(|| format!("configured provider not found: {reference}"))?,
+        None => default_index(store)?,
+    };
     if refresh_if_needed(&mut store.providers[selected]).await? {
         store.save(path)?;
     }
@@ -373,14 +478,45 @@ async fn execute_prompt(
     )?;
     // Session-scoped provider carrying the settings model/reasoning override
     // (a throwaway clone, never persisted).
-    let session_provider = effective.apply_to(store.providers[selected].clone());
+    let mut session_provider = effective.apply_to(store.providers[selected].clone());
+    if let Some(model) = model_override {
+        if model.trim().is_empty() {
+            bail!("model override cannot be empty");
+        }
+        session_provider.model = Some(model.to_owned());
+    }
     let tools = tool_bundle(config_root, &project)?;
     let (active, resumed_events) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
-    compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
-        .await?;
+    let target_lineage = lineage_override.unwrap_or(artist_session::MAIN_LINEAGE);
+    anyhow::ensure!(
+        target_lineage == artist_session::MAIN_LINEAGE
+            || target_lineage.starts_with("main/delegate-"),
+        "invalid agent lineage {target_lineage:?}"
+    );
+    anyhow::ensure!(
+        target_lineage == artist_session::MAIN_LINEAGE
+            || resumed_events
+                .iter()
+                .any(|event| event.lineage == target_lineage),
+        "agent lineage {target_lineage:?} does not exist in session {}",
+        active.session.id
+    );
+    if std::env::var("ARTIST_EVENT_STREAM").as_deref() == Ok("jsonl") {
+        eprintln!("ARTIST_EVENT_STREAM_READY=1");
+    }
+    if std::env::var_os("ARTIST_EMIT_SESSION_ID").is_some() {
+        eprintln!("ARTIST_SESSION_ID={}", active.session.id);
+    }
+    if let Some(events) = embedded_events {
+        let _ = events.send(EmbeddedEvent::Session(active.session.id.clone()));
+    }
+    if target_lineage == artist_session::MAIN_LINEAGE {
+        compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
+            .await?;
+    }
     let rules_engine = artist_rules::RulesEngine::discover(&project);
     // Restore prior rule state (once-per-session fires, persistent injections)
     // when resuming — the TUI path does this too; `-p` must match or a resumed
@@ -389,6 +525,26 @@ async fn execute_prompt(
     rules.restore_from_log(&resumed_events);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
+    let frontend_control = std::env::var("ARTIST_CONTROL_STREAM").as_deref() == Ok("jsonl")
+        || embedded_controls.is_some();
+    let ask = frontend_control
+        .then(|| artist_session::AskRegistry::with_recorder(active.recorder.clone()));
+    let (control_send, mut control_receive) = tokio::sync::mpsc::unbounded_channel();
+    if frontend_control {
+        std::thread::spawn(move || {
+            for line in std::io::stdin()
+                .lock()
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                if let Ok(command) = serde_json::from_str::<FrontendControl>(&line) {
+                    if control_send.send(command).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
     let effective_context_window =
         models::catalog(&session_provider)
             .await
@@ -400,17 +556,60 @@ async fn execute_prompt(
                     .and_then(|model| model.effective_context_window())
             });
     let durable_memory = open_memory(config_root, &effective.memory).await;
+    let target_recorder = target_lineage
+        .strip_prefix("main/")
+        .map(|suffix| {
+            suffix
+                .split('/')
+                .fold(active.recorder.clone(), |recorder, part| {
+                    recorder.child_lineage(part)
+                })
+        })
+        .unwrap_or_else(|| active.recorder.clone());
+    let conversation_id = if target_lineage == artist_session::MAIN_LINEAGE {
+        active.session.id.clone()
+    } else {
+        format!("{}:{target_lineage}", active.session.id)
+    };
+    let recorded_identity = resumed_events.iter().rev().find_map(|envelope| {
+        if envelope.lineage != target_lineage {
+            return None;
+        }
+        match envelope.event() {
+            artist_session::SessionEvent::RunStarted(run) => Some(artist_agent::RecordedIdentity {
+                name: run.agent?,
+                actor: run.actor?,
+            }),
+            _ => None,
+        }
+    });
+    let target_memory = if target_lineage == artist_session::MAIN_LINEAGE {
+        active.memory.clone()
+    } else {
+        artist_session::SessionMemory::for_lineage(
+            conversation_id.clone(),
+            target_lineage,
+            active.session.dir(),
+            target_recorder.clone(),
+            active.attachments.clone(),
+        )
+    };
     let handles = artist_agent::SessionHandles {
         steering: steering.clone(),
         rules,
         rule_set: rules_engine.snapshot(),
-        recorder: active.recorder.clone(),
-        memory: Arc::new(active.memory.clone()),
+        recorder: target_recorder,
+        memory: Arc::new(target_memory),
         durable_memory,
-        conversation_id: active.session.id.clone(),
+        conversation_id,
+        recorded_identity,
         provider_context: active.provider_context.clone(),
         effective_context_window,
         fast_mode: false,
+        // A structured frontend control stream makes the one-shot invocation
+        // interactive without borrowing the terminal. Plain `artist -p`
+        // remains non-interactive and therefore does not advertise `ask`.
+        ask: ask.clone(),
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
         providers: llm_provider::ProviderSet::new(store.providers.clone()),
@@ -434,7 +633,7 @@ async fn execute_prompt(
         capabilities: artist_session::ProviderCapabilities::for_session(),
         statefulness: effective.statefulness,
     };
-    extension_control.set_steering(Some(steering));
+    extension_control.set_steering(Some(steering.clone()));
     extensions
         .update_context(|context| context.agent_state = serde_json::json!({"state":"thinking"}));
     let _ = extensions.publish(artist_extensions::Event {
@@ -442,13 +641,28 @@ async fn execute_prompt(
         payload: serde_json::json!({"state":"thinking"}),
     });
     let styled = std::io::stdout().is_terminal();
+    let json_event_stream = std::env::var("ARTIST_EVENT_STREAM").as_deref() == Ok("jsonl");
     let mut reasoning = false;
     let mut response = String::new();
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
     let outcome = {
         // A resumed session runs as whatever profile it last handed off to.
-        let session_profile =
-            artist_session::active_profile(&resumed_events).unwrap_or_else(|| "default".to_owned());
+        let recorded_lineage_profile = resumed_events.iter().rev().find_map(|envelope| {
+            if envelope.lineage != target_lineage {
+                return None;
+            }
+            match envelope.event() {
+                artist_session::SessionEvent::RunStarted(run) => run.profile,
+                _ => None,
+            }
+        });
+        let session_profile = profile_override
+            .map(str::to_owned)
+            .or(recorded_lineage_profile)
+            .unwrap_or_else(|| {
+                artist_session::active_profile(&resumed_events)
+                    .unwrap_or_else(|| "default".to_owned())
+            });
         let chat = artist_agent::stream_chat_as(
             &session_provider,
             &session_profile,
@@ -464,8 +678,21 @@ async fn execute_prompt(
             handles,
             |event| {
                 publish_prompt_event(extensions, &event);
+                if let Some(events) = embedded_events {
+                    let _ = events.send(EmbeddedEvent::Prompt(event.clone()));
+                }
                 use artist_agent::PromptEvent;
                 use std::io::Write;
+                if json_event_stream {
+                    let mut events = std::io::stderr().lock();
+                    serde_json::to_writer(&mut events, &event)?;
+                    writeln!(events)?;
+                    events.flush()?;
+                    if let PromptEvent::TextDelta(delta) = &event {
+                        response.push_str(delta);
+                    }
+                    return Ok(());
+                }
                 let mut output = std::io::stdout().lock();
                 match event {
                     PromptEvent::ReasoningSummaryDelta(delta) => {
@@ -514,10 +741,48 @@ async fn execute_prompt(
         // cooperative cancellation token (the run records its cancelled
         // state and preserves accumulated output as a partial turn).
         tokio::pin!(chat);
+        let mut announced_questions = HashSet::new();
         loop {
             tokio::select! {
                 result = &mut chat => break result,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    while let Ok(command) = control_receive.try_recv() {
+                        match command {
+                            FrontendControl::Steer { message } => steering.enqueue(message),
+                            FrontendControl::Answer { answer } => {
+                                if let Some(ask) = &ask {
+                                    ask.answer_from(answer, "gui");
+                                }
+                            }
+                            FrontendControl::Stop => cancel.cancel(),
+                        }
+                    }
+                    if let Some(controls) = embedded_controls.as_deref_mut() {
+                        while let Ok(command) = controls.try_recv() {
+                            match command {
+                                FrontendControl::Steer { message } => steering.enqueue(message),
+                                FrontendControl::Answer { answer } => {
+                                    if let Some(ask) = &ask {
+                                        ask.answer_from(answer, "gui");
+                                    }
+                                }
+                                FrontendControl::Stop => cancel.cancel(),
+                            }
+                        }
+                    }
+                    if let Some(ask) = &ask {
+                        for question in ask.pending() {
+                            if announced_questions.insert(question.id.clone()) {
+                                if let Some(events) = embedded_events {
+                                    let _ = events.send(EmbeddedEvent::Question(question.clone()));
+                                }
+                                eprintln!(
+                                    "ARTIST_QUESTION={}",
+                                    serde_json::to_string(&question).unwrap_or_default()
+                                );
+                            }
+                        }
+                    }
                     if extension_control.take_stop() {
                         cancel.cancel();
                     }
@@ -542,9 +807,15 @@ async fn execute_prompt(
             path,
             &followup,
             Some(&session_id),
+            provider_override,
+            model_override,
+            profile_override,
+            lineage_override,
             mcp,
             extensions,
             extension_control,
+            embedded_events,
+            embedded_controls.as_deref_mut(),
         ))
         .await?;
     }
@@ -817,8 +1088,8 @@ fn computer_socket(given: Option<std::path::PathBuf>) -> Result<std::path::PathB
     if let Some(path) = given {
         return Ok(path);
     }
-    let runtime = std::env::var("XDG_RUNTIME_DIR")
-        .context("XDG_RUNTIME_DIR is not set; pass --socket")?;
+    let runtime =
+        std::env::var("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set; pass --socket")?;
     Ok(std::path::Path::new(&runtime).join("artist-computer.sock"))
 }
 
@@ -837,7 +1108,10 @@ async fn computer_serve(socket: Option<std::path::PathBuf>) -> Result<()> {
     // start fail with "address in use" and no hint as to why.
     if path.exists() {
         if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-            anyhow::bail!("another `artist computer serve` is already listening on {}", path.display());
+            anyhow::bail!(
+                "another `artist computer serve` is already listening on {}",
+                path.display()
+            );
         }
         std::fs::remove_file(&path)?;
     }
@@ -1035,11 +1309,7 @@ fn steps_len(document: &serde_json::Value) -> usize {
         .unwrap_or(0)
 }
 
-async fn computer_replay(
-    file: &std::path::Path,
-    launch: Option<&str>,
-    heal: bool,
-) -> Result<()> {
+async fn computer_replay(file: &std::path::Path, launch: Option<&str>, heal: bool) -> Result<()> {
     use artist_computer::macros::{Healing, Macro};
 
     let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
@@ -1076,7 +1346,7 @@ async fn computer_replay(
         );
         let launched = registry
             .host()
-            .launch(&program, &args, None)
+            .launch(&program, &args, None, None)
             .await
             .map_err(|error| anyhow::anyhow!("launch {program}: {error}"))?;
         let id = registry.attach_with_declines(launched.surface, launched.declined);
@@ -1274,8 +1544,10 @@ async fn sessions_gc(
 ) -> Result<()> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let cutoff = now.saturating_sub(older_than_days.saturating_mul(24 * 60 * 60 * 1000));
-    let mut by_project: std::collections::BTreeMap<std::path::PathBuf, Vec<sessions::Session>> =
-        Default::default();
+    let mut by_project: std::collections::BTreeMap<
+        std::path::PathBuf,
+        Vec<artist_session::Session>,
+    > = Default::default();
     for session in sessions.list()? {
         by_project
             .entry(session.project.clone())
@@ -1735,4 +2007,19 @@ pub(crate) async fn force_refresh(provider: &mut llm_provider::SavedProvider) ->
         .auth;
     *provider.chatgpt_auth_mut()? = refreshed;
     Ok(())
+}
+
+#[cfg(test)]
+mod frontend_control_tests {
+    use super::FrontendControl;
+
+    #[test]
+    fn structured_frontend_commands_parse_without_cli_text_scraping() {
+        let steer: FrontendControl =
+            serde_json::from_str(r#"{"type":"steer","message":"look again"}"#).unwrap();
+        assert!(matches!(steer, FrontendControl::Steer { message } if message == "look again"));
+
+        let stop: FrontendControl = serde_json::from_str(r#"{"type":"stop"}"#).unwrap();
+        assert!(matches!(stop, FrontendControl::Stop));
+    }
 }

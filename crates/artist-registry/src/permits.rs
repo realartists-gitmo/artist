@@ -72,7 +72,9 @@ impl Permits {
             return Ok(None);
         }
 
-        let path = self.dir.join(format!("{}-{}", std::process::id(), unique()));
+        let path = self
+            .dir
+            .join(format!("{}-{}", std::process::id(), unique()));
         write_atomic(
             &path,
             &serde_json::to_vec(&Claim {

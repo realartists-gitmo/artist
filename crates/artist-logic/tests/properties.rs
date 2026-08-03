@@ -59,7 +59,10 @@ struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
         // Numerical Recipes LCG. Reproducible is the only requirement.
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
     fn below(&mut self, n: u64) -> u64 {
@@ -103,7 +106,11 @@ impl GraphStructure for Mixed {
         Knowledge::Unknown
     }
     fn rules(&self, pred: ObjectId) -> Vec<ObjectId> {
-        self.rules.iter().filter(|(p, _)| *p == pred).map(|(_, r)| *r).collect()
+        self.rules
+            .iter()
+            .filter(|(p, _)| *p == pred)
+            .map(|(_, r)| *r)
+            .collect()
     }
     fn extension(&self, domain: ObjectId) -> Option<artist_logic::graph_eval::Extension> {
         (domain == self.domain).then(|| artist_logic::graph_eval::Extension {
@@ -152,7 +159,11 @@ impl Gen {
             6 => {
                 let v = g.fresh();
                 let body = self.prop(g, r, depth - 1);
-                let binder = if r.below(2) == 0 { wk::FORALL } else { wk::EXISTS };
+                let binder = if r.below(2) == 0 {
+                    wk::FORALL
+                } else {
+                    wk::EXISTS
+                };
                 // One case in four quantifies over an *integer* domain, which is
                 // the only route into `infinite()` and the tail abstraction. The
                 // generator used to pass `Some(self.domain)` every time, and
@@ -176,8 +187,16 @@ impl Gen {
                 } else {
                     g.apply(wk::LEQ, vec![k, v])
                 };
-                let binder = if r.below(2) == 0 { wk::FORALL } else { wk::EXISTS };
-                let dom = if r.below(2) == 0 { wk::NAT_TYPE } else { wk::INT_TYPE };
+                let binder = if r.below(2) == 0 {
+                    wk::FORALL
+                } else {
+                    wk::EXISTS
+                };
+                let dom = if r.below(2) == 0 {
+                    wk::NAT_TYPE
+                } else {
+                    wk::INT_TYPE
+                };
                 g.quantify(binder, v, Some(dom), body)
             }
             7 => {
@@ -187,8 +206,14 @@ impl Gen {
             8 => {
                 let v = g.fresh();
                 let body = self.prop(g, r, depth - 1);
-                let counted =
-                    g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(self.domain) }], vec![body]);
+                let counted = g.bind(
+                    wk::COUNT,
+                    vec![Binding {
+                        var: v,
+                        domain: Some(self.domain),
+                    }],
+                    vec![body],
+                );
                 let n = g.int(r.below(4) as i64);
                 if r.below(2) == 0 {
                     g.apply(wk::LEQ, vec![counted, n])
@@ -261,8 +286,26 @@ fn fixture(seed: u64) -> (ObjectGraph, Gen, Mixed, Rng) {
     let rule = g.quantify(wk::FORALL, x, None, imp);
     let rules = vec![(preds[2], rule)];
 
-    let s = Mixed { holds, denied, rules, defaults, domain, members, complete, world };
-    (g, Gen { preds, consts, domain }, s, r)
+    let s = Mixed {
+        holds,
+        denied,
+        rules,
+        defaults,
+        domain,
+        members,
+        complete,
+        world,
+    };
+    (
+        g,
+        Gen {
+            preds,
+            consts,
+            domain,
+        },
+        s,
+        r,
+    )
 }
 
 /// The information order: `must` grows and `may` shrinks. `Certain` on a side
@@ -410,7 +453,11 @@ fn a_sentence_does_not_depend_on_its_spelling() {
         };
         let a = ev.eval(&mut g, double_not, &s, 5_000);
         let b = ev.eval(&mut g, via_implies, &s, 5_000);
-        agree(&a, &b, &format!("seed {seed}: ¬¬P vs ¬(¬P ∨ ⊥) on {}", print(&g, p)));
+        agree(
+            &a,
+            &b,
+            &format!("seed {seed}: ¬¬P vs ¬(¬P ∨ ⊥) on {}", print(&g, p)),
+        );
 
         // …and `P ∨ Q` against `¬P → Q`.
         let q = shapes.prop(&mut g, &mut r, 2);
@@ -439,7 +486,9 @@ fn a_sentence_does_not_depend_on_its_spelling() {
 #[test]
 fn round_tripping_generated_atoms_preserves_evaluation() {
     let ev = GraphEvaluator::new();
-    let alphabet = ['a', 'z', '0', '1', '9', 'd', 'x', 'e', '-', '+', '.', '_', 'f'];
+    let alphabet = [
+        'a', 'z', '0', '1', '9', 'd', 'x', 'e', '-', '+', '.', '_', 'f',
+    ];
     for seed in 0..600u64 {
         let mut r = Rng(seed.wrapping_mul(0x2545F4914F6CDD1D).wrapping_add(7));
         let len = 1 + r.below(4) as usize;
@@ -455,8 +504,9 @@ fn round_tripping_generated_atoms_preserves_evaluation() {
         let before = ev.eval(&mut g, term, &s, 10_000);
 
         let mut fresh = ObjectGraph::new();
-        let back = parse(&mut fresh, &text)
-            .unwrap_or_else(|e| panic!("atom {name:?} printed as {text} and would not reparse: {e}"));
+        let back = parse(&mut fresh, &text).unwrap_or_else(|e| {
+            panic!("atom {name:?} printed as {text} and would not reparse: {e}")
+        });
         // The reparsed graph must still contain an *atom* with that name — not a
         // literal that merely prints the same way.
         let kids = fresh.children(back);
@@ -558,7 +608,10 @@ fn the_literal_shaped_atom_names_survive() {
 fn quoting_atoms_does_not_break_real_literals() {
     let mut g = ObjectGraph::new();
     let holder = g.atom("h");
-    let d = g.lit(LiteralValue::Decimal { mantissa: BigInt::from(-12345), scale: 3 });
+    let d = g.lit(LiteralValue::Decimal {
+        mantissa: BigInt::from(-12345),
+        scale: 3,
+    });
     let b = g.lit(LiteralValue::Bytes(vec![0, 255]));
     let i = g.lit(LiteralValue::Int(BigInt::from(-7)));
     let term = g.apply(holder, vec![d, b, i]);
@@ -571,11 +624,15 @@ fn quoting_atoms_does_not_break_real_literals() {
     let kids = fresh.children(back);
     assert!(matches!(
         fresh.get(kids[1]),
-        Some(artist_logic::object::CoreNode::Literal(LiteralValue::Decimal { scale: 3, .. }))
+        Some(artist_logic::object::CoreNode::Literal(
+            LiteralValue::Decimal { scale: 3, .. }
+        ))
     ));
     assert!(matches!(
         fresh.get(kids[2]),
-        Some(artist_logic::object::CoreNode::Literal(LiteralValue::Bytes(_)))
+        Some(artist_logic::object::CoreNode::Literal(
+            LiteralValue::Bytes(_)
+        ))
     ));
 }
 

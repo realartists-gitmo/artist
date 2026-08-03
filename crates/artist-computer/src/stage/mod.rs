@@ -189,6 +189,51 @@ pub enum Gesture {
     },
 }
 
+/// One pointer click, fully specified.
+///
+/// A struct rather than five positional arguments because the last three are
+/// all "usually the default" — a bare left click is `Pointing::at(rect)`, and
+/// the interesting cases name what makes them interesting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pointing {
+    pub at: Rect,
+    /// An evdev button code. [`crate::program::Button::evdev`] produces it.
+    pub button: u32,
+    /// 2 is a double click, delivered inside the toolkit's double-click window
+    /// rather than as two independent clicks — which is the whole difference
+    /// between opening a file and renaming it.
+    pub count: u8,
+    /// Held down for the duration, then released.
+    pub modifiers: crate::keys::Modifiers,
+}
+
+impl Pointing {
+    /// A single unmodified left click, which is what most callers want.
+    pub fn at(at: Rect) -> Self {
+        Self {
+            at,
+            button: 0x110,
+            count: 1,
+            modifiers: crate::keys::Modifiers::default(),
+        }
+    }
+
+    pub fn with_button(mut self, button: u32) -> Self {
+        self.button = button;
+        self
+    }
+
+    pub fn with_count(mut self, count: u8) -> Self {
+        self.count = count;
+        self
+    }
+
+    pub fn with_modifiers(mut self, modifiers: crate::keys::Modifiers) -> Self {
+        self.modifiers = modifiers;
+        self
+    }
+}
+
 /// What a stage's seat can actually do.
 ///
 /// Reported rather than assumed, because a surface's [`crate::model::Caps`] is
@@ -203,6 +248,16 @@ pub struct SeatCaps {
     pub pointer: bool,
     pub scroll: bool,
     pub touch: bool,
+    /// Buttons past the left one, and a pointer that can move without pressing.
+    /// Separate from `pointer` because a seat can deliver a click and still have
+    /// no way to express hover or a right button.
+    pub buttons: bool,
+    /// A selection this seat can read and write.
+    pub clipboard: bool,
+    /// A stylus with pressure and tilt.
+    pub tablet: bool,
+    /// A gamepad the seat can drive.
+    pub gamepad: bool,
 }
 
 /// An isolated graphical session.
@@ -217,7 +272,7 @@ pub trait Stage: Send + Sync {
     async fn focus(&self, window: WindowKey) -> Result<(), StepError>;
     async fn key(&self, window: WindowKey, stroke: &str) -> Result<(), StepError>;
     async fn text(&self, window: WindowKey, text: &str) -> Result<(), StepError>;
-    async fn pointer(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError>;
+    async fn pointer(&self, window: WindowKey, pointing: Pointing) -> Result<(), StepError>;
     async fn capture(&self, window: Option<WindowKey>) -> Result<Frame, StepError>;
 
     /// What this seat has. The default is the seat as it shipped: keys and a
@@ -226,9 +281,102 @@ pub trait Stage: Send + Sync {
         SeatCaps {
             keyboard: true,
             pointer: true,
-            scroll: false,
-            touch: false,
+            ..SeatCaps::default()
         }
+    }
+
+    /// Move the pointer onto something and leave it there.
+    ///
+    /// The pointer stays put afterwards, which is the point: a menu opened by
+    /// hovering closes the instant the pointer leaves, so a hover that tidied up
+    /// after itself would be indistinguishable from doing nothing.
+    async fn hover(&self, _window: WindowKey, _at: Rect) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat cannot move the pointer without clicking".into(),
+        ))
+    }
+
+    /// Press a button and hold it. Paired with [`Stage::release`].
+    async fn press(&self, _window: WindowKey, _at: Rect, _button: u32) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat cannot hold a button down".into(),
+        ))
+    }
+
+    /// Let go of a held button, wherever the pointer now is.
+    async fn release(&self, _window: WindowKey, _button: u32) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat cannot hold a button down".into(),
+        ))
+    }
+
+    /// Drag along a path, with real intermediate motion.
+    ///
+    /// Not press-then-release at two points: a drag with no motion between its
+    /// endpoints is ignored by every toolkit that starts a drag from a movement
+    /// threshold, which is all of them.
+    async fn drag(
+        &self,
+        _window: WindowKey,
+        _from: Rect,
+        _to: Rect,
+        _button: u32,
+        _modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        Err(StepError::Backend("this stage's seat cannot drag".into()))
+    }
+
+    /// Hold a key down, or let it go.
+    async fn key_hold(
+        &self,
+        _window: WindowKey,
+        _stroke: &str,
+        _pressed: bool,
+    ) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage's seat cannot hold a key down".into(),
+        ))
+    }
+
+    /// Read the seat's selection.
+    ///
+    /// `None` means the clipboard is empty, which is different from a seat that
+    /// has no clipboard at all — that is the error.
+    async fn clipboard_get(&self) -> Result<Option<String>, StepError> {
+        Err(StepError::Backend("this stage has no clipboard".into()))
+    }
+
+    async fn clipboard_set(&self, _text: &str) -> Result<(), StepError> {
+        Err(StepError::Backend("this stage has no clipboard".into()))
+    }
+
+    /// Ask a window to close, the way its titlebar button would.
+    ///
+    /// A request, not a kill: the client may raise "save your work?" instead,
+    /// and that dialog is a surface like any other.
+    async fn close_window(&self, _window: WindowKey) -> Result<(), StepError> {
+        Err(StepError::Backend(
+            "this stage cannot close a window".into(),
+        ))
+    }
+
+    /// Resize the output every window is given.
+    ///
+    /// The stage has one output and every toplevel fills it, so this is what
+    /// "resize the window" means here — and it is worth having because viewport
+    /// size changes what a responsive application shows.
+    async fn resize(&self, _width: u32, _height: u32) -> Result<(), StepError> {
+        Err(StepError::Backend("this stage cannot be resized".into()))
+    }
+
+    /// Let go of everything: held buttons, held keys, live touch contacts.
+    ///
+    /// Called after every program, always. A seat outlives the program that
+    /// used it, so a button left down turns the next program's click into a
+    /// drag and a held ctrl turns its typing into shortcuts — a corruption that
+    /// shows up somewhere else entirely and looks like a backend fault.
+    async fn relax(&self, _window: WindowKey) -> Result<(), StepError> {
+        Ok(())
     }
 
     /// Scroll at a point. Positive `amount` scrolls down, in pixels, matching
@@ -237,10 +385,29 @@ pub trait Stage: Send + Sync {
     /// Defaults to a refusal rather than a silent success: a stage that cannot
     /// scroll and says `ok` is indistinguishable, to the model, from a list that
     /// was already at the bottom.
-    async fn scroll(&self, _window: WindowKey, _at: Rect, _amount: i32) -> Result<(), StepError> {
+    async fn scroll(
+        &self,
+        _window: WindowKey,
+        _at: Rect,
+        _amount: i32,
+        _axis: crate::program::Axis,
+    ) -> Result<(), StepError> {
         Err(StepError::Backend(
             "this stage's seat has no scroll axis".into(),
         ))
+    }
+
+    /// The Android accessibility bridge, when this stage has one.
+    ///
+    /// On the trait rather than reached for by downcasting, because the attach
+    /// path should not have to know which concrete stage it is holding — it
+    /// asks every stage the same question and Android is the only one that
+    /// answers. `None` also covers the ordinary Android case where the bridge
+    /// APK is simply not installed, which is a rung to decline rather than a
+    /// failure.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    fn bridge(&self) -> Option<std::sync::Arc<crate::android::bridge::Bridge>> {
+        None
     }
 
     /// Deliver a touch gesture.
@@ -248,6 +415,28 @@ pub trait Stage: Send + Sync {
         Err(StepError::Backend(
             "this stage's seat has no touch device".into(),
         ))
+    }
+
+    /// Draw a stroke with a stylus.
+    ///
+    /// Separate from [`Stage::drag`] because a stylus is not a mouse that
+    /// reports extra numbers: a drawing application reads pressure to decide
+    /// stroke width and tilt to decide nib shape, and it reads them from a
+    /// different protocol object entirely. A drag with a pressure asked for and
+    /// no tablet under it must refuse rather than fall back to the pointer —
+    /// the resulting line would be the right shape and the wrong weight, which
+    /// looks like the application misbehaving.
+    ///
+    /// `pressure` is 0.0 to 1.0. `tilt` is degrees from vertical on each axis.
+    async fn stylus(
+        &self,
+        _window: WindowKey,
+        _from: Rect,
+        _to: Rect,
+        _pressure: f32,
+        _tilt: (f32, f32),
+    ) -> Result<(), StepError> {
+        Err(StepError::Backend("this stage's seat has no tablet".into()))
     }
 
     /// Subscribe to damage. Used to build settle predicates.

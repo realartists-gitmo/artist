@@ -32,9 +32,13 @@ fn a_source_that_does_not_exist_is_not_an_authority() {
     let (p, a, adam) = (g.atom("p"), g.atom("a"), g.atom("adam"));
     let claim = g.apply(p, vec![a]);
 
-    let real = cert(vec![Step::Told { node: claim, holds: true, sources: vec![adam] }])
-        .check(&g)
-        .expect("valid");
+    let real = cert(vec![Step::Told {
+        node: claim,
+        holds: true,
+        sources: vec![adam],
+    }])
+    .check(&g)
+    .expect("valid");
     assert_eq!(real.authorities, vec![adam]);
     assert!(real.assumed.is_empty());
 
@@ -45,8 +49,15 @@ fn a_source_that_does_not_exist_is_not_an_authority() {
     }])
     .check(&g)
     .expect("the step is well-formed; the *source* is what is bogus");
-    assert!(forged.authorities.is_empty(), "an id nobody minted vouches for nothing");
-    assert_eq!(forged.assumed, vec![claim], "and the trust is recorded instead");
+    assert!(
+        forged.authorities.is_empty(),
+        "an id nobody minted vouches for nothing"
+    );
+    assert_eq!(
+        forged.assumed,
+        vec![claim],
+        "and the trust is recorded instead"
+    );
 }
 
 /// **Γ empty means unconditional.** Semantics §7.1: a certificate proves a
@@ -66,7 +77,12 @@ fn an_empty_gamma_means_unconditional() {
     let (p, a) = (g.atom("p"), g.atom("a"));
     let claim = g.apply(p, vec![a]);
 
-    let axiom = cert(vec![Step::Axiom { node: wk::TOP, holds: true }]).check(&g).expect("valid");
+    let axiom = cert(vec![Step::Axiom {
+        node: wk::TOP,
+        holds: true,
+    }])
+    .check(&g)
+    .expect("valid");
     assert!(axiom.hypotheses.is_empty(), "true in every structure");
     assert!(axiom.authorities.is_empty() && axiom.assumed.is_empty());
 
@@ -74,18 +90,34 @@ fn an_empty_gamma_means_unconditional() {
     // either. Unconditionality is a property of Γ, not a privilege of one rule.
     let not_top = g.apply(wk::NOT, vec![wk::TOP]);
     let derived = cert(vec![
-        Step::Axiom { node: wk::TOP, holds: true },
-        Step::Negation { node: not_top, premise: 0 },
+        Step::Axiom {
+            node: wk::TOP,
+            holds: true,
+        },
+        Step::Negation {
+            node: not_top,
+            premise: 0,
+        },
     ])
     .check(&g)
     .expect("valid");
-    assert!(derived.hypotheses.is_empty(), "negating an axiom consults nobody");
+    assert!(
+        derived.hypotheses.is_empty(),
+        "negating an axiom consults nobody"
+    );
 
-    let told = cert(vec![Step::Told { node: claim, holds: true, sources: vec![] }])
-        .check(&g)
-        .expect("valid");
+    let told = cert(vec![Step::Told {
+        node: claim,
+        holds: true,
+        sources: vec![],
+    }])
+    .check(&g)
+    .expect("valid");
     assert_eq!(told.hypotheses, vec![claim], "testimony is a hypothesis");
-    assert!(!told.assumed.is_empty(), "and an unattributed one is visibly assumed");
+    assert!(
+        !told.assumed.is_empty(),
+        "and an unattributed one is visibly assumed"
+    );
 }
 
 /// **`(implies P P)` must not certify as refuted.**
@@ -103,11 +135,22 @@ fn a_self_implication_cannot_be_refuted() {
     let identity = g.apply(wk::IMPLIES, vec![pa, pa]);
 
     let attack = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
         // Position 0 only: the consequent is never discharged.
-        Step::Connective { node: identity, premises: vec![(0, 0)], holds: false },
+        Step::Connective {
+            node: identity,
+            premises: vec![(0, 0)],
+            holds: false,
+        },
     ]);
-    assert!(attack.check(&g).is_err(), "one premise cannot cover two positions");
+    assert!(
+        attack.check(&g).is_err(),
+        "one premise cannot cover two positions"
+    );
 }
 
 /// Zero operands make the coverage loop vacuous. `(implies)` used to certify
@@ -117,7 +160,11 @@ fn a_self_implication_cannot_be_refuted() {
 fn a_connective_of_no_operands_certifies_nothing() {
     let mut g = ObjectGraph::new();
     let empty = g.apply(wk::IMPLIES, vec![]);
-    let attack = cert(vec![Step::Connective { node: empty, premises: vec![], holds: false }]);
+    let attack = cert(vec![Step::Connective {
+        node: empty,
+        premises: vec![],
+        holds: false,
+    }]);
     assert!(attack.check(&g).is_err());
 }
 
@@ -132,15 +179,31 @@ fn an_honest_conjunction_checks() {
     let both = g.apply(wk::AND, vec![pa, qa]);
 
     let c = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Told { node: qa, holds: true, sources: vec![adam] },
-        Step::Connective { node: both, premises: vec![(0, 0), (1, 1)], holds: true },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Told {
+            node: qa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Connective {
+            node: both,
+            premises: vec![(0, 0), (1, 1)],
+            holds: true,
+        },
     ])
     .check(&g)
     .expect("valid");
     assert_eq!(c.support, Bound::Certain);
     assert_eq!(c.authorities, vec![adam]);
-    assert_eq!(c.hypotheses.len(), 2, "conditional on both pieces of testimony");
+    assert_eq!(
+        c.hypotheses.len(),
+        2,
+        "conditional on both pieces of testimony"
+    );
 }
 
 /// **A witness must come from the domain.** The binder's `vars` were
@@ -149,24 +212,56 @@ fn an_honest_conjunction_checks() {
 fn a_witness_from_outside_the_domain_is_refused() {
     use artist_logic::object::Binding;
     let mut g = ObjectGraph::new();
-    let (p, a, b, c, adam) =
-        (g.atom("p"), g.atom("a"), g.atom("b"), g.atom("c"), g.atom("adam"));
+    let (p, a, b, c, adam) = (
+        g.atom("p"),
+        g.atom("a"),
+        g.atom("b"),
+        g.atom("c"),
+        g.atom("adam"),
+    );
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
-    let exists = g.bind(wk::EXISTS, vec![Binding { var: v, domain: Some(dom) }], vec![body]);
+    let exists = g.bind(
+        wk::EXISTS,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![body],
+    );
 
     let outside = g.apply(p, vec![c]);
     let attack = cert(vec![
-        Step::Told { node: outside, holds: true, sources: vec![adam] },
-        Step::Instance { node: exists, premise: 0, value: c, instance: outside, holds: true },
+        Step::Told {
+            node: outside,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Instance {
+            node: exists,
+            premise: 0,
+            value: c,
+            instance: outside,
+            holds: true,
+        },
     ]);
     assert!(attack.check(&g).is_err(), "c is not in {{a, b}}");
 
     let inside = g.apply(p, vec![a]);
     let ok = cert(vec![
-        Step::Told { node: inside, holds: true, sources: vec![adam] },
-        Step::Instance { node: exists, premise: 0, value: a, instance: inside, holds: true },
+        Step::Told {
+            node: inside,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Instance {
+            node: exists,
+            premise: 0,
+            value: a,
+            instance: inside,
+            holds: true,
+        },
     ]);
     assert!(ok.check(&g).is_ok(), "a witness from inside it is fine");
 }
@@ -183,19 +278,34 @@ fn a_universal_needs_every_member_and_a_complete_domain() {
     let mk = |g: &mut ObjectGraph, dom| {
         let v = g.fresh();
         let body = g.apply(p, vec![v]);
-        g.bind(wk::FORALL, vec![Binding { var: v, domain: Some(dom) }], vec![body])
+        g.bind(
+            wk::FORALL,
+            vec![Binding {
+                var: v,
+                domain: Some(dom),
+            }],
+            vec![body],
+        )
     };
     let complete = g.apply(wk::SET_DOMAIN, vec![a, b]);
     let partial = g.apply(wk::SET_PARTIAL, vec![a, b]);
     let (all_c, all_p) = (mk(&mut g, complete), mk(&mut g, partial));
 
-    let told = |n| Step::Told { node: n, holds: true, sources: vec![adam] };
+    let told = |n| Step::Told {
+        node: n,
+        holds: true,
+        sources: vec![adam],
+    };
     let (t_a, t_b) = (told(pa), told(pb));
 
     // One member of two: refused however the step is spelled.
     let short = cert(vec![
         t_a.clone(),
-        Step::Exhaustive { node: all_c, premises: vec![(0, a, pa)], holds: true },
+        Step::Exhaustive {
+            node: all_c,
+            premises: vec![(0, a, pa)],
+            holds: true,
+        },
     ]);
     assert!(short.check(&g).is_err(), "half a domain is not a domain");
 
@@ -203,15 +313,26 @@ fn a_universal_needs_every_member_and_a_complete_domain() {
     let incomplete = cert(vec![
         t_a.clone(),
         t_b.clone(),
-        Step::Exhaustive { node: all_p, premises: vec![(0, a, pa), (1, b, pb)], holds: true },
+        Step::Exhaustive {
+            node: all_p,
+            premises: vec![(0, a, pa), (1, b, pb)],
+            holds: true,
+        },
     ]);
-    assert!(incomplete.check(&g).is_err(), "`set-partial` licenses no universal");
+    assert!(
+        incomplete.check(&g).is_err(),
+        "`set-partial` licenses no universal"
+    );
 
     // Both members over a complete domain.
     let ok = cert(vec![
         t_a,
         t_b,
-        Step::Exhaustive { node: all_c, premises: vec![(0, a, pa), (1, b, pb)], holds: true },
+        Step::Exhaustive {
+            node: all_c,
+            premises: vec![(0, a, pa), (1, b, pb)],
+            holds: true,
+        },
     ]);
     assert!(ok.check(&g).is_ok());
 }
@@ -224,28 +345,68 @@ fn a_universal_needs_every_member_and_a_complete_domain() {
 #[test]
 fn modus_ponens_cannot_conclude_an_unrelated_node() {
     let mut g = ObjectGraph::new();
-    let (p, q, r, a, adam) =
-        (g.atom("p"), g.atom("q"), g.atom("r"), g.atom("a"), g.atom("adam"));
-    let (pa, qa, ra) = (g.apply(p, vec![a]), g.apply(q, vec![a]), g.apply(r, vec![a]));
+    let (p, q, r, a, adam) = (
+        g.atom("p"),
+        g.atom("q"),
+        g.atom("r"),
+        g.atom("a"),
+        g.atom("adam"),
+    );
+    let (pa, qa, ra) = (
+        g.apply(p, vec![a]),
+        g.apply(q, vec![a]),
+        g.apply(r, vec![a]),
+    );
     let imp = g.apply(wk::IMPLIES, vec![pa, qa]);
 
     let honest = cert(vec![
-        Step::Told { node: imp, holds: true, sources: vec![adam] },
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::ModusPonens { node: qa, implication: 0, antecedent: 1 },
+        Step::Told {
+            node: imp,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::ModusPonens {
+            node: qa,
+            implication: 0,
+            antecedent: 1,
+        },
     ]);
     let c = honest.check(&g).expect("valid");
     assert_eq!(c.support, Bound::Certain);
     assert_eq!(c.derivation, artist_logic::evidence::Derivation::Derived);
-    assert_eq!(c.hypotheses.len(), 2, "the rule's own truth is a hypothesis");
+    assert_eq!(
+        c.hypotheses.len(),
+        2,
+        "the rule's own truth is a hypothesis"
+    );
 
     // Same premises, different conclusion.
     let forged = cert(vec![
-        Step::Told { node: imp, holds: true, sources: vec![adam] },
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::ModusPonens { node: ra, implication: 0, antecedent: 1 },
+        Step::Told {
+            node: imp,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::ModusPonens {
+            node: ra,
+            implication: 0,
+            antecedent: 1,
+        },
     ]);
-    assert!(forged.check(&g).is_err(), "the implication does not conclude `r`");
+    assert!(
+        forged.check(&g).is_err(),
+        "the implication does not conclude `r`"
+    );
 }
 
 /// The liar is `Oscillatory`, the truth-teller is a `StableLoop`, and the kernel
@@ -267,11 +428,19 @@ fn ungroundedness_is_derived_from_the_loop_not_asserted() {
     let tbody = g.get(th).cloned().expect("built");
     g.define(teller, tbody);
 
-    let l = cert(vec![Step::Ungrounded { node: liar }]).check(&g).expect("valid");
+    let l = cert(vec![Step::Ungrounded { node: liar }])
+        .check(&g)
+        .expect("valid");
     assert_eq!(l.grounding, Grounding::Oscillatory, "odd negation parity");
 
-    let t = cert(vec![Step::Ungrounded { node: teller }]).check(&g).expect("valid");
-    assert_eq!(t.grounding, Grounding::StableLoop, "even parity: classical fixpoints exist");
+    let t = cert(vec![Step::Ungrounded { node: teller }])
+        .check(&g)
+        .expect("valid");
+    assert_eq!(
+        t.grounding,
+        Grounding::StableLoop,
+        "even parity: classical fixpoints exist"
+    );
 }
 
 /// **A cycle is not ungroundedness.** `P ↔ P ∨ ⊤` loops and grounds to true in
@@ -286,7 +455,10 @@ fn a_cycle_through_a_connective_is_refused() {
     g.define(p, body);
 
     let attack = cert(vec![Step::Ungrounded { node: p }]);
-    assert!(attack.check(&g).is_err(), "a reachable cycle is not an unfounded set");
+    assert!(
+        attack.check(&g).is_err(),
+        "a reachable cycle is not an unfounded set"
+    );
 }
 
 /// Backward references only, so a certificate is acyclic by construction and the
@@ -299,8 +471,14 @@ fn premises_must_point_backwards() {
     let not_pa = g.apply(wk::NOT, vec![pa]);
 
     for k in [0usize, 1, 99] {
-        let bad = cert(vec![Step::Negation { node: not_pa, premise: k }]);
-        assert!(bad.check(&g).is_err(), "premise {k} is not a backward reference");
+        let bad = cert(vec![Step::Negation {
+            node: not_pa,
+            premise: k,
+        }]);
+        assert!(
+            bad.check(&g).is_err(),
+            "premise {k} is not a backward reference"
+        );
     }
 }
 
@@ -319,10 +497,22 @@ fn checking_a_cyclic_graph_terminates() {
 
     // Whatever the verdicts, the point is that these return at all.
     let _ = cert(vec![Step::Ungrounded { node: liar }]).check(&g);
-    let _ = cert(vec![Step::Told { node: liar, holds: true, sources: vec![] }]).check(&g);
+    let _ = cert(vec![Step::Told {
+        node: liar,
+        holds: true,
+        sources: vec![],
+    }])
+    .check(&g);
     let _ = cert(vec![
-        Step::Told { node: liar, holds: true, sources: vec![] },
-        Step::Negation { node: n, premise: 0 },
+        Step::Told {
+            node: liar,
+            holds: true,
+            sources: vec![],
+        },
+        Step::Negation {
+            node: n,
+            premise: 0,
+        },
     ])
     .check(&g);
 }
@@ -341,23 +531,65 @@ fn every_step_shape_round_trips() {
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
-    let all = g.bind(wk::FORALL, vec![Binding { var: v, domain: Some(dom) }], vec![body]);
+    let all = g.bind(
+        wk::FORALL,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![body],
+    );
 
     let original = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Told { node: pb, holds: true, sources: vec![] },
-        Step::Axiom { node: wk::TOP, holds: true },
-        Step::Negation { node: not_pa, premise: 0 },
-        Step::Connective { node: both, premises: vec![(0, 0), (1, 1)], holds: true },
-        Step::Instance { node: all, premise: 0, value: a, instance: pa, holds: false },
-        Step::Exhaustive { node: all, premises: vec![(0, a, pa), (1, b, pb)], holds: true },
-        Step::ModusPonens { node: pb, implication: 4, antecedent: 0 },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Told {
+            node: pb,
+            holds: true,
+            sources: vec![],
+        },
+        Step::Axiom {
+            node: wk::TOP,
+            holds: true,
+        },
+        Step::Negation {
+            node: not_pa,
+            premise: 0,
+        },
+        Step::Connective {
+            node: both,
+            premises: vec![(0, 0), (1, 1)],
+            holds: true,
+        },
+        Step::Instance {
+            node: all,
+            premise: 0,
+            value: a,
+            instance: pa,
+            holds: false,
+        },
+        Step::Exhaustive {
+            node: all,
+            premises: vec![(0, a, pa), (1, b, pb)],
+            holds: true,
+        },
+        Step::ModusPonens {
+            node: pb,
+            implication: 4,
+            antecedent: 0,
+        },
         Step::Ungrounded { node: pa },
     ]);
 
     let term = original.to_term(&mut g);
     let back = Certificate::from_term(&g, term).expect("decodes");
-    assert_eq!(back, original, "every field survives, including the rejecting ones");
+    assert_eq!(
+        back, original,
+        "every field survives, including the rejecting ones"
+    );
 }
 
 /// A term that is not a proof, or a step whose parts are malformed, decodes to
@@ -381,10 +613,11 @@ fn malformed_terms_decode_to_nothing() {
     let neg = g.int(-1);
     let step = g.apply(wk::STEP, vec![wk::BY_NEGATION, pa, neg]);
     let proof = g.apply(wk::PROOF, vec![step]);
-    assert!(Certificate::from_term(&g, proof).is_none(), "a negative index is not an index");
+    assert!(
+        Certificate::from_term(&g, proof).is_none(),
+        "a negative index is not an index"
+    );
 }
-
-
 
 /// **The operator count in the spec is a claim, so it is tested.**
 ///
@@ -415,37 +648,76 @@ fn the_reserved_vocabulary_is_the_size_the_spec_says() {
 fn a_stored_rule_can_be_instantiated_then_detached() {
     use artist_logic::object::Binding;
     let mut g = ObjectGraph::new();
-    let (p, q, a, b, adam) =
-        (g.atom("p"), g.atom("q"), g.atom("a"), g.atom("b"), g.atom("adam"));
+    let (p, q, a, b, adam) = (
+        g.atom("p"),
+        g.atom("q"),
+        g.atom("a"),
+        g.atom("b"),
+        g.atom("adam"),
+    );
     let dom = g.apply(wk::SET_PARTIAL, vec![a, b]);
     let v = g.fresh();
     let rule = {
         let (pv, qv) = (g.apply(p, vec![v]), g.apply(q, vec![v]));
         let imp = g.apply(wk::IMPLIES, vec![pv, qv]);
-        g.bind(wk::FORALL, vec![Binding { var: v, domain: Some(dom) }], vec![imp])
+        g.bind(
+            wk::FORALL,
+            vec![Binding {
+                var: v,
+                domain: Some(dom),
+            }],
+            vec![imp],
+        )
     };
     let (pa, qa) = (g.apply(p, vec![a]), g.apply(q, vec![a]));
     let imp_a = g.apply(wk::IMPLIES, vec![pa, qa]);
 
     let c = cert(vec![
-        Step::Told { node: rule, holds: true, sources: vec![adam] },
-        Step::Instantiate { node: imp_a, premise: 0, value: a },
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::ModusPonens { node: qa, implication: 1, antecedent: 2 },
+        Step::Told {
+            node: rule,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Instantiate {
+            node: imp_a,
+            premise: 0,
+            value: a,
+        },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::ModusPonens {
+            node: qa,
+            implication: 1,
+            antecedent: 2,
+        },
     ])
     .check(&g)
     .expect("valid");
     assert_eq!(c.node, qa);
     assert_eq!(c.support, Bound::Certain);
-    assert!(c.hypotheses.contains(&rule), "the rule's own truth is a hypothesis");
+    assert!(
+        c.hypotheses.contains(&rule),
+        "the rule's own truth is a hypothesis"
+    );
 
     // A value outside the domain instantiates nothing.
     let out = g.atom("c");
     let (pc, qc) = (g.apply(p, vec![out]), g.apply(q, vec![out]));
     let imp_c = g.apply(wk::IMPLIES, vec![pc, qc]);
     let attack = cert(vec![
-        Step::Told { node: rule, holds: true, sources: vec![adam] },
-        Step::Instantiate { node: imp_c, premise: 0, value: out },
+        Step::Told {
+            node: rule,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Instantiate {
+            node: imp_c,
+            premise: 0,
+            value: out,
+        },
     ]);
     assert!(attack.check(&g).is_err(), "c is not in the domain");
 }
@@ -468,8 +740,19 @@ fn a_default_is_not_certifiable() {
     // No rule concludes an `unless` node, so nothing derives it. A `Connective`
     // step is the closest shape available and `unless` is not a connective.
     let attempt = cert(vec![
-        Step::Told { node: pa, holds: true, sources: vec![adam] },
-        Step::Connective { node: hedged, premises: vec![(0, 1)], holds: true },
+        Step::Told {
+            node: pa,
+            holds: true,
+            sources: vec![adam],
+        },
+        Step::Connective {
+            node: hedged,
+            premises: vec![(0, 1)],
+            holds: true,
+        },
     ]);
-    assert!(attempt.check(&g).is_err(), "`unless` has no rule, and none is faked");
+    assert!(
+        attempt.check(&g).is_err(),
+        "`unless` has no rule, and none is faked"
+    );
 }

@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "artist"
 path = "src/main.rs"
 
+[lib]
+name = "artist_cli"
+path = "src/main.rs"
+
 [features]
 default = ["webview"]
 # WebKitGTK (Linux) and WebView2 (Windows) are system libraries, not crates.
@@ -26,6 +30,7 @@ artist-rules = { path = "../artist-rules", features = ["wasm"] }
 artist-memory = { path = "../artist-memory" }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
+artist-ui-core = { path = "../artist-ui-core" }
 fs2 = "0.4"
 ansi-to-tui = "8.0.1"
 arboard = { version = "3", features = ["wayland-data-control"] }

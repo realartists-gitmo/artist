@@ -35,10 +35,7 @@ impl Four {
     /// `≤_k`: `N <_k T <_k B`, `N <_k F <_k B`.
     fn le_k(self, other: Four) -> bool {
         use Four::*;
-        matches!(
-            (self, other),
-            (N, _) | (_, B) | (T, T) | (F, F)
-        )
+        matches!((self, other), (N, _) | (_, B) | (T, T) | (F, F))
     }
 
     fn not(self) -> Four {
@@ -103,7 +100,9 @@ fn eval_total(g: &ObjectGraph, n: ObjectId, atoms: &[ObjectId], vals: &[Four], f
     // generated atoms it ranges over, so no substitution is needed here — the
     // reference stays obviously correct rather than becoming a second evaluator.
     if let Some((binder, members)) = quantified(g, n, atoms) {
-        let vals = members.iter().map(|m| eval_total(g, *m, atoms, vals, fuel - 1));
+        let vals = members
+            .iter()
+            .map(|m| eval_total(g, *m, atoms, vals, fuel - 1));
         return match binder {
             b if b == wk::FORALL => vals.fold(Four::T, Four::and),
             _ => vals.fold(Four::F, Four::or),
@@ -111,8 +110,10 @@ fn eval_total(g: &ObjectGraph, n: ObjectId, atoms: &[ObjectId], vals: &[Four], f
     }
     match g.get(n) {
         Some(CoreNode::Apply { operator, operands }) => {
-            let ops: Vec<Four> =
-                operands.iter().map(|o| eval_total(g, *o, atoms, vals, fuel - 1)).collect();
+            let ops: Vec<Four> = operands
+                .iter()
+                .map(|o| eval_total(g, *o, atoms, vals, fuel - 1))
+                .collect();
             match (*operator, ops.as_slice()) {
                 (wk::NOT, [a]) => a.not(),
                 (wk::AND, xs) if !xs.is_empty() => xs.iter().copied().reduce(Four::and).unwrap(),
@@ -131,7 +132,12 @@ fn eval_total(g: &ObjectGraph, n: ObjectId, atoms: &[ObjectId], vals: &[Four], f
 /// Quantifying over extensions of the *whole* valuation, not each argument
 /// separately, is what correlates repeated occurrences of one atom — and is
 /// exactly why `P ∨ ¬P` comes out undefined rather than `T`.
-fn denote(g: &ObjectGraph, n: ObjectId, atoms: &[ObjectId], partial: &[Option<Four>]) -> Option<Four> {
+fn denote(
+    g: &ObjectGraph,
+    n: ObjectId,
+    atoms: &[ObjectId],
+    partial: &[Option<Four>],
+) -> Option<Four> {
     denote_over(g, n, atoms, partial, false)
 }
 
@@ -144,8 +150,17 @@ fn denote_over(
     partial: &[Option<Four>],
     bivalent: bool,
 ) -> Option<Four> {
-    let choices: &[Four] = if bivalent { &[Four::T, Four::F] } else { &Four::ALL };
-    let open: Vec<usize> = partial.iter().enumerate().filter(|(_, v)| v.is_none()).map(|(i, _)| i).collect();
+    let choices: &[Four] = if bivalent {
+        &[Four::T, Four::F]
+    } else {
+        &Four::ALL
+    };
+    let open: Vec<usize> = partial
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.is_none())
+        .map(|(i, _)| i)
+        .collect();
     let mut seen: Option<Four> = None;
     for mask in 0..choices.len().pow(open.len() as u32) {
         let mut vals: Vec<Four> = partial.iter().map(|v| v.unwrap_or(Four::N)).collect();
@@ -194,7 +209,10 @@ fn allowed(r: &EvaluationResult) -> (Option<Four>, Vec<Option<Four>>) {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn pick(&mut self, n: usize) -> usize {
@@ -215,7 +233,11 @@ fn quantified(
     atoms: &[ObjectId],
 ) -> Option<(ObjectId, Vec<ObjectId>)> {
     let (binder, vars, bodies) = match g.get(n) {
-        Some(CoreNode::Bind { binder, vars, bodies }) => (*binder, vars, bodies),
+        Some(CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        }) => (*binder, vars, bodies),
         _ => return None,
     };
     if !matches!(binder, wk::FORALL | wk::EXISTS) || vars.len() != 1 {
@@ -280,11 +302,7 @@ fn gen_term(
 /// `or` and `implies` for this suite's whole life, so `Instance`, `Exhaustive`
 /// and `Instantiate` — two of which were later refuted by hand-built
 /// countermodels — were never exercised by a generated case.
-fn gen_quantifiers(
-    g: &mut ObjectGraph,
-    preds: &[ObjectId],
-    args: &[ObjectId],
-) -> Vec<ObjectId> {
+fn gen_quantifiers(g: &mut ObjectGraph, preds: &[ObjectId], args: &[ObjectId]) -> Vec<ObjectId> {
     use artist_logic::object::Binding;
     let dom = g.apply(wk::SET_DOMAIN, args.to_vec());
     let mut out = Vec::new();
@@ -292,7 +310,14 @@ fn gen_quantifiers(
         for binder in [wk::FORALL, wk::EXISTS] {
             let v = g.fresh();
             let body = g.apply(*p, vec![v]);
-            out.push(g.bind(binder, vec![Binding { var: v, domain: Some(dom) }], vec![body]));
+            out.push(g.bind(
+                binder,
+                vec![Binding {
+                    var: v,
+                    domain: Some(dom),
+                }],
+                vec![body],
+            ));
         }
     }
     out
@@ -323,10 +348,7 @@ fn phi_is_monotone_under_information_extension() {
                 for b1 in &states {
                     let w = [*b0, *b1];
                     // v ⊑ w: w agrees wherever v is defined.
-                    let extends = v
-                        .iter()
-                        .zip(w.iter())
-                        .all(|(x, y)| x.is_none() || x == y);
+                    let extends = v.iter().zip(w.iter()).all(|(x, y)| x.is_none() || x == y);
                     if !extends {
                         continue;
                     }
@@ -475,7 +497,10 @@ fn brackets(recursive: bool) {
         let effective: Vec<Option<Four>> = if bivalent {
             // Under the presumption, an atom the store left open is *some*
             // classical value; the reference agrees only when both agree.
-            partial.iter().map(|v| if *v == Some(Four::N) { None } else { *v }).collect()
+            partial
+                .iter()
+                .map(|v| if *v == Some(Four::N) { None } else { *v })
+                .collect()
         } else {
             partial.clone()
         };
@@ -543,9 +568,21 @@ fn the_worked_values_hold() {
         g.apply(wk::OR, vec![p, np])
     };
 
-    assert_eq!(denote(&g, or_top, &atoms, &[None]), Some(Four::T), "⊥ ∨ T = T");
-    assert_eq!(denote(&g, or_bot, &atoms, &[None]), None, "⊥ ∨ F is undefined");
-    assert_eq!(denote(&g, and_bot, &atoms, &[None]), Some(Four::F), "a false conjunct decides");
+    assert_eq!(
+        denote(&g, or_top, &atoms, &[None]),
+        Some(Four::T),
+        "⊥ ∨ T = T"
+    );
+    assert_eq!(
+        denote(&g, or_bot, &atoms, &[None]),
+        None,
+        "⊥ ∨ F is undefined"
+    );
+    assert_eq!(
+        denote(&g, and_bot, &atoms, &[None]),
+        Some(Four::F),
+        "a false conjunct decides"
+    );
     // The one that matters most: a *classical* tautology is not valid in FOUR.
     assert_eq!(
         denote(&g, excluded, &atoms, &[Some(Four::N)]),

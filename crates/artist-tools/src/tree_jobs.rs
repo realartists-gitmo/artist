@@ -146,11 +146,17 @@ mod tests {
     #[test]
     fn identical_invocations_share_a_key() {
         assert_eq!(
-            classify("cargo test -p artist-agent", project()).unwrap().key,
-            classify("cargo test -p artist-agent", project()).unwrap().key
+            classify("cargo test -p artist-agent", project())
+                .unwrap()
+                .key,
+            classify("cargo test -p artist-agent", project())
+                .unwrap()
+                .key
         );
         assert_ne!(
-            classify("cargo test -p artist-agent", project()).unwrap().key,
+            classify("cargo test -p artist-agent", project())
+                .unwrap()
+                .key,
             classify("cargo test -p artist-cli", project()).unwrap().key
         );
     }
@@ -181,7 +187,11 @@ mod tests {
     #[test]
     fn cargo_commands_that_are_not_cache_builds_are_not_preemptible() {
         assert!(!classify("cargo publish", project()).unwrap().preemptible);
-        assert!(!classify("cargo install ripgrep", project()).unwrap().preemptible);
+        assert!(
+            !classify("cargo install ripgrep", project())
+                .unwrap()
+                .preemptible
+        );
     }
 
     /// An unknown command reproduces today's behaviour rather than being

@@ -201,7 +201,14 @@ const DEFAULT_MAX_CONCURRENT: usize = 4;
 /// Session-control tools, governed by `deny` but never narrowed away by
 /// `allow`. `subagent` is deliberately not here: delegating expands the
 /// capability surface, so it stays something a profile opts into.
-const HARNESS_TOOLS: [&str; 2] = [Tool::Handoff.name(), Tool::Todo.name()];
+///
+/// `ask` is here because asking the user a question is not a capability — it
+/// is the opposite, a way to *avoid* acting on a guess. A profile author who
+/// writes `allow: [read, grep]` is narrowing what the agent may do to the
+/// project, and almost certainly did not mean "and may never check an
+/// assumption with the person who asked". A profile that genuinely wants
+/// silence still has `deny`.
+const HARNESS_TOOLS: [&str; 3] = [Tool::Handoff.name(), Tool::Todo.name(), Tool::Ask.name()];
 
 impl Profiles {
     pub fn discover(project: &Path) -> Self {
@@ -592,6 +599,10 @@ mod tests {
             let profile = profiles.get(name).unwrap();
             assert!(profile.permits("handoff"), "{name} cannot hand off");
             assert!(profile.permits("todo"), "{name} cannot track work");
+            assert!(
+                profile.permits("ask"),
+                "{name} cannot check an assumption with the user"
+            );
             assert!(!profile.permits("write"), "{name} must stay read-only");
             assert!(!profile.permits("bash"), "{name} must stay read-only");
             // Driving a GUI is at least as capable as bash, and it is gated the
@@ -644,6 +655,11 @@ mod tests {
         assert!(!profiles.get("planner").unwrap().permits("write"));
         assert!(profiles.get("planner").unwrap().permits("read"));
         assert!(profiles.get("worker").unwrap().permits("bash"));
+    }
+
+    #[test]
+    fn lightweight_frontend_catalog_tracks_builtin_profiles() {
+        assert_eq!(builtin_names(), artist_config::BUILTIN_PROFILES);
     }
 
     #[test]

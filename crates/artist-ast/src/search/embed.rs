@@ -61,9 +61,7 @@ impl Embedder {
         let tensor = st.tensor(EMBEDDINGS_TENSOR).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "safetensors missing '{EMBEDDINGS_TENSOR}' tensor (have: {names:?}): {e}"
-                ),
+                format!("safetensors missing '{EMBEDDINGS_TENSOR}' tensor (have: {names:?}): {e}"),
             )
         })?;
         if tensor.dtype() != Dtype::F32 {
@@ -104,10 +102,7 @@ impl Embedder {
         );
 
         let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("tokenizer.json: {e}"),
-            )
+            io::Error::new(io::ErrorKind::InvalidData, format!("tokenizer.json: {e}"))
         })?;
 
         Ok(Self {
@@ -127,9 +122,7 @@ impl Embedder {
     fn all_rows(&self) -> &[f32] {
         // SAFETY: `embeddings_ptr` is valid for `vocab_size * DIM` f32s for the
         // lifetime of `self._mmap`.
-        unsafe {
-            std::slice::from_raw_parts(self.embeddings_ptr, self.vocab_size * DIM)
-        }
+        unsafe { std::slice::from_raw_parts(self.embeddings_ptr, self.vocab_size * DIM) }
     }
 
     /// Look up the embedding row for a single token id. OOV ids are clamped
@@ -181,7 +174,6 @@ impl Embedder {
         }
         out
     }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -215,7 +207,11 @@ pub fn cosine_topk(
     use rayon::prelude::*;
 
     let n = embeddings.len() / DIM;
-    debug_assert_eq!(embeddings.len() % DIM, 0, "embeddings length not a multiple of DIM");
+    debug_assert_eq!(
+        embeddings.len() % DIM,
+        0,
+        "embeddings length not a multiple of DIM"
+    );
     if let Some(m) = mask {
         debug_assert_eq!(m.len(), n, "mask length must equal row count");
     }
@@ -311,7 +307,7 @@ fn dot_simd(q_lanes: &[wide::f32x8; DIM / 8], row: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::download::{ensure_model, ModelInfo};
+    use crate::search::download::{ModelInfo, ensure_model};
 
     fn ensure_real_model() -> std::path::PathBuf {
         // Download once into a per-test cache; subsequent runs reuse the cache

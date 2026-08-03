@@ -366,9 +366,9 @@ fn is_descendant(all: &[Name], candidate: &str, root: &str) -> bool {
 /// A cheap stable hash, used only to spread concurrent claims across the
 /// roster. Collisions cost a scan, never correctness — the lock decides.
 fn fingerprint(value: &str) -> u32 {
-    value
-        .bytes()
-        .fold(2166136261u32, |hash, byte| (hash ^ byte as u32).wrapping_mul(16777619))
+    value.bytes().fold(2166136261u32, |hash, byte| {
+        (hash ^ byte as u32).wrapping_mul(16777619)
+    })
 }
 
 #[cfg(test)]
@@ -539,7 +539,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(matched.len(), 3, "{matched:?}");
-        assert!(matched.iter().all(|n| n.project.as_deref() == Some("/repo-a")));
+        assert!(
+            matched
+                .iter()
+                .all(|n| n.project.as_deref() == Some("/repo-a"))
+        );
     }
 
     /// "Every reviewer" — and it must be a conjunction with project, not a
@@ -643,7 +647,13 @@ mod tests {
     #[test]
     fn an_empty_selector_spans_every_project() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(populated(root.path()).select(&Selector::default()).unwrap().len(), 4);
+        assert_eq!(
+            populated(root.path())
+                .select(&Selector::default())
+                .unwrap()
+                .len(),
+            4
+        );
     }
 
     /// A handoff keeps the name but changes the profile, and the directory has
@@ -671,7 +681,11 @@ mod tests {
 
         assert_eq!(before.name, after.name, "a handoff keeps the name");
         assert_eq!(after.profile.as_deref(), Some("reviewer"));
-        assert_eq!(roster.list().unwrap().len(), 1, "and consumes no second name");
+        assert_eq!(
+            roster.list().unwrap().len(),
+            1,
+            "and consumes no second name"
+        );
     }
 
     /// A cycle in the parent links must not hang a membership query.

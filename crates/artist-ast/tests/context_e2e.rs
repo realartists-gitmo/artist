@@ -57,16 +57,48 @@ fn large_budget_includes_target_body_and_neighbours() {
 
     let (out, code) = run_in(
         root,
-        &["context", "target_fn", ".", "--budget", "8000", "--json", "--rebuild"],
+        &[
+            "context",
+            "target_fn",
+            ".",
+            "--budget",
+            "8000",
+            "--json",
+            "--rebuild",
+        ],
     );
     assert_eq!(code, 0, "context exited non-zero: {}", out);
 
-    assert!(out.contains(r#""label": "target""#), "expected full-body target entry, got:\n{}", out);
-    assert!(out.contains("helper_dep() + 1"), "expected target body inline, got:\n{}", out);
-    assert!(out.contains("helper_dep"), "expected direct dependency helper_dep, got:\n{}", out);
-    assert!(out.contains("top_caller"), "expected direct dependent top_caller, got:\n{}", out);
-    assert!(out.contains(r#""truncated": false"#), "nothing should be truncated at 8000 tokens, got:\n{}", out);
-    assert!(out.contains(r#""target_omitted": false"#), "target must not be omitted, got:\n{}", out);
+    assert!(
+        out.contains(r#""label": "target""#),
+        "expected full-body target entry, got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("helper_dep() + 1"),
+        "expected target body inline, got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("helper_dep"),
+        "expected direct dependency helper_dep, got:\n{}",
+        out
+    );
+    assert!(
+        out.contains("top_caller"),
+        "expected direct dependent top_caller, got:\n{}",
+        out
+    );
+    assert!(
+        out.contains(r#""truncated": false"#),
+        "nothing should be truncated at 8000 tokens, got:\n{}",
+        out
+    );
+    assert!(
+        out.contains(r#""target_omitted": false"#),
+        "target must not be omitted, got:\n{}",
+        out
+    );
 }
 
 #[test]
@@ -89,10 +121,22 @@ pub fn target_fn() -> String {
 
     let (out, code) = run_in(
         root,
-        &["context", "target_fn", ".", "--budget", "10", "--json", "--rebuild"],
+        &[
+            "context",
+            "target_fn",
+            ".",
+            "--budget",
+            "10",
+            "--json",
+            "--rebuild",
+        ],
     );
     assert_eq!(code, 0, "context exited non-zero: {}", out);
-    assert!(out.contains(r#""target_omitted": true"#), "expected target body omitted, got:\n{}", out);
+    assert!(
+        out.contains(r#""target_omitted": true"#),
+        "expected target body omitted, got:\n{}",
+        out
+    );
     assert!(
         out.contains("signature only — budget"),
         "expected signature-only degradation label, got:\n{}",
@@ -125,10 +169,22 @@ pub fn target_fn() -> u64 {
 
     let (out, code) = run_in(
         root,
-        &["context", "target_fn", ".", "--budget", "40", "--json", "--rebuild"],
+        &[
+            "context",
+            "target_fn",
+            ".",
+            "--budget",
+            "40",
+            "--json",
+            "--rebuild",
+        ],
     );
     assert_eq!(code, 0, "context exited non-zero: {}", out);
-    assert!(out.contains(r#""truncated": true"#), "expected truncated=true when the callee can't fit, got:\n{}", out);
+    assert!(
+        out.contains(r#""truncated": true"#),
+        "expected truncated=true when the callee can't fit, got:\n{}",
+        out
+    );
 }
 
 #[test]
@@ -152,7 +208,15 @@ pub fn target_fn(n: u32) -> u32 {
 
     let (out, code) = run_in(
         root,
-        &["context", "target_fn", ".", "--budget", "8000", "--json", "--rebuild"],
+        &[
+            "context",
+            "target_fn",
+            ".",
+            "--budget",
+            "8000",
+            "--json",
+            "--rebuild",
+        ],
     );
     assert_eq!(code, 0, "context exited non-zero: {}", out);
     let occurrences = out.matches(r#""qn": "src/lib.rs::buddy""#).count();

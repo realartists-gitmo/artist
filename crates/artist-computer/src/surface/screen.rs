@@ -25,6 +25,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::keys::parse_modifiers;
 use crate::model::{Caps, Frame, Node, Role, Rung, Snapshot, SurfaceId};
 use crate::ocr::{DetectOptions, Incremental, Ocr};
 use crate::program::{Settle, SettleKind, SettleOutcome, Step, StepError};
@@ -130,6 +131,77 @@ impl ScreenSurface {
             })
     }
 
+    /// Where a named element is on screen.
+    ///
+    /// Every pointer verb on this rung starts here, and every one of them fails
+    /// the same two ways: the step named nothing, or what it named has no
+    /// position because the screen has been redrawn since it was read.
+    fn bounds_of(
+        &self,
+        node: Option<&Node>,
+        target: &crate::program::Target,
+    ) -> Result<crate::model::Rect, StepError> {
+        let node = node.ok_or_else(|| {
+            StepError::Backend("this step on a screen surface needs an element".into())
+        })?;
+        node.bounds.ok_or_else(|| {
+            StepError::Backend(format!(
+                "{} has no position on screen — re-observe {}",
+                target.anchor, self.id
+            ))
+        })
+    }
+
+    /// Where a drag ends: a second named element, or a direction and a distance.
+    ///
+    /// Exactly one of the two. Checked here rather than at parse time so the
+    /// error can name the surface the model was working on, and so a backend
+    /// that supports only one of the forms can say which.
+    async fn drag_destination(
+        &self,
+        from: crate::model::Rect,
+        to: Option<&Node>,
+        direction: Option<crate::program::Direction>,
+        distance: Option<u32>,
+    ) -> Result<crate::model::Rect, StepError> {
+        match (to, direction) {
+            (Some(_), Some(_)) => Err(StepError::Backend(
+                "a drag takes either a destination element or a direction, not both".into(),
+            )),
+            (None, None) => Err(StepError::Backend(
+                "a drag needs somewhere to go: name a destination element with `to`, or give \
+                 a `direction`"
+                    .into(),
+            )),
+            (Some(node), None) => node.bounds.ok_or_else(|| {
+                StepError::Backend(format!(
+                    "the drag destination has no position on screen — re-observe {}",
+                    self.id
+                ))
+            }),
+            (None, Some(direction)) => {
+                let window = self.window_bounds().await?;
+                let span = match direction {
+                    crate::program::Direction::Up | crate::program::Direction::Down => {
+                        window.height
+                    }
+                    _ => window.width,
+                };
+                // A quarter of the screen by default, where a swipe uses half:
+                // a drag is a deliberate reposition and usually wants to land
+                // somewhere specific, so overshooting is the worse error.
+                let travel = distance.unwrap_or(span / 4).min(span) as i32;
+                let (dx, dy) = direction.offset(travel);
+                Ok(crate::model::Rect {
+                    x: from.x + dx,
+                    y: from.y + dy,
+                    width: from.width,
+                    height: from.height,
+                })
+            }
+        }
+    }
+
     /// Read the screen, re-reading only what changed.
     ///
     /// Compositor damage is believed whenever it is specific, because a client
@@ -194,10 +266,18 @@ impl Surface for ScreenSurface {
         Rung::Pixels
     }
 
-    /// Honest about the one thing this rung cannot do.
+    /// What this rung can do, now that it can do most of it.
     ///
-    /// Clicking works because we find the target ourselves. Typing and keys go
-    /// to whatever holds focus, which the stage handles.
+    /// Clicking works because we find the target ourselves. Keys go to whatever
+    /// holds focus, which the stage handles.
+    ///
+    /// Typing used to be refused, on the grounds that it needs a focused field
+    /// this rung cannot identify. That was half true: it cannot identify a field
+    /// *as a field* — OCR reads text, not roles — but it can put focus somewhere
+    /// specific, because clicking a located element is exactly how a person
+    /// focuses one. So `type` clicks the named element and then sends the text,
+    /// which is the same two actions in the same order a person performs, and
+    /// fails the same way if the thing clicked was not a text field.
     ///
     /// Scrolling used to be refused here, on the grounds that it has no meaning
     /// without a scrollable container we can identify. That was true of a
@@ -210,7 +290,7 @@ impl Surface for ScreenSurface {
     fn caps(&self) -> Caps {
         Caps {
             click: true,
-            type_text: false,
+            type_text: true,
             key: true,
             scroll: self.stage.seat().scroll,
             pixels: true,
@@ -287,11 +367,122 @@ impl Surface for ScreenSurface {
         }))))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn relax(&self) -> Result<(), StepError> {
+        self.stage.relax(self.window).await
+    }
+
+    fn window(&self) -> Option<WindowKey> {
+        Some(self.window)
+    }
+
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
+        // Handled ahead of the match because it is the one verb here that
+        // reports a value rather than an effect. Folding it into the match
+        // would make every other arm carry an `Option<String>` it never uses.
+        if let Step::GetClipboard {} = step {
+            return Ok(Some(match self.stage.clipboard_get().await? {
+                Some(text) => format!("clipboard: {text:?}"),
+                None => "clipboard: empty".to_owned(),
+            }));
+        }
+
         match step {
-            Step::Click(target) => {
+            Step::Click {
+                target,
+                button,
+                count,
+                modifiers,
+            } => {
+                let bounds = self.bounds_of(node, target)?;
+                // The centre, computed here from what we detected. The model
+                // never supplied a coordinate and never sees one.
+                self.stage
+                    .pointer(
+                        self.window,
+                        crate::stage::Pointing::at(bounds)
+                            .with_button(button.evdev())
+                            .with_count(*count)
+                            .with_modifiers(parse_modifiers(modifiers.as_deref())?),
+                    )
+                    .await?;
+                // What we clicked has probably changed, and the rest of the
+                // screen has not — damage will say which parts.
+                Ok(())
+            }
+            Step::Hover(target) => {
+                let bounds = self.bounds_of(node, target)?;
+                self.stage.hover(self.window, bounds).await
+            }
+            Step::Press { target, button } => {
+                let bounds = self.bounds_of(node, target)?;
+                self.stage.press(self.window, bounds, button.evdev()).await
+            }
+            Step::Release { button } => self.stage.release(self.window, button.evdev()).await,
+            Step::Drag {
+                from,
+                to,
+                direction,
+                distance,
+                button,
+                modifiers,
+                pressure,
+                tilt,
+            } => {
+                let start = self.bounds_of(node, from)?;
+                // `to` names the element; `secondary` is that element already
+                // resolved and label-checked by `run_program`, exactly as the
+                // primary target was.
+                let end = self
+                    .drag_destination(start, to.as_ref().and(secondary), *direction, *distance)
+                    .await?;
+                // A pressure asked for makes this a stylus stroke, delivered
+                // through the tablet rather than the pointer. Refused outright
+                // where the seat has no tablet: falling back would draw the
+                // right line at the wrong weight, which reads as the
+                // application ignoring pressure rather than as the harness
+                // never having sent any.
+                match pressure {
+                    Some(pressure) => {
+                        if !self.stage.seat().tablet {
+                            return Err(StepError::Backend(
+                                "this display has no stylus, so a drag cannot carry pressure. \
+                                 Drop `pressure` to drag with the pointer instead."
+                                    .into(),
+                            ));
+                        }
+                        let tilt = tilt.unwrap_or([0.0, 0.0]);
+                        self.stage
+                            .stylus(self.window, start, end, *pressure, (tilt[0], tilt[1]))
+                            .await
+                    }
+                    None => {
+                        self.stage
+                            .drag(
+                                self.window,
+                                start,
+                                end,
+                                button.evdev(),
+                                parse_modifiers(modifiers.as_deref())?,
+                            )
+                            .await
+                    }
+                }
+            }
+            Step::Key(press) => self.stage.key(self.window, press.chord()).await,
+            Step::KeyDown(press) => self.stage.key_hold(self.window, press.chord(), true).await,
+            Step::KeyUp(press) => self.stage.key_hold(self.window, press.chord(), false).await,
+            Step::Type {
+                target,
+                text,
+                clear,
+            } => {
                 let node = node.ok_or_else(|| {
-                    StepError::Backend("a click on a screen surface needs an element".into())
+                    StepError::Backend("typing on a screen surface needs an element".into())
                 })?;
                 let bounds = node.bounds.ok_or_else(|| {
                     StepError::Backend(format!(
@@ -299,14 +490,23 @@ impl Surface for ScreenSurface {
                         target.anchor, self.id
                     ))
                 })?;
-                // The centre, computed here from what we detected. The model
-                // never supplied a coordinate and never sees one.
-                self.stage.pointer(self.window, bounds, 0x110).await?;
-                // What we clicked has probably changed, and the rest of the
-                // screen has not — damage will say which parts.
-                Ok(())
+                // Focus first, by clicking where the text is. There is no other
+                // way to aim at a field on this rung: the stage delivers text to
+                // whatever holds focus, and nothing here knows what that is
+                // until we have put it somewhere.
+                self.stage
+                    .pointer(self.window, crate::stage::Pointing::at(bounds))
+                    .await?;
+                if *clear {
+                    // Select-all then type, which replaces. This is the one
+                    // place the rung has to assume a convention rather than
+                    // observe a fact — a field that does not honour ctrl+a will
+                    // append instead, and that is visible in the next
+                    // observation rather than silent.
+                    self.stage.key(self.window, "ctrl+a").await?;
+                }
+                self.stage.text(self.window, text).await
             }
-            Step::Key(press) => self.stage.key(self.window, press.chord()).await,
             Step::LongPress(_) => {
                 let at = match node.and_then(|node| node.bounds) {
                     Some(bounds) => bounds,
@@ -337,7 +537,9 @@ impl Surface for ScreenSurface {
                 // tall, so a distance proportional to it would travel too
                 // little to register as anything.
                 let span = match direction {
-                    crate::program::Direction::Up | crate::program::Direction::Down => window.height,
+                    crate::program::Direction::Up | crate::program::Direction::Down => {
+                        window.height
+                    }
                     _ => window.width,
                 };
                 let travel = distance.unwrap_or(span / 2).min(span) as i32;
@@ -359,7 +561,7 @@ impl Surface for ScreenSurface {
                     )
                     .await
             }
-            Step::Scroll { amount, .. } => {
+            Step::Scroll { amount, axis, .. } => {
                 // At the named element when there is one, and at the middle of
                 // the window otherwise. The fallback is the meaningful case on
                 // this rung: a list the OCR read as a column of text has no
@@ -369,8 +571,54 @@ impl Surface for ScreenSurface {
                     Some(bounds) => bounds,
                     None => self.window_bounds().await?,
                 };
-                self.stage.scroll(self.window, at, *amount).await
+                self.stage.scroll(self.window, at, *amount, *axis).await
             }
+            Step::Pinch { scale, .. } => {
+                let at = match node.and_then(|node| node.bounds) {
+                    Some(bounds) => bounds,
+                    None => self.window_bounds().await?,
+                };
+                if !scale.is_finite() || *scale <= 0.0 {
+                    return Err(StepError::Backend(format!(
+                        "a pinch scale of {scale} means nothing; use a positive number, \
+                         above 1 to zoom in"
+                    )));
+                }
+                // The starting gap is a fraction of the target rather than a
+                // constant, so a pinch on a small element does not put both
+                // contacts outside it. Bounded below because two contacts a few
+                // pixels apart read as one.
+                let from_gap = (at.width.min(at.height) / 2).max(64);
+                let to_gap = ((from_gap as f32) * scale).round().clamp(16.0, 4096.0) as u32;
+                self.stage
+                    .gesture(
+                        self.window,
+                        &crate::stage::Gesture::Pinch {
+                            at,
+                            from_gap,
+                            to_gap,
+                            duration_ms: SWIPE_MS,
+                        },
+                    )
+                    .await
+            }
+            Step::SetClipboard { text } => self.stage.clipboard_set(text).await,
+            // Answered above, before the match.
+            Step::GetClipboard {} => Ok(()),
+            // A file chooser on this rung is a window like any other, and the
+            // agent drives it by typing a path into it. Pretending otherwise
+            // would mean inventing a drop target from pixels.
+            Step::Upload { .. } => Err(StepError::Backend(
+                "a pixel surface has no file input to hand a path to. Open the application's \
+                 file chooser and type the path into it — the chooser is a separate window \
+                 and appears in `surfaces`."
+                    .into(),
+            )),
+            Step::Dialog { .. } => Err(StepError::Backend(
+                "a dialog on this rung is an ordinary window: observe it and click the button \
+                 you want, rather than arming an answer in advance."
+                    .into(),
+            )),
             other => Err(StepError::Backend(format!(
                 "a screen surface cannot {:?} — it can click what it can read, and send keys. \
                  If this application has a debugging protocol or an accessibility tree, it \
@@ -378,5 +626,6 @@ impl Surface for ScreenSurface {
                 other.action()
             ))),
         }
+        .map(|()| None)
     }
 }

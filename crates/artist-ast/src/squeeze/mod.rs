@@ -525,10 +525,8 @@ impl Compressor {
 
         // Scale the diminishing-returns cutoff to this pass's input size, but
         // never below the absolute floor (so small inputs behave exactly as before).
-        let min_savings = std::cmp::max(
-            BPE_MIN_SAVINGS,
-            (text.len() / BPE_MIN_SAVINGS_RATIO) as i32,
-        );
+        let min_savings =
+            std::cmp::max(BPE_MIN_SAVINGS, (text.len() / BPE_MIN_SAVINGS_RATIO) as i32);
 
         let (part_strs, seps) = strategy.split_text_with_separators(&text);
         let mut parts: Vec<Vec<u32>> = part_strs
@@ -537,7 +535,11 @@ impl Compressor {
                 if p.is_empty() {
                     vec![]
                 } else {
-                    strategy.tokenize(p).into_iter().map(&mut get_or_add).collect()
+                    strategy
+                        .tokenize(p)
+                        .into_iter()
+                        .map(&mut get_or_add)
+                        .collect()
                 }
             })
             .collect();
@@ -1036,12 +1038,12 @@ mod tests {
         assert_eq!(a.legend, b.legend);
     }
 
-
     // --- encoder fidelity -------------------------------------------------
 
     /// Input that trips every lossy stage: a git SHA with leading zeros, a
     /// zero-padded id, a blank line, and a run of identical lines.
-    const ADVERSARIAL: &str = "commit 0001abc9de fix: thing\n\nerror code 000042\nretrying\nretrying\ndone";
+    const ADVERSARIAL: &str =
+        "commit 0001abc9de fix: thing\n\nerror code 000042\nretrying\nretrying\ndone";
 
     /// `legible` is the profile artist puts tool output through, so it must be
     /// reversible. A silently mutated git SHA is worse than truncation: the
@@ -1087,6 +1089,4 @@ mod tests {
             "full pipeline round-tripped; the fidelity tests prove nothing"
         );
     }
-
 }
-

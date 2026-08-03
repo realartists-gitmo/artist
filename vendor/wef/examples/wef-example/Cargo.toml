@@ -1,0 +1,16 @@
+[package]
+name = "wef-example"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+embed-manifest = "1.4.0"
+
+[dependencies]
+wef = { path = "../../crates/wef" }
+gpui-webview = { path = "../../crates/webview" }
+gpui-component = "0.2.0"
+gpui = "0.2.0"
+futures-util = "0.3.31"
+serde = { version = "1.0.219", features = ["derive"] }
+flume = "0.11.1"

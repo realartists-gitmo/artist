@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -848,7 +848,9 @@ fn _walk_calls_in_body<'a, D: Doc>(node: &Node<'a, D>, src: &[u8], out: &mut Vec
 fn _call_site_from_call_kt<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     // tree-sitter-kotlin's call_expression is positional: first named child is
     // the callee expression, second is the call_suffix carrying arguments.
-    let callee = node.children().find(|c| c.is_named() && c.kind() != "call_suffix")?;
+    let callee = node
+        .children()
+        .find(|c| c.is_named() && c.kind() != "call_suffix")?;
     let (name, receiver) = _extract_callee_name_kt(&callee, src)?;
     let line = node.start_pos().line() as u32 + 1;
     Some(CallSite {
@@ -866,9 +868,10 @@ fn _extract_callee_name_kt<'a, D: Doc>(
     let kind = node.kind();
     let kind: &str = kind.as_ref();
     match kind {
-        "simple_identifier" | "identifier" => {
-            Some((String::from_utf8_lossy(&src[node.range()]).to_string(), None))
-        }
+        "simple_identifier" | "identifier" => Some((
+            String::from_utf8_lossy(&src[node.range()]).to_string(),
+            None,
+        )),
         "navigation_expression" => {
             // A navigation_expression has the receiver as the first named
             // child and a navigation_suffix containing the member name.

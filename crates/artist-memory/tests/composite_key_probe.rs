@@ -78,7 +78,10 @@ async fn hnsw_and_fts_work_on_a_two_column_key() {
 
     // Two rows whose keys differ only in the low half — the case a single-column
     // key could not represent.
-    for (lo, text) in [(1i64, "the provider is the codex proxy"), (2, "tabs not spaces")] {
+    for (lo, text) in [
+        (1i64, "the provider is the codex proxy"),
+        (2, "tabs not spaces"),
+    ] {
         let emb: Vec<String> = vector(lo as u64).iter().map(|f| f.to_string()).collect();
         store
             .script(
@@ -86,7 +89,10 @@ async fn hnsw_and_fts_work_on_a_two_column_key() {
                     "?[hi, lo, text, emb, live] <- [[7, {lo}, '{text}', \
                      vec([{}]), true]] :put probe {{hi, lo => text, emb, live}}",
                     emb.join(",")
-                ), Default::default(), true)
+                ),
+                Default::default(),
+                true,
+            )
             .await
             .expect("insert");
     }
@@ -98,14 +104,20 @@ async fn hnsw_and_fts_work_on_a_two_column_key() {
                 "?[hi, lo, text, dist] := ~probe:emb_idx{{hi, lo, text | \
                  query: vec([{}]), k: 2, ef: 50, bind_distance: dist}}",
                 qv.join(",")
-            ), Default::default(), false)
+            ),
+            Default::default(),
+            false,
+        )
         .await
         .expect("hnsw search binding a two-column key");
     assert_eq!(rows.rows.len(), 2, "expected both rows back, got {rows:?}");
 
     let rows = store
         .script(
-            "?[hi, lo, text] := ~probe:text_fts{hi, lo, text | query: 'codex', k: 2}", Default::default(), false)
+            "?[hi, lo, text] := ~probe:text_fts{hi, lo, text | query: 'codex', k: 2}",
+            Default::default(),
+            false,
+        )
         .await
         .expect("fts search binding a two-column key");
     assert_eq!(rows.rows.len(), 1, "expected the one match, got {rows:?}");

@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -43,7 +43,8 @@ fn _node_to_decl<'a, D: Doc>(
 ) -> Option<Declaration> {
     let kind = node.kind();
 
-    if kind == "class_declaration" || kind == "interface_declaration" || kind == "trait_declaration" {
+    if kind == "class_declaration" || kind == "interface_declaration" || kind == "trait_declaration"
+    {
         return _class_to_decl(node, src);
     } else if kind == "function_definition" {
         return _function_to_decl(node, src, inside_class);
@@ -481,10 +482,7 @@ fn _call_site_from_function_call_php<'a, D: Doc>(
     })
 }
 
-fn _call_site_from_member_call_php<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
+fn _call_site_from_member_call_php<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     let name_node = node.field("name")?;
     let object = node.field("object");
     let name = _bare_name_text_php(&name_node, src);
@@ -501,10 +499,7 @@ fn _call_site_from_member_call_php<'a, D: Doc>(
     })
 }
 
-fn _call_site_from_scoped_call_php<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
+fn _call_site_from_scoped_call_php<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     let name_node = node.field("name")?;
     let scope = node.field("scope");
     let name = _bare_name_text_php(&name_node, src);
@@ -553,7 +548,11 @@ fn _call_site_from_object_creation_php<'a, D: Doc>(
     // Unwrap `new (Class)()` — the class ref appears wrapped in a
     // parenthesized_expression. Drill once to find the inner reference.
     let class_ref = if class_ref.kind().as_ref() == "parenthesized_expression" {
-        class_ref.clone().children().find(|c| c.is_named()).unwrap_or(class_ref)
+        class_ref
+            .clone()
+            .children()
+            .find(|c| c.is_named())
+            .unwrap_or(class_ref)
     } else {
         class_ref
     };

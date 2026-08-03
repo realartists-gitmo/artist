@@ -80,6 +80,22 @@ pub(crate) fn has_native_conversation(events: &[Envelope], up_to_seq: Option<u64
     .is_some()
 }
 
+pub(crate) fn has_native_conversation_for_lineage(
+    events: &[Envelope],
+    lineage: &str,
+    up_to_seq: Option<u64>,
+) -> bool {
+    native_conversation(
+        events,
+        &HistoryOptions {
+            lineage,
+            up_to_seq,
+            drop_encrypted_reasoning: false,
+        },
+    )
+    .is_some()
+}
+
 /// Build the model-facing history from a session's events.
 pub fn build(
     events: &[Envelope],

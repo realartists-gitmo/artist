@@ -239,7 +239,7 @@ pub async fn replay(
                             text: step.text.clone().unwrap_or_default(),
                             clear: true,
                         },
-                        _ => Step::Click(target),
+                        _ => Step::click(target),
                     }
                 }
             };
@@ -371,11 +371,16 @@ mod tests {
         async fn watch(&self, _settle: &Settle) -> Result<SettleWatch, StepError> {
             Ok(SettleWatch::ready(SettleOutcome::Settled { after_ms: 0 }))
         }
-        async fn apply(&self, _step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+        async fn apply(
+            &self,
+            _step: &Step,
+            node: Option<&Node>,
+            _secondary: Option<&Node>,
+        ) -> Result<Option<String>, StepError> {
             if let Some(node) = node {
                 self.clicked.lock().unwrap().push(node.name.clone());
             }
-            Ok(())
+            Ok(None)
         }
     }
 

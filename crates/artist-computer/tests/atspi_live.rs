@@ -84,6 +84,7 @@ async fn a_real_gtk_application_exposes_a_usable_tree() {
                 "--cancel-label=Keep".into(),
             ],
             None,
+            None,
         ),
     )
     .await;
@@ -207,6 +208,7 @@ async fn two_applications_on_one_stage_do_not_get_confused() {
                 "--text=FirstWindowMarker".into(),
             ],
             None,
+            None,
         ),
     )
     .await;
@@ -224,6 +226,7 @@ async fn two_applications_on_one_stage_do_not_get_confused() {
                 "--title=probe-two".into(),
                 "--text=SecondWindowMarker".into(),
             ],
+            None,
             None,
         ),
     )

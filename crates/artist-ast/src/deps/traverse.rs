@@ -66,13 +66,7 @@ pub fn reverse<F: Fn(&DepEdge) -> bool>(
     bfs(start, max_depth, limit, edges_at, predicate)
 }
 
-fn bfs<F, P>(
-    start: &Path,
-    max_depth: usize,
-    limit: usize,
-    edges_at: F,
-    predicate: P,
-) -> Vec<DepHit>
+fn bfs<F, P>(start: &Path, max_depth: usize, limit: usize, edges_at: F, predicate: P) -> Vec<DepHit>
 where
     F: Fn(&Path) -> Vec<DepEdge>,
     P: Fn(&DepEdge) -> bool,

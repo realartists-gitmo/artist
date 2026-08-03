@@ -30,7 +30,10 @@ fn run(args: &[&str]) -> String {
 #[test]
 fn namespace_interface_class_render() {
     let s = run(&["map", FIXTURE]);
-    assert!(s.contains("namespace App\\Billing"), "namespace missing:\n{s}");
+    assert!(
+        s.contains("namespace App\\Billing"),
+        "namespace missing:\n{s}"
+    );
     assert!(s.contains("interface Payable"), "interface missing:\n{s}");
     assert!(s.contains("class Account"), "class missing:\n{s}");
 }

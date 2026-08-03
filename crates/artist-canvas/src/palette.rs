@@ -1196,14 +1196,20 @@ mod token_tests {
         // the page, and the page is no longer white.
         for (label, ground) in [("page", neutral[2]), ("card", 0xFF_FF_FF)] {
             let light = contrast(neutral[10], ground);
-            assert!(light >= 4.5, "light-mode body text on the {label} is {light:.2}:1");
+            assert!(
+                light >= 4.5,
+                "light-mode body text on the {label} is {light:.2}:1"
+            );
         }
 
         let dark_bg = mix(neutral[10], 0x00_00_00, 0.55);
         let dark_card = mix(neutral[10], 0x00_00_00, 0.25);
         for (label, ground) in [("page", dark_bg), ("card", dark_card)] {
             let dark = contrast(neutral[1], ground);
-            assert!(dark >= 4.5, "dark-mode body text on the {label} is {dark:.2}:1");
+            assert!(
+                dark >= 4.5,
+                "dark-mode body text on the {label} is {dark:.2}:1"
+            );
         }
     }
 

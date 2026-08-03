@@ -113,10 +113,7 @@ impl Identity {
     async fn refresh(&self) {
         {
             let state = self.state.lock().await;
-            if state
-                .fetched
-                .is_some_and(|when| when.elapsed() < CACHE_TTL)
-            {
+            if state.fetched.is_some_and(|when| when.elapsed() < CACHE_TTL) {
                 return;
             }
         }

@@ -41,7 +41,10 @@ fn fixture() -> (ObjectGraph, Closed, ObjectId, ObjectId, ObjectId, ObjectId) {
     let calls = g.atom("calls");
     let (a, b) = (g.atom("mod-a"), g.atom("mod-b"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
-    let s = Closed { rel: calls, pairs: vec![(a, b)] };
+    let s = Closed {
+        rel: calls,
+        pairs: vec![(a, b)],
+    };
     (g, s, calls, a, b, dom)
 }
 
@@ -58,13 +61,21 @@ fn a_two_slot_existential_is_not_refuted() {
     let q = g.bind(
         wk::EXISTS,
         vec![
-            Binding { var: x, domain: Some(dom) },
-            Binding { var: y, domain: Some(dom) },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
+            Binding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![body],
     );
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, q, &s, 200_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, q, &s, 200_000)
+            .evidential(),
         Evidential::Supported,
         "(calls mod-a mod-b) is on file"
     );
@@ -78,26 +89,44 @@ fn a_two_slot_universal_is_refuted_only_by_a_real_counterexample() {
     let (a, b) = (g.atom("mod-a"), g.atom("mod-b"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
     // Every ordered pair on file.
-    let s = Closed { rel: calls, pairs: vec![(a, a), (a, b), (b, a), (b, b)] };
+    let s = Closed {
+        rel: calls,
+        pairs: vec![(a, a), (a, b), (b, a), (b, b)],
+    };
 
     let (x, y) = (g.fresh(), g.fresh());
     let body = g.apply(calls, vec![x, y]);
     let q = g.bind(
         wk::EXISTS,
         vec![
-            Binding { var: x, domain: Some(dom) },
-            Binding { var: y, domain: Some(dom) },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
+            Binding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![body],
     );
     let ev = GraphEvaluator::new();
-    assert_eq!(ev.eval(&mut g, q, &s, 200_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, q, &s, 200_000).evidential(),
+        Evidential::Supported
+    );
 
     let all = g.bind(
         wk::FORALL,
         vec![
-            Binding { var: x, domain: Some(dom) },
-            Binding { var: y, domain: Some(dom) },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
+            Binding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![body],
     );
@@ -108,7 +137,10 @@ fn a_two_slot_universal_is_refuted_only_by_a_real_counterexample() {
     );
 
     // Remove one pair and the universal must fall — for the right reason.
-    let partial = Closed { rel: calls, pairs: vec![(a, a), (a, b), (b, a)] };
+    let partial = Closed {
+        rel: calls,
+        pairs: vec![(a, a), (a, b), (b, a)],
+    };
     assert_eq!(
         ev.eval(&mut g, all, &partial, 200_000).evidential(),
         Evidential::Refuted
@@ -123,22 +155,33 @@ fn a_multi_slot_aggregate_does_not_undercount() {
     let calls = g.atom("calls");
     let (a, b) = (g.atom("mod-a"), g.atom("mod-b"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
-    let s = Closed { rel: calls, pairs: vec![(a, a), (a, b), (b, a), (b, b)] };
+    let s = Closed {
+        rel: calls,
+        pairs: vec![(a, a), (a, b), (b, a), (b, b)],
+    };
 
     let (x, y) = (g.fresh(), g.fresh());
     let body = g.apply(calls, vec![x, y]);
     let counted = g.bind(
         wk::COUNT,
         vec![
-            Binding { var: x, domain: Some(dom) },
-            Binding { var: y, domain: Some(dom) },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
+            Binding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![body],
     );
     let zero = g.int(0);
     let claim = g.apply(wk::EQ, vec![counted, zero]);
     assert_ne!(
-        GraphEvaluator::new().eval(&mut g, claim, &s, 200_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, claim, &s, 200_000)
+            .evidential(),
         Evidential::Supported,
         "four pairs are on file; zero is not the count"
     );
@@ -178,14 +221,26 @@ fn telescoping_domains_still_work() {
     let q = g.bind(
         wk::FORALL,
         vec![
-            Binding { var: m, domain: Some(modules) },
-            Binding { var: t, domain: Some(inner_dom) },
+            Binding {
+                var: m,
+                domain: Some(modules),
+            },
+            Binding {
+                var: t,
+                domain: Some(inner_dom),
+            },
         ],
         vec![body],
     );
-    let s = PerModule { tests_of, passes, t1 };
+    let s = PerModule {
+        tests_of,
+        passes,
+        t1,
+    };
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, q, &s, 200_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, q, &s, 200_000)
+            .evidential(),
         Evidential::Supported,
         "the inner domain mentions the outer variable, which is the point of telescoping"
     );
@@ -205,8 +260,14 @@ fn a_two_slot_query_produces_a_checkable_derivation() {
     let q = g.bind(
         wk::EXISTS,
         vec![
-            Binding { var: x, domain: Some(dom) },
-            Binding { var: y, domain: Some(dom) },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
+            Binding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![body],
     );

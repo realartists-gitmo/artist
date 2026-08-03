@@ -9,8 +9,8 @@
 use artist_logic::object::{Binding, CoreNode, ExternalRef, LiteralValue, wk};
 use artist_logic::registry::{OpContext, OperatorSemantics};
 use artist_logic::syntax::{from_bytes, parse, print, to_bytes};
-use artist_logic::{Typing, type_of};
 use artist_logic::*;
+use artist_logic::{Typing, type_of};
 use num_bigint::BigInt;
 
 /// Round-trip through both canonical forms. Returns the reparsed text form.
@@ -103,9 +103,18 @@ fn transitive_closure_and_mutual_recursion() {
     let letrec = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: reach, domain: None },
-            Binding { var: x, domain: Some(node) },
-            Binding { var: y, domain: Some(node) },
+            Binding {
+                var: reach,
+                domain: None,
+            },
+            Binding {
+                var: x,
+                domain: Some(node),
+            },
+            Binding {
+                var: y,
+                domain: Some(node),
+            },
         ],
         vec![def, scope],
     );
@@ -126,9 +135,18 @@ fn transitive_closure_and_mutual_recursion() {
     let mutual = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: even, domain: None },
-            Binding { var: odd, domain: None },
-            Binding { var: n, domain: Some(nat) },
+            Binding {
+                var: even,
+                domain: None,
+            },
+            Binding {
+                var: odd,
+                domain: None,
+            },
+            Binding {
+                var: n,
+                domain: Some(nat),
+            },
         ],
         vec![even_def, even_pred, mutual_scope],
     );
@@ -286,7 +304,11 @@ fn source_spans_and_opaque_external_objects() {
     let claim = g.apply(mentions, vec![file, oracle]);
     round_trip(&g, claim);
 
-    let span = SourceSpan { locator: "src/lib.rs".into(), start: 40, end: 92 };
+    let span = SourceSpan {
+        locator: "src/lib.rs".into(),
+        start: 40,
+        end: 92,
+    };
     assert_eq!(span.end - span.start, 52);
 }
 
@@ -372,8 +394,14 @@ fn a_partially_evaluated_query_survives_process_restart() {
 
     let kids = fresh.children(reloaded);
     assert!(kids.contains(&query), "the residual query came back");
-    assert_eq!(partial.snapshot, 42, "and knows which universe version it used");
-    assert!(!partial.is_definite(), "a partial result never reads as definite");
+    assert_eq!(
+        partial.snapshot, 42,
+        "and knows which universe version it used"
+    );
+    assert!(
+        !partial.is_definite(),
+        "a partial result never reads as definite"
+    );
 }
 
 // ---- 20, 21. cycles and size -------------------------------------------
@@ -459,7 +487,10 @@ fn identity_kinds_are_distinguished() {
     let chinmay = g.atom("chinmay");
     let full = g.atom("chinmay_mehta");
     let same = g.apply(wk::SAME_AS, vec![chinmay, full]);
-    assert_ne!(chinmay, full, "asserting identity does not merge the objects");
+    assert_ne!(
+        chinmay, full,
+        "asserting identity does not merge the objects"
+    );
     round_trip(&g, same);
 }
 
@@ -486,7 +517,10 @@ fn typing_is_advisory_and_never_blocks_representation() {
 
     // An ill-typed expression is still fully representable and printable.
     let bad = g.apply(wk::ADD, vec![atom, one]);
-    assert!(type_of(&mut g, bad).is_mismatch(), "the mismatch is detected");
+    assert!(
+        type_of(&mut g, bad).is_mismatch(),
+        "the mismatch is detected"
+    );
     round_trip(&g, bad);
     assert!(
         print(&g, bad).starts_with("(+"),
@@ -504,7 +538,11 @@ fn universe_levels_are_values() {
     let one = g.int(1);
     let u1 = g.apply(wk::UNIVERSE, vec![one]);
 
-    assert_eq!(type_of(&mut g, u0), Typing::Known(u1), "Universe(0) : Universe(1)");
+    assert_eq!(
+        type_of(&mut g, u0),
+        Typing::Known(u1),
+        "Universe(0) : Universe(1)"
+    );
 
     let big = g.int(9_999);
     let u_big = g.apply(wk::UNIVERSE, vec![big]);
@@ -527,7 +565,10 @@ fn lambdas_are_typed_as_relations() {
     let body = g.apply(mortal, vec![x]);
     let lam = g.bind(
         wk::LAMBDA,
-        vec![Binding { var: x, domain: Some(person) }],
+        vec![Binding {
+            var: x,
+            domain: Some(person),
+        }],
         vec![body],
     );
     let expected = g.apply(wk::RELATION_TYPE, vec![person]);

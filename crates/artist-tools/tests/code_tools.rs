@@ -974,7 +974,10 @@ async fn ast_tools_skip_files_too_large_to_be_source() {
     std::fs::write(root.path().join("generated.rs"), &bulk).unwrap();
 
     let out = call(&tools.ast_query, json!({"pattern": "b($N)"})).await;
-    assert!(out.contains("small.rs"), "the real source should match: {out}");
+    assert!(
+        out.contains("small.rs"),
+        "the real source should match: {out}"
+    );
     assert!(
         !out.contains("generated.rs"),
         "an oversized file must be skipped, not read: {out}"
@@ -995,7 +998,10 @@ async fn ast_tools_can_be_scoped_by_glob() {
     std::fs::write(root.path().join("src/skip_test.rs"), "fn c() { b(2) }\n").unwrap();
 
     let all = call(&tools.ast_query, json!({"pattern": "b($N)"})).await;
-    assert!(all.contains("keep.rs") && all.contains("skip_test.rs"), "{all}");
+    assert!(
+        all.contains("keep.rs") && all.contains("skip_test.rs"),
+        "{all}"
+    );
 
     let scoped = call(
         &tools.ast_query,
@@ -1172,7 +1178,11 @@ async fn an_explicit_lang_narrows_the_search_instead_of_widening_it() {
 #[tokio::test]
 async fn an_unknown_lang_is_refused_rather_than_silently_matching_nothing() {
     let (_r, _s, tools) = mixed();
-    let err = call_err(&tools.ast_query, json!({"pattern": "target($N)", "lang": "klingon"})).await;
+    let err = call_err(
+        &tools.ast_query,
+        json!({"pattern": "target($N)", "lang": "klingon"}),
+    )
+    .await;
     assert!(err.contains("unknown language"), "{err}");
 }
 
@@ -1244,7 +1254,10 @@ async fn a_replacement_naming_an_unbound_capture_is_refused() {
     )
     .await;
     assert!(err.contains("$Z"), "{err}");
-    assert!(err.contains("$N"), "the error did not say what is bound:\n{err}");
+    assert!(
+        err.contains("$N"),
+        "the error did not say what is bound:\n{err}"
+    );
 }
 
 /// The parse check counts errors rather than testing for any, so a file that

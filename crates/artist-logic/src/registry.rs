@@ -130,7 +130,12 @@ impl OperatorRegistry {
             }
             return r;
         };
-        let mut cx = OpContext { graph, operands, budget, snapshot };
+        let mut cx = OpContext {
+            graph,
+            operands,
+            budget,
+            snapshot,
+        };
         if let Some(mut r) = sem.evaluate_exact(&mut cx) {
             // Left as the operator set it: overwriting here discarded the very
             // field `compose_snapshot` exists to inspect, so the guard at the
@@ -162,18 +167,20 @@ impl OperatorRegistry {
             snapshot,
         });
         // Left as the operator set it: overwriting here discarded the very
-            // field `compose_snapshot` exists to inspect, so the guard at the
-            // registry boundary — documented as the one place the version
-            // invariant is load-bearing — could never fire.
-            if r.snapshot == 0 {
-                r.snapshot = snapshot;
-            }
+        // field `compose_snapshot` exists to inspect, so the guard at the
+        // registry boundary — documented as the one place the version
+        // invariant is load-bearing — could never fire.
+        if r.snapshot == 0 {
+            r.snapshot = snapshot;
+        }
         r
     }
 }
 
 impl std::fmt::Debug for OperatorRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OperatorRegistry").field("operators", &self.ops.len()).finish()
+        f.debug_struct("OperatorRegistry")
+            .field("operators", &self.ops.len())
+            .finish()
     }
 }

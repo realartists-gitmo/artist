@@ -268,7 +268,7 @@ async fn a_program_clicks_a_real_button_and_the_page_changes() {
     };
 
     let program = Program {
-        steps: vec![Step::Click(Target {
+        steps: vec![Step::click(Target {
             anchor: anchor.clone(),
             label: Some("Send message".into()),
         })],
@@ -447,7 +447,7 @@ async fn a_mislabelled_anchor_never_reaches_the_browser() {
     // Claim the Cancel button is the send button — the exact confusion the
     // cross-check exists to catch.
     let program = Program {
-        steps: vec![Step::Click(Target {
+        steps: vec![Step::click(Target {
             anchor,
             label: Some("Send message".into()),
         })],
@@ -709,7 +709,7 @@ async fn a_click_that_loads_content_settles_only_once_the_content_is_there() {
         &surface,
         &mut book,
         &Program {
-            steps: vec![Step::Click(Target {
+            steps: vec![Step::click(Target {
                 anchor,
                 label: Some("Load orders".into()),
             })],
@@ -772,7 +772,7 @@ async fn a_button_inside_a_shadow_root_can_be_named_and_clicked() {
         &surface,
         &mut book,
         &Program {
-            steps: vec![Step::Click(Target {
+            steps: vec![Step::click(Target {
                 anchor,
                 label: Some("Save settings".into()),
             })],
@@ -849,7 +849,7 @@ async fn a_navigation_that_starts_late_is_still_waited_for() {
         &surface,
         &mut book,
         &Program {
-            steps: vec![Step::Click(Target {
+            steps: vec![Step::click(Target {
                 anchor,
                 label: Some("Continue to step two".into()),
             })],

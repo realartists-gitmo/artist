@@ -27,18 +27,38 @@ use std::sync::{Mutex, OnceLock};
 ///   - have a stable, conventional name
 pub const HARDCODED_IGNORE_DIRS: &[&str] = &[
     // VCS
-    ".git", ".hg", ".svn", ".jj",
+    ".git",
+    ".hg",
+    ".svn",
+    ".jj",
     // Python
-    "__pycache__", ".venv", "venv", ".tox",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
     // JS/TS
-    "node_modules", ".next", ".nuxt", ".turbo", ".parcel-cache",
+    "node_modules",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".parcel-cache",
     // Build outputs
-    "dist", "build", "out", ".eggs", "target",
+    "dist",
+    "build",
+    "out",
+    ".eggs",
+    "target",
     // Other
-    ".cache", ".gradle", ".idea", ".vscode",
+    ".cache",
+    ".gradle",
+    ".idea",
+    ".vscode",
     // Self (keep legacy name during transition)
-    ".ast-bro", ".ast-outline",
+    ".ast-bro",
+    ".ast-outline",
 ];
 
 /// Wire `.ast-bro-ignore` into a `WalkBuilder`.
@@ -124,16 +144,26 @@ pub fn should_skip_path(path: &Path, repo_root: &Path) -> bool {
 /// output. The unambiguous `integration-tests` / `integration_tests`
 /// forms are kept.
 const TEST_DIR_TOKENS: &[&str] = &[
-    "test", "tests", "__tests__", "e2e", "cypress", "playwright",
-    "integration-tests", "integration_tests", "test-fixtures", "fixtures",
-    "spec", "specs", "mocha", "jest",
+    "test",
+    "tests",
+    "__tests__",
+    "e2e",
+    "cypress",
+    "playwright",
+    "integration-tests",
+    "integration_tests",
+    "test-fixtures",
+    "fixtures",
+    "spec",
+    "specs",
+    "mocha",
+    "jest",
 ];
 
 /// File-stem suffixes (before the final extension) that mark test files.
 /// Checked against the lowered stem.
 const TEST_FILE_SUFFIXES: &[&str] = &[
-    "_test", ".test", "_spec", ".spec",
-    "_tests", ".tests", "_specs", ".specs",
+    "_test", ".test", "_spec", ".spec", "_tests", ".tests", "_specs", ".specs",
 ];
 
 /// Return `true` when `path` (relative to `repo_root`) looks like a test
@@ -184,29 +214,29 @@ pub fn detect_language(path: &Path) -> Option<ast_grep_language::SupportLang> {
     let mut file = fs::File::open(path).ok()?;
     let mut buffer = [0u8; 256];
     let bytes_read = file.read(&mut buffer).ok()?;
-    
+
     if bytes_read < 2 {
         return None;
     }
-    
+
     // Must start with #!
     if buffer[0] != b'#' || buffer[1] != b'!' {
         return None;
     }
-    
+
     // Find the first newline within the read bytes
     let newline_pos = buffer[..bytes_read]
         .iter()
         .position(|&b| b == b'\n')
         .unwrap_or(bytes_read);
-    
+
     // If the shebang line runs past the scan window, it's too long to be valid.
     // When the file fit entirely inside the window (`bytes_read < buffer.len()`),
     // EOF terminates the line just as well as a newline.
     if newline_pos == bytes_read && bytes_read == buffer.len() {
         return None;
     }
-    
+
     // Extract the first line as UTF-8
     let first_line = std::str::from_utf8(&buffer[..newline_pos]).ok()?;
 
@@ -257,7 +287,10 @@ mod tests {
     #[test]
     fn skip_node_modules_anywhere() {
         let root = PathBuf::from("/r");
-        assert!(should_skip_path(&root.join("node_modules/lodash/index.js"), &root));
+        assert!(should_skip_path(
+            &root.join("node_modules/lodash/index.js"),
+            &root
+        ));
         assert!(should_skip_path(
             &root.join("packages/foo/node_modules/lib.js"),
             &root,
@@ -267,13 +300,19 @@ mod tests {
     #[test]
     fn skip_target_dir() {
         let root = PathBuf::from("/r");
-        assert!(should_skip_path(&root.join("target/debug/build/x.rs"), &root));
+        assert!(should_skip_path(
+            &root.join("target/debug/build/x.rs"),
+            &root
+        ));
     }
 
     #[test]
     fn skip_self_managed_index() {
         let root = PathBuf::from("/r");
-        assert!(should_skip_path(&root.join(".ast-bro/index/meta.json"), &root));
+        assert!(should_skip_path(
+            &root.join(".ast-bro/index/meta.json"),
+            &root
+        ));
     }
 
     #[test]
@@ -287,16 +326,25 @@ mod tests {
     fn allow_paths_outside_root() {
         let root = PathBuf::from("/r");
         // strip_prefix fails → not skipped (let caller decide).
-        assert!(!should_skip_path(&PathBuf::from("/elsewhere/node_modules/x"), &root));
+        assert!(!should_skip_path(
+            &PathBuf::from("/elsewhere/node_modules/x"),
+            &root
+        ));
     }
 
     #[test]
     fn test_detection_directory_components() {
         let root = PathBuf::from("/r");
         assert!(is_test_file(&root.join("tests/foo.rs"), &root));
-        assert!(is_test_file(&root.join("src/features/__tests__/a.ts"), &root));
+        assert!(is_test_file(
+            &root.join("src/features/__tests__/a.ts"),
+            &root
+        ));
         assert!(is_test_file(&root.join("e2e/signup.spec.ts"), &root));
-        assert!(is_test_file(&root.join("cypress/integration/login.js"), &root));
+        assert!(is_test_file(
+            &root.join("cypress/integration/login.js"),
+            &root
+        ));
     }
 
     #[test]
@@ -320,7 +368,10 @@ mod tests {
         assert!(!is_test_file(&root.join("lib/auth.py"), &root));
         assert!(!is_test_file(&root.join("src/test_utils.rs"), &root));
         // Production integration code must not be classified as tests.
-        assert!(!is_test_file(&root.join("src/integration/stripe.rs"), &root));
+        assert!(!is_test_file(
+            &root.join("src/integration/stripe.rs"),
+            &root
+        ));
         // ...but explicit integration-test directories still are.
         assert!(is_test_file(&root.join("integration-tests/api.rs"), &root));
         assert!(is_test_file(&root.join("integration_tests/api.rs"), &root));

@@ -63,7 +63,11 @@ pub enum Step {
     /// source counts only if it names an object the graph actually holds —
     /// otherwise `assumed` is not "nobody vouched" but "the vector was
     /// non-empty", which any producer satisfies with one arbitrary integer.
-    Told { node: ObjectId, holds: bool, sources: Vec<ObjectId> },
+    Told {
+        node: ObjectId,
+        holds: bool,
+        sources: Vec<ObjectId>,
+    },
     /// A truth atom. `⟦#true⟧ = T` and `⟦#false⟧ = F` in every structure, so this
     /// is the only rule that introduces nothing into `Γ` (semantics §7.1, §10).
     ///
@@ -102,7 +106,11 @@ pub enum Step {
     /// at `T` puts a disjunction at `≥_t T`; and all operands agreeing decides
     /// the other direction. `implies` is `∨` with operand 0 negated, and
     /// negation is the involution swapping `T`/`F`.
-    Connective { node: ObjectId, premises: Vec<(usize, usize)>, holds: bool },
+    Connective {
+        node: ObjectId,
+        premises: Vec<(usize, usize)>,
+        holds: bool,
+    },
     /// One member settled a scan — the witness of an existential or the
     /// counterexample to a universal.
     ///
@@ -136,7 +144,11 @@ pub enum Step {
     /// **Soundness.** A universal over a complete, finite domain is the meet of
     /// its instances and an existential is their join (semantics §4). Given every
     /// member covered and every instance certain, the meet or join is decided.
-    Exhaustive { node: ObjectId, premises: Vec<(usize, ObjectId, ObjectId)>, holds: bool },
+    Exhaustive {
+        node: ObjectId,
+        premises: Vec<(usize, ObjectId, ObjectId)>,
+        holds: bool,
+    },
     /// A stored rule fired. Defeasible rules mark it, so a reader can see that
     /// the conclusion holds absent a defeater rather than outright.
     ///
@@ -169,7 +181,11 @@ pub enum Step {
     /// strong implication treats them identically — which is the point of using
     /// it rather than patching detachment with a side condition the judgment
     /// type cannot express.
-    ModusPonens { node: ObjectId, implication: usize, antecedent: usize },
+    ModusPonens {
+        node: ObjectId,
+        implication: usize,
+        antecedent: usize,
+    },
     /// The sentence has no stable value — its own truth is among its premises.
     ///
     /// Whether it **oscillates** used to be a `bool` the kernel copied into its
@@ -201,7 +217,11 @@ pub enum Step {
     /// against `enum`, and `enum ⊆ ext`, so this holds over **partially**
     /// enumerable domains too — unlike [`Step::Exhaustive`], which needs
     /// `enum = ext` because it reasons in the other direction.
-    Instantiate { node: ObjectId, premise: usize, value: ObjectId },
+    Instantiate {
+        node: ObjectId,
+        premise: usize,
+        value: ObjectId,
+    },
 }
 
 impl Step {
@@ -275,11 +295,17 @@ pub struct Checked {
 pub enum Invalid {
     Empty,
     /// A premise index pointing forward, or past the end.
-    BadReference { step: usize },
+    BadReference {
+        step: usize,
+    },
     /// The step's shape does not match the node it claims to conclude.
-    Mismatched { step: usize },
+    Mismatched {
+        step: usize,
+    },
     /// The step's rule does not license its conclusion from its premises.
-    Unlicensed { step: usize },
+    Unlicensed {
+        step: usize,
+    },
 }
 
 impl Certificate {
@@ -314,24 +340,43 @@ impl Certificate {
                 out.get(k).ok_or(Invalid::BadReference { step: i })
             };
             let checked = match step {
-                Step::Told { node, holds, sources } => {
+                Step::Told {
+                    node,
+                    holds,
+                    sources,
+                } => {
                     // An authority must name something the graph actually holds.
                     // `assumed` means *no source was verified* — not *the vector
                     // was non-empty*, which was satisfiable with one arbitrary
                     // integer, and which made an unattributed claim
                     // indistinguishable from an attributed one to every reader.
-                    let named: Vec<ObjectId> =
-                        sources.iter().copied().filter(|s| g.get(*s).is_some()).collect();
+                    let named: Vec<ObjectId> = sources
+                        .iter()
+                        .copied()
+                        .filter(|s| g.get(*s).is_some())
+                        .collect();
                     Checked {
                         node: *node,
                         // Both bits settled: a structure that says a fact holds
                         // has told you its refutation bit is zero.
-                        support: if *holds { Bound::Certain } else { Bound::Excluded },
-                        refutation: if *holds { Bound::Excluded } else { Bound::Certain },
+                        support: if *holds {
+                            Bound::Certain
+                        } else {
+                            Bound::Excluded
+                        },
+                        refutation: if *holds {
+                            Bound::Excluded
+                        } else {
+                            Bound::Certain
+                        },
                         grounding: Grounding::Grounded,
                         derivation: Derivation::Observed,
                         determinacy: Determinacy::Unknown,
-                        assumed: if named.is_empty() { vec![*node] } else { Vec::new() },
+                        assumed: if named.is_empty() {
+                            vec![*node]
+                        } else {
+                            Vec::new()
+                        },
                         authorities: named,
                         // This testimony is a hypothesis of everything downstream.
                         hypotheses: vec![*node],
@@ -345,7 +390,11 @@ impl Certificate {
                     // Γ empty: the only unconditional judgment in the system.
                     base(*node, *holds, Determinacy::Total)
                 }
-                Step::ModusPonens { node, implication, antecedent } => {
+                Step::ModusPonens {
+                    node,
+                    implication,
+                    antecedent,
+                } => {
                     let imp = premise(*implication)?;
                     let ante = premise(*antecedent)?;
                     // The implication premise must *be* `A → node`, with `A` the
@@ -383,7 +432,11 @@ impl Certificate {
                         ..p.clone()
                     }
                 }
-                Step::Connective { node, premises, holds } => {
+                Step::Connective {
+                    node,
+                    premises,
+                    holds,
+                } => {
                     let (op, operands) = match g.get(*node) {
                         Some(CoreNode::Apply { operator, operands }) => (*operator, operands),
                         _ => return Err(Invalid::Mismatched { step: i }),
@@ -443,7 +496,11 @@ impl Certificate {
                         // the designated `B`.
                         let negated = op == wk::IMPLIES && *pos == 0;
                         let licensed = if negated {
-                            if *holds { p.support.is_excluded() } else { p.support.is_certain() }
+                            if *holds {
+                                p.support.is_excluded()
+                            } else {
+                                p.support.is_certain()
+                            }
                         } else if *holds {
                             p.support.is_certain()
                         } else {
@@ -464,10 +521,16 @@ impl Certificate {
                     }
                     acc
                 }
-                Step::Instance { node, premise: k, value, instance, holds } => {
+                Step::Instance {
+                    node,
+                    premise: k,
+                    value,
+                    instance,
+                    holds,
+                } => {
                     let p = premise(*k)?;
-                    let (binder, body, dom) = binder_parts(g, *node)
-                        .ok_or(Invalid::Mismatched { step: i })?;
+                    let (binder, body, dom) =
+                        binder_parts(g, *node).ok_or(Invalid::Mismatched { step: i })?;
                     // A witness settles an existential true; a counterexample
                     // settles a universal false. The other two combinations are
                     // not licensed by a single member.
@@ -481,8 +544,7 @@ impl Certificate {
                     // rule, and the domain is in the node the kernel holds. A
                     // domain it cannot enumerate is refused rather than assumed:
                     // a kernel that cannot check must not pass.
-                    let (members, _) =
-                        domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
+                    let (members, _) = domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
                     if !members.contains(value) {
                         return Err(Invalid::Unlicensed { step: i });
                     }
@@ -498,9 +560,13 @@ impl Certificate {
                     absorb(&mut acc, p);
                     acc
                 }
-                Step::Exhaustive { node, premises, holds } => {
-                    let (binder, body, dom) = binder_parts(g, *node)
-                        .ok_or(Invalid::Mismatched { step: i })?;
+                Step::Exhaustive {
+                    node,
+                    premises,
+                    holds,
+                } => {
+                    let (binder, body, dom) =
+                        binder_parts(g, *node).ok_or(Invalid::Mismatched { step: i })?;
                     if !matches!(binder, wk::FORALL | wk::EXISTS) {
                         return Err(Invalid::Mismatched { step: i });
                     }
@@ -542,10 +608,14 @@ impl Certificate {
                     }
                     acc
                 }
-                Step::Instantiate { node, premise: k, value } => {
+                Step::Instantiate {
+                    node,
+                    premise: k,
+                    value,
+                } => {
                     let p = premise(*k)?;
-                    let (binder, body, dom) = binder_parts(g, p.node)
-                        .ok_or(Invalid::Mismatched { step: i })?;
+                    let (binder, body, dom) =
+                        binder_parts(g, p.node).ok_or(Invalid::Mismatched { step: i })?;
                     if binder != wk::FORALL {
                         return Err(Invalid::Mismatched { step: i });
                     }
@@ -557,8 +627,7 @@ impl Certificate {
                     }
                     // `enum ⊆ ext`, so an enumerated member is a real member and
                     // completeness is irrelevant here.
-                    let (members, _) =
-                        domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
+                    let (members, _) = domain_of(g, dom).ok_or(Invalid::Unlicensed { step: i })?;
                     if !members.contains(value) || p.support != Bound::Certain {
                         return Err(Invalid::Unlicensed { step: i });
                     }
@@ -620,8 +689,7 @@ impl Certificate {
                 // *conflict*: a certificate concluding `Supported` for a result
                 // that is `Refuted` is the failure this exists to catch, and
                 // one settling a bit the evaluator left open is not.
-                let compatible =
-                    |c: Bound, r: Bound| !c.is_settled() || !r.is_settled() || c == r;
+                let compatible = |c: Bound, r: Bound| !c.is_settled() || !r.is_settled() || c == r;
                 c.node == node
                     && compatible(c.support, result.support)
                     && compatible(c.refutation, result.refutation)
@@ -701,7 +769,11 @@ fn read_index(g: &ObjectGraph, id: ObjectId) -> Option<usize> {
 fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
     let mut parts: Vec<ObjectId> = Vec::new();
     match s {
-        Step::Told { node, holds, sources } => {
+        Step::Told {
+            node,
+            holds,
+            sources,
+        } => {
             let (h, src) = (g.boolean(*holds), seq_of(g, sources));
             parts.extend([wk::BY_TOLD, *node, h, src]);
         }
@@ -713,7 +785,11 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
             let p = g.int(*premise as i64);
             parts.extend([wk::BY_NEGATION, *node, p]);
         }
-        Step::Connective { node, premises, holds } => {
+        Step::Connective {
+            node,
+            premises,
+            holds,
+        } => {
             // Premise and operand position stay paired, for the same reason
             // `Exhaustive`'s triples do: flattening makes the grouping
             // recoverable only by arithmetic, and a mis-grouped decode yields a
@@ -728,11 +804,21 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
             let (ps, h) = (seq_of(g, &pairs), g.boolean(*holds));
             parts.extend([wk::BY_CONNECTIVE, *node, ps, h]);
         }
-        Step::Instance { node, premise, value, instance, holds } => {
+        Step::Instance {
+            node,
+            premise,
+            value,
+            instance,
+            holds,
+        } => {
             let (p, h) = (g.int(*premise as i64), g.boolean(*holds));
             parts.extend([wk::BY_INSTANCE, *node, p, *value, *instance, h]);
         }
-        Step::Exhaustive { node, premises, holds } => {
+        Step::Exhaustive {
+            node,
+            premises,
+            holds,
+        } => {
             // Each premise is a triple, and it stays a triple: flattening them
             // into one list would make `(k, value, instance)` recoverable only
             // by arithmetic on the length, and a mis-grouped decode produces a
@@ -747,12 +833,20 @@ fn encode_step(g: &mut ObjectGraph, s: &Step) -> ObjectId {
             let (ps, h) = (seq_of(g, &triples), g.boolean(*holds));
             parts.extend([wk::BY_EXHAUSTIVE, *node, ps, h]);
         }
-        Step::ModusPonens { node, implication, antecedent } => {
+        Step::ModusPonens {
+            node,
+            implication,
+            antecedent,
+        } => {
             let (imp, ante) = (g.int(*implication as i64), g.int(*antecedent as i64));
             parts.extend([wk::BY_RULE, *node, imp, ante]);
         }
         Step::Ungrounded { node } => parts.extend([wk::BY_UNGROUNDED, *node]),
-        Step::Instantiate { node, premise, value } => {
+        Step::Instantiate {
+            node,
+            premise,
+            value,
+        } => {
             let k = g.int(*premise as i64);
             parts.extend([wk::BY_INSTANTIATE, *node, k, *value]);
         }
@@ -774,12 +868,14 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
             holds: read_bool(g, *holds)?,
             sources: read_seq(g, *sources)?,
         }),
-        [k, node, holds] if *k == wk::BY_AXIOM => {
-            Some(Step::Axiom { node: *node, holds: read_bool(g, *holds)? })
-        }
-        [k, node, premise] if *k == wk::BY_NEGATION => {
-            Some(Step::Negation { node: *node, premise: read_index(g, *premise)? })
-        }
+        [k, node, holds] if *k == wk::BY_AXIOM => Some(Step::Axiom {
+            node: *node,
+            holds: read_bool(g, *holds)?,
+        }),
+        [k, node, premise] if *k == wk::BY_NEGATION => Some(Step::Negation {
+            node: *node,
+            premise: read_index(g, *premise)?,
+        }),
         [k, node, premises, holds] if *k == wk::BY_CONNECTIVE => {
             let mut ps = Vec::new();
             for t in read_seq(g, *premises)? {
@@ -791,7 +887,11 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
                 };
                 ps.push((read_index(g, idx)?, read_index(g, pos)?));
             }
-            Some(Step::Connective { node: *node, premises: ps, holds: read_bool(g, *holds)? })
+            Some(Step::Connective {
+                node: *node,
+                premises: ps,
+                holds: read_bool(g, *holds)?,
+            })
         }
         [k, node, premise, value, instance, holds] if *k == wk::BY_INSTANCE => {
             Some(Step::Instance {
@@ -810,7 +910,11 @@ fn decode_step(g: &ObjectGraph, id: ObjectId) -> Option<Step> {
                 };
                 ps.push((read_index(g, idx)?, value, instance));
             }
-            Some(Step::Exhaustive { node: *node, premises: ps, holds: read_bool(g, *holds)? })
+            Some(Step::Exhaustive {
+                node: *node,
+                premises: ps,
+                holds: read_bool(g, *holds)?,
+            })
         }
         [k, node, imp, ante] if *k == wk::BY_RULE => Some(Step::ModusPonens {
             node: *node,
@@ -846,7 +950,11 @@ pub(crate) fn instantiates(
         return false;
     }
     if let Some(k) = g.as_bvar(body) {
-        return if k == depth { instance == value } else { instance == body };
+        return if k == depth {
+            instance == value
+        } else {
+            instance == body
+        };
     }
     if body == instance {
         // Identical subtrees mention no variable at this level.
@@ -854,16 +962,33 @@ pub(crate) fn instantiates(
     }
     match (g.get(body), g.get(instance)) {
         (
-            Some(CoreNode::Apply { operator: o1, operands: a1 }),
-            Some(CoreNode::Apply { operator: o2, operands: a2 }),
+            Some(CoreNode::Apply {
+                operator: o1,
+                operands: a1,
+            }),
+            Some(CoreNode::Apply {
+                operator: o2,
+                operands: a2,
+            }),
         ) => {
             o1 == o2
                 && a1.len() == a2.len()
-                && a1.iter().zip(a2).all(|(x, y)| instantiates(g, *x, value, *y, depth))
+                && a1
+                    .iter()
+                    .zip(a2)
+                    .all(|(x, y)| instantiates(g, *x, value, *y, depth))
         }
         (
-            Some(CoreNode::Bind { binder: b1, vars: v1, bodies: d1 }),
-            Some(CoreNode::Bind { binder: b2, vars: v2, bodies: d2 }),
+            Some(CoreNode::Bind {
+                binder: b1,
+                vars: v1,
+                bodies: d1,
+            }),
+            Some(CoreNode::Bind {
+                binder: b2,
+                vars: v2,
+                bodies: d2,
+            }),
         ) => {
             b1 == b2
                 && v1 == v2
@@ -885,9 +1010,11 @@ pub(crate) fn instantiates(
 /// state membership as a side condition instead of omitting it.
 fn binder_parts(g: &ObjectGraph, node: ObjectId) -> Option<(ObjectId, ObjectId, ObjectId)> {
     match g.get(node) {
-        Some(CoreNode::Bind { binder, vars, bodies }) if vars.len() == 1 => {
-            Some((*binder, *bodies.first()?, vars[0].domain?))
-        }
+        Some(CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        }) if vars.len() == 1 => Some((*binder, *bodies.first()?, vars[0].domain?)),
         _ => None,
     }
 }
@@ -944,8 +1071,16 @@ pub(crate) fn loop_parity(g: &ObjectGraph, node: ObjectId) -> Option<bool> {
 fn base(node: ObjectId, holds: bool, determinacy: Determinacy) -> Checked {
     Checked {
         node,
-        support: if holds { Bound::Certain } else { Bound::Excluded },
-        refutation: if holds { Bound::Excluded } else { Bound::Certain },
+        support: if holds {
+            Bound::Certain
+        } else {
+            Bound::Excluded
+        },
+        refutation: if holds {
+            Bound::Excluded
+        } else {
+            Bound::Certain
+        },
         grounding: Grounding::Grounded,
         derivation: Derivation::Observed,
         determinacy,

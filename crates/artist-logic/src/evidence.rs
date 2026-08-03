@@ -150,7 +150,10 @@ pub struct Credence {
 
 impl Credence {
     /// The widest honest interval: expressible, and nothing known.
-    pub const VACUOUS: Credence = Credence { lo: -20_000, hi: 20_000 };
+    pub const VACUOUS: Credence = Credence {
+        lo: -20_000,
+        hi: 20_000,
+    };
 
     pub fn point(llr: i64) -> Credence {
         Credence { lo: llr, hi: llr }
@@ -180,28 +183,40 @@ impl Credence {
     /// gap in the implementation; it is the actual state of knowledge, and the
     /// interval representation exists to be able to say it.
     pub fn conjoin(self, other: Credence) -> Credence {
-        Credence { lo: Credence::VACUOUS.lo, hi: self.hi.min(other.hi) }
+        Credence {
+            lo: Credence::VACUOUS.lo,
+            hi: self.hi.min(other.hi),
+        }
     }
 
     /// The credence of a **disjunction** — the mirror. A disjunction is at least
     /// as likely as its likeliest disjunct, and no independence assumption
     /// bounds it above.
     pub fn disjoin(self, other: Credence) -> Credence {
-        Credence { lo: self.lo.max(other.lo), hi: Credence::VACUOUS.hi }
+        Credence {
+            lo: self.lo.max(other.lo),
+            hi: Credence::VACUOUS.hi,
+        }
     }
 
     /// What both sources agree on. Disagreement *widens*: an interval that
     /// narrowed under conflict would be claiming precision the sources do not
     /// jointly support.
     pub fn merge(self, other: Credence) -> Credence {
-        Credence { lo: self.lo.min(other.lo), hi: self.hi.max(other.hi) }
+        Credence {
+            lo: self.lo.min(other.lo),
+            hi: self.hi.max(other.hi),
+        }
     }
 
     pub fn negate(self) -> Credence {
         // Saturating, like `combine`. A structure returning `i64::MIN` panicked
         // on any negation above it — one factor outside the documented
         // `i64::MIN / 4` convention, which is not far enough to rely on.
-        Credence { lo: self.hi.saturating_neg(), hi: self.lo.saturating_neg() }
+        Credence {
+            lo: self.hi.saturating_neg(),
+            hi: self.lo.saturating_neg(),
+        }
     }
 
     /// Is the whole interval on one side of even odds?
@@ -792,8 +807,10 @@ impl EvidenceLedger {
         }
         let mut taken: BTreeSet<u128> = BTreeSet::new();
         let mut acc = Credence::point(0);
-        for (e, affirming) in
-            pro.iter().map(|e| (*e, true)).chain(con.iter().map(|e| (*e, false)))
+        for (e, affirming) in pro
+            .iter()
+            .map(|e| (*e, true))
+            .chain(con.iter().map(|e| (*e, false)))
         {
             let stamp = self.ancestry(e);
             if stamp.iter().any(|a| taken.contains(a)) {
@@ -804,8 +821,14 @@ impl EvidenceLedger {
                 (Some(w), true) => Credence::point(w),
                 (Some(w), false) => Credence::point(-w),
                 // Strength unrecorded: bounded on the side it cannot move.
-                (None, true) => Credence { lo: 0, hi: Credence::VACUOUS.hi },
-                (None, false) => Credence { lo: Credence::VACUOUS.lo, hi: 0 },
+                (None, true) => Credence {
+                    lo: 0,
+                    hi: Credence::VACUOUS.hi,
+                },
+                (None, false) => Credence {
+                    lo: Credence::VACUOUS.lo,
+                    hi: 0,
+                },
             };
             acc = acc.combine(c);
         }
@@ -827,7 +850,9 @@ impl EvidenceLedger {
             }
         };
         for a in self.assertions.values() {
-            if a.proposition == proposition && let Some(agent) = a.asserting_agent {
+            if a.proposition == proposition
+                && let Some(agent) = a.asserting_agent
+            {
                 push(agent);
             }
         }

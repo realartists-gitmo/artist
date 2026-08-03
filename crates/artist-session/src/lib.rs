@@ -17,6 +17,7 @@
 //! ```
 
 pub mod ask;
+mod ask_outbox;
 mod attachments;
 pub mod capabilities;
 pub mod chain;
@@ -33,8 +34,10 @@ mod memory;
 mod provider_context;
 mod recorder;
 mod replay;
+mod store;
 
 pub use ask::{Answer, AskRegistry, Question, QuestionOption};
+pub use ask_outbox::AskOutbox;
 pub use attachments::{AttachmentStore, content_digest};
 pub use capabilities::ProviderCapabilities;
 pub use chain::{ChainState, Send as ChainSend};
@@ -44,14 +47,14 @@ pub use convert::{
     user_to_blocks,
 };
 pub use event::{
-    AskAnswered, AskPosted, CanvasCreated, CanvasOpened, CanvasState, ComputerActed,
-    ComputerElided, ComputerLaunched, ComputerObserved, ComputerStageClosed, ComputerStageOpened,
-    ComputerStep, ContentBlock, ConversationCompacted, ConversationMessages, DelegateFinished,
-    DelegateStarted, Envelope, HandoffPerformed, HistoryRewind, LegacyTurn, MAIN_LINEAGE,
-    MemoryWritten, ModelTurn, ProviderContext, RuleFired, RuleInjection, RuleRetroFindings,
-    RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated, SessionEvent,
-    SteeringDelivered, TodoItem, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
-    TurnUser,
+    AskAnswered, AskPosted, CanvasCreated, CanvasOpened, CanvasState, ChangeRecorded,
+    ComputerActed, ComputerElided, ComputerLaunched, ComputerObserved, ComputerStageClosed,
+    ComputerStageOpened, ComputerStep, ContentBlock, ConversationCompacted, ConversationMessages,
+    DelegateFinished, DelegateStarted, Envelope, HandoffPerformed, HistoryRewind, LegacyTurn,
+    MAIN_LINEAGE, MemoryWritten, ModelTurn, ProviderContext, RuleFired, RuleInjection,
+    RuleRetroFindings, RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated,
+    SessionEvent, SteeringDelivered, TaskFinished, TaskStarted, TaskUpdated, TodoItem, TodoStatus,
+    TodoUpdated, ToolOutcomeRecord, ToolResultEvent, TurnUser,
 };
 pub use file_handles::HandleLedger;
 pub use history::{HistoryOptions, build as build_history};
@@ -64,3 +67,4 @@ pub use replay::{
     ReplayItem, active_profile, handoff_depth, markdown_fragment, render_markdown, replay_for_ui,
     rewind_targets, user_prompts, visible_events,
 };
+pub use store::{ActiveSession, Session, SessionStore};

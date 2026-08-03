@@ -23,7 +23,9 @@ fn proposition(pred: artist_memory::relational::Sym, args: &[ObjectId]) -> Objec
 
 async fn store() -> (TempDir, MemoryStore) {
     let dir = TempDir::new().expect("tempdir");
-    let s = MemoryStore::open(dir.path().join("t.rocks")).await.expect("open");
+    let s = MemoryStore::open(dir.path().join("t.rocks"))
+        .await
+        .expect("open");
     (dir, s)
 }
 
@@ -47,13 +49,17 @@ async fn a_coreference_merge_preserves_sources_under_both_names() {
     let full = intern(&s, "compaction-planner").await.expect("sym");
     let tabs = intern(&s, "tabs").await.expect("sym");
 
-    assert_stmt(&s, prefers, &[full, tabs], "agent-a").await.expect("fact");
+    assert_stmt(&s, prefers, &[full, tabs], "agent-a")
+        .await
+        .expect("fact");
     let view = RelationalView::load(&s).await.expect("load");
     let before = view.attribution(proposition(prefers, &[oid(full), oid(tabs)]));
     assert!(!before.is_empty(), "agent-a vouches for what it wrote");
 
     // A pure addition: nobody has retracted anything.
-    assert_stmt(&s, well_known::IS, &[short, full], "corefbot").await.expect("merge");
+    assert_stmt(&s, well_known::IS, &[short, full], "corefbot")
+        .await
+        .expect("merge");
     let view = RelationalView::load(&s).await.expect("reload");
 
     for (label, args) in [
@@ -87,7 +93,9 @@ async fn a_source_named_like_an_operator_is_not_that_operator() {
     let thing = intern(&s, "thing").await.expect("sym");
 
     // "source" is a reserved operator name, and a perfectly ordinary origin.
-    assert_stmt(&s, holds, &[thing], "source").await.expect("fact");
+    assert_stmt(&s, holds, &[thing], "source")
+        .await
+        .expect("fact");
     let view = RelationalView::load(&s).await.expect("load");
     let sources = view.attribution(proposition(holds, &[oid(thing)]));
 
@@ -124,7 +132,9 @@ async fn a_retracted_claim_stops_vouching() {
     let fast = intern(&s, "build-is-fast").await.expect("sym");
     let proj = intern(&s, "artist").await.expect("sym");
 
-    let id = assert_stmt(&s, fast, &[proj], "agent-a").await.expect("fact");
+    let id = assert_stmt(&s, fast, &[proj], "agent-a")
+        .await
+        .expect("fact");
     let view = RelationalView::load(&s).await.expect("load");
     assert!(
         !view.attribution(proposition(fast, &[oid(proj)])).is_empty(),
@@ -140,7 +150,9 @@ async fn a_retracted_claim_stops_vouching() {
 
     // …and a second, independent assertion of the same fact is unaffected,
     // because the fold is per statement rather than per tuple.
-    assert_stmt(&s, fast, &[proj], "agent-b").await.expect("second");
+    assert_stmt(&s, fast, &[proj], "agent-b")
+        .await
+        .expect("second");
     let view = RelationalView::load(&s).await.expect("reload");
     assert_eq!(
         view.attribution(proposition(fast, &[oid(proj)])).len(),
@@ -173,7 +185,11 @@ async fn a_denier_does_not_vouch_for_the_claim_it_denies() {
     let (carol, dan) = (g.atom("carol"), g.atom("dan"));
     record_assertion(
         &s,
-        &Assertion { asserting_agent: Some(carol), ..Assertion::affirm(prop, 1_000) }.sealed(),
+        &Assertion {
+            asserting_agent: Some(carol),
+            ..Assertion::affirm(prop, 1_000)
+        }
+        .sealed(),
     )
     .await
     .expect("carol affirms");
@@ -192,7 +208,10 @@ async fn a_denier_does_not_vouch_for_the_claim_it_denies() {
     let view = RelationalView::load(&s).await.expect("load");
     let sources = view.attribution(prop);
 
-    assert!(sources.contains(&carol), "carol affirmed it, so carol vouches");
+    assert!(
+        sources.contains(&carol),
+        "carol affirmed it, so carol vouches"
+    );
     assert!(
         !sources.contains(&dan),
         "dan denied it — `authorities` on a `Told{{holds:true}}` step means \
@@ -213,7 +232,9 @@ async fn an_origin_cannot_impersonate_a_session() {
     let holds = intern(&s, "claims").await.expect("sym");
     let thing = intern(&s, "thing").await.expect("sym");
 
-    assert_stmt(&s, holds, &[thing], "session:abc").await.expect("fact");
+    assert_stmt(&s, holds, &[thing], "session:abc")
+        .await
+        .expect("fact");
     let view = RelationalView::load(&s).await.expect("load");
     let sources = view.attribution(proposition(holds, &[oid(thing)]));
 

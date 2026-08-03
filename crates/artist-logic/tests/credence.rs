@@ -13,10 +13,10 @@
 //! independent evidence bearing on *one* proposition — would be how a system
 //! ends up confident that six 90%-likely things are all true at once.
 
+use artist_logic::ObjectGraph;
 use artist_logic::evidence::{ComputeStatus, Credence, Evidential};
 use artist_logic::graph_eval::{EmptyStructure, GraphEvaluator, MapGraphStructure};
 use artist_logic::object::wk;
-use artist_logic::ObjectGraph;
 
 /// A conjunction is no more likely than its least likely part, and the floor is
 /// honestly vacuous — two individually near-certain claims can be jointly
@@ -35,9 +35,15 @@ fn a_conjunction_takes_the_weakest_ceiling() {
         .graded(qa, 1_000, 2_000);
 
     let r = GraphEvaluator::new().eval(&mut g, both, &s, 100_000);
-    let c = r.credence.expect("a conjunction of graded claims is graded");
+    let c = r
+        .credence
+        .expect("a conjunction of graded claims is graded");
     assert_eq!(c.hi, 2_000, "no likelier than the least likely conjunct");
-    assert_eq!(c.lo, Credence::VACUOUS.lo, "and no floor without an independence claim");
+    assert_eq!(
+        c.lo,
+        Credence::VACUOUS.lo,
+        "and no floor without an independence claim"
+    );
 }
 
 /// The mirror. A disjunction inherits its likeliest disjunct as a floor.
@@ -70,9 +76,15 @@ fn an_ungraded_conjunct_is_skipped_not_fatal() {
     let (p, q, a) = (g.atom("p"), g.atom("q"), g.atom("a"));
     let (pa, qa) = (g.apply(p, vec![a]), g.apply(q, vec![a]));
     let both = g.apply(wk::AND, vec![pa, qa]);
-    let s = MapGraphStructure::new().fact(p, vec![a]).fact(q, vec![a]).graded(pa, 3_000, 4_000);
+    let s = MapGraphStructure::new()
+        .fact(p, vec![a])
+        .fact(q, vec![a])
+        .graded(pa, 3_000, 4_000);
 
-    let c = GraphEvaluator::new().eval(&mut g, both, &s, 100_000).credence.expect("graded");
+    let c = GraphEvaluator::new()
+        .eval(&mut g, both, &s, 100_000)
+        .credence
+        .expect("graded");
     assert_eq!(c.hi, 4_000);
     assert_eq!(
         c.lo,
@@ -89,9 +101,14 @@ fn negation_reflects_the_interval() {
     let (p, a) = (g.atom("p"), g.atom("a"));
     let pa = g.apply(p, vec![a]);
     let not_pa = g.apply(wk::NOT, vec![pa]);
-    let s = MapGraphStructure::new().fact(p, vec![a]).graded(pa, 1_000, 4_000);
+    let s = MapGraphStructure::new()
+        .fact(p, vec![a])
+        .graded(pa, 1_000, 4_000);
 
-    let c = GraphEvaluator::new().eval(&mut g, not_pa, &s, 100_000).credence.expect("graded");
+    let c = GraphEvaluator::new()
+        .eval(&mut g, not_pa, &s, 100_000)
+        .credence
+        .expect("graded");
     assert_eq!((c.lo, c.hi), (-4_000, -1_000));
 }
 
@@ -101,7 +118,11 @@ fn negation_reflects_the_interval() {
 fn likely_reads_the_interval() {
     let mut g = ObjectGraph::new();
     let (p, a, b, c) = (g.atom("p"), g.atom("a"), g.atom("b"), g.atom("c"));
-    let (pa, pb, pc) = (g.apply(p, vec![a]), g.apply(p, vec![b]), g.apply(p, vec![c]));
+    let (pa, pb, pc) = (
+        g.apply(p, vec![a]),
+        g.apply(p, vec![b]),
+        g.apply(p, vec![c]),
+    );
     let s = MapGraphStructure::new()
         .fact(p, vec![a])
         .fact(p, vec![b])
@@ -110,9 +131,7 @@ fn likely_reads_the_interval() {
         .graded(pb, -4_000, -1_000)
         .graded(pc, -1_000, 1_000);
 
-    let ev = |g: &mut ObjectGraph, node| {
-        GraphEvaluator::new().eval(g, node, &s, 100_000)
-    };
+    let ev = |g: &mut ObjectGraph, node| GraphEvaluator::new().eval(g, node, &s, 100_000);
     let q = g.apply(wk::LIKELY, vec![pa]);
     assert_eq!(ev(&mut g, q).evidential(), Evidential::Supported);
     let q = g.apply(wk::LIKELY, vec![pb]);
@@ -120,7 +139,11 @@ fn likely_reads_the_interval() {
     let q = g.apply(wk::LIKELY, vec![pc]);
     let r = ev(&mut g, q);
     assert_eq!(r.evidential(), Evidential::Open);
-    assert_eq!(r.compute_status, ComputeStatus::Exact, "graded, and it straddles");
+    assert_eq!(
+        r.compute_status,
+        ComputeStatus::Exact,
+        "graded, and it straddles"
+    );
 }
 
 /// **Ungraded is not even odds.** A store asked about something it cannot grade
@@ -146,8 +169,8 @@ fn an_ungraded_proposition_stalls_rather_than_straddling() {
 /// `combine` belongs, unlike across a conjunction.
 #[test]
 fn the_ledger_pools_independent_evidence() {
-    use artist_logic::evidence::{Assertion, Evidence, EvidenceLedger, Polarity};
     use artist_logic::ObjectId;
+    use artist_logic::evidence::{Assertion, Evidence, EvidenceLedger, Polarity};
 
     let prop = ObjectId(1);
     let mut led = EvidenceLedger::new();
@@ -178,9 +201,16 @@ fn the_ledger_pools_independent_evidence() {
         });
     }
     let c = led.credence_of(prop).expect("evidence bears on it");
-    assert_eq!(c, Credence::point(2_000), "two independent sources compound");
+    assert_eq!(
+        c,
+        Credence::point(2_000),
+        "two independent sources compound"
+    );
 
     // …and the agent who asserted it is nameable, which is what a certificate
     // needs and what naming the predicate never gave.
-    assert_eq!(led.attribution(prop), vec![ObjectId(99), ObjectId(2), ObjectId(3)]);
+    assert_eq!(
+        led.attribution(prop),
+        vec![ObjectId(99), ObjectId(2), ObjectId(3)]
+    );
 }

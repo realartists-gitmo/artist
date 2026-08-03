@@ -39,7 +39,11 @@ struct Told {
 
 impl Told {
     fn new() -> Told {
-        Told { holds: Vec::new(), fails: Vec::new(), domains: Vec::new() }
+        Told {
+            holds: Vec::new(),
+            fails: Vec::new(),
+            domains: Vec::new(),
+        }
     }
     fn holding(mut self, p: ObjectId, args: Vec<ObjectId>) -> Told {
         self.holds.push((p, args));
@@ -66,10 +70,13 @@ impl GraphStructure for Told {
         }
     }
     fn extension(&self, domain: ObjectId) -> Option<Extension> {
-        self.domains.iter().find(|(d, _, _)| *d == domain).map(|(_, m, c)| Extension {
-            members: m.clone(),
-            complete: *c,
-        })
+        self.domains
+            .iter()
+            .find(|(d, _, _)| *d == domain)
+            .map(|(_, m, c)| Extension {
+                members: m.clone(),
+                complete: *c,
+            })
     }
 }
 
@@ -77,8 +84,11 @@ impl GraphStructure for Told {
 fn fixture(g: &mut ObjectGraph) -> (Told, ObjectId, ObjectId, ObjectId) {
     let p = g.atom("p");
     let (t, u, f) = (g.atom("t"), g.atom("u"), g.atom("f"));
-    let (yes, unknown, no) =
-        (g.apply(p, vec![t]), g.apply(p, vec![u]), g.apply(p, vec![f]));
+    let (yes, unknown, no) = (
+        g.apply(p, vec![t]),
+        g.apply(p, vec![u]),
+        g.apply(p, vec![f]),
+    );
     let s = Told::new().holding(p, vec![t]).failing(p, vec![f]);
     (s, yes, unknown, no)
 }
@@ -92,9 +102,11 @@ fn eval(g: &mut ObjectGraph, root: ObjectId, s: &dyn GraphStructure) -> Evidenti
 fn row_not() {
     let mut g = ObjectGraph::new();
     let (s, yes, unknown, no) = fixture(&mut g);
-    for (operand, expect) in
-        [(yes, Evidential::Refuted), (no, Evidential::Supported), (unknown, Evidential::Open)]
-    {
+    for (operand, expect) in [
+        (yes, Evidential::Refuted),
+        (no, Evidential::Supported),
+        (unknown, Evidential::Open),
+    ] {
         let e = g.apply(wk::NOT, vec![operand]);
         assert_eq!(eval(&mut g, e, &s), expect);
     }
@@ -161,10 +173,10 @@ fn row_implies() {
     // repair separates *fails* from *is refuted*, and the row is derivable again
     // — without the unsoundness that used to come with it.
     for (a, b, expect) in [
-        (no, unknown, Evidential::Supported),   // false antecedent: `⟦A⟧⁺ = 0`
-        (yes, yes, Evidential::Supported),      // true consequent
-        (yes, no, Evidential::Refuted),         // the only refuting case
-        (unknown, other, Evidential::Open),     // both open, and unrelated
+        (no, unknown, Evidential::Supported), // false antecedent: `⟦A⟧⁺ = 0`
+        (yes, yes, Evidential::Supported),    // true consequent
+        (yes, no, Evidential::Refuted),       // the only refuting case
+        (unknown, other, Evidential::Open),   // both open, and unrelated
     ] {
         let e = g.apply(wk::IMPLIES, vec![a, b]);
         assert_eq!(eval(&mut g, e, &s), expect);
@@ -209,10 +221,11 @@ fn row_forall() {
         .holding(p, vec![a])
         .holding(p, vec![b])
         .domain(d, vec![a, b], false);
-    let counterexample = Told::new()
-        .holding(p, vec![a])
-        .failing(p, vec![b])
-        .domain(d, vec![a, b], false);
+    let counterexample =
+        Told::new()
+            .holding(p, vec![a])
+            .failing(p, vec![b])
+            .domain(d, vec![a, b], false);
 
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
@@ -240,14 +253,16 @@ fn row_exists() {
     let d = g.atom("D");
 
     let witness = Told::new().holding(p, vec![a]).domain(d, vec![a, b], false);
-    let none_complete = Told::new()
-        .failing(p, vec![a])
-        .failing(p, vec![b])
-        .domain(d, vec![a, b], true);
-    let none_partial = Told::new()
-        .failing(p, vec![a])
-        .failing(p, vec![b])
-        .domain(d, vec![a, b], false);
+    let none_complete =
+        Told::new()
+            .failing(p, vec![a])
+            .failing(p, vec![b])
+            .domain(d, vec![a, b], true);
+    let none_partial =
+        Told::new()
+            .failing(p, vec![a])
+            .failing(p, vec![b])
+            .domain(d, vec![a, b], false);
 
     let v = g.fresh();
     let body = g.apply(p, vec![v]);
@@ -325,7 +340,11 @@ fn the_lattice_is_ordered_by_information() {
     let node = g.get(n).cloned().expect("built");
     g.define(liar, node);
     let r = GraphEvaluator::new().eval(&mut g, liar, &EmptyStructure, 10_000);
-    assert_eq!(r.evidential(), Evidential::Open, "no evidence either way exists");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "no evidence either way exists"
+    );
     assert_eq!(r.grounding, artist_logic::evidence::Grounding::Oscillatory);
     assert!(!r.is_definite());
 }
@@ -360,7 +379,10 @@ fn compute_status_is_orthogonal_to_evidence() {
     let big = g.quantify(wk::FORALL, v, Some(d), body);
     let r = ev.eval(&mut g, big, &s, 8);
     assert_eq!(r.compute_status, ComputeStatus::BudgetExhausted);
-    assert!(r.residual.is_some(), "a cut-short scan hands back what is left");
+    assert!(
+        r.residual.is_some(),
+        "a cut-short scan hands back what is left"
+    );
 }
 
 /// §5.4 — termination under a budget is unconditional, and a partial result is
@@ -384,7 +406,11 @@ fn halting_early_is_sound() {
 
     // Cut short, it must not claim the answer it has not reached.
     let partial = ev.eval(&mut g, claim, &s, 10);
-    assert_ne!(partial.evidential(), Evidential::Refuted, "never a wrong verdict");
+    assert_ne!(
+        partial.evidential(),
+        Evidential::Refuted,
+        "never a wrong verdict"
+    );
     assert!(!partial.is_definite(), "a truncated scan is not definite");
 
     // Given budget, it reaches it.
@@ -409,19 +435,38 @@ fn row_aggregates_bound_from_both_sides() {
     let dom = g.atom("D");
     let v = g.fresh();
     let body = g.apply(fails, vec![v]);
-    let counted = g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(dom) }], vec![body]);
+    let counted = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![body],
+    );
 
     // One proven, two undecided, over a *complete* enumeration: lo = 1, hi = 3.
-    let complete = Told::new().holding(fails, vec![ms[0]]).domain(dom, ms.clone(), true);
+    let complete = Told::new()
+        .holding(fails, vec![ms[0]])
+        .domain(dom, ms.clone(), true);
     let one = g.int(1);
     let at_least_one = g.apply(wk::LEQ, vec![one, counted]);
-    assert_eq!(eval(&mut g, at_least_one, &complete), Evidential::Supported, "lo decides");
+    assert_eq!(
+        eval(&mut g, at_least_one, &complete),
+        Evidential::Supported,
+        "lo decides"
+    );
     let three = g.int(3);
     let at_most_three = g.apply(wk::LEQ, vec![counted, three]);
-    assert_eq!(eval(&mut g, at_most_three, &complete), Evidential::Supported, "hi decides");
+    assert_eq!(
+        eval(&mut g, at_most_three, &complete),
+        Evidential::Supported,
+        "hi decides"
+    );
 
     // The same numbers over a *partial* enumeration bound only from below.
-    let partial = Told::new().holding(fails, vec![ms[0]]).domain(dom, ms.clone(), false);
+    let partial = Told::new()
+        .holding(fails, vec![ms[0]])
+        .domain(dom, ms.clone(), false);
     assert_eq!(eval(&mut g, at_least_one, &partial), Evidential::Supported);
     assert_ne!(
         eval(&mut g, at_most_three, &partial),
@@ -449,7 +494,10 @@ fn row_usually_is_defeasible_support() {
     // overturn it. Strength and defeasibility are separate axes.
     assert_eq!(r.support, Bound::Certain);
     assert_eq!(r.derivation, artist_logic::evidence::Derivation::Default);
-    assert!(!r.defeated_by.is_empty(), "a default names what would defeat it");
+    assert!(
+        !r.defeated_by.is_empty(),
+        "a default names what would defeat it"
+    );
     assert!(!r.is_definite());
 
     // Nothing on record: `usually` reports the absence it found.
@@ -496,7 +544,9 @@ fn row_quantities_normalise_through_stored_scale_facts() {
 
     let s = MapGraphStructure::new().scale_fact(minutes, sixty, 60, seconds);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, same, &s, 20_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, same, &s, 20_000)
+            .evidential(),
         Evidential::Supported,
         "one stored fact is the whole of what a new unit costs"
     );
@@ -516,7 +566,11 @@ fn row_at_indexes_by_valid_time() {
             Knowledge::Unknown
         }
         fn known_at(&self, pred: ObjectId, _a: &[ObjectId], t: i64) -> Knowledge {
-            if pred == self.0 && t >= 5 { Knowledge::Holds } else { Knowledge::Fails }
+            if pred == self.0 && t >= 5 {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         }
     }
 

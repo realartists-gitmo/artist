@@ -83,11 +83,7 @@ impl Delta {
 ///
 /// Honours `.gitignore` etc. via `ignore::WalkBuilder` and only considers
 /// files that pass `is_indexable`.
-pub fn compute_delta(
-    walk_root: &Path,
-    strip_root: &Path,
-    cached_files: &[FileRecord],
-) -> Delta {
+pub fn compute_delta(walk_root: &Path, strip_root: &Path, cached_files: &[FileRecord]) -> Delta {
     let cached: HashMap<&str, &FileRecord> =
         cached_files.iter().map(|r| (r.path.as_str(), r)).collect();
 
@@ -259,8 +255,8 @@ mod tests {
         let path = touch(dir.path(), "f.rs", "fn x() {}");
         let record = FileRecord {
             path: "f.rs".to_string(),
-            mtime_ns: 0, // forces hash check
-            size: 999,   // mismatch on size too
+            mtime_ns: 0,      // forces hash check
+            size: 999,        // mismatch on size too
             content_hash: 42, // wrong hash
             chunk_start: 0,
             chunk_end: 1,

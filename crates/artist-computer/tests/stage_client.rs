@@ -914,13 +914,12 @@ async fn keyboard_and_pointer_input_reach_the_focused_client() {
     stage
         .pointer(
             key,
-            artist_computer::Rect {
+            artist_computer::stage::Pointing::at(artist_computer::Rect {
                 x: 10,
                 y: 10,
                 width: 20,
                 height: 20,
-            },
-            0x110, // BTN_LEFT
+            }),
         )
         .await
         .expect("pointer");
@@ -1293,7 +1292,7 @@ async fn the_screen_surface_reads_a_real_window_and_clicks_what_it_read() {
 
     // Click it, and check the client received a button where the text is.
     stage
-        .pointer(key, bounds, 0x110)
+        .pointer(key, artist_computer::stage::Pointing::at(bounds))
         .await
         .expect("the click should dispatch");
 
@@ -1412,6 +1411,11 @@ const REQUIRED_GLOBALS: &[&str] = &[
     "zwp_linux_dmabuf_v1",
     "wp_viewporter",
     "wp_presentation",
+    // A drawing application asks the tablet seat what tools exist at start-up
+    // and takes the mouse path permanently if it finds none — there is no
+    // second chance to discover a stylus, so its absence is not a degradation
+    // but a decision made once, invisibly, against us.
+    "zwp_tablet_manager_v2",
 ];
 
 #[tokio::test]

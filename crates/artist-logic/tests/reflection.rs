@@ -12,14 +12,18 @@
 //! ungrounded, and asking whether something is broken would break in the same
 //! way. `provable` did inherit them, for as long as it has existed.
 
+use artist_logic::ObjectGraph;
 use artist_logic::evidence::{Bound, ComputeStatus, Determinacy, Evidential, Grounding};
 use artist_logic::graph_eval::{
     EmptyStructure, GraphEvaluator, GraphStructure, Knowledge, MapGraphStructure,
 };
-use artist_logic::object::{wk, Binding};
-use artist_logic::ObjectGraph;
+use artist_logic::object::{Binding, wk};
 
-fn ask(g: &mut ObjectGraph, node: artist_logic::ObjectId, s: &dyn GraphStructure) -> artist_logic::evidence::EvaluationResult {
+fn ask(
+    g: &mut ObjectGraph,
+    node: artist_logic::ObjectId,
+    s: &dyn GraphStructure,
+) -> artist_logic::evidence::EvaluationResult {
     GraphEvaluator::new().eval(g, node, s, 100_000)
 }
 
@@ -36,11 +40,19 @@ fn a_report_about_an_ungrounded_sentence_is_grounded() {
     g.define(liar, body);
 
     let direct = ask(&mut g, liar, &EmptyStructure);
-    assert_ne!(direct.grounding, Grounding::Grounded, "the liar itself is ungrounded");
+    assert_ne!(
+        direct.grounding,
+        Grounding::Grounded,
+        "the liar itself is ungrounded"
+    );
 
     let q = g.apply(wk::GROUNDED, vec![liar]);
     let r = ask(&mut g, q, &EmptyStructure);
-    assert_eq!(r.evidential(), Evidential::Refuted, "…and that is a fact about it");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Refuted,
+        "…and that is a fact about it"
+    );
     assert_eq!(
         r.grounding,
         Grounding::Grounded,
@@ -57,7 +69,10 @@ fn absence_of_evidence_is_not_ungroundedness() {
     let (p, a) = (g.atom("p"), g.atom("a"));
     let claim = g.apply(p, vec![a]);
     let q = g.apply(wk::GROUNDED, vec![claim]);
-    assert_eq!(ask(&mut g, q, &EmptyStructure).evidential(), Evidential::Supported);
+    assert_eq!(
+        ask(&mut g, q, &EmptyStructure).evidential(),
+        Evidential::Supported
+    );
 }
 
 /// A conclusion reached through a defeater is defeasible and *names* what would
@@ -131,7 +146,14 @@ fn the_defeater_set_is_a_domain() {
     // domain to range over, which is the whole claim being made here.
     let d = g.apply(wk::DEFEATERS_DOMAIN, vec![hedged]);
     let v = g.fresh();
-    let n = g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(d) }], vec![wk::TOP]);
+    let n = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(d),
+        }],
+        vec![wk::TOP],
+    );
     let one = g.int(1);
     let q = g.apply(wk::EQ, vec![n, one]);
     assert_eq!(
@@ -180,7 +202,11 @@ fn determinacy_distinguishes_denied_from_unspoken() {
 
     let q = g.apply(wk::DETERMINATE, vec![quiet]);
     let r = ask(&mut g, q, &s);
-    assert_eq!(r.evidential(), Evidential::Open, "nobody has said, which is not a no");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "nobody has said, which is not a no"
+    );
     assert_eq!(r.compute_status, ComputeStatus::Stalled);
 
     // And *whether we are taking totality on faith* is itself askable — the one
@@ -201,7 +227,11 @@ fn an_underspecified_condition_is_partial() {
             Knowledge::Holds
         }
         fn determinacy(&self, p: artist_logic::ObjectId) -> Determinacy {
-            if p == self.0 { Determinacy::Underspecified } else { Determinacy::Unknown }
+            if p == self.0 {
+                Determinacy::Underspecified
+            } else {
+                Determinacy::Unknown
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -225,5 +255,8 @@ fn reflection_sees_through_a_quotation() {
     let bare = g.apply(wk::GROUNDED, vec![claim]);
     let wrapped = g.apply(wk::GROUNDED, vec![quoted]);
     let s = MapGraphStructure::new().fact(p, vec![a]);
-    assert_eq!(ask(&mut g, bare, &s).evidential(), ask(&mut g, wrapped, &s).evidential());
+    assert_eq!(
+        ask(&mut g, bare, &s).evidential(),
+        ask(&mut g, wrapped, &s).evidential()
+    );
 }

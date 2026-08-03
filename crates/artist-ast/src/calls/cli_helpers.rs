@@ -69,7 +69,10 @@ pub fn resolve_target_full(calls: &CallGraph, target: &str) -> Vec<ResolvedTarge
             }
         }
         if qn_matches(&qn, symbol, &parts) {
-            out.push(ResolvedTarget { qn, kind: SymbolKind::Callable });
+            out.push(ResolvedTarget {
+                qn,
+                kind: SymbolKind::Callable,
+            });
         }
     }
     for qn in calls.types.keys() {
@@ -119,7 +122,10 @@ fn file_matches(qn: &Qn, filter: &str) -> bool {
         return true;
     }
     // Trailing-path match — `Player.cs` matches `src/game/Player.cs`.
-    f.ends_with(filter) && f.as_bytes().get(f.len().saturating_sub(filter.len()).saturating_sub(1)) == Some(&b'/')
+    f.ends_with(filter)
+        && f.as_bytes()
+            .get(f.len().saturating_sub(filter.len()).saturating_sub(1))
+            == Some(&b'/')
 }
 
 fn collect_callable_qns(calls: &CallGraph) -> Vec<Qn> {
@@ -142,7 +148,10 @@ fn qn_matches(qn: &Qn, raw: &str, parts: &[&str]) -> bool {
         return false;
     }
     let start = segments.len() - parts.len();
-    parts.iter().enumerate().all(|(i, p)| segments[start + i] == *p)
+    parts
+        .iter()
+        .enumerate()
+        .all(|(i, p)| segments[start + i] == *p)
 }
 
 #[cfg(test)]
@@ -187,15 +196,21 @@ mod tests {
         let dotted = split_file_filter("Type.method").1.replace("::", ".");
         let colons = split_file_filter("Type::method").1.replace("::", ".");
         assert_eq!(dotted, colons);
-        assert_eq!(colons.split('.').collect::<Vec<_>>(), vec!["Type", "method"]);
+        assert_eq!(
+            colons.split('.').collect::<Vec<_>>(),
+            vec!["Type", "method"]
+        );
     }
 
     #[test]
     fn a_bare_name_is_unaffected_by_separator_normalisation() {
         assert_eq!(
-            split_file_filter("method").1.replace("::", ".").split('.').collect::<Vec<_>>(),
+            split_file_filter("method")
+                .1
+                .replace("::", ".")
+                .split('.')
+                .collect::<Vec<_>>(),
             vec!["method"]
         );
     }
-
 }

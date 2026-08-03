@@ -72,7 +72,10 @@ async fn facts_round_trip_through_vector_and_text_search() {
     let store = store(&dir).await;
 
     let facts = vec![
-        fact("compaction keeps recent turns and never cuts at a tool result", 1),
+        fact(
+            "compaction keeps recent turns and never cuts at a tool result",
+            1,
+        ),
         fact("session events are appended to events.jsonl on disk", 2),
         fact("the todo list survives a handoff verbatim", 3),
     ];
@@ -98,7 +101,10 @@ async fn facts_round_trip_through_vector_and_text_search() {
     );
 
     // The semantic leg alone should find this by vector identity.
-    let hits = store.search_facts("nothing lexical here", &vector(3), 5).await.unwrap();
+    let hits = store
+        .search_facts("nothing lexical here", &vector(3), 5)
+        .await
+        .unwrap();
     assert_eq!(
         hits.first().map(|h| h.id),
         Some(artist_memory::identity::proposition_id(
@@ -122,7 +128,10 @@ async fn superseding_removes_a_fact_from_vector_recall() {
     let new = artist_memory::identity::proposition_id("the model is opus");
 
     let before = store.search_facts("model", &vector(1), 10).await.unwrap();
-    assert!(before.iter().any(|h| h.id == old), "the old fact should start visible");
+    assert!(
+        before.iter().any(|h| h.id == old),
+        "the old fact should start visible"
+    );
 
     store.supersede(old, new).await.unwrap();
 
@@ -195,11 +204,17 @@ async fn export_and_import_round_trips_through_a_fresh_store() {
     let source_dir = tempfile::tempdir().unwrap();
     let source = store(&source_dir).await;
     source
-        .put_facts(&[fact("alpha fact about compaction", 1), fact("beta fact about rules", 2)])
+        .put_facts(&[
+            fact("alpha fact about compaction", 1),
+            fact("beta fact about rules", 2),
+        ])
         .await
         .unwrap();
     let payload = source.export_json().await.unwrap();
-    assert!(payload.contains("alpha fact"), "export should carry row data");
+    assert!(
+        payload.contains("alpha fact"),
+        "export should carry row data"
+    );
 
     let target_dir = tempfile::tempdir().unwrap();
     let target = store(&target_dir).await;
@@ -209,7 +224,11 @@ async fn export_and_import_round_trips_through_a_fresh_store() {
     // A backup that drops the observation rows restores facts nobody is
     // recorded as having asserted, which silently disarms the reconcile guard
     // that keeps a peer's facts from being retired.
-    assert_eq!(observation_count(&source).await, 2, "one observation per write");
+    assert_eq!(
+        observation_count(&source).await,
+        2,
+        "one observation per write"
+    );
     assert_eq!(
         observation_count(&target).await,
         2,

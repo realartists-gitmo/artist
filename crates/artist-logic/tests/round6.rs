@@ -27,7 +27,8 @@ fn logical_truths_do_not_need_evidence() {
 
     let identity = g.apply(wk::IMPLIES, vec![pa, pa]);
     assert_eq!(
-        ev.eval(&mut g, identity, &EmptyStructure, 10_000).evidential(),
+        ev.eval(&mut g, identity, &EmptyStructure, 10_000)
+            .evidential(),
         Evidential::Supported,
         "P → P holds in every structure, including the empty one"
     );
@@ -44,7 +45,8 @@ fn logical_truths_do_not_need_evidence() {
 
     let contradiction = g.apply(wk::AND, vec![pa, npa]);
     assert_eq!(
-        ev.eval(&mut g, contradiction, &EmptyStructure, 10_000).evidential(),
+        ev.eval(&mut g, contradiction, &EmptyStructure, 10_000)
+            .evidential(),
         Evidential::Refuted,
         "…and its dual is false in every structure"
     );
@@ -54,7 +56,8 @@ fn logical_truths_do_not_need_evidence() {
     let qa = g.apply(q, vec![a]);
     let contingent = g.apply(wk::IMPLIES, vec![pa, qa]);
     assert_eq!(
-        ev.eval(&mut g, contingent, &EmptyStructure, 10_000).evidential(),
+        ev.eval(&mut g, contingent, &EmptyStructure, 10_000)
+            .evidential(),
         Evidential::Open,
         "P → Q depends on the store, and the store says nothing"
     );
@@ -160,7 +163,11 @@ fn determinacy_and_grounding_are_independent() {
     let claim = h2.apply(heap, vec![k]);
     let and = h2.apply(wk::AND, vec![claim, wk::TOP]);
     let r2 = ev.eval(&mut h2, and, &Vague, 20_000);
-    assert_eq!(r2.grounding, Grounding::Grounded, "no loop, evaluation terminates");
+    assert_eq!(
+        r2.grounding,
+        Grounding::Grounded,
+        "no loop, evaluation terminates"
+    );
     assert_eq!(r2.determinacy, Determinacy::Indeterminate);
 }
 
@@ -173,7 +180,11 @@ fn indeterminacy_does_not_destroy_evidence() {
     }
     impl GraphStructure for Tall {
         fn known(&self, pred: ObjectId, _a: &[ObjectId]) -> Knowledge {
-            if pred == self.tall { Knowledge::Holds } else { Knowledge::Unknown }
+            if pred == self.tall {
+                Knowledge::Holds
+            } else {
+                Knowledge::Unknown
+            }
         }
         fn determinacy(&self, _p: ObjectId) -> Determinacy {
             Determinacy::Indeterminate
@@ -185,8 +196,16 @@ fn indeterminacy_does_not_destroy_evidence() {
     let claim = g.apply(tall, vec![adam]);
     let r = GraphEvaluator::new().eval(&mut g, claim, &Tall { tall }, 10_000);
 
-    assert_eq!(r.evidential(), Evidential::Supported, "the grounds are genuine");
-    assert_eq!(r.determinacy, Determinacy::Indeterminate, "and there is no sharp fact");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "the grounds are genuine"
+    );
+    assert_eq!(
+        r.determinacy,
+        Determinacy::Indeterminate,
+        "and there is no sharp fact"
+    );
 }
 
 /// The default is `Unknown`, not `Total` — presumed rather than established,
@@ -344,6 +363,14 @@ fn the_remaining_two_cells_of_the_independence_argument() {
     h.define(s, node);
 
     let r2 = ev.eval(&mut h, s, &Vague, 20_000);
-    assert_ne!(r2.grounding, Grounding::Grounded, "its own truth is among its premises");
-    assert_eq!(r2.determinacy, Determinacy::Indeterminate, "and its predicate is borderline");
+    assert_ne!(
+        r2.grounding,
+        Grounding::Grounded,
+        "its own truth is among its premises"
+    );
+    assert_eq!(
+        r2.determinacy,
+        Determinacy::Indeterminate,
+        "and its predicate is borderline"
+    );
 }

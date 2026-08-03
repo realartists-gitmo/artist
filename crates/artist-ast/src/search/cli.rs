@@ -3,7 +3,7 @@
 //!
 //! Keeps `main.rs` thin: each subcommand is a one-line dispatch into here.
 
-use crate::project_root::{compare_corpus, relative_posix, resolve_home, CorpusRel, Marker};
+use crate::project_root::{CorpusRel, Marker, compare_corpus, relative_posix, resolve_home};
 use crate::search::format::{
     render_index_stats_json, render_index_stats_text, render_related_json, render_related_text,
     render_search_json, render_search_text,
@@ -84,9 +84,7 @@ pub fn run_find_related(
                 println!("{}", render_related_json(file_path, line, &[], pretty));
                 return 0;
             }
-            eprintln!(
-                "ast-bro: no chunk at {file_path}:{line} (was the file indexed?)"
-            );
+            eprintln!("ast-bro: no chunk at {file_path}:{line} (was the file indexed?)");
             return 2;
         }
     };
@@ -217,10 +215,7 @@ fn peek_recorded_corpus(home: &Path) -> Option<String> {
         #[serde(default)]
         indexed_corpus: String,
     }
-    let meta_path = home
-        .join(".ast-bro")
-        .join("index")
-        .join("meta.json");
+    let meta_path = home.join(".ast-bro").join("index").join("meta.json");
     let bytes = std::fs::read(&meta_path).ok()?;
     let m: PeekMeta = serde_json::from_slice(&bytes).ok()?;
     Some(m.indexed_corpus)
@@ -285,10 +280,7 @@ mod tests {
                  "indexed_corpus": "packages" }"#,
         )
         .unwrap();
-        assert_eq!(
-            peek_recorded_corpus(home).as_deref(),
-            Some("packages")
-        );
+        assert_eq!(peek_recorded_corpus(home).as_deref(), Some("packages"));
     }
 
     #[test]

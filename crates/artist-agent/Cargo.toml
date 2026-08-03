@@ -59,6 +59,7 @@ uuid = { version = "1", features = ["v4"] }
 rig-agent = "0.41.0"
 
 [dev-dependencies]
+artist-config = { path = "../artist-config" }
 proptest = "1"
 http = "1"
 rig-core = { version = "0.41.0", features = ["test-utils"] }

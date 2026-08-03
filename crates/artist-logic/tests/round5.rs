@@ -34,7 +34,11 @@ impl GraphStructure for Closed {
         if self.holds.iter().any(|(p, a)| *p == pred && a == args) {
             return Knowledge::Holds;
         }
-        if pred == self.closed { Knowledge::Fails } else { Knowledge::Unknown }
+        if pred == self.closed {
+            Knowledge::Fails
+        } else {
+            Knowledge::Unknown
+        }
     }
     fn is_closed(&self, pred: ObjectId) -> bool {
         pred == self.closed
@@ -47,8 +51,12 @@ impl GraphStructure for Closed {
 #[test]
 fn a_relation_variable_is_never_resolved_as_an_entity() {
     let mut g = ObjectGraph::new();
-    let (deprecated, uses, a, m) =
-        (g.atom("deprecated"), g.atom("uses"), g.atom("a"), g.atom("M"));
+    let (deprecated, uses, a, m) = (
+        g.atom("deprecated"),
+        g.atom("uses"),
+        g.atom("a"),
+        g.atom("M"),
+    );
     let dom = g.apply(wk::SET_DOMAIN, vec![uses, a]);
     let rel_ty = g.apply(wk::RELATION_TYPE, vec![dom]);
     let _ = m;
@@ -61,8 +69,14 @@ fn a_relation_variable_is_never_resolved_as_an_entity() {
     let d = g.apply(deprecated, vec![uses]);
     let u = g.apply(uses, vec![a]);
     let ev = GraphEvaluator::new();
-    assert_eq!(ev.eval(&mut g, d, &s, 50_000).evidential(), Evidential::Supported);
-    assert_eq!(ev.eval(&mut g, u, &s, 50_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, d, &s, 50_000).evidential(),
+        Evidential::Supported
+    );
+    assert_eq!(
+        ev.eval(&mut g, u, &s, 50_000).evidential(),
+        Evidential::Supported
+    );
 
     let r = g.fresh();
     let dep_r = g.apply(deprecated, vec![r]);
@@ -86,7 +100,10 @@ fn a_relation_variable_is_never_resolved_as_an_entity() {
     let imp = g.apply(wk::IMPLIES, vec![dep_r, inner_all]);
     let q2 = g.quantify(wk::FORALL, r, Some(rel_ty), imp);
     let out2 = ev.eval(&mut g, q2, &s, 100_000);
-    assert!(!out2.is_definite(), "and must not become a definite truth under implies");
+    assert!(
+        !out2.is_definite(),
+        "and must not become a definite truth under implies"
+    );
 }
 
 /// A rule whose conclusion is a cyclic node walked `match_goal`'s wrapper loop
@@ -95,13 +112,19 @@ fn a_relation_variable_is_never_resolved_as_an_entity() {
 #[test]
 fn a_cyclic_rule_conclusion_does_not_crash() {
     let mut g = ObjectGraph::new();
-    let rule = parse(&mut g, "(forall [(v0 (set a))] (implies #true #1=(not #1#)))")
-        .expect("parses");
+    let rule = parse(
+        &mut g,
+        "(forall [(v0 (set a))] (implies #true #1=(not #1#)))",
+    )
+    .expect("parses");
     let (p, a) = (g.atom("p"), g.atom("a"));
     let s = MapGraphStructure::new().rule(p, rule);
     let goal = g.apply(p, vec![a]);
     let r = GraphEvaluator::new().eval(&mut g, goal, &s, 10_000);
-    assert!(!r.is_definite(), "no verdict is available from a cyclic conclusion");
+    assert!(
+        !r.is_definite(),
+        "no verdict is available from a cyclic conclusion"
+    );
 }
 
 /// A malformed `(not A C)` conclusion fired and fabricated a definite
@@ -135,7 +158,11 @@ fn a_contested_member_is_not_silently_decided() {
     }
     impl GraphStructure for Both {
         fn known(&self, pred: ObjectId, _a: &[ObjectId]) -> Knowledge {
-            if pred == self.f { Knowledge::Conflicted } else { Knowledge::Unknown }
+            if pred == self.f {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Unknown
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -147,7 +174,14 @@ fn a_contested_member_is_not_silently_decided() {
     // (a) a `where` filter must not drop it and still claim to be exhaustive.
     let z = g.fresh();
     let fz = g.apply(f, vec![z]);
-    let lam = g.bind(wk::LAMBDA, vec![Binding { var: z, domain: None }], vec![fz]);
+    let lam = g.bind(
+        wk::LAMBDA,
+        vec![Binding {
+            var: z,
+            domain: None,
+        }],
+        vec![fz],
+    );
     let refined = g.apply(wk::WHERE_DOMAIN, vec![dom, lam]);
     let w = g.fresh();
     let gw = g.apply(gg, vec![w]);
@@ -160,7 +194,14 @@ fn a_contested_member_is_not_silently_decided() {
     // (b) an aggregate must not count it as a definite contributor.
     let v = g.fresh();
     let fv = g.apply(f, vec![v]);
-    let counted = g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(dom) }], vec![fv]);
+    let counted = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![fv],
+    );
     for n in [0i64, 1] {
         let k = g.int(n);
         let claim = g.apply(wk::EQ, vec![counted, k]);
@@ -179,8 +220,14 @@ fn a_contested_member_is_not_silently_decided() {
     let node = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: pv, domain: Some(rel_ty) },
-            Binding { var: xv, domain: Some(dom) },
+            Binding {
+                var: pv,
+                domain: Some(rel_ty),
+            },
+            Binding {
+                var: xv,
+                domain: Some(dom),
+            },
         ],
         vec![def, scope],
     );
@@ -203,7 +250,11 @@ fn unless_marks_what_would_defeat_it() {
     let r = GraphEvaluator::new().eval(&mut g, guarded, &EmptyStructure, 20_000);
     assert_eq!(r.evidential(), Evidential::Supported);
     assert_eq!(r.derivation, Derivation::Default);
-    assert_eq!(r.defeated_by, vec![exception], "the defeater is the whole content");
+    assert_eq!(
+        r.defeated_by,
+        vec![exception],
+        "the defeater is the whole content"
+    );
     assert!(!r.is_definite());
 }
 
@@ -218,7 +269,9 @@ fn permitted_composes_with_the_forbidden_identity() {
 
     let permitted_not = g.apply(wk::PERMITTED, vec![negated]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, permitted_not, &s, 50_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, permitted_not, &s, 50_000)
+            .evidential(),
         Evidential::Supported,
         "forbidden(P) gives obliged(¬P) gives permitted(¬P)"
     );
@@ -229,20 +282,23 @@ fn permitted_composes_with_the_forbidden_identity() {
 #[test]
 fn a_rule_can_conclude_a_violation() {
     let mut g = ObjectGraph::new();
-    let (skipped, formatted, c1) =
-        (g.atom("skipped-fmt"), g.atom("formatted"), g.atom("c1"));
+    let (skipped, formatted, c1) = (g.atom("skipped-fmt"), g.atom("formatted"), g.atom("c1"));
     let x = g.fresh();
     let ante = g.apply(skipped, vec![x]);
     let inner = g.apply(formatted, vec![x]);
     let cons = g.apply(wk::VIOLATED, vec![inner]);
     let imp = g.apply(wk::IMPLIES, vec![ante, cons]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
-    let s = MapGraphStructure::new().fact(skipped, vec![c1]).rule(wk::VIOLATED, rule);
+    let s = MapGraphStructure::new()
+        .fact(skipped, vec![c1])
+        .rule(wk::VIOLATED, rule);
 
     let concrete = g.apply(formatted, vec![c1]);
     let goal = g.apply(wk::VIOLATED, vec![concrete]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &s, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &s, 100_000)
+            .evidential(),
         Evidential::Supported
     );
 }
@@ -268,13 +324,20 @@ fn a_domain_term_is_substituted_under_a_quantifier() {
         fn extension(&self, _domain: ObjectId) -> Option<artist_logic::graph_eval::Extension> {
             let _ = self.tests_of;
             let _ = self.m1;
-            Some(artist_logic::graph_eval::Extension::complete(self.members.clone()))
+            Some(artist_logic::graph_eval::Extension::complete(
+                self.members.clone(),
+            ))
         }
     }
     let mut g = ObjectGraph::new();
     let (tests_of, m1, fails) = (g.atom("tests-of"), g.atom("mod1"), g.atom("fails"));
     let (t1, t2) = (g.atom("t1"), g.atom("t2"));
-    let s = PerGroup { tests_of, m1, members: vec![t1, t2], fails };
+    let s = PerGroup {
+        tests_of,
+        m1,
+        members: vec![t1, t2],
+        fails,
+    };
 
     let m = g.fresh();
     let group = g.apply(tests_of, vec![m]);
@@ -285,7 +348,9 @@ fn a_domain_term_is_substituted_under_a_quantifier() {
     let q = g.quantify(wk::FORALL, m, Some(outer_dom), inner);
 
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, q, &s, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, q, &s, 100_000)
+            .evidential(),
         Evidential::Supported,
         "the store must be asked to enumerate (tests-of mod1), not (tests-of <skolem>)"
     );
@@ -296,8 +361,7 @@ fn a_domain_term_is_substituted_under_a_quantifier() {
 #[test]
 fn a_quantified_variable_reaches_inside_a_binder() {
     let mut g = ObjectGraph::new();
-    let (in_module, formatted, m1) =
-        (g.atom("in-module"), g.atom("formatted"), g.atom("mod1"));
+    let (in_module, formatted, m1) = (g.atom("in-module"), g.atom("formatted"), g.atom("mod1"));
     let files = g.atom("Files");
     let f1 = g.atom("f1");
 
@@ -310,14 +374,16 @@ fn a_quantified_variable_reaches_inside_a_binder() {
         g.apply(wk::OBLIGED, vec![inner])
     };
     let ground = build(&mut g, m1);
-    let s = MapGraphStructure::new()
-        .fact(wk::OBLIGED, vec![{
+    let s = MapGraphStructure::new().fact(
+        wk::OBLIGED,
+        vec![{
             let f = g.fresh();
             let a = g.apply(in_module, vec![f, m1]);
             let c = g.apply(formatted, vec![f]);
             let imp = g.apply(wk::IMPLIES, vec![a, c]);
             g.quantify(wk::FORALL, f, Some(files), imp)
-        }]);
+        }],
+    );
     let ev = GraphEvaluator::new();
     // The ground form is the control; whether the fixture matches it exactly
     // depends on binder identity, so only the generalisation is asserted below.
@@ -355,7 +421,11 @@ fn an_existential_names_its_witness() {
     let r = GraphEvaluator::new().eval(&mut g, q, &s, 50_000);
 
     assert_eq!(r.evidential(), Evidential::Supported);
-    assert_eq!(r.bindings, vec![(0usize, t2)], "the store must say *which* test fails");
+    assert_eq!(
+        r.bindings,
+        vec![(0usize, t2)],
+        "the store must say *which* test fails"
+    );
 }
 
 /// The dual: a refuted universal names its counterexample.
@@ -370,14 +440,21 @@ fn a_refuted_universal_names_its_counterexample() {
             if pred != self.p || args.len() != 1 {
                 return Knowledge::Unknown;
             }
-            if self.holds.contains(&args[0]) { Knowledge::Holds } else { Knowledge::Fails }
+            if self.holds.contains(&args[0]) {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         }
     }
     let mut g = ObjectGraph::new();
     let tested = g.atom("tested");
     let (a, b) = (g.atom("a.rs"), g.atom("b.rs"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
-    let s = Closed2 { p: tested, holds: vec![a] };
+    let s = Closed2 {
+        p: tested,
+        holds: vec![a],
+    };
 
     let v = g.fresh();
     let body = g.apply(tested, vec![v]);
@@ -385,7 +462,11 @@ fn a_refuted_universal_names_its_counterexample() {
     let r = GraphEvaluator::new().eval(&mut g, q, &s, 50_000);
 
     assert_eq!(r.evidential(), Evidential::Refuted);
-    assert_eq!(r.bindings, vec![(0usize, b)], "and *which* file is untested");
+    assert_eq!(
+        r.bindings,
+        vec![(0usize, b)],
+        "and *which* file is untested"
+    );
 }
 
 /// **Bindings do not propagate.** A witness justifies exactly the claim it
@@ -444,14 +525,21 @@ fn a_negated_universal_drops_its_counterexample_deliberately() {
             if pred != self.p || args.len() != 1 {
                 return Knowledge::Unknown;
             }
-            if self.holds.contains(&args[0]) { Knowledge::Holds } else { Knowledge::Fails }
+            if self.holds.contains(&args[0]) {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         }
     }
     let mut g = ObjectGraph::new();
     let tested = g.atom("tested");
     let (a, b) = (g.atom("a.rs"), g.atom("b.rs"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
-    let s = Closed3 { p: tested, holds: vec![a] };
+    let s = Closed3 {
+        p: tested,
+        holds: vec![a],
+    };
 
     let v = g.fresh();
     let body = g.apply(tested, vec![v]);
@@ -461,7 +549,11 @@ fn a_negated_universal_drops_its_counterexample_deliberately() {
 
     let inner = ev.eval(&mut g, q, &s, 50_000);
     assert_eq!(inner.evidential(), Evidential::Refuted);
-    assert_eq!(inner.bindings, vec![(0usize, b)], "the universal names its counterexample");
+    assert_eq!(
+        inner.bindings,
+        vec![(0usize, b)],
+        "the universal names its counterexample"
+    );
 
     let outer = ev.eval(&mut g, negated, &s, 50_000);
     assert_eq!(outer.evidential(), Evidential::Supported);

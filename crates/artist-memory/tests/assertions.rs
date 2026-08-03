@@ -88,13 +88,31 @@ async fn assertion_identity_is_derived_from_all_of_its_fields() {
 
     // Any field moving makes it a different claim.
     for variant in [
-        Assertion { recorded_at: 501, ..base.clone() }.sealed(),
-        Assertion { polarity: Polarity::Deny, ..base.clone() }.sealed(),
-        Assertion { valid_from: Some(9), ..base.clone() }.sealed(),
-        Assertion { world: Some(wk::TOP), ..base.clone() }.sealed(),
+        Assertion {
+            recorded_at: 501,
+            ..base.clone()
+        }
+        .sealed(),
+        Assertion {
+            polarity: Polarity::Deny,
+            ..base.clone()
+        }
+        .sealed(),
+        Assertion {
+            valid_from: Some(9),
+            ..base.clone()
+        }
+        .sealed(),
+        Assertion {
+            world: Some(wk::TOP),
+            ..base.clone()
+        }
+        .sealed(),
     ] {
         assert_ne!(variant.id, base.id, "a changed field must change identity");
-        record_assertion(&s, &variant).await.expect("record variant");
+        record_assertion(&s, &variant)
+            .await
+            .expect("record variant");
     }
     assert_eq!(assertions_about(&s, p).await.expect("query").len(), 5);
 }
@@ -139,7 +157,11 @@ async fn assertions_carry_valid_time_independently() {
         ..Assertion::affirm(p, 100)
     }
     .sealed();
-    let holds_now = Assertion { valid_from: Some(200), ..Assertion::affirm(p, 200) }.sealed();
+    let holds_now = Assertion {
+        valid_from: Some(200),
+        ..Assertion::affirm(p, 200)
+    }
+    .sealed();
 
     record_assertion(&s, &held_then).await.expect("record");
     record_assertion(&s, &holds_now).await.expect("record");

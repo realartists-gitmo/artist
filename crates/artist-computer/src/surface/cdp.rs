@@ -237,6 +237,16 @@ pub struct CdpPage {
     /// `complete` once the initial document is parsed and says nothing at all
     /// about the XHR an SPA fires immediately afterwards.
     inflight: InFlight,
+    /// Where the pointer was last put, so a `release` can happen there.
+    ///
+    /// A page has one pointer and CDP does not report its position back, so the
+    /// only way to release a held button where the drag left it is to remember
+    /// where that was.
+    pointer_at: Mutex<(f64, f64)>,
+    /// How the next JavaScript dialog gets answered.
+    dialog_policy: Arc<DialogPolicy>,
+    /// Downloads that have completed on this page.
+    downloads: Arc<Mutex<Vec<Download>>>,
     /// Held so the connection outlives the surface.
     ///
     /// Dropping the `Browser` closes the websocket and every page with it, so
@@ -244,6 +254,75 @@ pub struct CdpPage {
     /// exactly what needs the connection, and tying the two together means a
     /// closed surface releases the connection rather than leaking it.
     _browser: Option<Arc<Browser>>,
+}
+
+/// Where a drag ends.
+#[derive(Clone, Copy, Debug)]
+enum DragEnd {
+    Element(i64),
+    Direction(crate::program::Direction, Option<u32>),
+}
+
+/// A file the page downloaded.
+#[derive(Clone, Debug)]
+pub struct Download {
+    pub filename: String,
+    pub path: std::path::PathBuf,
+}
+
+/// The standing answer to the next JavaScript dialog.
+///
+/// A `confirm()`, an `alert()` or a `beforeunload` blocks the renderer until it
+/// is answered — which means the observation that would have shown the dialog
+/// cannot be taken, and a page with an unanswered dialog is a page that hangs.
+/// Something must therefore answer without being asked, and the only safe
+/// default is to dismiss: a `confirm()` guarding a delete is the case that
+/// matters, and the safe answer to a question nobody armed for is no.
+///
+/// A `dialog` step overrides that for exactly one dialog, and the override is
+/// consumed when it is used — an armed "accept" that persisted would silently
+/// accept the *next* dialog too, which may be a different question entirely.
+#[derive(Debug, Default)]
+pub struct DialogPolicy {
+    armed: std::sync::Mutex<Option<(bool, Option<String>)>>,
+    /// What the dialogs said, in order, so the model can see what it answered.
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl DialogPolicy {
+    fn store(&self, accept: bool, text: Option<String>) {
+        if let Ok(mut armed) = self.armed.lock() {
+            *armed = Some((accept, text));
+        }
+    }
+
+    /// Take the armed answer, or fall back to dismissing.
+    fn take(&self) -> (bool, Option<String>) {
+        self.armed
+            .lock()
+            .ok()
+            .and_then(|mut armed| armed.take())
+            .unwrap_or((false, None))
+    }
+
+    fn note(&self, message: String) {
+        if let Ok(mut seen) = self.seen.lock() {
+            // Bounded: a page in a dialog loop would otherwise grow this
+            // without limit, and only the recent ones can still be acted on.
+            if seen.len() >= 16 {
+                seen.remove(0);
+            }
+            seen.push(message);
+        }
+    }
+
+    /// What dialogs have opened since the last look, draining the record.
+    pub fn drain(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .map(|mut seen| std::mem::take(&mut *seen))
+            .unwrap_or_default()
+    }
 }
 
 impl CdpPage {
@@ -274,12 +353,44 @@ impl CdpPage {
         if let Err(error) = track_network(&page, Arc::clone(&inflight)).await {
             eprintln!("artist: network tracking unavailable for this page: {error}");
         }
+
+        // Installed before anything can navigate. A dialog that opens with no
+        // handler blocks the renderer for good: the page stops answering CDP,
+        // so neither the observation that would reveal it nor the click that
+        // would dismiss it can be delivered. This was the one failure in the
+        // subsystem with no recovery path at all.
+        let dialog_policy = Arc::new(DialogPolicy::default());
+        if let Err(error) = handle_dialogs(&page, Arc::clone(&dialog_policy)).await {
+            eprintln!("artist: dialog handling unavailable for this page: {error}");
+        }
+
+        let downloads = Arc::new(Mutex::new(Vec::new()));
+        if let Err(error) = track_downloads(&page, Arc::clone(&downloads)).await {
+            eprintln!("artist: download tracking unavailable for this page: {error}");
+        }
+
         Ok(Self {
             id: SurfaceId::new(id),
             page,
             inflight,
+            pointer_at: Mutex::new((0.0, 0.0)),
+            dialog_policy,
+            downloads,
             _browser: browser,
         })
+    }
+
+    /// Dialogs that have opened since the last look.
+    pub fn dialogs(&self) -> Vec<String> {
+        self.dialog_policy.drain()
+    }
+
+    /// Files this page has downloaded.
+    pub fn downloads(&self) -> Vec<Download> {
+        self.downloads
+            .lock()
+            .map(|list| list.clone())
+            .unwrap_or_default()
     }
 
     /// Requests currently in flight, for diagnostics and the inspector.
@@ -290,6 +401,165 @@ impl CdpPage {
     pub fn page(&self) -> &chromiumoxide::Page {
         &self.page
     }
+}
+
+/// Which CDP button a named one is.
+fn cdp_button(
+    button: crate::program::Button,
+) -> chromiumoxide::cdp::browser_protocol::input::MouseButton {
+    use chromiumoxide::cdp::browser_protocol::input::MouseButton;
+    match button {
+        crate::program::Button::Left => MouseButton::Left,
+        crate::program::Button::Right => MouseButton::Right,
+        crate::program::Button::Middle => MouseButton::Middle,
+    }
+}
+
+/// The `buttons` bitmask, which is a different encoding from `button`.
+///
+/// CDP wants both: `button` names which one caused this event, `buttons` is the
+/// set currently held. They use different numbering — right is 2 in one and 2
+/// in the other only by coincidence, middle is 1 versus 4 — and getting the
+/// mask wrong makes a drag look like a move with nothing pressed.
+fn cdp_button_mask(button: crate::program::Button) -> i64 {
+    match button {
+        crate::program::Button::Left => 1,
+        crate::program::Button::Right => 2,
+        crate::program::Button::Middle => 4,
+    }
+}
+
+/// Answer JavaScript dialogs so the renderer cannot block on one.
+async fn handle_dialogs(
+    page: &chromiumoxide::Page,
+    policy: Arc<DialogPolicy>,
+) -> Result<(), StepError> {
+    use chromiumoxide::cdp::browser_protocol::page::{
+        EventJavascriptDialogOpening, HandleJavaScriptDialogParams,
+    };
+
+    let opening = page
+        .event_listener::<EventJavascriptDialogOpening>()
+        .await
+        .map_err(|error| StepError::Backend(format!("listen for dialogs: {error}")))?;
+
+    tokio::spawn({
+        let page = page.clone();
+        async move {
+            let mut opening = opening;
+            while let Some(event) = opening.next().await {
+                let (accept, text) = policy.take();
+                policy.note(format!(
+                    "{} dialog: {:?} — {}",
+                    event.r#type.as_ref(),
+                    event.message,
+                    if accept { "accepted" } else { "dismissed" }
+                ));
+
+                let mut params = HandleJavaScriptDialogParams::builder().accept(accept);
+                // Only meaningful for `prompt()`, and Chromium ignores it
+                // elsewhere — but sending an empty string where the page
+                // expected none is a difference a script can see.
+                if let Some(text) = text {
+                    params = params.prompt_text(text);
+                }
+                if let Ok(params) = params.build() {
+                    // A failure here means the page went away with the dialog
+                    // still open, which resolves itself.
+                    let _ = page.execute(params).await;
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Record what the page downloads, and where it landed.
+///
+/// Downloads go to a directory of ours rather than the browser's default,
+/// because a file the agent cannot find is a file it did not get. The path is
+/// reported so the next step can simply read it.
+async fn track_downloads(
+    page: &chromiumoxide::Page,
+    downloads: Arc<Mutex<Vec<Download>>>,
+) -> Result<(), StepError> {
+    // All four live on `Browser`, not `Page`. The `Page` spellings are the
+    // deprecated ones and are not generated at all in this protocol revision.
+    use chromiumoxide::cdp::browser_protocol::browser::{
+        EventDownloadProgress, EventDownloadWillBegin, SetDownloadBehaviorBehavior,
+        SetDownloadBehaviorParams,
+    };
+
+    let directory = download_directory()?;
+    page.execute(
+        SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+            .download_path(directory.to_string_lossy().into_owned())
+            // Named by guid rather than by the server's filename, so two
+            // downloads called `report.pdf` cannot overwrite each other.
+            .events_enabled(true)
+            .build()
+            .map_err(StepError::Backend)?,
+    )
+    .await
+    .map_err(|error| StepError::Backend(format!("set download behaviour: {error}")))?;
+
+    let beginning = page
+        .event_listener::<EventDownloadWillBegin>()
+        .await
+        .map_err(|error| StepError::Backend(format!("listen for downloads: {error}")))?;
+    let progress = page
+        .event_listener::<EventDownloadProgress>()
+        .await
+        .map_err(|error| StepError::Backend(format!("listen for download progress: {error}")))?;
+
+    // The two events carry different halves of the answer: `willBegin` knows
+    // the suggested filename, `progress` knows when it finished and under which
+    // guid it was actually written. Neither alone is enough to hand back a path.
+    let names: Arc<Mutex<std::collections::HashMap<String, String>>> = Arc::default();
+    tokio::spawn({
+        let names = Arc::clone(&names);
+        async move {
+            let mut beginning = beginning;
+            while let Some(event) = beginning.next().await {
+                if let Ok(mut names) = names.lock() {
+                    names.insert(event.guid.clone(), event.suggested_filename.clone());
+                }
+            }
+        }
+    });
+    tokio::spawn(async move {
+        let mut progress = progress;
+        while let Some(event) = progress.next().await {
+            use chromiumoxide::cdp::browser_protocol::browser::DownloadProgressState;
+            if event.state != DownloadProgressState::Completed {
+                continue;
+            }
+            let filename = names
+                .lock()
+                .ok()
+                .and_then(|names| names.get(&event.guid).cloned())
+                .unwrap_or_else(|| event.guid.clone());
+            if let Ok(mut downloads) = downloads.lock() {
+                downloads.push(Download {
+                    path: directory.join(&event.guid),
+                    filename,
+                });
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Where downloads land: a directory of ours, created on demand.
+fn download_directory() -> Result<std::path::PathBuf, StepError> {
+    let base = dirs::cache_dir()
+        .ok_or_else(|| StepError::Backend("no cache directory for downloads".into()))?
+        .join("artist")
+        .join("downloads");
+    std::fs::create_dir_all(&base)
+        .map_err(|error| StepError::Backend(format!("create {}: {error}", base.display())))?;
+    Ok(base)
 }
 
 /// Enable the network domain and track which requests are outstanding.
@@ -493,6 +763,13 @@ mod inflight_tests {
 pub struct CdpChrome {
     id: SurfaceId,
     browser: Arc<Browser>,
+    /// One page surface per open tab, keyed by target id.
+    ///
+    /// Cached rather than built on demand because [`Surface::children`] is
+    /// synchronous while attaching a page is not — and rebuilding a page surface
+    /// per call would also throw away its anchor book, so every observation
+    /// would renumber every element on every tab.
+    pages: std::sync::Mutex<Vec<(String, Arc<CdpPage>)>>,
 }
 
 impl CdpChrome {
@@ -500,7 +777,43 @@ impl CdpChrome {
         Self {
             id: SurfaceId::new(id),
             browser,
+            pages: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Bring the cached page surfaces in line with the browser's open tabs.
+    ///
+    /// This is what makes a `target="_blank"` link reachable. Clicking one opens
+    /// a *new target*, which is not part of the page that spawned it and is
+    /// invisible to it: without this, the tab exists, the user would see it, and
+    /// the model has no way to name anything on it.
+    async fn refresh_children(&self) {
+        let Ok(pages) = self.browser.pages().await else {
+            return;
+        };
+
+        // Existing surfaces are reused by target id; only genuinely new tabs are
+        // attached, and closed ones fall out.
+        let mut existing: Vec<(String, Arc<CdpPage>)> =
+            std::mem::take(&mut *self.pages.lock().unwrap());
+        let mut next: Vec<(String, Arc<CdpPage>)> = Vec::new();
+
+        for page in pages {
+            let target = page.target_id().inner().clone();
+            if let Some(position) = existing.iter().position(|(id, _)| *id == target) {
+                next.push(existing.remove(position));
+                continue;
+            }
+            // A tab we cannot attach to is skipped rather than fatal — a
+            // devtools or extension target is not something to drive, and
+            // failing the whole listing over one would lose the others.
+            if let Ok(surface) =
+                CdpPage::attach(format!("page:{}", artist_tools::short_id("tab")), page).await
+            {
+                next.push((target, Arc::new(surface)));
+            }
+        }
+        *self.pages.lock().unwrap() = next;
     }
 }
 
@@ -556,7 +869,21 @@ impl Surface for CdpChrome {
                     .with_actions(["activate", "close"]),
             );
         }
+        // Refreshed here because this is the one place that is both async and
+        // called whenever the model looks at the browser — so the child list a
+        // caller reads is never older than the tab list it was derived from.
+        self.refresh_children().await;
         Ok(Snapshot::new(nodes))
+    }
+
+    /// The open tabs, as surfaces in their own right.
+    fn children(&self) -> Vec<Arc<dyn Surface>> {
+        self.pages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, page)| Arc::clone(page) as Arc<dyn Surface>)
+            .collect()
     }
 
     async fn watch(&self, _settle: &Settle) -> Result<SettleWatch, StepError> {
@@ -564,12 +891,17 @@ impl Surface for CdpChrome {
         Ok(SettleWatch::ready(SettleOutcome::Settled { after_ms: 0 }))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        _secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         // `navigate` names no element: it acts on whichever tab is current, and
         // is the whole reason this rung exists. Requiring a tab anchor for it
         // would mean an observation just to open a URL.
         if let Step::Navigate { url } = step {
-            return self.navigate(url).await;
+            return self.navigate(url).await.map(|()| None);
         }
 
         let Some(node) = node else {
@@ -583,7 +915,7 @@ impl Surface for CdpChrome {
             .to_owned();
 
         match step {
-            Step::Click(_) => self.tab_action(&target, "activate").await,
+            Step::Click { .. } => self.tab_action(&target, "activate").await,
             // The verbs the tab nodes advertise. Before this they were rendered
             // and could never be run.
             Step::Invoke { action, .. } => self.tab_action(&target, action).await,
@@ -597,6 +929,7 @@ impl Surface for CdpChrome {
                 action: other.action(),
             }),
         }
+        .map(|()| None)
     }
 }
 
@@ -1019,7 +1352,12 @@ impl Surface for CdpPage {
         }))))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         let backend_id = |node: Option<&Node>| -> Result<i64, StepError> {
             node.and_then(|node| node.binding.as_str().strip_prefix("cdp:node:"))
                 .and_then(|id| id.parse::<i64>().ok())
@@ -1027,12 +1365,80 @@ impl Surface for CdpPage {
         };
 
         match step {
-            Step::Click(_) => {
+            Step::Click {
+                button,
+                count,
+                modifiers,
+                ..
+            } => {
                 // Scroll into view, then click at the element's own centre —
                 // computed here from CDP geometry, never supplied by the model.
                 let id = backend_id(node)?;
-                self.click_backend_node(id).await
+                self.click_backend_node(
+                    id,
+                    *button,
+                    *count,
+                    crate::keys::parse_modifiers(modifiers.as_deref())?,
+                )
+                .await
             }
+            Step::Hover(_) => {
+                let id = backend_id(node)?;
+                self.hover_backend_node(id).await
+            }
+            Step::Press { button, .. } => {
+                let id = backend_id(node)?;
+                self.button_backend_node(id, *button, true).await
+            }
+            // No element: the pointer is wherever the press or the drag left it,
+            // and a page has one pointer position that CDP already tracks.
+            Step::Release { button } => self.button_at_last_point(*button, false).await,
+            Step::Drag {
+                to,
+                direction,
+                distance,
+                button,
+                modifiers,
+                ..
+            } => {
+                let from = backend_id(node)?;
+                let to = match (to, direction) {
+                    (Some(_), Some(_)) => {
+                        return Err(StepError::Backend(
+                            "a drag takes either a destination element or a direction, not both"
+                                .into(),
+                        ));
+                    }
+                    (None, None) => {
+                        return Err(StepError::Backend(
+                            "a drag needs somewhere to go: name a destination element with \
+                             `to`, or give a `direction`"
+                                .into(),
+                        ));
+                    }
+                    (Some(_), None) => DragEnd::Element(backend_id(secondary)?),
+                    (None, Some(direction)) => DragEnd::Direction(*direction, *distance),
+                };
+                self.drag_backend_node(
+                    from,
+                    to,
+                    *button,
+                    crate::keys::parse_modifiers(modifiers.as_deref())?,
+                )
+                .await
+            }
+            Step::Upload { paths, .. } => {
+                let id = backend_id(node)?;
+                self.upload_to_backend_node(id, paths).await
+            }
+            // Armed, not answered: the dialog does not exist yet. The handler
+            // installed at attach time reads this when one opens.
+            Step::Dialog { accept, text } => {
+                self.dialog_policy.store(*accept, text.clone());
+                Ok(())
+            }
+            Step::KeyDown(press) => self.key_event(press.chord(), Some(true)).await,
+            Step::KeyUp(press) => self.key_event(press.chord(), Some(false)).await,
             Step::Type { text, clear, .. } => {
                 // Refused here rather than by the browser. A page labels its
                 // input with a `<label>`, and in document order that label's
@@ -1072,9 +1478,13 @@ impl Surface for CdpPage {
             // list, a chat log and a modal body all scroll independently of the
             // document, so scrolling the window instead moved nothing and
             // reported `ok`.
-            Step::Scroll { amount, .. } => match node {
+            Step::Scroll { amount, axis, .. } => match node {
                 None => {
-                    let expression = format!("window.scrollBy(0, {})", amount * 100);
+                    let (dx, dy) = match axis {
+                        crate::program::Axis::Vertical => (0, amount * 100),
+                        crate::program::Axis::Horizontal => (amount * 100, 0),
+                    };
+                    let expression = format!("window.scrollBy({dx}, {dy})");
                     self.page
                         .execute(
                             EvaluateParams::builder()
@@ -1088,7 +1498,7 @@ impl Surface for CdpPage {
                 }
                 Some(_) => {
                     let id = backend_id(node)?;
-                    self.scroll_backend_node(id, amount * 100).await
+                    self.scroll_backend_node(id, amount * 100, *axis).await
                 }
             },
             Step::Navigate { url } => {
@@ -1106,10 +1516,24 @@ impl Surface for CdpPage {
             // `Input.dispatchTouchEvent` — but a browser on a desktop stage is
             // not a touchscreen, and silently turning a long press into a click
             // is exactly the substitution the step exists to rule out.
-            other @ (Step::LongPress(_) | Step::Swipe { .. }) => Err(StepError::Backend(format!(
-                "a page has no {:?} — it is a pointer surface, not a touch one",
-                other.action()
-            ))),
+            other @ (Step::LongPress(_) | Step::Swipe { .. } | Step::Pinch { .. }) => {
+                Err(StepError::Backend(format!(
+                    "a page has no {:?} — it is a pointer surface, not a touch one",
+                    other.action()
+                )))
+            }
+            // The clipboard belongs to the seat, not to the page. A browser on
+            // the stage shares the stage's selection, so these are answered one
+            // rung down — and saying so points at the surface that can do it
+            // rather than implying nothing can.
+            other @ (Step::SetClipboard { .. } | Step::GetClipboard { .. }) => {
+                Err(StepError::Backend(format!(
+                    "a page cannot {:?} directly — the clipboard belongs to the display the \
+                     browser is running on. Use the window surface for it, or copy within the \
+                     page with `key`.",
+                    other.action()
+                )))
+            }
             // The page rung has no declared per-element verbs — every element
             // is reached the same way — so `invoke` here is a routing mistake
             // rather than a missing feature, and says so.
@@ -1131,6 +1555,7 @@ impl Surface for CdpPage {
                 other => other,
             }),
         }
+        .map(|()| None)
     }
 }
 
@@ -1188,7 +1613,12 @@ impl CdpPage {
     /// message — while the element with the overflow is usually a container a
     /// few levels up that has no accessible name at all and so no anchor the
     /// model could ever cite.
-    async fn scroll_backend_node(&self, backend_id: i64, delta: i32) -> Result<(), StepError> {
+    async fn scroll_backend_node(
+        &self,
+        backend_id: i64,
+        delta: i32,
+        axis: crate::program::Axis,
+    ) -> Result<(), StepError> {
         use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
         use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
 
@@ -1207,26 +1637,36 @@ impl CdpPage {
             ));
         };
 
-        const SCROLL: &str = r#"function (delta) {
+        // The axis is threaded through as an argument rather than by generating
+        // two copies of the function: the scrollable-ancestor walk is identical
+        // for both, and only the property it reads and writes differs. A
+        // horizontally scrollable ancestor is a genuinely different element
+        // from a vertically scrollable one, which is why the overflow test has
+        // to follow the axis too.
+        const SCROLL: &str = r#"function (delta, horizontal) {
+            const overflow = (style) => horizontal ? style.overflowX : style.overflowY;
+            const bigger = (node) => horizontal
+                ? node.scrollWidth > node.clientWidth
+                : node.scrollHeight > node.clientHeight;
             let node = this;
             while (node && node !== document.body) {
                 const style = getComputedStyle(node);
-                const scrollable = /auto|scroll|overlay/.test(style.overflowY)
-                    && node.scrollHeight > node.clientHeight;
+                const scrollable = /auto|scroll|overlay/.test(overflow(style)) && bigger(node);
                 if (scrollable) { break; }
                 node = node.parentElement;
             }
             const target = node && node !== document.body ? node : null;
             if (target) {
-                const before = target.scrollTop;
-                target.scrollTop += delta;
-                return target.scrollTop !== before;
+                const before = horizontal ? target.scrollLeft : target.scrollTop;
+                if (horizontal) { target.scrollLeft += delta; } else { target.scrollTop += delta; }
+                return (horizontal ? target.scrollLeft : target.scrollTop) !== before;
             }
-            const before = window.scrollY;
-            window.scrollBy(0, delta);
-            return window.scrollY !== before;
+            const before = horizontal ? window.scrollX : window.scrollY;
+            window.scrollBy(horizontal ? delta : 0, horizontal ? 0 : delta);
+            return (horizontal ? window.scrollX : window.scrollY) !== before;
         }"#;
 
+        let horizontal = matches!(axis, crate::program::Axis::Horizontal);
         let outcome = self
             .page
             .execute(
@@ -1236,6 +1676,11 @@ impl CdpPage {
                     .argument(
                         chromiumoxide::cdp::js_protocol::runtime::CallArgument::builder()
                             .value(serde_json::json!(delta))
+                            .build(),
+                    )
+                    .argument(
+                        chromiumoxide::cdp::js_protocol::runtime::CallArgument::builder()
+                            .value(serde_json::json!(horizontal))
                             .build(),
                     )
                     .return_by_value(true)
@@ -1305,12 +1750,13 @@ impl CdpPage {
             .map_err(|error| StepError::Backend(format!("focus element: {error}")))
     }
 
-    async fn click_backend_node(&self, backend_id: i64) -> Result<(), StepError> {
+    /// The centre of an element, in page coordinates.
+    ///
+    /// Scrolls it into view first, because geometry for an element outside the
+    /// viewport is geometry for a point no click could reach.
+    async fn centre_of_backend_node(&self, backend_id: i64) -> Result<(f64, f64), StepError> {
         use chromiumoxide::cdp::browser_protocol::dom::{
             GetBoxModelParams, ScrollIntoViewIfNeededParams,
-        };
-        use chromiumoxide::cdp::browser_protocol::input::{
-            DispatchMouseEventParams, DispatchMouseEventType, MouseButton,
         };
 
         let node_id = BackendNodeId::new(backend_id);
@@ -1336,33 +1782,306 @@ impl CdpPage {
         let quad = &box_model.result.model.content;
         // A content quad is four corner pairs; the centre is the mean of the
         // first and third.
-        let (x, y) = (
+        Ok((
             (quad.inner()[0] + quad.inner()[4]) / 2.0,
             (quad.inner()[1] + quad.inner()[5]) / 2.0,
-        );
+        ))
+    }
 
-        for kind in [
-            DispatchMouseEventType::MousePressed,
-            DispatchMouseEventType::MouseReleased,
-        ] {
-            self.page
-                .execute(
-                    DispatchMouseEventParams::builder()
-                        .r#type(kind)
-                        .x(x)
-                        .y(y)
-                        .button(MouseButton::Left)
-                        .click_count(1)
-                        .build()
-                        .map_err(StepError::Backend)?,
-                )
-                .await
-                .map_err(|error| StepError::Backend(format!("click: {error}")))?;
+    /// One mouse event at a point.
+    ///
+    /// Every pointer verb on this rung funnels through here so that the button,
+    /// the modifier bits and the click count are set the same way each time —
+    /// they were previously hardcoded to a single unmodified left click, which
+    /// is why a context menu could not be opened and a file could not be
+    /// dragged.
+    async fn mouse_event(
+        &self,
+        kind: chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType,
+        x: f64,
+        y: f64,
+        button: crate::program::Button,
+        count: i64,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventParams;
+
+        self.page
+            .execute(
+                DispatchMouseEventParams::builder()
+                    .r#type(kind)
+                    .x(x)
+                    .y(y)
+                    .button(cdp_button(button))
+                    .buttons(cdp_button_mask(button))
+                    .click_count(count)
+                    .modifiers(modifiers.cdp_bits())
+                    .build()
+                    .map_err(StepError::Backend)?,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| StepError::Backend(format!("mouse event: {error}")))
+    }
+
+    async fn click_backend_node(
+        &self,
+        backend_id: i64,
+        button: crate::program::Button,
+        count: u8,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        let (x, y) = self.centre_of_backend_node(backend_id).await?;
+        self.remember_point(x, y);
+
+        // A move first. A page that reveals its button on hover has not
+        // revealed it yet when the press arrives, and several menu systems
+        // dispatch on mouseover rather than on click.
+        self.mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            x,
+            y,
+            crate::program::Button::Left,
+            0,
+            modifiers,
+        )
+        .await?;
+
+        // `clickCount` is cumulative within a sequence, which is exactly how a
+        // browser recognizes a double click: the second press must say 2, not
+        // two presses that each say 1.
+        for click in 1..=i64::from(count.clamp(1, 3)) {
+            for kind in [
+                DispatchMouseEventType::MousePressed,
+                DispatchMouseEventType::MouseReleased,
+            ] {
+                self.mouse_event(kind, x, y, button, click, modifiers)
+                    .await?;
+            }
         }
         Ok(())
     }
 
+    async fn hover_backend_node(&self, backend_id: i64) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        let (x, y) = self.centre_of_backend_node(backend_id).await?;
+        self.remember_point(x, y);
+        self.mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            x,
+            y,
+            crate::program::Button::Left,
+            0,
+            crate::keys::Modifiers::default(),
+        )
+        .await
+    }
+
+    /// Press or release a button on an element, leaving it held.
+    async fn button_backend_node(
+        &self,
+        backend_id: i64,
+        button: crate::program::Button,
+        pressed: bool,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        let (x, y) = self.centre_of_backend_node(backend_id).await?;
+        self.remember_point(x, y);
+        self.mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            x,
+            y,
+            crate::program::Button::Left,
+            0,
+            crate::keys::Modifiers::default(),
+        )
+        .await?;
+        self.mouse_event(
+            if pressed {
+                DispatchMouseEventType::MousePressed
+            } else {
+                DispatchMouseEventType::MouseReleased
+            },
+            x,
+            y,
+            button,
+            1,
+            crate::keys::Modifiers::default(),
+        )
+        .await
+    }
+
+    /// Release a button wherever the pointer was left.
+    ///
+    /// The position is remembered rather than recomputed, because the element
+    /// the press started on is not where the release belongs — that is the
+    /// whole point of holding one.
+    async fn button_at_last_point(
+        &self,
+        button: crate::program::Button,
+        pressed: bool,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        // A poisoned lock here means a previous panic while recording a point,
+        // and the origin is a better answer than a failure: a release at (0,0)
+        // is wrong, but refusing to release a held button is worse.
+        let (x, y) = self.pointer_at.lock().map(|at| *at).unwrap_or((0.0, 0.0));
+        self.mouse_event(
+            if pressed {
+                DispatchMouseEventType::MousePressed
+            } else {
+                DispatchMouseEventType::MouseReleased
+            },
+            x,
+            y,
+            button,
+            1,
+            crate::keys::Modifiers::default(),
+        )
+        .await
+    }
+
+    /// Press, move in steps, release.
+    ///
+    /// The intermediate moves are what make it a drag: HTML5 drag-and-drop and
+    /// every JavaScript sortable library start on `mousemove` after a
+    /// threshold, so a press and a release at two points is a click at the
+    /// first one.
+    async fn drag_backend_node(
+        &self,
+        from: i64,
+        to: DragEnd,
+        button: crate::program::Button,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        let (x0, y0) = self.centre_of_backend_node(from).await?;
+        let (x1, y1) = match to {
+            DragEnd::Element(id) => self.centre_of_backend_node(id).await?,
+            DragEnd::Direction(direction, distance) => {
+                // A quarter of the viewport by default, matching the pixel rung.
+                let travel = f64::from(distance.unwrap_or(200));
+                let (dx, dy) = direction.offset(travel as i32);
+                (x0 + f64::from(dx), y0 + f64::from(dy))
+            }
+        };
+
+        self.mouse_event(
+            DispatchMouseEventType::MouseMoved,
+            x0,
+            y0,
+            crate::program::Button::Left,
+            0,
+            modifiers,
+        )
+        .await?;
+        self.mouse_event(
+            DispatchMouseEventType::MousePressed,
+            x0,
+            y0,
+            button,
+            1,
+            modifiers,
+        )
+        .await?;
+
+        const STEPS: i32 = 12;
+        for step in 1..=STEPS {
+            let fraction = f64::from(step) / f64::from(STEPS);
+            self.mouse_event(
+                DispatchMouseEventType::MouseMoved,
+                x0 + (x1 - x0) * fraction,
+                y0 + (y1 - y0) * fraction,
+                button,
+                0,
+                modifiers,
+            )
+            .await?;
+        }
+
+        let result = self
+            .mouse_event(
+                DispatchMouseEventType::MouseReleased,
+                x1,
+                y1,
+                button,
+                1,
+                modifiers,
+            )
+            .await;
+        self.remember_point(x1, y1);
+        result
+    }
+
+    /// Hand a list of files to a file input.
+    ///
+    /// `DOM.setFileInputFiles` rather than driving the picker, because the
+    /// picker is the browser's own native window and on the stage it is a
+    /// separate toplevel with its own rung. Setting the files directly is both
+    /// what a test harness does and the only route that works headless.
+    async fn upload_to_backend_node(
+        &self,
+        backend_id: i64,
+        paths: &[String],
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::dom::SetFileInputFilesParams;
+
+        if paths.is_empty() {
+            return Err(StepError::Backend("upload needs at least one path".into()));
+        }
+        // Checked here so the error names the file, rather than letting the
+        // browser fail with a message that names only the element.
+        for path in paths {
+            if !std::path::Path::new(path).exists() {
+                return Err(StepError::Backend(format!(
+                    "{path} does not exist, so it cannot be uploaded"
+                )));
+            }
+        }
+
+        self.page
+            .execute(
+                SetFileInputFilesParams::builder()
+                    .files(paths.to_vec())
+                    .backend_node_id(BackendNodeId::new(backend_id))
+                    .build()
+                    .map_err(StepError::Backend)?,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                StepError::Backend(format!(
+                    "handing {} file(s) to this element: {error}. It has to be a file input.",
+                    paths.len()
+                ))
+            })
+    }
+
+    /// Remember where the pointer was left, for a later release.
+    fn remember_point(&self, x: f64, y: f64) {
+        if let Ok(mut at) = self.pointer_at.try_lock() {
+            *at = (x, y);
+        }
+    }
+
     async fn press_key(&self, key: &str) -> Result<(), StepError> {
+        self.key_event(key, None).await
+    }
+
+    /// Dispatch a chord: down, up, or the pair.
+    ///
+    /// `half` selects one edge of the keystroke. `None` sends both, which is a
+    /// tap — the overwhelmingly common case and what `key` means. `Some(true)`
+    /// and `Some(false)` are the two halves of a held key, which a game's
+    /// movement control and a push-to-talk button both need and which a tap
+    /// cannot express at all.
+    async fn key_event(&self, key: &str, half: Option<bool>) -> Result<(), StepError> {
         use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchKeyEventParams, DispatchKeyEventType,
@@ -1376,7 +2095,12 @@ impl CdpPage {
         // only way to get one into a contenteditable reliably. *With* a
         // modifier it is a shortcut and must be dispatched as a key event —
         // routing it to insertText is what made `ctrl+a` type a literal "a".
-        if modifiers == 0
+        //
+        // Only for a whole keystroke: a held character key is being held for
+        // its keydown/keyup, not for the text it would insert, and inserting
+        // the text on the way down would type it once per hold.
+        if half.is_none()
+            && modifiers == 0
             && let crate::keys::Key::Char(character) = chord.key
         {
             return self
@@ -1392,11 +2116,16 @@ impl CdpPage {
                 .map_err(|error| StepError::Backend(format!("type: {error}")));
         }
 
-        for kind in [DispatchKeyEventType::KeyDown, DispatchKeyEventType::KeyUp] {
+        let kinds: &[DispatchKeyEventType] = match half {
+            None => &[DispatchKeyEventType::KeyDown, DispatchKeyEventType::KeyUp],
+            Some(true) => &[DispatchKeyEventType::KeyDown],
+            Some(false) => &[DispatchKeyEventType::KeyUp],
+        };
+        for kind in kinds {
             self.page
                 .execute(
                     DispatchKeyEventParams::builder()
-                        .r#type(kind)
+                        .r#type(kind.clone())
                         .key(dom_key.clone())
                         .windows_virtual_key_code(code)
                         .modifiers(modifiers)

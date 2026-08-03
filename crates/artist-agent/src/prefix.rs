@@ -195,7 +195,12 @@ mod tests {
     fn an_unchanged_preamble_reports_nothing() {
         let freezer = PrefixFreezer::for_session();
         freezer.freeze("k", "same".into());
-        assert!(freezer.freeze("k", "same".into()).superseded_note().is_none());
+        assert!(
+            freezer
+                .freeze("k", "same".into())
+                .superseded_note()
+                .is_none()
+        );
     }
 
     /// A handoff is a deliberate fresh start, so it gets its own frozen text
@@ -228,7 +233,14 @@ mod tests {
             .superseded_note()
             .expect("supersession reported");
 
-        assert!(note.contains("more changed line(s) not shown"), "truncation missing");
-        assert!(note.len() < SUPERSEDED_BUDGET * 2, "budget overrun: {}", note.len());
+        assert!(
+            note.contains("more changed line(s) not shown"),
+            "truncation missing"
+        );
+        assert!(
+            note.len() < SUPERSEDED_BUDGET * 2,
+            "budget overrun: {}",
+            note.len()
+        );
     }
 }

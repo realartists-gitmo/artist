@@ -387,14 +387,18 @@ mod tests {
         // A different family on the tint is not this check's business — the
         // contrast is a different question and guessing it would be a false
         // positive, which is what the whole scan is built to avoid.
-        assert!(found(r#"const a = <div className="bg-red-100 text-cyan-700">x</div>;"#).is_empty());
+        assert!(
+            found(r#"const a = <div className="bg-red-100 text-cyan-700">x</div>;"#).is_empty()
+        );
         // Either half alone says nothing.
         assert!(found(r#"const a = <div className="bg-red-700 text-white">x</div>;"#).is_empty());
         assert!(found(r#"const a = <div className="text-red-700">x</div>;"#).is_empty());
         assert!(found(r#"const a = <div className="bg-red-100">x</div>;"#).is_empty());
         // Not a family step, so not a pairing.
         assert!(found(r#"const a = <div className="bg-accent text-red-700">x</div>;"#).is_empty());
-        assert!(found(r#"const a = <div className="bg-white p-4 text-red-700">x</div>;"#).is_empty());
+        assert!(
+            found(r#"const a = <div className="bg-white p-4 text-red-700">x</div>;"#).is_empty()
+        );
     }
 
     /// A file that will not parse is already reported, with a position.

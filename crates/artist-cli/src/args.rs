@@ -12,6 +12,19 @@ pub struct Cli {
     /// Resume a session by ID, or select one interactively when no ID is given.
     #[arg(short = 'r', long = "resume", value_name = "SESSION_ID", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
+    /// Use a configured provider account for this run instead of the default.
+    #[arg(long, value_name = "PROVIDER")]
+    pub provider: Option<String>,
+    /// Override the provider's configured model for this run.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+    /// Start a new session with this agent profile. On resume, overrides the
+    /// profile recorded by the latest handoff.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+    /// Resume an exact agent lineage (session-host protocol; not user-facing yet).
+    #[arg(long, hide = true, value_name = "LINEAGE")]
+    pub lineage: Option<String>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -240,6 +253,21 @@ mod tests {
         assert!(provider.command.is_none());
         assert_eq!(provider.prompt.as_deref(), Some("provider"));
         assert!(Cli::try_parse_from(["artist", "model"]).is_ok());
+        let routed = Cli::try_parse_from([
+            "artist",
+            "-p",
+            "hello",
+            "--provider",
+            "work",
+            "--model",
+            "fast-model",
+            "--profile",
+            "reviewer",
+        ])
+        .unwrap();
+        assert_eq!(routed.provider.as_deref(), Some("work"));
+        assert_eq!(routed.model.as_deref(), Some("fast-model"));
+        assert_eq!(routed.profile.as_deref(), Some("reviewer"));
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK"]).unwrap();
         assert_eq!(cli.print_prompt.as_deref(), Some("reply OK"));
         let cli = Cli::try_parse_from(["artist", "-p", "reply OK", "/tmp"]).unwrap();

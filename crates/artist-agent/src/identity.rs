@@ -35,7 +35,6 @@ impl Identity {
             self.name
         )
     }
-
 }
 
 /// Claim the name for a session, which keeps it across resumes and handoffs.
@@ -77,6 +76,16 @@ pub(crate) fn session(
         profile: Some(profile.to_owned()),
         parent: None,
     })
+}
+
+/// Reconstitute the identity stored in a lineage's `run.started` event.
+/// Registration is deliberately skipped: the durable log, not the transient
+/// name roster, is authoritative when resuming an existing agent.
+pub(crate) fn recorded(name: &str, actor: &str) -> Identity {
+    Identity {
+        name: name.to_owned(),
+        actor: actor.to_owned(),
+    }
 }
 
 /// Claim a name for a subagent run, released when the run ends.
@@ -166,8 +175,14 @@ mod tests {
     fn the_identity_block_is_a_pure_suffix() {
         with_roster(|| {
             let shared = "shared system prompt";
-            let one = format!("{shared}{}", session("s-1", "s-1", std::path::Path::new("/p"), "default").prompt_block());
-            let two = format!("{shared}{}", session("s-2", "s-2", std::path::Path::new("/p"), "default").prompt_block());
+            let one = format!(
+                "{shared}{}",
+                session("s-1", "s-1", std::path::Path::new("/p"), "default").prompt_block()
+            );
+            let two = format!(
+                "{shared}{}",
+                session("s-2", "s-2", std::path::Path::new("/p"), "default").prompt_block()
+            );
 
             assert!(one.starts_with(shared) && two.starts_with(shared));
             assert_ne!(one, two, "two agents must not be the same agent");
@@ -198,14 +213,14 @@ mod tests {
     fn a_run_name_is_released_when_the_run_ends() {
         with_roster(|| {
             let name = {
-                let run = for_run("a-child", std::path::Path::new("/p"), "worker", Some("Monet"));
-                let held = run.name.clone();
-                assert!(
-                    artist_registry::names()
-                        .resolve(&held)
-                        .unwrap()
-                        .is_some()
+                let run = for_run(
+                    "a-child",
+                    std::path::Path::new("/p"),
+                    "worker",
+                    Some("Monet"),
                 );
+                let held = run.name.clone();
+                assert!(artist_registry::names().resolve(&held).unwrap().is_some());
                 held
             };
             assert!(
@@ -220,7 +235,12 @@ mod tests {
     #[test]
     fn a_cloned_run_identity_holds_the_name_until_the_last_copy_drops() {
         with_roster(|| {
-            let run = for_run("a-child", std::path::Path::new("/p"), "worker", Some("Monet"));
+            let run = for_run(
+                "a-child",
+                std::path::Path::new("/p"),
+                "worker",
+                Some("Monet"),
+            );
             let name = run.name.clone();
             let clone = run.clone();
             drop(run);

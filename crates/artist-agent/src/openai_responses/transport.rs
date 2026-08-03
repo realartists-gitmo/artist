@@ -151,8 +151,7 @@ impl Client {
     /// been exercised against the live endpoint rather than only a scripted
     /// one.
     fn chaining_supported(&self) -> bool {
-        matches!(self.credentials, Credentials::ApiKey(_))
-            && self.statefulness.chaining
+        matches!(self.credentials, Credentials::ApiKey(_)) && self.statefulness.chaining
     }
 
     /// Replace inline image bytes with ids the provider already holds.
@@ -287,10 +286,9 @@ impl Client {
             )));
         }
         let wire: Value = serde_json::from_str(&text)?;
-        let id = wire
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| CompletionError::ProviderError("prompt publish returned no id".into()))?;
+        let id = wire.get("id").and_then(Value::as_str).ok_or_else(|| {
+            CompletionError::ProviderError("prompt publish returned no id".into())
+        })?;
         Ok(match wire.get("version").and_then(Value::as_str) {
             Some(version) => format!("{id}@{version}"),
             None => id.to_owned(),
@@ -359,9 +357,7 @@ impl Client {
         serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|wire| wire.get("id")?.as_str().map(str::to_owned))
-            .ok_or_else(|| {
-                CompletionError::ProviderError("file upload returned no id".to_owned())
-            })
+            .ok_or_else(|| CompletionError::ProviderError("file upload returned no id".to_owned()))
     }
 
     /// Compact the full canonical sidecar plus current context. The sidecar is
@@ -1041,7 +1037,12 @@ fn wire_fingerprint(value: &Value) -> String {
 /// Split out of [`reconcile_inputs`] because conversation chaining needs the
 /// same number for the opposite purpose: reconciliation uses it to know what to
 /// append, chaining uses it to know what to *omit*.
-fn common_prefix(saved: &[Value], checkpoint: &[String], fresh: &[Value], fingerprints: &[String]) -> usize {
+fn common_prefix(
+    saved: &[Value],
+    checkpoint: &[String],
+    fresh: &[Value],
+    fingerprints: &[String],
+) -> usize {
     if checkpoint.is_empty() && !saved.is_empty() {
         // Schema-v1 snapshots did not record a cursor. Rig history contains prior
         // assistant turns, so migrate conservatively at the last such boundary;
@@ -1294,26 +1295,42 @@ mod transport_tests {
     /// that never happened.
     #[test]
     fn an_unchanged_history_matches_the_whole_checkpoint() {
-        let fresh = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "two"})];
+        let fresh = vec![
+            json!({"role": "user", "content": "one"}),
+            json!({"role": "user", "content": "two"}),
+        ];
         let fingerprints: Vec<String> = fresh.iter().map(wire_fingerprint).collect();
         let checkpoint = fingerprints.clone();
         let saved = vec![json!({"role": "assistant", "content": "ok"})];
 
         let common = common_prefix(&saved, &checkpoint, &fresh, &fingerprints);
-        assert_eq!(common, checkpoint.len(), "an intact history must not look rewritten");
+        assert_eq!(
+            common,
+            checkpoint.len(),
+            "an intact history must not look rewritten"
+        );
     }
 
     #[test]
     fn a_rewritten_history_falls_short_of_the_checkpoint() {
-        let told = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "two"})];
+        let told = vec![
+            json!({"role": "user", "content": "one"}),
+            json!({"role": "user", "content": "two"}),
+        ];
         let checkpoint: Vec<String> = told.iter().map(wire_fingerprint).collect();
         // The second turn was replaced, which is what a rule replay does.
-        let fresh = vec![json!({"role": "user", "content": "one"}), json!({"role": "user", "content": "rewritten"})];
+        let fresh = vec![
+            json!({"role": "user", "content": "one"}),
+            json!({"role": "user", "content": "rewritten"}),
+        ];
         let fingerprints: Vec<String> = fresh.iter().map(wire_fingerprint).collect();
         let saved = vec![json!({"role": "assistant", "content": "ok"})];
 
         let common = common_prefix(&saved, &checkpoint, &fresh, &fingerprints);
-        assert!(common < checkpoint.len(), "a rewrite must be detected: {common}");
+        assert!(
+            common < checkpoint.len(),
+            "a rewrite must be detected: {common}"
+        );
     }
 
     #[test]

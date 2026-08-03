@@ -4,9 +4,7 @@ use crate::{
     input_atoms::{ExpandedInput, InputAtoms},
     input_images::ImagePaste,
     interaction::{PromptHistory, SteeringQueue},
-    models,
-    sessions::{ActiveSession, SessionStore},
-    slash_commands,
+    models, slash_commands,
     status_bar::{self, StatusBarConfig, StatusItem},
     store::ProviderStore,
     subagent_ui::{self, SubagentStatuses},
@@ -14,6 +12,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use artist_rules::{RulesEngine, state::RulesHandle};
+use artist_session::{ActiveSession, SessionStore};
 use artist_session::{Envelope, ReplayItem, SteeringDelivered};
 use artist_tools::ToolBundle;
 use llm_provider::SavedProvider;
@@ -421,6 +420,10 @@ struct StreamingControls<'a> {
     animation_frame: usize,
     reasoning: &'a str,
     transcript_gap: bool,
+    /// A question the agent is blocked on. Rendered in the live region rather
+    /// than as a modal so the transcript above stays readable — the user can
+    /// see *why* they are being asked while they answer.
+    ask: Option<&'a crate::ask_ui::AskPicker>,
 }
 
 struct StreamingViewport {
@@ -2384,6 +2387,10 @@ async fn submit(
         .set_steering(Some(steering_handle.clone()));
     // `steer` is refused when no turn is running, so the bridge has to know
     // which state we are in to answer a canvas honestly.
+    // Questions arrive mid-turn while the model is blocked on the answer, so
+    // the picker is opened from the poll loop as they appear rather than up
+    // front.
+    let mut ask_picker: Option<crate::ask_ui::AskPicker> = None;
     context.canvas_control.set_busy(true);
     // A canvas renders the same questions the TUI does, so it has to be told
     // when the set changes rather than polling for it. `running` rather than
@@ -2436,10 +2443,19 @@ async fn submit(
         recorder: active.recorder.clone(),
         memory: std::sync::Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
+        recorded_identity: None,
         provider_context: active.provider_context.clone(),
         effective_context_window: status.context_capacity,
         fast_mode: status.fast_mode,
         cancel: cancel.clone(),
+        // One registry for the session, shared with every surface that can
+        // render or answer a question — a second one would mean an answer given
+        // on the canvas never reached the agent that asked. Recording is
+        // attached here rather than at construction because the registry is set
+        // up before a session is open.
+        ask: context.canvas_control.ask_registry().inspect(|ask| {
+            ask.attach_recorder(active.recorder.clone());
+        }),
         attachments: Some(active.attachments.clone()),
         providers: context.providers.clone(),
         todos: context.todos.clone(),
@@ -2497,6 +2513,7 @@ async fn submit(
             animation_frame,
             reasoning: &reasoning,
             transcript_gap: false,
+            ask: ask_picker.as_ref(),
         },
         &mut stream_viewport,
     )?;
@@ -2557,7 +2574,55 @@ async fn submit(
                     cancel.cancel();
                     cancelled = true;
                 }
-                while event::poll(std::time::Duration::ZERO)? {
+                // Adopt anything the agent has just asked. Taken before the
+                // key loop so a question posted this tick can be answered on
+                // the very next keystroke rather than a frame later.
+                if ask_picker.as_ref().is_none_or(crate::ask_ui::AskPicker::is_done)
+                    && let Some(registry) = context.canvas_control.ask_registry()
+                {
+                    ask_picker = crate::ask_ui::AskPicker::open(registry.pending());
+                }
+                // While a question is open the picker owns the keyboard: the
+                // run is blocked on the answer, so steering past it would be
+                // typing into a turn that cannot advance.
+                let asking = if let (Some(picker), Some(registry)) = (
+                    ask_picker.as_mut(),
+                    context.canvas_control.ask_registry(),
+                ) {
+                    while event::poll(std::time::Duration::ZERO)? {
+                        let Event::Key(key) = event::read()? else {
+                            continue;
+                        };
+                        match picker.handle_key(key) {
+                            crate::ask_ui::Outcome::Pending => {}
+                            crate::ask_ui::Outcome::Answered(answer) => {
+                                registry.answer_from(answer, "tui");
+                            }
+                            crate::ask_ui::Outcome::DismissedAll => {
+                                for id in picker.outstanding() {
+                                    registry.answer_from(
+                                        artist_session::ask::Answer::dismissed(id),
+                                        "tui",
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    // Also retired when a canvas answered first — whoever gets
+                    // there first wins, and the loser's picker must close
+                    // rather than sit on a question nobody is waiting for.
+                    if picker.is_done() || registry.is_empty() {
+                        ask_picker = None;
+                    }
+                    true
+                } else {
+                    false
+                };
+                // Skipping only the key loop, never the redraw below: the
+                // picker has to repaint on every keystroke, and an early
+                // `continue` out of this arm would freeze it mid-answer.
+                while !asking && event::poll(std::time::Duration::ZERO)? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press
                             && (key.code == KeyCode::Esc
@@ -2898,6 +2963,7 @@ async fn submit(
                 animation_frame,
                 reasoning: &reasoning,
                 transcript_gap,
+                ask: ask_picker.as_ref(),
             },
             &mut stream_viewport,
         )?;
@@ -3466,7 +3532,17 @@ fn draw_streaming(
         .min(layout_height.saturating_sub(base_fixed_height))
         / 2
         * 2;
-    let fixed_height = base_fixed_height.saturating_add(subagent_height);
+    // Reserved before reasoning, which is the one live element that yields:
+    // a question the run is blocked on matters more than the thinking that led
+    // to it, and the reasoning tail is already truncated by design.
+    let ask_height = controls
+        .ask
+        .map(|picker| picker.height(width))
+        .unwrap_or(0)
+        .min(layout_height.saturating_sub(base_fixed_height.saturating_add(subagent_height)));
+    let fixed_height = base_fixed_height
+        .saturating_add(subagent_height)
+        .saturating_add(ask_height);
     const MAX_LIVE_REASONING_ROWS: u16 = 8;
     let mut reasoning_lines = wrapped_reasoning_lines(controls.reasoning, usize::from(width));
     let reasoning_height = (reasoning_lines.len() as u16)
@@ -3478,7 +3554,7 @@ fn draw_streaming(
     reasoning_lines.drain(..keep_from);
     let desired = streaming_viewport_height(
         input_height,
-        subagent_height,
+        subagent_height.saturating_add(ask_height),
         queued_height.saturating_add(suggestions_height),
         reasoning_height,
         footer_height,
@@ -3507,11 +3583,20 @@ fn draw_streaming(
         controls
             .subagents
             .render(frame.buffer_mut(), subagent_area, controls.animation_frame);
-        let queued_area = Rect::new(
+        let ask_area = Rect::new(
             area.x,
             subagent_area.bottom(),
             area.width,
-            queued_height.min(area.height.saturating_sub(subagent_height)),
+            ask_height.min(area.height.saturating_sub(subagent_area.bottom() - area.y)),
+        );
+        if let Some(picker) = controls.ask {
+            picker.render(frame, ask_area);
+        }
+        let queued_area = Rect::new(
+            area.x,
+            ask_area.bottom(),
+            area.width,
+            queued_height.min(area.height.saturating_sub(subagent_height + ask_height)),
         );
         let queued = controls
             .steering

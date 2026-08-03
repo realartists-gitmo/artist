@@ -74,7 +74,10 @@ async fn a_logged_vector_is_reused_instead_of_re_embedded() {
     std::fs::create_dir_all(&session_dir).unwrap();
 
     let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
-    append(&mut writer, written_with_vector("rten runs on the CPU", 4, "gemma-768"));
+    append(
+        &mut writer,
+        written_with_vector("rten runs on the CPU", 4, "gemma-768"),
+    );
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
 
     let store = MemoryStore::open(dir.path().join("memory.rocks"))
@@ -82,8 +85,14 @@ async fn a_logged_vector_is_reused_instead_of_re_embedded() {
         .unwrap();
     let report = store.reconcile(&events, "gemma-768").await.unwrap();
 
-    assert_eq!(report.restored, 1, "the logged vector should have been reused");
-    assert!(report.missing.is_empty(), "nothing should need re-embedding");
+    assert_eq!(
+        report.restored, 1,
+        "the logged vector should have been reused"
+    );
+    assert!(
+        report.missing.is_empty(),
+        "nothing should need re-embedding"
+    );
     assert_eq!(store.fact_count().await.unwrap(), 1);
 }
 
@@ -96,7 +105,10 @@ async fn a_vector_from_another_embedder_is_not_reused() {
     std::fs::create_dir_all(&session_dir).unwrap();
 
     let mut writer = EventLogWriter::open(&session_dir, "s").unwrap();
-    append(&mut writer, written_with_vector("rten runs on the CPU", 4, "coderank-768"));
+    append(
+        &mut writer,
+        written_with_vector("rten runs on the CPU", 4, "coderank-768"),
+    );
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
 
     let store = MemoryStore::open(dir.path().join("memory.rocks"))
@@ -105,7 +117,11 @@ async fn a_vector_from_another_embedder_is_not_reused() {
     let report = store.reconcile(&events, "gemma-768").await.unwrap();
 
     assert_eq!(report.restored, 0, "a foreign vector must not be indexed");
-    assert_eq!(report.missing.len(), 1, "it must be reported for re-embedding");
+    assert_eq!(
+        report.missing.len(),
+        1,
+        "it must be reported for re-embedding"
+    );
     assert_eq!(store.fact_count().await.unwrap(), 0);
 }
 
@@ -120,7 +136,10 @@ async fn rewinding_past_a_write_removes_the_fact() {
         .unwrap();
 
     let ids = store
-        .put_facts(&[new_fact("prefers tabs over spaces", 1), new_fact("uses fish shell", 2)])
+        .put_facts(&[
+            new_fact("prefers tabs over spaces", 1),
+            new_fact("uses fish shell", 2),
+        ])
         .await
         .unwrap();
     assert_eq!(ids.len(), 2);
@@ -132,7 +151,10 @@ async fn rewinding_past_a_write_removes_the_fact() {
     // Nothing masked yet: both facts are accounted for.
     let events = EventLogReader::new(&session_dir).read_all().unwrap();
     let report = store.reconcile(&events, "test-embedder").await.unwrap();
-    assert!(report.is_clean(), "expected a clean reconcile, got {report:?}");
+    assert!(
+        report.is_clean(),
+        "expected a clean reconcile, got {report:?}"
+    );
     assert_eq!(store.fact_count().await.unwrap(), 2);
 
     // Masks every event after `first_seq`, i.e. the second write.
@@ -147,7 +169,10 @@ async fn rewinding_past_a_write_removes_the_fact() {
     );
     assert_eq!(store.fact_count().await.unwrap(), 1);
 
-    let hits = store.search_facts("fish shell", &vector(2), 5).await.unwrap();
+    let hits = store
+        .search_facts("fish shell", &vector(2), 5)
+        .await
+        .unwrap();
     assert!(
         !hits
             .iter()

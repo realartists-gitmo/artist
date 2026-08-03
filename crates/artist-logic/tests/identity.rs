@@ -65,7 +65,10 @@ fn default_is_a_usable_graph() {
     assert_eq!(a.atom("and"), wk::AND, "well-known atoms must be preloaded");
     let ids_a: BTreeSet<ObjectId> = (0..64).map(|_| a.fresh()).collect();
     let ids_b: BTreeSet<ObjectId> = (0..64).map(|_| b.fresh()).collect();
-    assert!(ids_a.is_disjoint(&ids_b), "Default graphs share an allocator seed");
+    assert!(
+        ids_a.is_disjoint(&ids_b),
+        "Default graphs share an allocator seed"
+    );
 }
 
 /// The other half of the contract, stated narrowly: **closed structural**
@@ -132,8 +135,15 @@ fn the_id_spaces_are_disjoint() {
 
     for _ in 0..2048 {
         let id = g.fresh();
-        assert_eq!(id.space(), IdSpace::Nominal, "nominal id {id} left its namespace");
-        assert!(id.0 >= wk::FIRST_FREE.0, "nominal id {id} entered the reserved range");
+        assert_eq!(
+            id.space(),
+            IdSpace::Nominal,
+            "nominal id {id} left its namespace"
+        );
+        assert!(
+            id.0 >= wk::FIRST_FREE.0,
+            "nominal id {id} entered the reserved range"
+        );
     }
 }
 
@@ -226,7 +236,10 @@ fn an_inner_binder_shadows_an_outer_one() {
     let inner_body2 = g.apply(p, vec![b]);
     let inner2 = g.quantify(wk::EXISTS, b, Some(d), inner_body2);
     let outer2 = g.quantify(wk::FORALL, a, Some(d), inner2);
-    assert_eq!(outer, outer2, "shadowing must resolve to the innermost binder");
+    assert_eq!(
+        outer, outer2,
+        "shadowing must resolve to the innermost binder"
+    );
 }
 
 /// Allocation is what makes cycles representable, and it has to keep working
@@ -241,6 +254,9 @@ fn allocation_still_supports_cycles() {
     let body = g.get(negated).cloned().expect("built");
     g.define(liar, body);
 
-    assert!(g.is_cyclic(liar), "alloc-before-define must still close a cycle");
+    assert!(
+        g.is_cyclic(liar),
+        "alloc-before-define must still close a cycle"
+    );
     assert!(matches!(g.get(liar), Some(CoreNode::Apply { .. })));
 }

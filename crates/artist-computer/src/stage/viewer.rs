@@ -276,7 +276,12 @@ async fn deliver(stage: &StageWayland, window: WindowKey, input: HumanInput) -> 
                 width: 1,
                 height: 1,
             };
-            stage.pointer(window, at, LEFT_BUTTON).await
+            stage
+                .pointer(
+                    window,
+                    crate::stage::Pointing::at(at).with_button(LEFT_BUTTON),
+                )
+                .await
         }
         HumanInput::Key(chord) => stage.key(window, &chord).await,
     };

@@ -14,8 +14,8 @@
 //! overwrite another, which is data loss disguised as idempotence.
 
 use anyhow::{Result, anyhow};
-use artist_logic::evidence::{Assertion, Polarity};
 use artist_logic::ObjectId;
+use artist_logic::evidence::{Assertion, Polarity};
 use cozo::DataValue;
 use std::collections::BTreeMap;
 

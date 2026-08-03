@@ -81,20 +81,28 @@ use smithay::wayland::dmabuf::{
 };
 use smithay::wayland::output::{OutputHandler, OutputManagerState};
 use smithay::wayland::presentation::{PresentationState, Refresh};
-use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    request_data_device_client_selection, set_data_device_selection,
+};
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
+use smithay::desktop::{
+    PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy,
+    find_popup_root_surface,
 };
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::tablet_manager::{
+    TabletDescriptor, TabletManagerState, TabletSeatHandler, TabletSeatTrait,
+};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
     delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell, delegate_tablet_manager,
 };
 
 use crate::model::{Frame, Rect};
@@ -169,16 +177,42 @@ enum StageCommand {
     ),
     Pointer(
         WindowKey,
-        Rect,
-        u32,
+        crate::stage::Pointing,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
+    /// One primitive of a pointer sequence.
+    ///
+    /// Split out for the same reason [`StageCommand::Touch`] is: a drag is a
+    /// press, real motion over real time, and a release. The motion is what
+    /// makes it a drag rather than two clicks — every toolkit starts dragging
+    /// from a movement threshold — and sleeping between the points has to
+    /// happen on the caller's task, never on the compositor thread.
+    Pointing(
+        PointerStep,
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
     Scroll(
         WindowKey,
         Rect,
         i32,
+        crate::program::Axis,
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
+    /// Hold a key down, or let it go. `bool` is `pressed`.
+    KeyHold(
+        WindowKey,
+        String,
+        bool,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
+    ClipboardSet(String, tokio::sync::oneshot::Sender<Result<(), String>>),
+    ClipboardGet(tokio::sync::oneshot::Sender<Result<ClipboardRead, String>>),
+    CloseWindow(WindowKey, tokio::sync::oneshot::Sender<Result<(), String>>),
+    Resize(u32, u32, tokio::sync::oneshot::Sender<Result<(), String>>),
+    /// Release every button, key and contact this seat is holding.
+    Relax(tokio::sync::oneshot::Sender<Result<(), String>>),
+    /// One primitive of a stylus stroke.
+    Stylus(StylusStep, tokio::sync::oneshot::Sender<Result<(), String>>),
     /// One primitive of a touch sequence.
     ///
     /// Gestures are assembled by the *proxy*, not here, because the timing is
@@ -223,6 +257,62 @@ enum TouchStep {
     /// left down is worse than a gesture that did not happen, because the next
     /// interaction inherits it.
     Cancel,
+}
+
+/// The answer to a clipboard read, which arrives one of two ways.
+///
+/// When the agent owns the selection the text is simply there. When a *client*
+/// owns it the data has to be asked for over the protocol and written into a
+/// pipe, and the read cannot happen here — the client only answers once the
+/// compositor loop runs again, so reading on this thread would deadlock against
+/// the very event that fills the pipe. The fd goes back to the proxy, which
+/// reads it on its own task.
+enum ClipboardRead {
+    Text(Option<String>),
+    Pipe(std::os::fd::OwnedFd),
+}
+
+/// One primitive of a stylus stroke.
+///
+/// Split from the pointer for the same reason touch is: a stylus is not a mouse
+/// that reports extra numbers. Pressure and tilt are what a drawing application
+/// reads to decide stroke width and shape, and a tool that goes from "not
+/// there" to "pressing" without a proximity event is one many applications
+/// ignore entirely.
+#[derive(Clone, Copy, Debug)]
+enum StylusStep {
+    /// The tool comes within range of the tablet, over a window.
+    ProximityIn { window: WindowKey, at: Rect },
+    /// The tip touches down.
+    Down,
+    /// The tool moves, at a pressure and tilt.
+    Motion {
+        window: WindowKey,
+        at: Rect,
+        pressure: f64,
+        tilt: (f64, f64),
+    },
+    /// The tip lifts.
+    Up,
+    /// The tool leaves range. Paired with `ProximityIn`, always: a stylus left
+    /// in proximity keeps an application in its hover state forever.
+    ProximityOut,
+}
+
+/// One primitive of a pointer sequence, assembled by the proxy.
+#[derive(Clone, Copy, Debug)]
+enum PointerStep {
+    /// Move the pointer, pressing nothing.
+    Motion { window: WindowKey, at: Rect },
+    /// Press or release one button where the pointer already is.
+    Button { button: u32, pressed: bool },
+    /// Hold or release the modifier keys of a chord, so a ctrl+click and a
+    /// shift+drag are expressible as the sequence a person performs.
+    Modifiers {
+        window: WindowKey,
+        modifiers: crate::keys::Modifiers,
+        pressed: bool,
+    },
 }
 
 /// A window the compositor is managing.
@@ -281,6 +371,37 @@ struct StageState {
     seat: Seat<Self>,
     windows: Vec<Managed>,
     next_key: u64,
+    /// Buttons and evdev keycodes this seat is currently holding down.
+    ///
+    /// Tracked because a seat outlives the program that used it: a `press` with
+    /// no `release`, or a program that failed between the two, leaves the
+    /// client believing the button is still down and turns the *next* program's
+    /// click into a drag. `Relax` reads these and lets go of exactly what is
+    /// held, rather than blindly sending releases for things that were never
+    /// pressed — a spurious release is itself an event a client can act on.
+    held_buttons: Vec<u32>,
+    held_keys: Vec<u32>,
+    /// What the agent last put on the clipboard.
+    ///
+    /// The stage is the data source for its own selection, so the text has to
+    /// live somewhere the offer can be served from. A client that copies
+    /// something replaces this through the ordinary data-device path.
+    clipboard: Option<String>,
+    /// The `zwp_tablet_manager_v2` global.
+    ///
+    /// Held to keep the global alive, like the decoration and viewporter
+    /// states: a drawing application binds it at start-up to discover whether a
+    /// stylus exists at all, and one that finds none takes the mouse path
+    /// permanently — no pressure, no tilt, and no way to ask for them later.
+    _tablet_state: TabletManagerState,
+    /// Menus, dropdowns, tooltips — every transient surface a client puts up.
+    ///
+    /// Held separately from `windows` because a popup is not a window: it has
+    /// no independent identity the agent should see, it lives and dies with its
+    /// parent, and it is positioned relative to that parent rather than to the
+    /// output. What it *does* need is to be configured, rendered above its
+    /// parent, and given input — none of which was happening.
+    popups: PopupManager,
     /// Set when a surface commits with new content, so the render loop knows
     /// there is something to do. This is the whole reason an idle stage is free.
     dirty: bool,
@@ -380,6 +501,11 @@ impl CompositorHandler for StageState {
         on_commit_buffer_handler::<Self>(surface);
         self.dirty = true;
 
+        // Advances a popup's configure state, and — on the initial commit —
+        // sends the configure the client is waiting for. Without this a popup
+        // that was tracked still never reaches a mapped state.
+        self.popups.commit(surface);
+
         // A commit carrying damage is a commit that painted, which is the point
         // a toplevel becomes a window the agent can see and act on.
         let painted = !regions.is_empty();
@@ -461,21 +587,164 @@ impl XdgShellHandler for StageState {
         self.dirty = true;
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    /// A menu, a dropdown, a combo box list, a tooltip.
+    ///
+    /// This was an empty stub, and the consequences were larger than they look.
+    /// A popup is a *separate* xdg surface, not a subsurface of its parent, so
+    /// it appears in none of the toplevel surface trees `draw` walks — and
+    /// xdg-shell requires a configure before the client may attach a buffer, so
+    /// a popup that is never configured is never even painted. The result was
+    /// that every context menu, every `<select>` dropdown and every tooltip on
+    /// the stage was invisible to capture and unreachable by the pointer, with
+    /// no error anywhere: the click that opened the menu succeeded, and the menu
+    /// simply did not exist.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        // The geometry the client asked for, honoured as asked. There is
+        // nowhere to slide it to anyway: the stage is one output and its
+        // toplevels already fill it, so the constraint-adjustment dance a real
+        // compositor performs would have no better answer than the client's.
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface.clone())) {
+            eprintln!("artist: a popup could not be tracked: {error}");
+            return;
+        }
+        // Unconditional, for the same reason the decoration configure is: this
+        // is the event the client is waiting on before it draws anything.
+        if let Err(error) = surface.send_configure() {
+            eprintln!("artist: a popup could not be configured: {error}");
+        }
+        self.dirty = true;
+    }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    /// A client asking to own input while its menu is open.
+    ///
+    /// Honoured rather than ignored, because a menu that does not hold a grab
+    /// closes on the next click *anywhere* in many toolkits — including the
+    /// click meant to choose an item from it.
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        use smithay::input::Seat;
 
+        let Some(seat) = Seat::<Self>::from_resource(&seat) else {
+            return;
+        };
+        let popup = PopupKind::Xdg(surface.clone());
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            return;
+        };
+        let mut grab = match self.popups.grab_popup(root, popup, &seat, serial) {
+            Ok(grab) => grab,
+            Err(error) => {
+                eprintln!("artist: a popup grab was refused: {error}");
+                return;
+            }
+        };
+        if let Some(keyboard) = seat.get_keyboard()
+            && keyboard.is_grabbed()
+            && !(keyboard.has_grab(serial)
+                || grab.previous_serial().is_some_and(|s| keyboard.has_grab(s)))
+        {
+            // Another grab is already in force and this one does not chain onto
+            // it. Ungrabbing the new popup is what the protocol expects; taking
+            // the grab anyway would strand the first menu open with no input.
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        if let Some(keyboard) = seat.get_keyboard() {
+            keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        }
+        if let Some(pointer) = seat.get_pointer() {
+            pointer.set_grab(
+                self,
+                PopupPointerGrab::new(&grab),
+                serial,
+                smithay::input::pointer::Focus::Keep,
+            );
+        }
+    }
+
+    /// A popup asking to move — a submenu flipping to the other side, a
+    /// dropdown repositioning after its anchor scrolled.
+    ///
+    /// Acknowledged with the geometry the client computed. Leaving this unanswered
+    /// leaves the popup where it was while the client believes it moved.
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+        if let Err(error) = surface.send_configure() {
+            eprintln!("artist: a popup could not be repositioned: {error}");
+        }
+        self.dirty = true;
+    }
+
+    /// A popup went away — the menu closed, the tooltip faded.
+    ///
+    /// The manager has to be told, or it keeps yielding a dead surface from
+    /// `popups_for_surface` and the renderer walks a tree that no longer has
+    /// buffers.
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        self.popups.cleanup();
+        self.dirty = true;
     }
 }
 
 impl SelectionHandler for StageState {
     type SelectionUserData = ();
+
+    /// A client took the clipboard.
+    ///
+    /// Our cached copy is dropped rather than kept, because keeping it would
+    /// make `getClipboard` answer with what the *agent* last copied long after
+    /// an application replaced it — a stale read that looks exactly like a
+    /// successful one. `None` here means "ask whoever owns it", which is the
+    /// only answer that stays true.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if ty == SelectionTarget::Clipboard && source.is_some() {
+            self.clipboard = None;
+        }
+    }
+
+    /// A client is reading the selection we own. Write it into the pipe.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        _mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        use std::io::Write;
+
+        if ty != SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(text) = self.clipboard.clone() else {
+            return;
+        };
+        // Dropped at the end of the scope, which closes the write end — a
+        // reader blocks until EOF, so a pipe left open is a client that hangs
+        // rather than one that gets nothing.
+        let mut pipe = std::fs::File::from(fd);
+        // A failed write is the client having gone away mid-request, which is
+        // ordinary and not ours to report anywhere.
+        let _ = pipe.write_all(text.as_bytes());
+        let _ = pipe.flush();
+    }
 }
 
 impl DataDeviceHandler for StageState {
@@ -486,6 +755,14 @@ impl DataDeviceHandler for StageState {
 
 impl ClientDndGrabHandler for StageState {}
 impl ServerDndGrabHandler for StageState {}
+
+/// The stage has no cursor to draw, so a tool asking for one changes nothing.
+///
+/// Implemented rather than left off because `delegate_tablet_manager!` requires
+/// it, and because a client that sets a tool image is telling us it is
+/// genuinely using the tablet — which is worth nothing here but is not an
+/// error.
+impl TabletSeatHandler for StageState {}
 
 impl SeatHandler for StageState {
     type KeyboardFocus = wl_surface::WlSurface;
@@ -578,6 +855,7 @@ delegate_xdg_decoration!(StageState);
 delegate_shm!(StageState);
 delegate_seat!(StageState);
 delegate_data_device!(StageState);
+delegate_tablet_manager!(StageState);
 delegate_dmabuf!(StageState);
 delegate_output!(StageState);
 delegate_viewporter!(StageState);
@@ -698,6 +976,14 @@ pub struct StageWayland {
     /// cannot leave applications running against a dead display.
     children: Mutex<Vec<std::process::Child>>,
     thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Whether the seat got a tablet and a gamepad at start-up.
+    ///
+    /// Decided once, when the seat is built, and reported through
+    /// [`Stage::seat`] rather than assumed — a surface derives its own `Caps`
+    /// from this, and advertising a device the seat does not have is how a step
+    /// comes back `ok` having done nothing.
+    has_tablet: bool,
+    has_gamepad: bool,
 }
 
 impl Drop for StageWayland {
@@ -814,6 +1100,13 @@ impl StageWayland {
             socket_name,
             children: Mutex::new(Vec::new()),
             thread: Mutex::new(Some(thread)),
+            // Both devices are added to the seat unconditionally when the
+            // compositor thread builds it, so both are always present here. The
+            // fields exist because a future stage — a remote one, a phone —
+            // may not have them, and `Caps` has to report the truth rather than
+            // this backend's assumption.
+            has_tablet: true,
+            has_gamepad: true,
         })
     }
 
@@ -889,6 +1182,147 @@ impl StageWayland {
     /// compositor thread — which is why the thread only ever sees instantaneous
     /// events. A 500 ms long press otherwise stalls rendering, damage delivery
     /// and every other command for half a second.
+    /// Send one pointer primitive to the compositor thread.
+    async fn pointing(&self, step: PointerStep) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Pointing(step, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn stylus_step(&self, step: StylusStep) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Stylus(step, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    /// Approach, touch down, draw, lift, withdraw.
+    ///
+    /// The five phases are what a drawing application expects, and skipping any
+    /// of them is a stroke it will not record: proximity is how it learns which
+    /// tool is in use, and a tip-down with no preceding proximity event is
+    /// discarded outright by several.
+    async fn run_stroke(
+        &self,
+        window: WindowKey,
+        from: Rect,
+        to: Rect,
+        pressure: f32,
+        tilt: (f32, f32),
+    ) -> Result<(), StepError> {
+        let start = centre_i32(from);
+        let end = centre_i32(to);
+        let steps = 24;
+        let pressure = f64::from(pressure.clamp(0.0, 1.0));
+        let tilt = (f64::from(tilt.0), f64::from(tilt.1));
+        let point = |x: i32, y: i32| Rect {
+            x,
+            y,
+            width: 0,
+            height: 0,
+        };
+
+        self.stylus_step(StylusStep::ProximityIn { window, at: from })
+            .await?;
+        self.stylus_step(StylusStep::Motion {
+            window,
+            at: from,
+            pressure,
+            tilt,
+        })
+        .await?;
+        self.stylus_step(StylusStep::Down).await?;
+
+        // More samples than a drag uses. A stroke's *shape* is the output here,
+        // not just its endpoints, so the sample rate is the resolution of the
+        // line the application draws.
+        for step in 1..=steps {
+            tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
+            let (x, y) = lerp(start, end, step, steps);
+            self.stylus_step(StylusStep::Motion {
+                window,
+                at: point(x, y),
+                pressure,
+                tilt,
+            })
+            .await?;
+        }
+
+        self.stylus_step(StylusStep::Up).await?;
+        self.stylus_step(StylusStep::ProximityOut).await
+    }
+
+    /// Press, move in steps, release.
+    ///
+    /// The intermediate motion is the whole point. Every toolkit begins a drag
+    /// only after the pointer has travelled past a threshold — typically a few
+    /// pixels — so a press and a release at two points is not a short drag, it
+    /// is a click at the first point and nothing at the second. The waiting
+    /// happens here, on the caller's task, for the same reason gestures do it
+    /// here: sleeping on the compositor thread would stall rendering and the
+    /// command channel for the length of the drag.
+    async fn run_drag(
+        &self,
+        window: WindowKey,
+        from: Rect,
+        to: Rect,
+        button: u32,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        let start = centre_i32(from);
+        let end = centre_i32(to);
+        let steps = 16;
+
+        if modifiers.any() {
+            self.pointing(PointerStep::Modifiers {
+                window,
+                modifiers,
+                pressed: true,
+            })
+            .await?;
+        }
+        self.pointing(PointerStep::Motion { window, at: from })
+            .await?;
+        self.pointing(PointerStep::Button {
+            button,
+            pressed: true,
+        })
+        .await?;
+
+        for step in 1..=steps {
+            tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
+            let (x, y) = lerp(start, end, step, steps);
+            self.pointing(PointerStep::Motion {
+                window,
+                at: Rect {
+                    x,
+                    y,
+                    width: 0,
+                    height: 0,
+                },
+            })
+            .await?;
+        }
+        // A settling pause before the release. A drop target that highlights on
+        // hover often commits on the *next* frame, and releasing in the same
+        // millisecond as the final motion lands the drop before the target has
+        // accepted it.
+        tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS * 2)).await;
+        self.pointing(PointerStep::Button {
+            button,
+            pressed: false,
+        })
+        .await?;
+        if modifiers.any() {
+            self.pointing(PointerStep::Modifiers {
+                window,
+                modifiers,
+                pressed: false,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn run_gesture(&self, window: WindowKey, gesture: &Gesture) -> Result<(), StepError> {
         match *gesture {
             Gesture::Tap { at, hold_ms } => {
@@ -899,8 +1333,10 @@ impl StageWayland {
                     slot: 0,
                 })
                 .await?;
-                tokio::time::sleep(std::time::Duration::from_millis(hold_ms.max(MIN_CONTACT_MS)))
-                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    hold_ms.max(MIN_CONTACT_MS),
+                ))
+                .await;
                 self.touch_step(TouchStep::Up { slot: 0 }).await
             }
             Gesture::Swipe {
@@ -1022,6 +1458,14 @@ impl Stage for StageWayland {
 
         let mut process = std::process::Command::new(&command.program);
         process.args(&command.args);
+        // GUI applications must not inherit the harness terminal's stdio. Browsers
+        // are especially noisy (D-Bus, portal, and web-service diagnostics), and
+        // leaking their stderr into Artist makes harmless child warnings look like
+        // harness failures. GUI diagnostics belong to the surface/process log;
+        // until that channel exists, discard both streams rather than corrupting
+        // the agent's terminal.
+        process.stdout(std::process::Stdio::null());
+        process.stderr(std::process::Stdio::null());
         // Its own process group, so teardown can signal the whole tree.
         // Browsers in particular fork a zygote, a GPU process and several
         // utility processes; killing only the one we spawned leaves those
@@ -1096,8 +1540,156 @@ impl Stage for StageWayland {
             .map_err(StepError::Backend)
     }
 
-    async fn pointer(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError> {
-        self.ask(|tx| StageCommand::Pointer(window, at, button, tx))
+    async fn pointer(
+        &self,
+        window: WindowKey,
+        pointing: crate::stage::Pointing,
+    ) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Pointer(window, pointing, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn hover(&self, window: WindowKey, at: Rect) -> Result<(), StepError> {
+        self.pointing(PointerStep::Motion { window, at }).await
+    }
+
+    async fn press(&self, window: WindowKey, at: Rect, button: u32) -> Result<(), StepError> {
+        self.pointing(PointerStep::Motion { window, at }).await?;
+        self.pointing(PointerStep::Button {
+            button,
+            pressed: true,
+        })
+        .await
+    }
+
+    async fn release(&self, _window: WindowKey, button: u32) -> Result<(), StepError> {
+        self.pointing(PointerStep::Button {
+            button,
+            pressed: false,
+        })
+        .await
+    }
+
+    async fn drag(
+        &self,
+        window: WindowKey,
+        from: Rect,
+        to: Rect,
+        button: u32,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        let result = self.run_drag(window, from, to, button, modifiers).await;
+        if result.is_err() {
+            // Same guarantee `gesture` gives a touch contact: a button left
+            // down outlives the failed drag and turns the next click into one,
+            // so the withdrawal is unconditional and its own failure is
+            // discarded rather than replacing the real error.
+            let _ = self
+                .pointing(PointerStep::Button {
+                    button,
+                    pressed: false,
+                })
+                .await;
+            let _ = self
+                .pointing(PointerStep::Modifiers {
+                    window,
+                    modifiers,
+                    pressed: false,
+                })
+                .await;
+        }
+        result
+    }
+
+    async fn key_hold(
+        &self,
+        window: WindowKey,
+        stroke: &str,
+        pressed: bool,
+    ) -> Result<(), StepError> {
+        let stroke = stroke.to_owned();
+        self.ask(|tx| StageCommand::KeyHold(window, stroke, pressed, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn clipboard_set(&self, text: &str) -> Result<(), StepError> {
+        let text = text.to_owned();
+        self.ask(|tx| StageCommand::ClipboardSet(text, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn clipboard_get(&self) -> Result<Option<String>, StepError> {
+        match self
+            .ask(StageCommand::ClipboardGet)
+            .await?
+            .map_err(StepError::Backend)?
+        {
+            ClipboardRead::Text(text) => Ok(text),
+            // The owning client writes into the pipe only once the compositor
+            // loop runs again, so this read happens on a blocking task and is
+            // bounded: a client that never answers must not hang the agent.
+            ClipboardRead::Pipe(fd) => {
+                let read = tokio::task::spawn_blocking(move || {
+                    use std::io::Read;
+                    let mut buffer = String::new();
+                    let mut pipe = std::fs::File::from(fd);
+                    pipe.read_to_string(&mut buffer).map(|_| buffer)
+                });
+                match tokio::time::timeout(std::time::Duration::from_secs(2), read).await {
+                    Ok(Ok(Ok(text))) if text.is_empty() => Ok(None),
+                    Ok(Ok(Ok(text))) => Ok(Some(text)),
+                    Ok(Ok(Err(error))) => Err(StepError::Backend(format!(
+                        "reading the clipboard from the application that owns it: {error}"
+                    ))),
+                    Ok(Err(error)) => Err(StepError::Backend(format!("clipboard read: {error}"))),
+                    Err(_) => Err(StepError::Backend(
+                        "the application holding the clipboard did not answer within 2s".into(),
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn close_window(&self, window: WindowKey) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::CloseWindow(window, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn resize(&self, width: u32, height: u32) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Resize(width, height, tx))
+            .await?
+            .map_err(StepError::Backend)
+    }
+
+    async fn stylus(
+        &self,
+        window: WindowKey,
+        from: Rect,
+        to: Rect,
+        pressure: f32,
+        tilt: (f32, f32),
+    ) -> Result<(), StepError> {
+        let result = self.run_stroke(window, from, to, pressure, tilt).await;
+        if result.is_err() {
+            // A tip left down, or a tool left in proximity, outlives the failed
+            // stroke — the first keeps drawing on the next motion, the second
+            // holds the application in its hover state for good.
+            let _ = self.stylus_step(StylusStep::Up).await;
+            let _ = self.stylus_step(StylusStep::ProximityOut).await;
+        }
+        result
+    }
+
+    async fn relax(&self, _window: WindowKey) -> Result<(), StepError> {
+        // Touch contacts first: `Cancel` is idempotent and withdrawing a
+        // contact that was never placed costs nothing, whereas leaving one down
+        // makes the next gesture start mid-sequence.
+        let _ = self.touch_step(TouchStep::Cancel).await;
+        self.ask(StageCommand::Relax)
             .await?
             .map_err(StepError::Backend)
     }
@@ -1114,11 +1706,23 @@ impl Stage for StageWayland {
             pointer: true,
             scroll: true,
             touch: true,
+            buttons: true,
+            clipboard: true,
+            // Both are advertised only when their device was actually created;
+            // the compositor decides that at start-up rather than here.
+            tablet: self.has_tablet,
+            gamepad: self.has_gamepad,
         }
     }
 
-    async fn scroll(&self, window: WindowKey, at: Rect, amount: i32) -> Result<(), StepError> {
-        self.ask(|tx| StageCommand::Scroll(window, at, amount, tx))
+    async fn scroll(
+        &self,
+        window: WindowKey,
+        at: Rect,
+        amount: i32,
+        axis: crate::program::Axis,
+    ) -> Result<(), StepError> {
+        self.ask(|tx| StageCommand::Scroll(window, at, amount, axis, tx))
             .await?
             .map_err(StepError::Backend)
     }
@@ -1278,6 +1882,23 @@ fn run_compositor(
     };
     let mut handle = display.handle();
 
+    // Bound *before* any GPU state exists, and that ordering is a crash fix
+    // rather than a preference. Binding is the failure that actually happens —
+    // a stale socket, or a second stage on the same path — and when it happened
+    // after the renderer was built, the early return dropped an EGL context and
+    // its GBM buffers from this thread while the main thread was still unwinding
+    // the same objects. That is not a clean error: it aborts the whole process
+    // with `corrupted double-linked list`, so a name collision presented as a
+    // heap bug. With nothing on the GPU yet, the same failure is just an `Err`.
+    let socket_name = "wayland-artist".to_owned();
+    let listener = match ListeningSocket::bind_absolute(runtime_dir.join(&socket_name)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = ready.send(Err(format!("bind wayland socket: {error}")));
+            return;
+        }
+    };
+
     let (renderer, mut allocator, render_device) = match make_renderer() {
         Ok(renderer) => renderer,
         Err(error) => {
@@ -1404,6 +2025,11 @@ fn run_compositor(
         seat,
         windows: Vec::new(),
         next_key: 0,
+        held_buttons: Vec::new(),
+        held_keys: Vec::new(),
+        clipboard: None,
+        _tablet_state: TabletManagerState::new::<StageState>(&handle),
+        popups: PopupManager::default(),
         dirty: false,
         damage,
         running: true,
@@ -1428,19 +2054,42 @@ fn run_compositor(
     // — and for Android that is the whole application.
     let touch = state.seat.add_touch();
 
+    // A stylus, for the same reason: a drawing application asks the tablet seat
+    // what tools exist when it starts, and one added afterwards is invisible to
+    // it. The descriptor is deliberately plain — no usb id and no syspath,
+    // because there is no device and claiming a real one would be a lie a
+    // client could act on (several match on vendor id to pick a pressure curve).
+    let display_handle = state.display.clone();
+    let tablet_seat = state.seat.tablet_seat();
+    let tablet = tablet_seat.add_tablet::<StageState>(
+        &display_handle,
+        &TabletDescriptor {
+            name: "artist-stage-stylus".to_owned(),
+            usb_id: None,
+            syspath: None,
+        },
+    );
+    // One pen, declaring only the axes we actually send. Advertising
+    // `DISTANCE`, `ROTATION` or the rest and never reporting them is the same
+    // trap as an unserviced global: an application that reads a declared axis
+    // and always gets its initial value draws with it.
+    let tool = tablet_seat.add_tool::<StageState>(
+        &mut state,
+        &display_handle,
+        &smithay::backend::input::TabletToolDescriptor {
+            tool_type: smithay::backend::input::TabletToolType::Pen,
+            hardware_serial: 0,
+            hardware_id_wacom: 0,
+            capabilities: smithay::backend::input::TabletToolCapabilities::PRESSURE
+                | smithay::backend::input::TabletToolCapabilities::TILT,
+        },
+    );
+
     // Bound by absolute path rather than through `XDG_RUNTIME_DIR`.
     // `ListeningSocket::bind` reads that variable from the process environment,
     // so using it would mean mutating global state from a compositor thread —
     // and two stages in one process would then race for the same directory,
     // with the loser's clients quietly connecting to the winner's display.
-    let socket_name = "wayland-artist".to_owned();
-    let listener = match ListeningSocket::bind_absolute(runtime_dir.join(&socket_name)) {
-        Ok(listener) => listener,
-        Err(error) => {
-            let _ = ready.send(Err(format!("bind wayland socket: {error}")));
-            return;
-        }
-    };
     let _ = ready.send(Ok(socket_name));
 
     // XWayland needs a calloop `LoopHandle`, so the loop is calloop-driven —
@@ -1475,6 +2124,8 @@ fn run_compositor(
                 &keyboard,
                 &pointer,
                 &touch,
+                &tablet,
+                &tool,
                 Buffers {
                     targets: &mut targets,
                     back,
@@ -1593,6 +2244,8 @@ fn handle_command(
     keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
     pointer: &smithay::input::pointer::PointerHandle<StageState>,
     touch: &smithay::input::touch::TouchHandle<StageState>,
+    tablet: &smithay::wayland::tablet_manager::TabletHandle,
+    tool: &smithay::wayland::tablet_manager::TabletToolHandle,
     buffers: Buffers<'_>,
     command: StageCommand,
 ) {
@@ -1639,11 +2292,80 @@ fn handle_command(
         StageCommand::Text(key, text, reply) => {
             let _ = reply.send(deliver_text(state, keyboard, key, &text));
         }
-        StageCommand::Pointer(key, at, button, reply) => {
-            let _ = reply.send(deliver_click(state, pointer, key, at, button));
+        StageCommand::Pointer(key, pointing, reply) => {
+            let _ = reply.send(deliver_click(state, pointer, keyboard, key, pointing));
         }
-        StageCommand::Scroll(key, at, amount, reply) => {
-            let _ = reply.send(deliver_scroll(state, pointer, key, at, amount));
+        StageCommand::Pointing(step, reply) => {
+            let result = match step {
+                PointerStep::Motion { window, at } => {
+                    deliver_motion(state, pointer, window, at).map(|_| ())
+                }
+                PointerStep::Button { button, pressed } => {
+                    deliver_button(state, pointer, button, pressed);
+                    Ok(())
+                }
+                PointerStep::Modifiers {
+                    window,
+                    modifiers,
+                    pressed,
+                } => deliver_modifiers(state, keyboard, window, modifiers, pressed),
+            };
+            let _ = reply.send(result);
+        }
+        StageCommand::Scroll(key, at, amount, axis, reply) => {
+            let _ = reply.send(deliver_scroll(state, pointer, key, at, amount, axis));
+        }
+        StageCommand::KeyHold(key, stroke, pressed, reply) => {
+            let _ = reply.send(deliver_key_hold(state, keyboard, key, &stroke, pressed));
+        }
+        StageCommand::Relax(reply) => {
+            deliver_relax(state, pointer, keyboard);
+            let _ = reply.send(Ok(()));
+        }
+        StageCommand::Stylus(step, reply) => {
+            let _ = reply.send(deliver_stylus(state, tablet, tool, step));
+        }
+        StageCommand::ClipboardSet(text, reply) => {
+            let display = state.display.clone();
+            let seat = state.seat.clone();
+            // Announced in the three spellings a Wayland client actually asks
+            // for. A toolkit that finds none of its preferred types treats the
+            // offer as empty, which presents as a paste that silently does
+            // nothing.
+            set_data_device_selection(
+                &display,
+                &seat,
+                vec![
+                    "text/plain;charset=utf-8".to_owned(),
+                    "text/plain".to_owned(),
+                    "UTF8_STRING".to_owned(),
+                ],
+                (),
+            );
+            // After the call, not before: `set_data_device_selection` can drive
+            // `new_selection`, and that handler clears this field.
+            state.clipboard = Some(text);
+            let _ = reply.send(Ok(()));
+        }
+        StageCommand::ClipboardGet(reply) => {
+            let _ = reply.send(read_clipboard(state));
+        }
+        StageCommand::CloseWindow(key, reply) => {
+            let result = match state.window(key) {
+                Some(window) => {
+                    // A request, not a kill. The client may put up "save your
+                    // work?" instead of closing, and that dialog is a surface
+                    // the agent can drive like any other — which is the whole
+                    // reason not to destroy the toplevel from here.
+                    window.toplevel.send_close();
+                    Ok(())
+                }
+                None => Err(format!("no window {key:?}")),
+            };
+            let _ = reply.send(result);
+        }
+        StageCommand::Resize(width, height, reply) => {
+            let _ = reply.send(resize_output(state, width, height));
         }
         StageCommand::Touch(step, reply) => {
             let _ = reply.send(deliver_touch(state, touch, step));
@@ -1750,54 +2472,288 @@ fn toplevel_identity(toplevel: &ToplevelSurface) -> (String, String) {
 /// The caller passes the element's bounds rather than a point, and the centre is
 /// computed here: the model never supplies coordinates, so the only geometry in
 /// play is what the harness resolved from an anchor moments earlier.
-fn deliver_click(
+/// Move the pointer onto a window, without pressing anything.
+///
+/// Factored out because every pointer action starts this way: a wheel event, a
+/// press and a click all go to whatever is under the cursor, so arriving there
+/// first is not a nicety. Returns the timestamp used, so a caller sequencing
+/// several events can keep them coherent.
+fn deliver_motion(
     state: &mut StageState,
     pointer: &smithay::input::pointer::PointerHandle<StageState>,
     key: WindowKey,
     at: Rect,
-    button: u32,
-) -> Result<(), String> {
-    use smithay::input::pointer::{ButtonEvent, MotionEvent};
+) -> Result<u32, String> {
+    use smithay::input::pointer::MotionEvent;
     use smithay::utils::SERIAL_COUNTER;
 
     let Some(window) = state.window(key) else {
         return Err(format!("no window {key:?}"));
     };
-    let surface = window.toplevel.wl_surface().clone();
+    let toplevel = window.toplevel.wl_surface().clone();
     let point = centre_of(at);
-    // Real elapsed milliseconds, not zero. Two clicks stamped with the same
-    // time are a double-click to every toolkit that checks, which turned two
-    // deliberate single clicks into an unintended double.
     let time = state.now_ms();
+
+    // What is actually under the point, which is not always the toplevel: an
+    // open menu sits above it, and focusing the toplevel regardless would send
+    // the click straight through the menu to whatever it covers. That is worse
+    // than the menu being invisible, because the click lands somewhere and
+    // reports success.
+    let focus = surface_under(&toplevel, point).unwrap_or((toplevel, (0.0, 0.0).into()));
 
     pointer.motion(
         state,
-        Some((surface, (0.0, 0.0).into())),
+        Some(focus),
         &MotionEvent {
             location: point,
             serial: SERIAL_COUNTER.next_serial(),
             time,
         },
     );
+    pointer.frame(state);
+    Ok(time)
+}
+
+/// The surface at a point, preferring popups over the window beneath them.
+///
+/// Returns the surface and the point's position *within* it, which is the pair
+/// `PointerHandle::motion` wants — a click carries surface-local coordinates,
+/// so handing it the popup with the toplevel's origin would land the press at
+/// the wrong place inside the menu.
+fn surface_under(
+    toplevel: &wl_surface::WlSurface,
+    point: smithay::utils::Point<f64, smithay::utils::Logical>,
+) -> Option<(
+    wl_surface::WlSurface,
+    smithay::utils::Point<f64, smithay::utils::Logical>,
+)> {
+    // Reversed: `popups_for_surface` yields parents before children, and a
+    // submenu overlapping its parent menu must win.
+    let popups: Vec<_> = PopupManager::popups_for_surface(toplevel).collect();
+    for (popup, offset) in popups.into_iter().rev() {
+        let geometry = popup.geometry();
+        let origin = offset - geometry.loc;
+        let rect = smithay::utils::Rectangle::new(
+            smithay::utils::Point::from((origin.x, origin.y)),
+            geometry.size,
+        );
+        if rect.to_f64().contains(point) {
+            return Some((
+                popup.wl_surface().clone(),
+                point - smithay::utils::Point::from((f64::from(origin.x), f64::from(origin.y))),
+            ));
+        }
+    }
+    None
+}
+
+/// Press or release one button where the pointer already is.
+///
+/// Records what is held so [`StageCommand::Relax`] can let go of exactly that.
+fn deliver_button(
+    state: &mut StageState,
+    pointer: &smithay::input::pointer::PointerHandle<StageState>,
+    button: u32,
+    pressed: bool,
+) {
+    use smithay::input::pointer::ButtonEvent;
+    use smithay::utils::SERIAL_COUNTER;
+
+    let time = state.now_ms();
+    pointer.button(
+        state,
+        &ButtonEvent {
+            button,
+            state: if pressed {
+                smithay::backend::input::ButtonState::Pressed
+            } else {
+                smithay::backend::input::ButtonState::Released
+            },
+            serial: SERIAL_COUNTER.next_serial(),
+            time,
+        },
+    );
+    pointer.frame(state);
+
+    if pressed {
+        if !state.held_buttons.contains(&button) {
+            state.held_buttons.push(button);
+        }
+    } else {
+        state.held_buttons.retain(|held| *held != button);
+    }
+}
+
+/// A click: move there, then press and release `count` times.
+///
+/// The repeats are deliberately *not* spaced out. A double click is two presses
+/// inside the toolkit's double-click window — typically 400 ms — and delivering
+/// them as fast as the seat allows is the only way to be reliably inside it.
+/// The single-click case is unchanged from what it always was.
+fn deliver_click(
+    state: &mut StageState,
+    pointer: &smithay::input::pointer::PointerHandle<StageState>,
+    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
+    key: WindowKey,
+    pointing: crate::stage::Pointing,
+) -> Result<(), String> {
+    deliver_motion(state, pointer, key, pointing.at)?;
+
+    // Modifiers are held across the whole click, the way a hand holds them:
+    // ctrl+click extends a selection only if ctrl is down when the button goes
+    // down, so pressing it afterwards would be an ordinary click.
+    let modifiers = pointing.modifiers;
+    if modifiers.any() {
+        deliver_modifiers(state, keyboard, key, modifiers, true)?;
+    }
     // A press with no matching release leaves the client believing the button
     // is still held, which breaks the very next interaction.
-    for pressed in [true, false] {
-        pointer.button(
-            state,
-            &ButtonEvent {
-                button,
-                state: if pressed {
-                    smithay::backend::input::ButtonState::Pressed
-                } else {
-                    smithay::backend::input::ButtonState::Released
-                },
-                serial: SERIAL_COUNTER.next_serial(),
-                time,
-            },
-        );
+    for _ in 0..pointing.count.clamp(1, 3) {
+        deliver_button(state, pointer, pointing.button, true);
+        deliver_button(state, pointer, pointing.button, false);
     }
-    pointer.frame(state);
+    if modifiers.any() {
+        deliver_modifiers(state, keyboard, key, modifiers, false)?;
+    }
     Ok(())
+}
+
+/// Hold or release the modifier keys of a chord.
+fn deliver_modifiers(
+    state: &mut StageState,
+    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
+    key: WindowKey,
+    modifiers: crate::keys::Modifiers,
+    pressed: bool,
+) -> Result<(), String> {
+    focus_window(state, keyboard, key)?;
+    // Released in the reverse of the order they were pressed, so a client
+    // tracking modifier state never sees an impossible intermediate — the same
+    // ordering `tap` already keeps.
+    let mut codes = modifier_codes(modifiers);
+    if !pressed {
+        codes.reverse();
+    }
+    for code in codes {
+        hold_key(state, keyboard, code, pressed);
+    }
+    Ok(())
+}
+
+/// Press or release one evdev keycode, recording what is held.
+fn hold_key(
+    state: &mut StageState,
+    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
+    code: u32,
+    pressed: bool,
+) {
+    use smithay::backend::input::KeyState;
+    use smithay::input::keyboard::{FilterResult, Keycode};
+    use smithay::utils::SERIAL_COUNTER;
+
+    // The same evdev -> xkb offset `tap` applies. Sending the raw code here
+    // would hold a key eight places along the keymap from the one asked for —
+    // and because a held key produces no visible character, it would be wrong
+    // silently.
+    const OFFSET: u32 = 8;
+
+    let time = state.now_ms();
+    keyboard.input::<(), _>(
+        state,
+        Keycode::from(code + OFFSET),
+        if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        },
+        SERIAL_COUNTER.next_serial(),
+        time,
+        |_, _, _| FilterResult::Forward,
+    );
+
+    if pressed {
+        if !state.held_keys.contains(&code) {
+            state.held_keys.push(code);
+        }
+    } else {
+        state.held_keys.retain(|held| *held != code);
+    }
+}
+
+/// Deliver one instantaneous step of a stylus stroke.
+fn deliver_stylus(
+    state: &mut StageState,
+    tablet: &smithay::wayland::tablet_manager::TabletHandle,
+    tool: &smithay::wayland::tablet_manager::TabletToolHandle,
+    step: StylusStep,
+) -> Result<(), String> {
+    use smithay::utils::SERIAL_COUNTER;
+
+    let time = state.now_ms();
+    match step {
+        StylusStep::ProximityIn { window, at } => {
+            let Some(managed) = state.window(window) else {
+                return Err(format!("no window {window:?}"));
+            };
+            let surface = managed.toplevel.wl_surface().clone();
+            let point = centre_of(at);
+            tool.proximity_in(
+                point,
+                (surface, (0.0, 0.0).into()),
+                tablet,
+                SERIAL_COUNTER.next_serial(),
+                time,
+            );
+        }
+        StylusStep::Down => tool.tip_down(SERIAL_COUNTER.next_serial(), time),
+        StylusStep::Motion {
+            window,
+            at,
+            pressure,
+            tilt,
+        } => {
+            let Some(managed) = state.window(window) else {
+                return Err(format!("no window {window:?}"));
+            };
+            let surface = managed.toplevel.wl_surface().clone();
+            let point = centre_of(at);
+            tool.motion(
+                point,
+                Some((surface, (0.0, 0.0).into())),
+                tablet,
+                SERIAL_COUNTER.next_serial(),
+                time,
+            );
+            // Sent after the motion, not before: the axes describe the point
+            // just reported, and an application that reads them in the other
+            // order attributes this sample's pressure to the previous position.
+            tool.pressure(pressure);
+            tool.tilt(tilt);
+        }
+        StylusStep::Up => tool.tip_up(time),
+        StylusStep::ProximityOut => tool.proximity_out(time),
+    }
+    // No explicit frame: smithay's tablet tool emits one per event itself,
+    // unlike the pointer handle where framing is the caller's job.
+    Ok(())
+}
+
+/// Let go of every button and key this seat is holding.
+///
+/// Runs after every program. Iterating over a *copy* of the held lists because
+/// each release mutates them, and releasing only what is actually held keeps a
+/// spurious release — itself an event a client acts on — from being sent.
+fn deliver_relax(
+    state: &mut StageState,
+    pointer: &smithay::input::pointer::PointerHandle<StageState>,
+    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
+) {
+    for button in state.held_buttons.clone() {
+        deliver_button(state, pointer, button, false);
+    }
+    for code in state.held_keys.clone() {
+        hold_key(state, keyboard, code, false);
+    }
 }
 
 /// The centre of a rectangle, in compositor-logical coordinates.
@@ -1824,32 +2780,27 @@ fn deliver_scroll(
     key: WindowKey,
     at: Rect,
     amount: i32,
+    axis: crate::program::Axis,
 ) -> Result<(), String> {
     use smithay::backend::input::{Axis, AxisSource};
-    use smithay::input::pointer::{AxisFrame, MotionEvent};
-    use smithay::utils::SERIAL_COUNTER;
+    use smithay::input::pointer::AxisFrame;
 
     if amount == 0 {
         return Ok(());
     }
-    let Some(window) = state.window(key) else {
-        return Err(format!("no window {key:?}"));
-    };
-    let surface = window.toplevel.wl_surface().clone();
-    let point = centre_of(at);
-
     // The pointer has to be over the thing being scrolled first: a wheel event
     // goes to whatever is under the cursor, so scrolling without moving there
     // scrolls whatever was last clicked instead.
-    pointer.motion(
-        state,
-        Some((surface, (0.0, 0.0).into())),
-        &MotionEvent {
-            location: point,
-            serial: SERIAL_COUNTER.next_serial(),
-            time: state.now_ms(),
-        },
-    );
+    deliver_motion(state, pointer, key, at)?;
+
+    // A horizontal wheel is what a tilt wheel or a two-finger sideways swipe
+    // produces, and it is the only way to reach a wide table, a timeline or a
+    // carousel. Clients read the two axes from the same frame, so the only
+    // difference is which one carries the value.
+    let axis = match axis {
+        crate::program::Axis::Vertical => Axis::Vertical,
+        crate::program::Axis::Horizontal => Axis::Horizontal,
+    };
 
     // Delivered a notch at a time rather than as one large value. A real wheel
     // never sends 900 pixels in one frame, and a list that animates per notch
@@ -1862,11 +2813,8 @@ fn deliver_scroll(
         let time = state.now_ms();
         let frame = AxisFrame::new(time)
             .source(AxisSource::Wheel)
-            .value(Axis::Vertical, per_notch)
-            .v120(
-                Axis::Vertical,
-                (per_notch / PIXELS_PER_NOTCH * 120.0).round() as i32,
-            );
+            .value(axis, per_notch)
+            .v120(axis, (per_notch / PIXELS_PER_NOTCH * 120.0).round() as i32);
         pointer.axis(state, frame);
         pointer.frame(state);
     }
@@ -1995,6 +2943,108 @@ fn modifier_codes(modifiers: crate::keys::Modifiers) -> Vec<u32> {
     codes
 }
 
+/// Hold a chord down, or let it go.
+///
+/// The modifiers are pressed before the base key and released after it, so a
+/// held `ctrl+shift` is genuinely held rather than tapped either side.
+fn deliver_key_hold(
+    state: &mut StageState,
+    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
+    key: WindowKey,
+    stroke: &str,
+    pressed: bool,
+) -> Result<(), String> {
+    focus_window(state, keyboard, key)?;
+    let chord = crate::keys::parse(stroke).map_err(|error| error.to_string())?;
+    let code = chord
+        .key
+        .evdev()
+        .ok_or_else(|| format!("key {stroke:?} is not on the stage keyboard layout"))?;
+
+    if pressed {
+        for modifier in modifier_codes(chord.modifiers) {
+            hold_key(state, keyboard, modifier, true);
+        }
+        hold_key(state, keyboard, code, true);
+    } else {
+        hold_key(state, keyboard, code, false);
+        for modifier in modifier_codes(chord.modifiers).into_iter().rev() {
+            hold_key(state, keyboard, modifier, false);
+        }
+    }
+    Ok(())
+}
+
+/// Read the clipboard, either from our own copy or from whoever owns it.
+fn read_clipboard(state: &mut StageState) -> Result<ClipboardRead, String> {
+    if let Some(text) = &state.clipboard {
+        return Ok(ClipboardRead::Text(Some(text.clone())));
+    }
+
+    let (read, write) = std::io::pipe().map_err(|error| format!("clipboard pipe: {error}"))?;
+    let seat = state.seat.clone();
+    match request_data_device_client_selection::<StageState>(
+        &seat,
+        "text/plain;charset=utf-8".to_owned(),
+        write.into(),
+    ) {
+        Ok(()) => Ok(ClipboardRead::Pipe(read.into())),
+        // No client owns a clipboard selection either, so the clipboard is
+        // genuinely empty. That is an answer, not a failure.
+        Err(_) => Ok(ClipboardRead::Text(None)),
+    }
+}
+
+/// Resize the single output every window is given.
+///
+/// Each toplevel is reconfigured to the new size, because a client that is not
+/// told has no reason to repaint and would keep drawing at the old dimensions
+/// into a differently sized screen.
+fn resize_output(state: &mut StageState, width: u32, height: u32) -> Result<(), String> {
+    use smithay::output::{Mode, Scale};
+
+    if width == 0 || height == 0 {
+        return Err("a stage cannot be zero pixels across".into());
+    }
+    // An upper bound, because the size becomes a GPU allocation: the render
+    // target is reallocated at this size and an unchecked value from the model
+    // is a way to ask for a buffer that cannot exist.
+    if width > 7680 || height > 4320 {
+        return Err(format!(
+            "{width}x{height} is past the largest stage we allocate (7680x4320)"
+        ));
+    }
+
+    state.width = width as i32;
+    state.height = height as i32;
+    let mode = Mode {
+        size: (width as i32, height as i32).into(),
+        refresh: 60_000,
+    };
+    state.output.change_current_state(
+        Some(mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        None,
+    );
+    state.output.set_preferred(mode);
+
+    for window in &mut state.windows {
+        window.geometry = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        window.toplevel.with_pending_state(|pending| {
+            pending.size = Some((width as i32, height as i32).into());
+        });
+        window.toplevel.send_configure();
+    }
+    state.dirty = true;
+    Ok(())
+}
+
 fn focus_window(
     state: &mut StageState,
     keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
@@ -2064,9 +3114,19 @@ fn deliver_text(
         }
         // Refuse rather than approximate. Silently dropping a character is how
         // typed text ends up subtly wrong with no error anywhere.
+        //
+        // Deliberately not falling back to the clipboard automatically, even
+        // though the seat now has one. Pasting means sending ctrl+v, and that
+        // is a *convention* rather than something observable here — a field
+        // that does not honour it would receive nothing while this reported
+        // success, which is the failure class the whole subsystem exists to
+        // remove. The remedy is named instead, and the model performs it
+        // deliberately.
         return Err(format!(
-            "character {character:?} cannot be typed on the stage's US layout; \
-             paste it or use a rung that accepts text directly"
+            "character {character:?} is not on the stage's US keyboard layout. \
+             Put the text on the clipboard with a `setClipboard` step and paste it \
+             with `key: ctrl+v`, or drive this element at a rung that takes text \
+             directly."
         ));
     }
     Ok(())
@@ -2172,14 +3232,44 @@ fn draw(
         .iter()
         .filter(|window| only.is_none_or(|key| window.key == key))
         .flat_map(|window| {
-            render_elements_from_surface_tree(
+            let surface = window.toplevel.wl_surface();
+            // The toplevel, then everything popped up over it.
+            //
+            // Order matters and is the reason this is not one call: render
+            // elements are drawn front-to-back, so a menu has to come *first*
+            // in the list to land on top of the window that opened it. A popup
+            // is a separate xdg surface rather than a subsurface, so walking
+            // the toplevel's tree alone never reaches it — which is exactly why
+            // menus used to be invisible.
+            //
+            // Popups are collected under the same `only` filter as their
+            // parent, so a per-window capture of the window that owns a menu
+            // contains the menu, and a capture of its neighbour does not.
+            let popups: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                PopupManager::popups_for_surface(surface)
+                    .flat_map(|(popup, offset)| {
+                        // The offset is the popup's position relative to the
+                        // toplevel, which is what makes a submenu land beside
+                        // its parent item rather than at the window's corner.
+                        let location = offset - popup.geometry().loc;
+                        render_elements_from_surface_tree(
+                            renderer,
+                            popup.wl_surface(),
+                            (location.x, location.y),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                    })
+                    .collect();
+            popups.into_iter().chain(render_elements_from_surface_tree(
                 renderer,
-                window.toplevel.wl_surface(),
+                surface,
                 (0, 0),
                 1.0,
                 1.0,
                 Kind::Unspecified,
-            )
+            ))
         })
         .collect();
 

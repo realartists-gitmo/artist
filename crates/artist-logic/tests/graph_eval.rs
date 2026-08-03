@@ -57,9 +57,16 @@ fn a_truncated_scan_never_fabricates_a_verdict() {
 
     let cut = ev.eval(&mut g, query, &s, 40);
     assert_eq!(cut.compute_status, ComputeStatus::BudgetExhausted);
-    assert_eq!(cut.evidential(), Evidential::Open, "no verdict from a partial scan");
+    assert_eq!(
+        cut.evidential(),
+        Evidential::Open,
+        "no verdict from a partial scan"
+    );
     assert!(!cut.is_definite());
-    assert!(cut.continuation.is_some(), "work is resumable, not discarded");
+    assert!(
+        cut.continuation.is_some(),
+        "work is resumable, not discarded"
+    );
     assert!(!cut.dependencies.is_empty(), "and it knows what is left");
 
     // Same query, more budget: it decides. Cost is a dial.
@@ -105,7 +112,10 @@ fn arithmetic_and_text_are_arbitrary_precision() {
         num_bigint::BigInt::from(u64::MAX) * num_bigint::BigInt::from(u64::MAX),
     ));
     let leq = g.apply(wk::LEQ, vec![big, big]);
-    assert_eq!(ev.eval(&mut g, leq, &s, 1000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, leq, &s, 1000).evidential(),
+        Evidential::Supported
+    );
 
     let one = g.int(1);
     let sum = g.apply(wk::ADD, vec![big, one]);
@@ -122,7 +132,10 @@ fn arithmetic_and_text_are_arbitrary_precision() {
     let joined = g.apply(wk::CONCAT, vec![l, r]);
     let needle = g.text("compaction");
     let has = g.apply(wk::CONTAINS, vec![joined, needle]);
-    assert_eq!(ev.eval(&mut g, has, &s, 1000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, has, &s, 1000).evidential(),
+        Evidential::Supported
+    );
 }
 
 #[test]
@@ -153,7 +166,9 @@ impl OperatorSemantics for Parity {
     }
     fn evaluate_exact(&self, cx: &mut OpContext<'_>) -> Option<EvaluationResult> {
         cx.charge(1);
-        Some(EvaluationResult::certain(cx.operands.len().is_multiple_of(2)))
+        Some(EvaluationResult::certain(
+            cx.operands.len().is_multiple_of(2),
+        ))
     }
 }
 
@@ -170,7 +185,10 @@ fn unknown_operators_evaluate_to_unsupported_then_to_semantics() {
     let r = ev.eval(&mut g, e, &s, 10_000);
     assert_eq!(r.evidential(), Evidential::Open);
     assert!(
-        matches!(r.compute_status, ComputeStatus::Stalled | ComputeStatus::Unsupported),
+        matches!(
+            r.compute_status,
+            ComputeStatus::Stalled | ComputeStatus::Unsupported
+        ),
         "no semantics and no fact: {:?}",
         r.compute_status
     );
@@ -216,7 +234,9 @@ fn a_counterexample_decides_a_universal_early() {
     let body = g.apply(ok, vec![v]);
     let all = g.quantify(wk::FORALL, v, Some(dom), body);
 
-    let mut s = MapGraphStructure::new().domain(dom, members.clone()).closed(ok);
+    let mut s = MapGraphStructure::new()
+        .domain(dom, members.clone())
+        .closed(ok);
     for m in &members {
         if *m != bad {
             s = s.fact(ok, vec![*m]);
@@ -244,7 +264,10 @@ fn lambdas_are_constructed_and_applied_on_the_graph() {
     let body = g.apply(stale, vec![x]);
     let lam = g.bind(
         wk::LAMBDA,
-        vec![artist_logic::ObjBinding { var: x, domain: Some(dom) }],
+        vec![artist_logic::ObjBinding {
+            var: x,
+            domain: Some(dom),
+        }],
         vec![body],
     );
     let applied_a = g.apply(lam, vec![a]);
@@ -252,8 +275,14 @@ fn lambdas_are_constructed_and_applied_on_the_graph() {
 
     let s = MapGraphStructure::new().fact(stale, vec![a]).closed(stale);
     let ev = GraphEvaluator::new();
-    assert_eq!(ev.eval(&mut g, applied_a, &s, 10_000).evidential(), Evidential::Supported);
-    assert_eq!(ev.eval(&mut g, applied_b, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, applied_a, &s, 10_000).evidential(),
+        Evidential::Supported
+    );
+    assert_eq!(
+        ev.eval(&mut g, applied_b, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 #[test]
@@ -268,7 +297,9 @@ fn set_and_where_domains_are_ordinary_expressions() {
     let body = g.apply(stale, vec![v]);
     let q = g.quantify(wk::EXISTS, v, Some(set_dom), body);
 
-    let s = MapGraphStructure::new().fact(stale, vec![members[4]]).closed(stale);
+    let s = MapGraphStructure::new()
+        .fact(stale, vec![members[4]])
+        .closed(stale);
     let ev = GraphEvaluator::new();
     let r = ev.eval(&mut g, q, &s, 100_000);
     assert_eq!(r.evidential(), Evidential::Supported, "f4 witnesses it");
@@ -294,7 +325,9 @@ fn continuations_shrink_and_resuming_is_just_evaluating_them() {
     let body = g.apply(stale, vec![v]);
     let query = g.quantify(wk::EXISTS, v, Some(dom), body);
 
-    let s = MapGraphStructure::new().domain(dom, members.clone()).closed(stale);
+    let s = MapGraphStructure::new()
+        .domain(dom, members.clone())
+        .closed(stale);
     let ev = GraphEvaluator::new();
 
     // Small budget: cut short, with a continuation.
@@ -306,10 +339,7 @@ fn continuations_shrink_and_resuming_is_just_evaluating_them() {
 
     // The continuation is an ordinary query — resuming is evaluating it.
     let second = ev.eval(&mut g, cont, &s, 60);
-    let left_after_second = second
-        .dependencies
-        .len()
-        .min(left_after_first);
+    let left_after_second = second.dependencies.len().min(left_after_first);
     assert!(
         left_after_second < left_after_first,
         "remaining work shrank: {left_after_first} -> {left_after_second}"
@@ -317,11 +347,18 @@ fn continuations_shrink_and_resuming_is_just_evaluating_them() {
 
     // And it is still a *quantified* question, not an unrolled conjunction.
     let printed = artist_logic::syntax::print(&g, cont);
-    assert!(printed.starts_with("(exists"), "still quantified: {}", &printed[..40.min(printed.len())]);
+    assert!(
+        printed.starts_with("(exists"),
+        "still quantified: {}",
+        &printed[..40.min(printed.len())]
+    );
 
     // Enough budget on the continuation and it decides outright.
     let done = ev.eval(&mut g, cont, &s, 1_000_000);
-    assert!(done.is_definite(), "the continuation is answerable on its own");
+    assert!(
+        done.is_definite(),
+        "the continuation is answerable on its own"
+    );
 }
 
 // ---- Kripke groundedness, with oscillation detection --------------------
@@ -348,12 +385,20 @@ fn the_liar_oscillates_and_the_truth_teller_does_not() {
         artist_logic::evidence::Grounding::Oscillatory,
         "the liar oscillates between rounds"
     );
-    assert_eq!(r.compute_status, ComputeStatus::Exact, "and that is a finding, not a stall");
+    assert_eq!(
+        r.compute_status,
+        ComputeStatus::Exact,
+        "and that is a finding, not a stall"
+    );
     // Ungroundedness is not evidence. Reporting it as `Conflicted` made one
     // value mean "the store holds claims both ways, go read them" and "this
     // sentence has no stable value, stop asking" — two different instructions
     // to the caller, and §5.3 already said in bold they were different things.
-    assert_eq!(r.evidential(), Evidential::Open, "nothing is on file either way");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "nothing is on file either way"
+    );
     assert!(!r.is_definite());
 
     // P = holds(⟨P⟩) — ungrounded, but stable. No parity flip.
@@ -405,11 +450,16 @@ fn aggregates_compute_on_the_graph() {
     let body = g.apply(corrected, vec![v]);
     let count = g.bind(
         wk::COUNT,
-        vec![artist_logic::ObjBinding { var: v, domain: Some(dom) }],
+        vec![artist_logic::ObjBinding {
+            var: v,
+            domain: Some(dom),
+        }],
         vec![body],
     );
 
-    let mut s = MapGraphStructure::new().domain(dom, members.clone()).closed(corrected);
+    let mut s = MapGraphStructure::new()
+        .domain(dom, members.clone())
+        .closed(corrected);
     for m in &members[..3] {
         s = s.fact(corrected, vec![*m]);
     }
@@ -418,7 +468,11 @@ fn aggregates_compute_on_the_graph() {
     let ev = GraphEvaluator::new();
     // Aggregates denote numbers, so the comparison is what carries the verdict.
     let r = ev.eval(&mut g, eq, &s, 100_000);
-    assert_ne!(r.evidential(), Evidential::Refuted, "three of five were corrected");
+    assert_ne!(
+        r.evidential(),
+        Evidential::Refuted,
+        "three of five were corrected"
+    );
 }
 
 #[test]
@@ -439,20 +493,35 @@ fn letrec_computes_a_least_fixpoint_on_the_graph() {
     let lr = g.bind(
         wk::LETREC,
         vec![
-            artist_logic::ObjBinding { var: reach, domain: None },
-            artist_logic::ObjBinding { var: x, domain: Some(dom) },
-            artist_logic::ObjBinding { var: y, domain: Some(dom) },
+            artist_logic::ObjBinding {
+                var: reach,
+                domain: None,
+            },
+            artist_logic::ObjBinding {
+                var: x,
+                domain: Some(dom),
+            },
+            artist_logic::ObjBinding {
+                var: y,
+                domain: Some(dom),
+            },
         ],
         vec![def, scope],
     );
 
-    let mut s = MapGraphStructure::new().domain(dom, ns.clone()).closed(edge);
+    let mut s = MapGraphStructure::new()
+        .domain(dom, ns.clone())
+        .closed(edge);
     for w in ns.windows(2) {
         s = s.fact(edge, vec![w[0], w[1]]);
     }
     let ev = GraphEvaluator::new();
     let r = ev.eval(&mut g, lr, &s, 5_000_000);
-    assert_eq!(r.evidential(), Evidential::Supported, "n0 reaches n3 transitively");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "n0 reaches n3 transitively"
+    );
 }
 
 #[test]
@@ -495,7 +564,11 @@ fn universals_over_naturals_are_decided_on_the_graph() {
     let leq = g.apply(wk::LEQ, vec![v, succ]);
     let all = g.quantify(wk::FORALL, v, Some(wk::NAT_TYPE), leq);
     let r = ev.eval(&mut g, all, &s, 200_000);
-    assert_eq!(r.evidential(), Evidential::Supported, "widening closed the tail");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "widening closed the tail"
+    );
 
     // ∀n:ℕ. n ≤ 10 — refuted by a concrete counterexample, over an infinite
     // domain, in finite time.
@@ -526,7 +599,11 @@ fn an_undecidable_infinite_claim_stalls_honestly() {
     let ev = GraphEvaluator::new();
     let mut b = 200_000u64;
     let r = ev.eval(&mut g, all, &EmptyStructure, b);
-    assert_eq!(r.evidential(), Evidential::Open, "no counterexample, no proof");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "no counterexample, no proof"
+    );
     assert!(!r.is_definite());
     assert!(r.residual.is_some(), "the question comes back intact");
     b = r.spent;
@@ -550,7 +627,11 @@ impl GraphStructure for Timed {
     }
     fn known_at(&self, pred: ObjectId, args: &[ObjectId], t: i64) -> Knowledge {
         if pred == self.pred && args == [self.arg] {
-            if (1_000..2_000).contains(&t) { Knowledge::Holds } else { Knowledge::Fails }
+            if (1_000..2_000).contains(&t) {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         } else {
             Knowledge::Unknown
         }
@@ -566,21 +647,33 @@ fn time_travel_works_on_the_graph() {
     let prefers = g.atom("prefers");
     let tabs = g.atom("tabs");
     let p = g.apply(prefers, vec![tabs]);
-    let s = Timed { pred: prefers, arg: tabs };
+    let s = Timed {
+        pred: prefers,
+        arg: tabs,
+    };
     let ev = GraphEvaluator::new();
 
     // Now: refuted.
-    assert_eq!(ev.eval(&mut g, p, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, p, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 
     // Then: supported. "What did I used to believe" is answerable.
     let then = g.int(1_500);
     let past = g.apply(wk::AT, vec![then, p]);
-    assert_eq!(ev.eval(&mut g, past, &s, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, past, &s, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // And after the switch, refuted again.
     let later = g.int(2_500);
     let after = g.apply(wk::AT, vec![later, p]);
-    assert_eq!(ev.eval(&mut g, after, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, after, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 // ---- resolver completeness ------------------------------------------------
@@ -643,7 +736,11 @@ fn an_authoritative_resolver_still_refutes() {
     let q = g.apply(p, vec![a]);
 
     let r = GraphEvaluator::new().eval(&mut g, q, &Authoritative, 10_000);
-    assert_eq!(r.evidential(), Evidential::Refuted, "closed-world negation must still work");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Refuted,
+        "closed-world negation must still work"
+    );
 
     let negated = g.apply(wk::NOT, vec![q]);
     let r = GraphEvaluator::new().eval(&mut g, negated, &Authoritative, 10_000);
@@ -785,9 +882,13 @@ fn equality_on_distinct_atoms_still_refutes() {
     let different = g.apply(wk::EQ, vec![a, b]);
 
     let ev = GraphEvaluator::new();
-    assert_eq!(ev.eval(&mut g, same, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
     assert_eq!(
-        ev.eval(&mut g, different, &EmptyStructure, 10_000).evidential(),
+        ev.eval(&mut g, same, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
+    assert_eq!(
+        ev.eval(&mut g, different, &EmptyStructure, 10_000)
+            .evidential(),
         Evidential::Refuted,
         "distinct atoms must stay unequal — exception sets rely on this"
     );
@@ -802,8 +903,14 @@ fn equality_on_literals_and_externals_still_decides() {
     let ne = g.apply(wk::EQ, vec![four, five]);
 
     let ev = GraphEvaluator::new();
-    assert_eq!(ev.eval(&mut g, eq, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
-    assert_eq!(ev.eval(&mut g, ne, &EmptyStructure, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, eq, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
+    assert_eq!(
+        ev.eval(&mut g, ne, &EmptyStructure, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 /// A refinement type ranges over a *subset*, so probing the whole integer line
@@ -820,7 +927,10 @@ fn a_refinement_domain_is_not_probed_as_the_whole_integer_line() {
     let nonneg = g.apply(wk::LEQ, vec![zero, n]);
     let pred = g.bind(
         wk::LAMBDA,
-        vec![artist_logic::ObjBinding { var: n, domain: None }],
+        vec![artist_logic::ObjBinding {
+            var: n,
+            domain: None,
+        }],
         vec![nonneg],
     );
     let refined = g.apply(wk::REFINEMENT_TYPE, vec![wk::INT_TYPE, pred]);
@@ -953,7 +1063,11 @@ fn a_partial_extension_cannot_support_a_universal() {
     let files = g.atom("Files");
     let tested = g.atom("tested");
     let (a, b) = (g.atom("a.rs"), g.atom("b.rs"));
-    let s = PartialSort { domain: files, seen: vec![a, b], pred: tested };
+    let s = PartialSort {
+        domain: files,
+        seen: vec![a, b],
+        pred: tested,
+    };
 
     let v = g.fresh();
     let body = g.apply(tested, vec![v]);
@@ -976,7 +1090,11 @@ fn a_partial_extension_cannot_refute_an_existential() {
     let broken = g.atom("broken");
     let tested = g.atom("tested");
     let (a, b) = (g.atom("a.rs"), g.atom("b.rs"));
-    let s = PartialSort { domain: files, seen: vec![a, b], pred: tested };
+    let s = PartialSort {
+        domain: files,
+        seen: vec![a, b],
+        pred: tested,
+    };
 
     let v = g.fresh();
     let body = g.apply(broken, vec![v]);
@@ -1003,7 +1121,10 @@ fn a_guessed_refinement_does_not_produce_an_exact_count() {
     let filter_body = g.apply(untested, vec![x]);
     let filter = g.bind(
         wk::LAMBDA,
-        vec![artist_logic::ObjBinding { var: x, domain: None }],
+        vec![artist_logic::ObjBinding {
+            var: x,
+            domain: None,
+        }],
         vec![filter_body],
     );
     let refined = g.apply(wk::WHERE_DOMAIN, vec![base, filter]);
@@ -1011,7 +1132,10 @@ fn a_guessed_refinement_does_not_produce_an_exact_count() {
     let f = g.fresh();
     let counted = g.bind(
         wk::COUNT,
-        vec![artist_logic::ObjBinding { var: f, domain: Some(refined) }],
+        vec![artist_logic::ObjBinding {
+            var: f,
+            domain: Some(refined),
+        }],
         vec![wk::TOP],
     );
     let three = g.int(3);
@@ -1050,7 +1174,10 @@ fn a_lower_bound_decides_a_comparison_early() {
     let body = g.apply(fails, vec![t]);
     let counted = g.bind(
         wk::COUNT,
-        vec![artist_logic::ObjBinding { var: t, domain: Some(dom) }],
+        vec![artist_logic::ObjBinding {
+            var: t,
+            domain: Some(dom),
+        }],
         vec![body],
     );
 
@@ -1088,36 +1215,54 @@ fn the_arithmetic_gaps_are_closed() {
     let (ten, six, four) = (n(&mut g, 10), n(&mut g, 6), n(&mut g, 4));
     let sub = g.apply(wk::NEG, vec![ten, six]);
     let claim = g.apply(wk::EQ, vec![sub, four]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Unary `-` still negates.
     let neg = g.apply(wk::NEG, vec![four]);
     let minus_four = n(&mut g, -4);
     let claim = g.apply(wk::EQ, vec![neg, minus_four]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // n-ary `+` and `*`, matching the unbounded arity the kernel advertises.
     let (one, two, three, six2) = (n(&mut g, 1), n(&mut g, 2), n(&mut g, 3), n(&mut g, 6));
     let sum = g.apply(wk::ADD, vec![one, two, three]);
     let claim = g.apply(wk::EQ, vec![sum, six2]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     let prod = g.apply(wk::MUL, vec![two, three, four]);
     let twenty_four = n(&mut g, 24);
     let claim = g.apply(wk::EQ, vec![prod, twenty_four]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // `mod`.
     let seven = n(&mut g, 7);
     let m = g.apply(wk::MOD, vec![seven, three]);
     let claim = g.apply(wk::EQ, vec![m, one]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Division by zero has no value and must stall, never refute.
     let zero = n(&mut g, 0);
     let div0 = g.apply(wk::DIV, vec![four, zero]);
     let claim = g.apply(wk::EQ, vec![div0, four]);
-    assert_ne!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Refuted);
+    assert_ne!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 /// §3 calls decimals "exact, ordered" and §5.4 puts arithmetic on literals in
@@ -1129,22 +1274,40 @@ fn decimals_are_exact_and_ordered() {
     let ev = GraphEvaluator::new();
 
     // 40 × 10⁻¹ = 4
-    let forty_tenths = g.lit(LiteralValue::Decimal { mantissa: 40.into(), scale: 1 });
+    let forty_tenths = g.lit(LiteralValue::Decimal {
+        mantissa: 40.into(),
+        scale: 1,
+    });
     let four = g.int(4);
     let claim = g.apply(wk::EQ, vec![forty_tenths, four]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Ordered.
-    let forty_one_tenths = g.lit(LiteralValue::Decimal { mantissa: 41.into(), scale: 1 });
+    let forty_one_tenths = g.lit(LiteralValue::Decimal {
+        mantissa: 41.into(),
+        scale: 1,
+    });
     let le = g.apply(wk::LEQ, vec![forty_tenths, forty_one_tenths]);
-    assert_eq!(ev.eval(&mut g, le, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, le, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Exact: 1.5 + 1.5 = 3, with no floating-point drift anywhere.
-    let one_five = g.lit(LiteralValue::Decimal { mantissa: 15.into(), scale: 1 });
+    let one_five = g.lit(LiteralValue::Decimal {
+        mantissa: 15.into(),
+        scale: 1,
+    });
     let sum = g.apply(wk::ADD, vec![one_five, one_five]);
     let three = g.int(3);
     let claim = g.apply(wk::EQ, vec![sum, three]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // And division stays exact rather than truncating: 1/3 * 3 = 1.
     let (one, three2) = (g.int(1), g.int(3));
@@ -1167,7 +1330,10 @@ fn text_operators_are_interpreted() {
     let len = g.apply(wk::LEN, vec![s]);
     let nineteen = g.int(19);
     let claim = g.apply(wk::EQ, vec![len, nineteen]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // `substr` counts characters, not bytes, so a multi-byte character cannot
     // be split in half.
@@ -1206,7 +1372,11 @@ impl GraphStructure for Timeline {
     }
     fn known_at(&self, pred: ObjectId, args: &[ObjectId], t: i64) -> Knowledge {
         if pred == self.passes && args == [self.suite] {
-            if t >= 100 { Knowledge::Holds } else { Knowledge::Fails }
+            if t >= 100 {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         } else {
             Knowledge::Unknown
         }
@@ -1228,7 +1398,11 @@ fn a_symbolic_instant_resolves_through_the_structure() {
     let passes = g.atom("passes");
     let suite = g.atom("suite");
     let session_start = g.atom("session-start-7");
-    let s = Timeline { passes, suite, session_start };
+    let s = Timeline {
+        passes,
+        suite,
+        session_start,
+    };
 
     let claim = g.apply(passes, vec![suite]);
     let then = g.apply(wk::AT, vec![session_start, claim]);
@@ -1249,7 +1423,11 @@ fn always_and_eventually_quantify_over_instants() {
     let passes = g.atom("passes");
     let suite = g.atom("suite");
     let session_start = g.atom("session-start-7");
-    let s = Timeline { passes, suite, session_start };
+    let s = Timeline {
+        passes,
+        suite,
+        session_start,
+    };
     let ev = GraphEvaluator::new();
 
     let claim = g.apply(passes, vec![suite]);
@@ -1275,25 +1453,41 @@ fn before_and_during_order_instants() {
     let passes = g.atom("passes");
     let suite = g.atom("suite");
     let session_start = g.atom("session-start-7");
-    let s = Timeline { passes, suite, session_start };
+    let s = Timeline {
+        passes,
+        suite,
+        session_start,
+    };
     let ev = GraphEvaluator::new();
 
     // Symbolic on the left, literal on the right.
     let hundred = g.int(100);
     let ord = g.apply(wk::BEFORE, vec![session_start, hundred]);
-    assert_eq!(ev.eval(&mut g, ord, &s, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, ord, &s, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     let back = g.apply(wk::BEFORE, vec![hundred, session_start]);
-    assert_eq!(ev.eval(&mut g, back, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, back, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 
     // Half-open, so adjacent intervals tile without overlap.
     let (zero, ninety) = (g.int(0), g.int(90));
     let iv = g.apply(wk::INTERVAL, vec![zero, ninety]);
     let inside = g.apply(wk::DURING, vec![session_start, iv]);
-    assert_eq!(ev.eval(&mut g, inside, &s, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, inside, &s, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     let outside = g.apply(wk::DURING, vec![hundred, iv]);
-    assert_eq!(ev.eval(&mut g, outside, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, outside, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 // ---- modal and reflective, given a structure that supplies a frame ---------
@@ -1312,7 +1506,11 @@ impl GraphStructure for Frame {
     }
     fn known_in(&self, pred: ObjectId, args: &[ObjectId], world: ObjectId) -> Knowledge {
         if pred == self.green && args == [self.build] {
-            if world == self.w_now { Knowledge::Holds } else { Knowledge::Fails }
+            if world == self.w_now {
+                Knowledge::Holds
+            } else {
+                Knowledge::Fails
+            }
         } else {
             Knowledge::Unknown
         }
@@ -1335,7 +1533,12 @@ fn modal_operators_quantify_over_accessible_worlds() {
     let green = g.atom("green");
     let build = g.atom("build");
     let (w_now, w_alt) = (g.atom("w-now"), g.atom("w-alt"));
-    let s = Frame { green, build, w_now, w_alt };
+    let s = Frame {
+        green,
+        build,
+        w_now,
+        w_alt,
+    };
     let ev = GraphEvaluator::new();
 
     let claim = g.apply(green, vec![build]);
@@ -1356,9 +1559,15 @@ fn modal_operators_quantify_over_accessible_worlds() {
 
     // `in-world` pins evaluation to one world.
     let here = g.apply(wk::IN_WORLD, vec![w_now, claim]);
-    assert_eq!(ev.eval(&mut g, here, &s, 20_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, here, &s, 20_000).evidential(),
+        Evidential::Supported
+    );
     let there = g.apply(wk::IN_WORLD, vec![w_alt, claim]);
-    assert_eq!(ev.eval(&mut g, there, &s, 20_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, there, &s, 20_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 /// A counterfactual is evaluated in the closest worlds satisfying its
@@ -1370,7 +1579,12 @@ fn counterfactuals_use_the_structures_similarity_ordering() {
     let green = g.atom("green");
     let build = g.atom("build");
     let (w_now, w_alt) = (g.atom("w-now"), g.atom("w-alt"));
-    let s = Frame { green, build, w_now, w_alt };
+    let s = Frame {
+        green,
+        build,
+        w_now,
+        w_alt,
+    };
 
     let claim = g.apply(green, vec![build]);
     let cond = g.atom("had-we-reverted");
@@ -1395,11 +1609,18 @@ fn eval_undoes_quotation() {
 
     // Quoted, it is inert.
     let r = ev.eval(&mut g, quoted, &EmptyStructure, 10_000);
-    assert_ne!(r.evidential(), Evidential::Supported, "a quotation is not evaluated");
+    assert_ne!(
+        r.evidential(),
+        Evidential::Supported,
+        "a quotation is not evaluated"
+    );
 
     // Evaluated, it decides.
     let run = g.apply(wk::EVAL, vec![quoted]);
-    assert_eq!(ev.eval(&mut g, run, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, run, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 }
 
 /// `provable` reports derivability *within the budget*, so it can support but
@@ -1415,7 +1636,10 @@ fn provable_supports_but_never_refutes() {
     let truth = g.apply(wk::EQ, vec![sum, four]);
     let quoted = g.apply(wk::QUOTE, vec![truth]);
     let claim = g.apply(wk::PROVABLE, vec![quoted]);
-    assert_eq!(ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, claim, &EmptyStructure, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Something unknowable is not *disprovable*.
     let p = g.atom("p");
@@ -1470,17 +1694,26 @@ fn quantities_compare_across_units_given_only_scale_facts() {
     let q1 = g.apply(wk::QUANTITY, vec![four, minutes]);
     let q2 = g.apply(wk::QUANTITY, vec![two_forty, seconds]);
     let eq = g.apply(wk::EQ, vec![q1, q2]);
-    assert_eq!(ev.eval(&mut g, eq, &s, 20_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, eq, &s, 20_000).evidential(),
+        Evidential::Supported
+    );
 
     // And ordered across units: 300 MB < 1 GB.
     let (three_hundred, one) = (g.int(300), g.int(1));
     let a = g.apply(wk::QUANTITY, vec![three_hundred, mb]);
     let b = g.apply(wk::QUANTITY, vec![one, gb]);
     let le = g.apply(wk::LEQ, vec![a, b]);
-    assert_eq!(ev.eval(&mut g, le, &s, 20_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, le, &s, 20_000).evidential(),
+        Evidential::Supported
+    );
 
     let ge = g.apply(wk::LEQ, vec![b, a]);
-    assert_eq!(ev.eval(&mut g, ge, &s, 20_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, ge, &s, 20_000).evidential(),
+        Evidential::Refuted
+    );
 }
 
 /// A unit with no conversion known yields no verdict — never a wrong one.
@@ -1489,7 +1722,9 @@ fn an_unknown_unit_stalls_rather_than_comparing() {
     let mut g = ObjectGraph::new();
     let (minutes, seconds) = (g.atom("minutes"), g.atom("seconds"));
     let furlongs = g.atom("furlongs");
-    let s = ScaleTable { rows: vec![(minutes, 60, seconds)] };
+    let s = ScaleTable {
+        rows: vec![(minutes, 60, seconds)],
+    };
 
     let (four, two_forty) = (g.int(4), g.int(240));
     let q1 = g.apply(wk::QUANTITY, vec![four, furlongs]);
@@ -1510,7 +1745,9 @@ fn an_unknown_unit_stalls_rather_than_comparing() {
 fn a_cyclic_scale_chain_terminates() {
     let mut g = ObjectGraph::new();
     let (a, b) = (g.atom("a"), g.atom("b"));
-    let s = ScaleTable { rows: vec![(a, 2, b), (b, 3, a)] };
+    let s = ScaleTable {
+        rows: vec![(a, 2, b), (b, 3, a)],
+    };
 
     let one = g.int(1);
     let qa = g.apply(wk::QUANTITY, vec![one, a]);
@@ -1539,7 +1776,11 @@ impl GraphStructure for WithRules {
         }
     }
     fn rules(&self, pred: ObjectId) -> Vec<ObjectId> {
-        self.rules.iter().filter(|(p, _)| *p == pred).map(|(_, r)| *r).collect()
+        self.rules
+            .iter()
+            .filter(|(p, _)| *p == pred)
+            .map(|(_, r)| *r)
+            .collect()
     }
 }
 
@@ -1560,7 +1801,10 @@ fn a_stored_rule_fires() {
     let imp = g.apply(wk::IMPLIES, vec![ante, conseq]);
     let rule = g.quantify(wk::FORALL, x, Some(commits), imp);
 
-    let s = WithRules { facts: vec![(touches, vec![c])], rules: vec![(needs, rule)] };
+    let s = WithRules {
+        facts: vec![(touches, vec![c])],
+        rules: vec![(needs, rule)],
+    };
 
     let goal = g.apply(needs, vec![c]);
     let r = GraphEvaluator::new().eval(&mut g, goal, &s, 50_000);
@@ -1588,7 +1832,10 @@ fn a_rule_whose_antecedent_fails_derives_nothing() {
     let imp = g.apply(wk::IMPLIES, vec![ante, conseq]);
     let rule = g.quantify(wk::FORALL, x, Some(commits), imp);
 
-    let s = WithRules { facts: Vec::new(), rules: vec![(needs, rule)] };
+    let s = WithRules {
+        facts: Vec::new(),
+        rules: vec![(needs, rule)],
+    };
     let goal = g.apply(needs, vec![other]);
     let r = GraphEvaluator::new().eval(&mut g, goal, &s, 50_000);
     assert_eq!(r.evidential(), Evidential::Open);
@@ -1622,7 +1869,11 @@ fn rule_chains_terminate() {
 
     let goal = g.apply(c, vec![item]);
     let r = GraphEvaluator::new().eval(&mut g, goal, &s, 100_000);
-    assert_eq!(r.evidential(), Evidential::Supported, "a → b → c should chain");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "a → b → c should chain"
+    );
     assert_ne!(
         r.compute_status,
         ComputeStatus::BudgetExhausted,
@@ -1710,8 +1961,14 @@ fn an_exception_defeats_the_rule_it_guards() {
     let ev = GraphEvaluator::new();
 
     // No exception in force: the rule applies.
-    let s = WithRules { facts: vec![(use_tabs, vec![f])], rules: Vec::new() };
-    assert_eq!(ev.eval(&mut g, guarded, &s, 20_000).evidential(), Evidential::Supported);
+    let s = WithRules {
+        facts: vec![(use_tabs, vec![f])],
+        rules: Vec::new(),
+    };
+    assert_eq!(
+        ev.eval(&mut g, guarded, &s, 20_000).evidential(),
+        Evidential::Supported
+    );
 
     // Exception holds: defeated, and specifically *not* refuted — the rule did
     // not become false, it stopped applying.
@@ -1727,17 +1984,29 @@ fn an_exception_defeats_the_rule_it_guards() {
 fn preference_is_a_strict_order() {
     let mut g = ObjectGraph::new();
     let (tabs, spaces) = (g.atom("tabs"), g.atom("spaces"));
-    let s = WithRules { facts: vec![(wk::PREFER, vec![tabs, spaces])], rules: Vec::new() };
+    let s = WithRules {
+        facts: vec![(wk::PREFER, vec![tabs, spaces])],
+        rules: Vec::new(),
+    };
     let ev = GraphEvaluator::new();
 
     let p = g.apply(wk::PREFER, vec![tabs, spaces]);
-    assert_eq!(ev.eval(&mut g, p, &s, 10_000).evidential(), Evidential::Supported);
+    assert_eq!(
+        ev.eval(&mut g, p, &s, 10_000).evidential(),
+        Evidential::Supported
+    );
 
     // Asymmetric: the stored preference refutes its converse.
     let back = g.apply(wk::PREFER, vec![spaces, tabs]);
-    assert_eq!(ev.eval(&mut g, back, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, back, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 
     // Irreflexive.
     let self_pref = g.apply(wk::PREFER, vec![tabs, tabs]);
-    assert_eq!(ev.eval(&mut g, self_pref, &s, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, self_pref, &s, 10_000).evidential(),
+        Evidential::Refuted
+    );
 }

@@ -17,8 +17,8 @@
 
 use artist_logic::graph_eval::Knowledge;
 use artist_logic::{GraphStructure, ObjectGraph, ObjectId, wk};
+use artist_memory::MemoryStore;
 use artist_memory::relational::{RelationalView, assert_stmt, intern, oid, well_known};
-use artist_memory::{MemoryStore};
 use tempfile::TempDir;
 
 async fn store() -> (TempDir, MemoryStore) {
@@ -39,7 +39,9 @@ async fn same_as_licenses_substitution_in_extensional_position() {
     let full = intern(&s, "compaction-planner").await.expect("sym");
     let tabs = intern(&s, "tabs").await.expect("sym");
 
-    assert_stmt(&s, prefers, &[full, tabs], "t").await.expect("fact");
+    assert_stmt(&s, prefers, &[full, tabs], "t")
+        .await
+        .expect("fact");
 
     // Before the identity, the short name is simply not known to prefer tabs.
     let view = RelationalView::load(&s).await.expect("load");
@@ -49,7 +51,9 @@ async fn same_as_licenses_substitution_in_extensional_position() {
         "no identity asserted yet, so nothing is known — and crucially not refuted"
     );
 
-    assert_stmt(&s, well_known::IS, &[short, full], "t").await.expect("is");
+    assert_stmt(&s, well_known::IS, &[short, full], "t")
+        .await
+        .expect("is");
     let view = RelationalView::load(&s).await.expect("reload");
     assert_eq!(
         view.known(oid(prefers), &[oid(short), oid(tabs)]),
@@ -69,14 +73,24 @@ async fn identity_never_destroys_the_original_terms() {
     let full = intern(&s, "compaction-planner").await.expect("sym");
     let tabs = intern(&s, "tabs").await.expect("sym");
 
-    assert_stmt(&s, prefers, &[full, tabs], "t").await.expect("fact");
-    assert_stmt(&s, well_known::IS, &[short, full], "t").await.expect("is");
+    assert_stmt(&s, prefers, &[full, tabs], "t")
+        .await
+        .expect("fact");
+    assert_stmt(&s, well_known::IS, &[short, full], "t")
+        .await
+        .expect("is");
 
     let view = RelationalView::load(&s).await.expect("load");
     // Both names still resolve to something nameable; neither was overwritten.
-    assert!(view.name(short).is_some(), "the aliased symbol still exists");
+    assert!(
+        view.name(short).is_some(),
+        "the aliased symbol still exists"
+    );
     assert!(view.name(full).is_some(), "the representative still exists");
-    assert_ne!(short, full, "distinct symbols must stay distinct in storage");
+    assert_ne!(
+        short, full,
+        "distinct symbols must stay distinct in storage"
+    );
 }
 
 /// The boundary: substitution must not cross into a quotation.

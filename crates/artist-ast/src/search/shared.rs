@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::project_root::{resolve_home, Marker};
+use crate::project_root::{Marker, resolve_home};
 use crate::search::index::Index;
 
 type Registry = RwLock<HashMap<PathBuf, Arc<Index>>>;

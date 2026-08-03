@@ -74,7 +74,8 @@ application rather than here.
 | `wl_compositor`, `wl_subcompositor`, `wl_shm` | The baseline. Surfaces and shared-memory buffers. |
 | `xdg_wm_base` | Toplevels. Without it nothing has a window. |
 | `wl_seat` | Keyboard and pointer. Input is delivered into this seat. |
-| `wl_data_device_manager` | The clipboard. Not optional for real tasks — it is also how off-keymap text is typed. |
+| `wl_data_device_manager` | The clipboard. Not optional for real tasks: it is how text crosses an application boundary, and the only way to enter a character the stage's keymap cannot produce. The compositor is a selection *source* as well as a router — `setClipboard` makes the stage the owner and serves the data when a client asks for it, `getClipboard` reads back from whichever client owns it, over a pipe and off the compositor thread. |
+| `zwp_tablet_manager_v2` | A stylus, with pressure and tilt. A drawing application asks the tablet seat what tools exist at start-up; one that finds none takes the mouse path permanently, and there is no second chance to discover a pen. Advertised **and answered** — the tool declares only `PRESSURE` and `TILT`, because a declared axis that never reports is the same trap as an unserviced global. |
 | `wl_output`, `zxdg_output_manager_v1` | How a client learns the screen exists. Toolkits that find no output pick a default size, skip scale setup, and in several cases never map a window at all. Surfaces are `enter`ed onto it as they appear. |
 | `zwp_linux_dmabuf_v1` **v4** | How a GPU client hands over a texture it already has. Without it Chromium, anything on Vulkan or GL, and Waydroid's Android surfaces either read back through shared memory every frame or refuse to start. Version 4 carries a feedback tranche naming our render node, so a client allocates on the device we can actually import from. |
 | `zxdg_decoration_manager_v1` | Lets us *insist* on server-side decorations. A client-drawn titlebar is pixels no rung knows the geometry of — the agent could neither avoid its close button nor deliberately use it. |
@@ -129,6 +130,18 @@ Both were hit during implementation, and both are silent:
   own launcher and so only lost under load, surfacing as an intermittent
   "Server GUID mismatch" rather than as anything resembling a leak. Fixed by
   setting `XDG_RUNTIME_DIR` and clearing `DISPLAY` on the daemon itself.
+- **A popup nobody configured, rendered nowhere.** `new_popup`, `grab` and
+  `reposition_request` were empty stubs. A popup is a *separate* xdg surface
+  rather than a subsurface, so it appeared in none of the toplevel surface trees
+  the renderer walks — and xdg-shell requires a configure before a client may
+  attach a buffer, so it was never painted in the first place. Every context
+  menu, `<select>` dropdown and tooltip on the stage was therefore invisible to
+  capture and unreachable by the pointer, and nothing failed: the click that
+  opened the menu succeeded and the menu did not exist. Fixed with a
+  `PopupManager`, an unconditional configure, honoured grabs, rendering above
+  the parent, and pointer focus that prefers a popup over the window under it —
+  without that last part a click passes *through* an open menu to whatever it
+  covers, which is worse than the menu being missing.
 - **A configure the client never receives.** smithay's `send_pending_configure`
   suppresses the event when nothing changed — and the decoration mode is already
   `ServerSide` from the initial configure, so a client binding xdg-decoration
@@ -395,6 +408,67 @@ Externalizing keeps the log proportional to the number of *distinct* images.
   15.5x. See [rung 3](computer-use-ocr.md).
 - Tool UI.
 
+### The verb list, and the bug that hid half of it
+
+*Corrected 2026-08-01.* The agent-facing vocabulary was audited against the
+backends and found to be **narrower than the implementation**: `longPress` and
+`swipe` existed as `Step` variants, were delivered on the stage's touch device,
+and were routed through two surfaces — and appeared in neither the tool
+description nor the JSON schema. Because the step object declares
+`additionalProperties: false`, a verb absent from the schema is not merely
+undocumented; it is rejected before it is parsed. The implementation was
+complete and unreachable, and no test noticed.
+
+`every_step_the_backends_understand_is_in_the_schema` now checks both
+directions, so a verb can no longer be built without being askable, and the
+schema cannot offer one no backend implements.
+
+The vocabulary that followed from closing the audit:
+
+| Verb | Why it was needed |
+|---|---|
+| `click` with `button`, `count`, `modifiers` | Only `BTN_LEFT` was ever sent — every caller passed `0x110`, and CDP hardcoded `MouseButton::Left` with `clickCount(1)`. No context menu, no double click, and no ctrl-click, which is what makes a file list or a spreadsheet usable at all. |
+| `hover` | A menu that opens on hover, a tooltip, a reveal-on-hover control. The pointer stays where it lands, because a hover that tidied up after itself is indistinguishable from doing nothing. |
+| `press` / `release` | A marquee selection, a slider grab, a canvas stroke — the meaning is in the interval between them. |
+| `drag` | Anchor to anchor, which is the anchor-native way to say "drag this onto that"; or an anchor and a direction where there is no second element to name. Both endpoints are resolved and label-checked, because dropping a file on whatever happens to be at a remembered position is exactly what anchors exist to prevent. |
+| `drag` with `pressure` | The same gesture with a different instrument. Delivered through the tablet rather than the pointer, and **refused** where there is no tablet rather than falling back — the line would be the right shape at the wrong weight, which reads as the application ignoring pressure. |
+| `pinch` | Implemented on the touch device since before the verb existed. It simply had no way to be asked for. |
+| `scroll` with `axis` | A wide table, a timeline and a carousel were unreachable, and the vertical-only seat reported `ok` while moving nothing. |
+| `keyDown` / `keyUp` | A game's movement key, push-to-talk, a modifier held across several actions. Anything still held is released when the program ends. |
+| F-keys, media keys, `Insert`, `Menu`, `PrintScreen` | The vocabulary was fourteen named keys plus a character. |
+| `setClipboard` / `getClipboard` | The global was advertised and no selection was ever set or read. |
+| `upload` | `DOM.setFileInputFiles`, rather than driving a picker that is a separate toplevel with its own rung. |
+| `dialog` | See below. |
+
+**Anything held is released when a program ends.** A seat outlives the program
+that used it, so a `press` with no `release`, or a failure between the two,
+leaves the client believing a button is down — and the *next* program's click
+arrives as a drag, or its typing arrives as shortcuts. The corruption surfaces
+somewhere else entirely and looks like a backend fault. The stage tracks exactly
+what is held and lets go of exactly that, because a spurious release is itself
+an event a client acts on.
+
+### A dialog nobody answers freezes the page
+
+`Page.javascriptDialogOpening` had no handler. A `confirm()`, an `alert()` or a
+`beforeunload` blocks the renderer until it is answered — so the page stops
+responding to CDP, and neither the observation that would reveal the dialog nor
+the click that would dismiss it can be delivered. It was the one failure in the
+subsystem with no recovery path at all.
+
+Something must therefore answer without being asked, and the only safe default
+is **dismiss**: a `confirm()` guarding a delete is the case that matters. A
+`dialog` step arms a different answer for exactly one dialog and is consumed when
+used — an armed "accept" that persisted would silently accept the next question
+too. It is armed *before* the step that triggers it, which is the only ordering
+that can work and has the side benefit of making the model state its intent
+before the irreversible thing rather than after.
+
+Downloads are set to a directory of ours with `Browser.setDownloadBehavior` and
+tracked through `downloadWillBegin` and `downloadProgress` — the first knows the
+filename, the second knows when it finished and under which guid it was written,
+and neither alone is enough to hand back a path.
+
 **Known gaps** — real, and stated rather than implied:
 
 - **Prompt injection is not addressed.** Rendered observations are
@@ -405,15 +479,38 @@ Externalizing keeps the log proportional to the number of *distinct* images.
   guardrail pattern**, because no regex over the arguments can recover a name the
   arguments do not contain. The optional focus label covers the case where the
   model knows what it is aiming at; nothing covers the case where it does not.
-- **Rung 3 pixel *typing* and scrolling.** The rung can now click what it can
-  read and send keys — see [rung 3](computer-use-ocr.md) — but text entry needs a
-  focused field it cannot identify, and scrolling needs a container it cannot
-  see. Both report plainly rather than pretending.
-- **`Surface::children` has no implementors**, so a `target=_blank` tab is
-  unreachable, and `GetFullAxTreeParams::default()` is main-frame only — an
-  iframe (a payment form, an embedded login) is not observable.
+- ~~Rung 3 pixel typing and scrolling~~ **fixed.** Scrolling goes to the seat's
+  axis at a point, which is what a wheel does and needs no container to be
+  identified. Typing clicks the named element to put focus there, then sends the
+  text — the same two actions in the same order a person performs. `clear` sends
+  `ctrl+a` first, which is the one convention this rung assumes rather than
+  observes; a field that ignores it appends, and that is visible in the next
+  observation rather than silent.
+- ~~`Surface::children` has no implementors~~ **fixed.** `CdpChrome::children`
+  returns one surface per open tab, refreshed whenever the browser is observed
+  and keyed by target id so a tab keeps its anchor book across looks. A
+  `target=_blank` link is now reachable. (The iframe half of this entry was
+  already fixed earlier: `ax_nodes` merges every child frame's tree, so an
+  embedded payment form or login *is* observable.)
 - **No benchmark number.** The design argument is strong and the evidence is
   absent.
+- **No sound, and no video as a sequence.** The stage has no audio capture and no
+  transcription, so an application whose state is announced rather than drawn is
+  invisible — a notification chime, a video's dialogue, a call. `watch` gives the
+  *user* a live view; the agent still gets stills. Media *control* is covered at
+  rung 0 for MPRIS players, which is play/pause/seek but not hearing.
+- **Rung 3 reads text, not things.** OCR answers "where is the word you named",
+  so an unlabelled icon, a colour swatch or a purely graphic control cannot be
+  named at all. This is steal-list item 15 — a localizer rung between 2 and 3 —
+  and it is the difference between driving most of a canvas application and all
+  of one.
+- **No gamepad.** Wayland has no gamepad protocol: applications open the device
+  directly through evdev, so giving the stage one means a `/dev/uinput` virtual
+  device, and a uinput device is **global to the machine**. That contradicts the
+  property the stage exists to provide — the agent's input would be visible to
+  the user's own applications, which is the isolation failure this design was
+  built to avoid. Not a backlog item so much as a conflict to resolve before it
+  can be one.
 - **Linux/Wayland only, for now.** One compositor — ours. macOS, Windows,
   Android and iOS are **not built yet**, which is a backlog item rather than a
   scope decision: phones are an accepted goal (steal list item 17). The ladder
@@ -459,11 +556,15 @@ GUI can do anything a person at that keyboard could.
   somewhere to put things while looking at something else — and an agent has no
   use for it. Every extra output is another surface to search and another
   coordinate space to keep straight, for no capability gained. The *size* is
-  configurable (`[computer] screen = "1280x800"`), because viewport size
-  genuinely changes what an application shows; the number of outputs is not.
-- **Rung 3 cannot type or scroll.** It clicks what it can read and sends keys.
-  Typing needs a focused field it cannot identify and scrolling needs a container
-  it cannot see, so both say so rather than pretending.
+  now changeable at run time (`{"mode":"resize","width":…,"height":…}`) as well
+  as configurable, because viewport size genuinely changes what a responsive
+  application shows; the number of outputs is not.
+- **No minimize, maximize, move or workspaces.** Not missing — meaningless. Every
+  toplevel is given the whole output at `(0,0)`, so a window here *is* the
+  screen: there is nothing to maximize it to and nowhere to move it. Implementing
+  them would be theatre. What is real is `focus`, because several windows share
+  one seat and keystrokes go to one of them, and `resize`, because it changes
+  what applications draw. Both are modes.
 - **No general OCR.** The rung answers "where is the thing you named", not "what
   does this screen say". Transcription is a much harder problem and is not the
   one we have.

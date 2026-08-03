@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -360,12 +360,7 @@ fn _function_to_decl<'a, D: Doc>(
         start_byte: range.start,
         end_byte: range.end,
         doc_start_byte: range.start,
-        native_kind: Some(if inside_class {
-            "method"
-        } else {
-            "function"
-        }
-        .to_string()),
+        native_kind: Some(if inside_class { "method" } else { "function" }.to_string()),
         modifiers: Vec::new(),
         deprecated: false,
         children: Vec::new(),
@@ -500,9 +495,9 @@ fn _drill_function_declarator_name<'a, D: Doc>(node: &Node<'a, D>) -> Option<Str
             _drill_function_declarator_name(&inner)
         }
         "pointer_declarator" | "reference_declarator" | "parenthesized_declarator" => {
-            let inner = node.field("declarator").or_else(|| {
-                node.children().find(|c| c.is_named())
-            })?;
+            let inner = node
+                .field("declarator")
+                .or_else(|| node.children().find(|c| c.is_named()))?;
             _drill_function_declarator_name(&inner)
         }
         "identifier" | "field_identifier" | "operator_name" | "destructor_name" => {
@@ -534,9 +529,9 @@ fn _drill_function_declarator_qname<'a, D: Doc>(node: &Node<'a, D>) -> Option<St
             _drill_function_declarator_qname(&inner)
         }
         "pointer_declarator" | "reference_declarator" | "parenthesized_declarator" => {
-            let inner = node.field("declarator").or_else(|| {
-                node.children().find(|c| c.is_named())
-            })?;
+            let inner = node
+                .field("declarator")
+                .or_else(|| node.children().find(|c| c.is_named()))?;
             _drill_function_declarator_qname(&inner)
         }
         // Explicit terminals — preserve the full scope (`Foo::bar`) for
@@ -606,14 +601,10 @@ fn _call_site_from_call_cpp<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Optio
     })
 }
 
-fn _call_site_from_new_expression<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
-    let type_node = node.field("type").or_else(|| {
-        node.children()
-            .find(|c| c.is_named() && c.kind() != "new")
-    })?;
+fn _call_site_from_new_expression<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
+    let type_node = node
+        .field("type")
+        .or_else(|| node.children().find(|c| c.is_named() && c.kind() != "new"))?;
     let raw = String::from_utf8_lossy(&src[type_node.range()]).to_string();
     let name = _last_type_segment_cpp(&raw);
     if name.is_empty() {
@@ -643,14 +634,17 @@ fn _split_callee_cpp<'a, D: Doc>(
             let field = node.field("field")?;
             let arg = node.field("argument");
             let name = String::from_utf8_lossy(&src[field.range()]).to_string();
-            let receiver = arg
-                .map(|a| collapse_ws(&String::from_utf8_lossy(&src[a.range()])));
+            let receiver = arg.map(|a| collapse_ws(&String::from_utf8_lossy(&src[a.range()])));
             Some((name, receiver))
         }
         "qualified_identifier" | "scoped_identifier" => {
             let raw = String::from_utf8_lossy(&src[node.range()]).to_string();
             let collapsed = collapse_ws(&raw);
-            let name = collapsed.rsplit("::").next().unwrap_or(&collapsed).to_string();
+            let name = collapsed
+                .rsplit("::")
+                .next()
+                .unwrap_or(&collapsed)
+                .to_string();
             let receiver = if collapsed.contains("::") {
                 let cut = collapsed.rfind("::").unwrap();
                 Some(collapsed[..cut].to_string())
@@ -660,9 +654,9 @@ fn _split_callee_cpp<'a, D: Doc>(
             Some((name, receiver))
         }
         "template_function" => {
-            let name_node = node.field("name").or_else(|| {
-                node.children().find(|c| c.is_named())
-            })?;
+            let name_node = node
+                .field("name")
+                .or_else(|| node.children().find(|c| c.is_named()))?;
             _split_callee_cpp(&name_node, src)
         }
         _ => {

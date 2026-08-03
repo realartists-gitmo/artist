@@ -387,7 +387,11 @@ async fn the_system_prompt_never_moves_within_a_session() {
 #[tokio::test]
 async fn changed_instructions_ride_the_user_turn_instead() {
     let harness = Harness::new().await;
-    std::fs::write(harness.project().join("AGENTS.md"), "always answer in haiku").unwrap();
+    std::fs::write(
+        harness.project().join("AGENTS.md"),
+        "always answer in haiku",
+    )
+    .unwrap();
 
     let (url, requests) = scripted(vec![says("resp_1", "one"), says("resp_2", "two")]).await;
     let handles = SessionHandles {
@@ -502,7 +506,9 @@ async fn scripted_endpoints(
                     None => MISSING.to_owned(),
                 },
                 Route::Prompts => match stored_prompt {
-                    Some((id, version)) => json(format!(r#"{{"id":"{id}","version":"{version}"}}"#)),
+                    Some((id, version)) => {
+                        json(format!(r#"{{"id":"{id}","version":"{version}"}}"#))
+                    }
                     None => MISSING.to_owned(),
                 },
                 Route::Responses => {
@@ -526,7 +532,6 @@ enum Route {
     Prompts,
     Responses,
 }
-
 
 /// A provider on the API-key Responses route.
 ///
@@ -553,7 +558,9 @@ fn api_key_provider(url: &str) -> SavedProvider {
 fn handles_with_attachments(dir: &std::path::Path) -> SessionHandles {
     SessionHandles {
         conversation_id: "test-conversation".to_owned(),
-        attachments: Some(artist_session::AttachmentStore::new(dir.join("attachments"))),
+        attachments: Some(artist_session::AttachmentStore::new(
+            dir.join("attachments"),
+        )),
         ..SessionHandles::default()
     }
 }
@@ -717,7 +724,11 @@ async fn a_chained_request_omits_what_the_provider_already_holds() {
     assert!(outcome.is_ok(), "{outcome:?}");
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "the tool result should drive a second turn");
+    assert_eq!(
+        requests.len(),
+        2,
+        "the tool result should drive a second turn"
+    );
 
     let first_body: serde_json::Value =
         serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
@@ -804,7 +815,10 @@ async fn scripted_with_prompts(
                             body.len()
                         )
                     }
-                    None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    }
                 }
             } else {
                 let Some(body) = bodies.next() else { return };
@@ -827,10 +841,18 @@ async fn scripted_with_prompts(
 async fn a_stored_prompt_replaces_the_preamble_on_the_wire() {
     let harness = Harness::new().await;
     let session = tempfile::tempdir().unwrap();
-    std::fs::write(harness.project().join("AGENTS.md"), "a distinctive instruction").unwrap();
+    std::fs::write(
+        harness.project().join("AGENTS.md"),
+        "a distinctive instruction",
+    )
+    .unwrap();
 
-    let (url, requests) =
-        scripted_endpoints(vec![says("resp_1", "one"), says("resp_2", "two")], None, Some(("pmpt_abc", "3"))).await;
+    let (url, requests) = scripted_endpoints(
+        vec![says("resp_1", "one"), says("resp_2", "two")],
+        None,
+        Some(("pmpt_abc", "3")),
+    )
+    .await;
 
     let handles = handles_with(
         session.path(),
@@ -849,8 +871,14 @@ async fn a_stored_prompt_replaces_the_preamble_on_the_wire() {
     }
 
     let requests = requests.lock().unwrap();
-    let publishes = requests.iter().filter(|r| r.starts_with("POST /prompts")).count();
-    assert_eq!(publishes, 1, "the prompt should be stored once, then referenced");
+    let publishes = requests
+        .iter()
+        .filter(|r| r.starts_with("POST /prompts"))
+        .count();
+    assert_eq!(
+        publishes, 1,
+        "the prompt should be stored once, then referenced"
+    );
 
     let completions: Vec<&String> = requests
         .iter()
@@ -863,7 +891,8 @@ async fn a_stored_prompt_replaces_the_preamble_on_the_wire() {
         assert_eq!(body["prompt"]["id"], "pmpt_abc", "{body}");
         assert_eq!(body["prompt"]["version"], "3", "pinned to a revision");
         assert!(
-            body.get("instructions").is_none_or(serde_json::Value::is_null),
+            body.get("instructions")
+                .is_none_or(serde_json::Value::is_null),
             "the preamble must leave the request entirely: {body}"
         );
         assert!(
@@ -878,10 +907,18 @@ async fn a_stored_prompt_replaces_the_preamble_on_the_wire() {
 async fn an_endpoint_without_stored_prompts_keeps_sending_instructions() {
     let harness = Harness::new().await;
     let session = tempfile::tempdir().unwrap();
-    std::fs::write(harness.project().join("AGENTS.md"), "a distinctive instruction").unwrap();
+    std::fs::write(
+        harness.project().join("AGENTS.md"),
+        "a distinctive instruction",
+    )
+    .unwrap();
 
-    let (url, requests) =
-        scripted_endpoints(vec![says("resp_1", "one"), says("resp_2", "two")], None, None).await;
+    let (url, requests) = scripted_endpoints(
+        vec![says("resp_1", "one"), says("resp_2", "two")],
+        None,
+        None,
+    )
+    .await;
 
     let handles = handles_with(
         session.path(),
@@ -901,7 +938,10 @@ async fn an_endpoint_without_stored_prompts_keeps_sending_instructions() {
 
     let requests = requests.lock().unwrap();
     assert_eq!(
-        requests.iter().filter(|r| r.starts_with("POST /prompts")).count(),
+        requests
+            .iter()
+            .filter(|r| r.starts_with("POST /prompts"))
+            .count(),
         1,
         "probe once, then stop asking"
     );
@@ -951,7 +991,10 @@ async fn the_chatgpt_backend_is_never_probed_for_side_endpoints() {
 
     let requests = requests.lock().unwrap();
     assert_eq!(
-        requests.iter().filter(|r| r.starts_with("POST /files")).count(),
+        requests
+            .iter()
+            .filter(|r| r.starts_with("POST /files"))
+            .count(),
         0,
         "a backend without a files endpoint should not be asked"
     );

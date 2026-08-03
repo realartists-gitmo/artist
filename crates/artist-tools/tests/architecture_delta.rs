@@ -208,7 +208,10 @@ fn a_unit_introduces_itself_with_its_role_and_reach() {
         .region_note(&root.join("core/src/lib.rs"))
         .expect("a note for core");
     assert!(note.contains("entering core"), "{note}");
-    assert!(note.contains("Shared primitives"), "role is carried: {note}");
+    assert!(
+        note.contains("Shared primitives"),
+        "role is carried: {note}"
+    );
     assert!(
         note.contains("break if it changes"),
         "the number that changes how careful to be: {note}"
@@ -227,7 +230,11 @@ fn a_unit_introduces_itself_with_its_role_and_reach() {
 fn a_file_outside_every_unit_introduces_nothing() {
     let dir = workspace();
     let baseline = artist_tools::skeleton::baseline(dir.path()).expect("a baseline");
-    assert!(baseline.region_note(&dir.path().join("README.md")).is_none());
+    assert!(
+        baseline
+            .region_note(&dir.path().join("README.md"))
+            .is_none()
+    );
 }
 
 /// Recent work is a prior about what the session is for, and it is available
@@ -254,8 +261,7 @@ fn recent_git_activity_points_at_the_units_in_hand() {
     let skeleton =
         artist_tools::skeleton::build(root, artist_tools::skeleton::DEFAULT_BUDGET).expect("shape");
     assert!(
-        skeleton.active.contains(&"app".to_owned())
-            || skeleton.active.contains(&"core".to_owned()),
+        skeleton.active.contains(&"app".to_owned()) || skeleton.active.contains(&"core".to_owned()),
         "uncommitted work should be named: {:?}",
         skeleton.active
     );
@@ -318,7 +324,9 @@ fn a_deleted_unit_is_reported() {
     let notes = baseline.observe(root, &root.join("app/src/lib.rs"));
 
     assert!(
-        notes.iter().any(|n| n.contains("core") && n.contains("gone")),
+        notes
+            .iter()
+            .any(|n| n.contains("core") && n.contains("gone")),
         "{notes:?}"
     );
     // Reported once: the unit is dropped from the baseline as it is announced.
@@ -347,7 +355,9 @@ fn a_new_unit_is_reported() {
 
     let notes = baseline.observe(root, &manifest);
     assert!(
-        notes.iter().any(|n| n.contains("extra") && n.contains("new")),
+        notes
+            .iter()
+            .any(|n| n.contains("extra") && n.contains("new")),
         "{notes:?}"
     );
     assert!(
@@ -379,7 +389,9 @@ fn a_removed_dependency_is_reported() {
     );
     let notes = baseline.observe(root, &file);
     assert!(
-        notes.iter().any(|n| n.contains("no longer depends on core")),
+        notes
+            .iter()
+            .any(|n| n.contains("no longer depends on core")),
         "{notes:?}"
     );
 }
@@ -445,7 +457,9 @@ fn any_change_to_the_derived_architecture_is_reported() {
         "a change the summariser cannot describe must not pass in silence"
     );
     assert!(
-        notes.iter().any(|n| n.contains("a-unit-that-was-never-here")),
+        notes
+            .iter()
+            .any(|n| n.contains("a-unit-that-was-never-here")),
         "and it should describe it where it can: {notes:?}"
     );
 }

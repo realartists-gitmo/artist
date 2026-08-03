@@ -87,10 +87,18 @@ fn a_recorded_negative_does_not_require_omniscience() {
     let fixes = g.atom("fixes");
     let (native, lto) = (g.atom("target-cpu-native"), g.atom("lto"));
     let bug = g.atom("segfault-in-rten");
-    let s = Denials { fixes, flag: native, bug };
+    let s = Denials {
+        fixes,
+        flag: native,
+        bug,
+    };
 
     let tried = g.apply(fixes, vec![native, bug]);
-    assert_eq!(ev(&mut g, tried, &s), Evidential::Refuted, "we tried it; it did not work");
+    assert_eq!(
+        ev(&mut g, tried, &s),
+        Evidential::Refuted,
+        "we tried it; it did not work"
+    );
 
     let never_tried = g.apply(fixes, vec![lto, bug]);
     assert_eq!(
@@ -107,7 +115,11 @@ fn disagreeing_sources_are_conflicted_not_arbitrated() {
     struct Disagreement(ObjectId);
     impl GraphStructure for Disagreement {
         fn known(&self, pred: ObjectId, _args: &[ObjectId]) -> Knowledge {
-            if pred == self.0 { Knowledge::Conflicted } else { Knowledge::Unknown }
+            if pred == self.0 {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Unknown
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -117,7 +129,10 @@ fn disagreeing_sources_are_conflicted_not_arbitrated() {
     let claim = g.apply(race, vec![flake]);
     let r = GraphEvaluator::new().eval(&mut g, claim, &s, 10_000);
     assert_eq!(r.evidential(), Evidential::Conflicted);
-    assert!(!r.is_definite(), "a contradiction is not a definite reading");
+    assert!(
+        !r.is_definite(),
+        "a contradiction is not a definite reading"
+    );
 }
 
 /// …and a conflict must not be laundered back into a verdict by a connective.
@@ -126,7 +141,11 @@ fn a_conjunction_does_not_flatten_a_conflict() {
     struct Disagreement(ObjectId);
     impl GraphStructure for Disagreement {
         fn known(&self, pred: ObjectId, _args: &[ObjectId]) -> Knowledge {
-            if pred == self.0 { Knowledge::Conflicted } else { Knowledge::Unknown }
+            if pred == self.0 {
+                Knowledge::Conflicted
+            } else {
+                Knowledge::Unknown
+            }
         }
     }
     let mut g = ObjectGraph::new();
@@ -156,7 +175,9 @@ fn a_norm_survives_being_broken() {
     let norm = g.apply(wk::OBLIGED, vec![ran_fmt]);
 
     // The norm is on file; the world does not match it.
-    let s = MapGraphStructure::new().fact(wk::OBLIGED, vec![ran_fmt]).closed(formatted);
+    let s = MapGraphStructure::new()
+        .fact(wk::OBLIGED, vec![ran_fmt])
+        .closed(formatted);
 
     assert_eq!(
         ev(&mut g, norm, &s),
@@ -183,7 +204,11 @@ fn obligation_entails_permission_and_no_more() {
     assert_eq!(ev(&mut g, may, &s), Evidential::Supported);
 
     // Obliging something does not make it true.
-    assert_eq!(ev(&mut g, act, &s), Evidential::Open, "an `ought` is not an `is`");
+    assert_eq!(
+        ev(&mut g, act, &s),
+        Evidential::Open,
+        "an `ought` is not an `is`"
+    );
 }
 
 // -------------------------------------------------------------- sequences
@@ -263,11 +288,19 @@ fn since_restricts_to_a_window() {
         fn known_at(&self, pred: ObjectId, _args: &[ObjectId], t: i64) -> Knowledge {
             if pred == self.refactor {
                 // The refactor landed at t=2.
-                return if t == 2 { Knowledge::Holds } else { Knowledge::Fails };
+                return if t == 2 {
+                    Knowledge::Holds
+                } else {
+                    Knowledge::Fails
+                };
             }
             if pred == self.green {
                 // CI was red at t=1 and green from t=2 on.
-                return if t >= 2 { Knowledge::Holds } else { Knowledge::Fails };
+                return if t >= 2 {
+                    Knowledge::Holds
+                } else {
+                    Knowledge::Fails
+                };
             }
             Knowledge::Unknown
         }
@@ -342,7 +375,9 @@ fn a_rule_may_conclude_a_negation() {
     let imp = g.apply(wk::IMPLIES, vec![antecedent, negated]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
 
-    let s = MapGraphStructure::new().fact(generated, vec![file]).rule(needs_review, rule);
+    let s = MapGraphStructure::new()
+        .fact(generated, vec![file])
+        .rule(needs_review, rule);
     let goal = g.apply(needs_review, vec![file]);
     assert_eq!(ev(&mut g, goal, &s), Evidential::Refuted);
 }
@@ -410,7 +445,9 @@ fn aggregates_are_not_integers_only() {
     let counts = g.atom("counts");
     let (a, b) = (g.atom("a"), g.atom("b"));
     let dom = g.apply(wk::SET_DOMAIN, vec![a, b]);
-    let s = MapGraphStructure::new().fact(counts, vec![a]).fact(counts, vec![b]);
+    let s = MapGraphStructure::new()
+        .fact(counts, vec![a])
+        .fact(counts, vec![b]);
 
     let v = g.fresh();
     let body = g.apply(counts, vec![v]);
@@ -422,7 +459,10 @@ fn aggregates_are_not_integers_only() {
     });
     let total = g.bind(
         wk::SUM,
-        vec![Binding { var: v, domain: Some(dom) }],
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
         vec![body, half],
     );
     let one = g.int(1);
@@ -441,7 +481,11 @@ fn the_new_vocabulary_reports_unsupported_rather_than_guessing() {
     for op in [wk::OBLIGED, wk::PERMITTED, wk::FORBIDDEN, wk::VIOLATED] {
         let node = g.apply(op, vec![claim]);
         let r = GraphEvaluator::new().eval(&mut g, node, &EmptyStructure, 10_000);
-        assert_eq!(r.evidential(), Evidential::Open, "{op:?} must not invent a norm");
+        assert_eq!(
+            r.evidential(),
+            Evidential::Open,
+            "{op:?} must not invent a norm"
+        );
         assert_ne!(r.compute_status, ComputeStatus::Exact);
     }
     // Wrong arity everywhere, as the rest of the vocabulary already does.

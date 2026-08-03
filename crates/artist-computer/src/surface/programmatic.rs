@@ -231,7 +231,12 @@ impl Surface for ProgrammaticSurface {
         Ok(SettleWatch::ready(SettleOutcome::Settled { after_ms: 0 }))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        _secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         let Some(node) = node else {
             return Err(StepError::Backend(
                 "a programmatic surface is driven by naming one of its actions".into(),
@@ -261,7 +266,7 @@ impl Surface for ProgrammaticSurface {
             Step::Type { text, .. } => Some(text.as_str()),
             _ => None,
         };
-        self.invoke(action, value).await.map(|_| ())
+        self.invoke(action, value).await.map(|_| None)
     }
 }
 
@@ -404,11 +409,12 @@ cli = { argv = ["false"] }
         let node = Node::new("adapter:echo:nope", Role::Button, "nope");
         let error = surface
             .apply(
-                &Step::Click(Target {
+                &Step::click(Target {
                     anchor: "x".into(),
                     label: None,
                 }),
                 Some(&node),
+                None,
             )
             .await
             .unwrap_err()
@@ -524,6 +530,7 @@ mod output_tests {
                     action: "status".into(),
                 },
                 Some(&node),
+                None,
             )
             .await
             .unwrap();
@@ -556,6 +563,7 @@ mod output_tests {
                     action: "status".into(),
                 },
                 Some(&node),
+                None,
             )
             .await
             .unwrap();

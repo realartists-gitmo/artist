@@ -135,10 +135,7 @@ pub const RELATIONS: &[(&str, &str)] = &[
     // Arity is carried in a side relation rather than a `holds2/holds3/holds4`
     // ladder, because a ladder would put a bound in storage that the logic does
     // not have. `stmt` + `arg` admits any arity at the cost of one join.
-    (
-        "sym",
-        r#":create sym { sym_id: Int => name: String }"#,
-    ),
+    ("sym", r#":create sym { sym_id: Int => name: String }"#),
     // Valid time, not a liveness flag.
     //
     // The original plan ruled bitemporality out on the grounds that it rejects

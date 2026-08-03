@@ -353,7 +353,10 @@ mod tests {
     fn unknown_languages_still_produce_chunks() {
         let text = "alpha\n\nbeta\n\ngamma\n";
         let chunks = chunk_source(text, "x.unknown", Lang::Other, 8);
-        assert!(chunks.len() > 1, "expected the heuristic to split: {chunks:?}");
+        assert!(
+            chunks.len() > 1,
+            "expected the heuristic to split: {chunks:?}"
+        );
     }
 
     #[test]
@@ -410,9 +413,7 @@ fn beta(y: u32) -> u32 {
     /// dropped and not truncated.
     #[test]
     fn oversized_declaration_splits_but_keeps_file_line_numbers() {
-        let big_body: String = (0..80)
-            .map(|i| format!("    let v{i} = {i};\n"))
-            .collect();
+        let big_body: String = (0..80).map(|i| format!("    let v{i} = {i};\n")).collect();
         let source = format!("fn huge() {{\n{big_body}}}\n");
         let (_dir, path) = fixture("a.rs", &source);
         let chunks = chunk_by_declaration(&source, &path, 200);

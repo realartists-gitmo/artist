@@ -390,7 +390,12 @@ impl Surface for AtspiSurface {
         }))))
     }
 
-    async fn apply(&self, step: &Step, node: Option<&Node>) -> Result<(), StepError> {
+    async fn apply(
+        &self,
+        step: &Step,
+        node: Option<&Node>,
+        _secondary: Option<&Node>,
+    ) -> Result<Option<String>, StepError> {
         let Some(node) = node else {
             return Err(StepError::Backend(
                 "this step needs an element from the accessibility tree".into(),
@@ -410,7 +415,7 @@ impl Surface for AtspiSurface {
             // `click` takes the default verb; `invoke` names one. The second is
             // what makes `Node::actions` more than decoration — a menu item's
             // "open in new window" is unreachable any other way.
-            Step::Click(target) => self.do_action(path, target, node, None).await,
+            Step::Click { target, .. } => self.do_action(path, target, node, None).await,
             Step::Invoke { target, action } => {
                 self.do_action(path, target, node, Some(action)).await
             }
@@ -456,6 +461,7 @@ impl Surface for AtspiSurface {
                 action: other.action(),
             }),
         }
+        .map(|()| None)
     }
 }
 

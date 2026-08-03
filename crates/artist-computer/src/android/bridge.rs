@@ -112,8 +112,7 @@ impl Bridge {
         stream.set_nodelay(true).ok();
 
         let (read, write) = stream.into_split();
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>> =
-            Arc::default();
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<serde_json::Value>>>> = Arc::default();
         let (events, _) = broadcast::channel(64);
 
         // One reader task owns the socket. Replies are matched by id and events
@@ -204,7 +203,9 @@ impl Bridge {
     pub async fn tree(&self) -> Result<Tree, StepError> {
         let value = self.request(serde_json::json!({"op": "tree"})).await?;
         serde_json::from_value(value).map_err(|error| {
-            StepError::Backend(format!("the accessibility bridge sent a tree we could not read: {error}"))
+            StepError::Backend(format!(
+                "the accessibility bridge sent a tree we could not read: {error}"
+            ))
         })
     }
 
@@ -265,7 +266,12 @@ pub async fn install(adb: &Adb, apk: &std::path::Path) -> Result<(), StepError> 
     // disable every other accessibility service the user has running — a screen
     // reader among them, on a container somebody actually uses.
     let existing = adb
-        .shell(&["settings", "get", "secure", "enabled_accessibility_services"])
+        .shell(&[
+            "settings",
+            "get",
+            "secure",
+            "enabled_accessibility_services",
+        ])
         .await
         .unwrap_or_default();
     let existing = existing.trim();

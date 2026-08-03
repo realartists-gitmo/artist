@@ -24,8 +24,8 @@
 use std::path::{Path, PathBuf};
 
 mod jobs;
-mod names;
 mod messages;
+mod names;
 mod permits;
 mod process;
 mod roster;

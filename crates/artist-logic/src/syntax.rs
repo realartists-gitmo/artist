@@ -142,7 +142,11 @@ fn write_node(
             }
             out.push(')');
         }
-        Some(CoreNode::Bind { binder, vars, bodies }) => {
+        Some(CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        }) => {
             out.push('(');
             write_node(g, *binder, labels, emitted, scope, out);
             out.push_str(" [");
@@ -182,7 +186,12 @@ fn write_node(
             out.push(')');
         }
         Some(CoreNode::External(r)) => {
-            let _ = write!(out, "(#external {} {}", escape_atom(&r.namespace), hex_field(&r.locator));
+            let _ = write!(
+                out,
+                "(#external {} {}",
+                escape_atom(&r.namespace),
+                hex_field(&r.locator)
+            );
             match &r.version {
                 Some(v) => {
                     let _ = write!(out, " {}", hex_field(v));
@@ -214,7 +223,8 @@ fn print_literal(v: &LiteralValue) -> String {
 }
 
 fn escape_atom(s: &str) -> String {
-    if s.is_empty() || s.chars().any(|c| c.is_whitespace() || "()\"#|".contains(c))
+    if s.is_empty()
+        || s.chars().any(|c| c.is_whitespace() || "()\"#|".contains(c))
         || reads_as_literal(s)
     {
         format!("|{}|", s.replace('|', "\\|"))
@@ -294,7 +304,11 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
 // ---- parsing -----------------------------------------------------------
 
 pub fn parse(g: &mut ObjectGraph, src: &str) -> Result<ObjectId, String> {
-    let mut p = Parser { s: src.as_bytes(), i: 0, labels: BTreeMap::new() };
+    let mut p = Parser {
+        s: src.as_bytes(),
+        i: 0,
+        labels: BTreeMap::new(),
+    };
     let id = p.expr(g)?;
     p.ws();
     if p.i < p.s.len() {
@@ -336,12 +350,7 @@ impl<'a> Parser<'a> {
                 self.i += kw.len();
                 true
             }
-            Some(c)
-                if (*c as char).is_whitespace()
-                    || *c == b'('
-                    || *c == b')'
-                    || *c == b'[' =>
-            {
+            Some(c) if (*c as char).is_whitespace() || *c == b'(' || *c == b')' || *c == b'[' => {
                 self.i += kw.len();
                 true
             }
@@ -493,7 +502,11 @@ impl<'a> Parser<'a> {
         Ok(g.external(ExternalRef {
             namespace: unquote(&ns),
             locator: unhex_field(&loc).ok_or("bad locator")?,
-            version: if ver == "-" { None } else { Some(unhex_field(&ver).ok_or("bad version")?) },
+            version: if ver == "-" {
+                None
+            } else {
+                Some(unhex_field(&ver).ok_or("bad version")?)
+            },
             digest,
         }))
     }
@@ -534,7 +547,11 @@ impl<'a> Parser<'a> {
             return Err("unterminated |atom|".into());
         }
         let t = self.take_while(|c| !c.is_whitespace() && c != '(' && c != ')');
-        if t.is_empty() { Err("expected token".into()) } else { Ok(t) }
+        if t.is_empty() {
+            Err("expected token".into())
+        } else {
+            Ok(t)
+        }
     }
 
     fn take_while(&mut self, f: impl Fn(char) -> bool) -> String {
@@ -639,7 +656,11 @@ pub fn to_bytes(g: &ObjectGraph, root: ObjectId) -> Vec<u8> {
                     push_u128(&mut out, o.0);
                 }
             }
-            Some(CoreNode::Bind { binder, vars, bodies }) => {
+            Some(CoreNode::Bind {
+                binder,
+                vars,
+                bodies,
+            }) => {
                 out.push(4);
                 push_u128(&mut out, binder.0);
                 push_u64(&mut out, vars.len() as u64);
@@ -705,7 +726,9 @@ pub fn from_bytes(g: &mut ObjectGraph, buf: &[u8]) -> Result<ObjectId, String> {
             1 => {
                 let name = c.string()?;
                 let present = c.u8()? == 1;
-                CoreNode::Atom { name: present.then_some(name) }
+                CoreNode::Atom {
+                    name: present.then_some(name),
+                }
             }
             2 => CoreNode::Literal(decode_literal(&mut c)?),
             3 => {
@@ -722,8 +745,11 @@ pub fn from_bytes(g: &mut ObjectGraph, buf: &[u8]) -> Result<ObjectId, String> {
                 let k = c.u64()? as usize;
                 let mut vars = Vec::with_capacity(k);
                 for _ in 0..k {
-                    let domain =
-                        if c.u8()? == 1 { Some(ObjectId(c.u128()?)) } else { None };
+                    let domain = if c.u8()? == 1 {
+                        Some(ObjectId(c.u128()?))
+                    } else {
+                        None
+                    };
                     vars.push(Binder { domain });
                 }
                 let m = c.u64()? as usize;
@@ -731,7 +757,11 @@ pub fn from_bytes(g: &mut ObjectGraph, buf: &[u8]) -> Result<ObjectId, String> {
                 for _ in 0..m {
                     bodies.push(ObjectId(c.u128()?));
                 }
-                CoreNode::Bind { binder, vars, bodies }
+                CoreNode::Bind {
+                    binder,
+                    vars,
+                    bodies,
+                }
             }
             5 => {
                 let namespace = c.string()?;
@@ -744,9 +774,17 @@ pub fn from_bytes(g: &mut ObjectGraph, buf: &[u8]) -> Result<ObjectId, String> {
                 } else {
                     None
                 };
-                CoreNode::External(ExternalRef { namespace, locator, version, digest })
+                CoreNode::External(ExternalRef {
+                    namespace,
+                    locator,
+                    version,
+                    digest,
+                })
             }
-            6 => CoreNode::Opaque { tag: c.string()?, payload: c.bytes()? },
+            6 => CoreNode::Opaque {
+                tag: c.string()?,
+                payload: c.bytes()?,
+            },
             other => return Err(format!("unknown node tag {other}")),
         };
         g.define(id, node);
@@ -787,7 +825,10 @@ fn decode_literal(c: &mut Cursor<'_>) -> Result<LiteralValue, String> {
             let mantissa = BigInt::from_signed_bytes_le(&c.bytes()?);
             let mut s = [0u8; 4];
             s.copy_from_slice(c.take(4)?);
-            LiteralValue::Decimal { mantissa, scale: i32::from_le_bytes(s) }
+            LiteralValue::Decimal {
+                mantissa,
+                scale: i32::from_le_bytes(s),
+            }
         }
         2 => LiteralValue::Text(c.string()?),
         3 => LiteralValue::Bool(c.u8()? == 1),

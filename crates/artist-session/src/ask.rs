@@ -1,10 +1,10 @@
 //! Asking the user a structured question.
 //!
-//! One vocabulary, two renderers. The same [`Question`] is drawn as a picker in
-//! the TUI and as a component in a canvas, and either can answer it. That is
-//! the point of putting it here rather than next to whichever feature happened
-//! to need it first: a question raised by a tool must be answerable wherever
-//! the user happens to be looking.
+//! One vocabulary, many renderers. The same [`Question`] is drawn as a picker
+//! in the TUI and can be rendered by a canvas, and either can answer it —
+//! whoever gets there first wins. That is the point of putting it here rather
+//! than next to whichever feature happened to need it first: a question raised
+//! by a tool must be answerable wherever the user happens to be looking.
 //!
 //! The types live in the session crate because an answer is part of the
 //! conversation — it has to survive resume, rewind, and compaction alongside
@@ -89,10 +89,16 @@ impl Answer {
 #[derive(Clone, Default)]
 pub struct AskRegistry {
     pending: Arc<Mutex<HashMap<String, Waiting>>>,
-    /// Recording lives here rather than at each call site so that every future
-    /// poster — the planned `ask` tool, a canvas, anything else — is recorded
-    /// by construction instead of by remembering to.
-    recorder: Option<crate::Recorder>,
+    /// Recording lives here rather than at each call site so that every poster
+    /// — the `ask` tool, a canvas, anything else — is recorded by construction
+    /// instead of by remembering to.
+    ///
+    /// Shared and late-bindable because the registry outlives the session it
+    /// records into: surfaces are attached to it at startup, before a session
+    /// is open and therefore before a recorder exists. A registry created
+    /// per-session instead would be a second registry, and an answer given on
+    /// the canvas would never reach the agent that asked.
+    recorder: Arc<Mutex<Option<crate::Recorder>>>,
 }
 
 struct Waiting {
@@ -110,13 +116,26 @@ impl AskRegistry {
     pub fn with_recorder(recorder: crate::Recorder) -> Self {
         Self {
             pending: Arc::default(),
-            recorder: Some(recorder),
+            recorder: Arc::new(Mutex::new(Some(recorder))),
         }
+    }
+
+    /// Start recording into a session that opened after this registry did.
+    ///
+    /// Affects every clone, because they share the slot — which is the point:
+    /// the canvas bridge holds one clone and the agent another, and a question
+    /// must be recorded whichever of them posted it.
+    pub fn attach_recorder(&self, recorder: crate::Recorder) {
+        *self.recorder.lock().expect("ask registry poisoned") = Some(recorder);
+    }
+
+    fn recorder(&self) -> Option<crate::Recorder> {
+        self.recorder.lock().expect("ask registry poisoned").clone()
     }
 
     /// Post a question and hand back the receiver its answer will arrive on.
     pub fn post(&self, question: Question) -> oneshot::Receiver<Answer> {
-        if let Some(recorder) = &self.recorder {
+        if let Some(recorder) = self.recorder() {
             recorder.record(crate::AskPosted {
                 question: question.clone(),
             });
@@ -167,7 +186,7 @@ impl AskRegistry {
         };
         // Recorded before delivery: the answer is part of the conversation
         // whether or not the asker is still listening for it.
-        if let Some(recorder) = &self.recorder {
+        if let Some(recorder) = self.recorder() {
             recorder.record(crate::AskAnswered {
                 answer: answer.clone(),
                 surface: surface.to_owned(),

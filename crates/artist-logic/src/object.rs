@@ -125,7 +125,10 @@ pub enum LiteralValue {
     Int(BigInt),
     /// `mantissa × 10^-scale`. Exact, ordered, hashable — no floats, so a
     /// literal can key an evidence ledger.
-    Decimal { mantissa: BigInt, scale: i32 },
+    Decimal {
+        mantissa: BigInt,
+        scale: i32,
+    },
     Text(String),
     Bool(bool),
     Bytes(Vec<u8>),
@@ -180,18 +183,30 @@ pub struct Binding {
 pub enum CoreNode {
     /// A primitive: an entity, a predicate, an operator, a sort, a variable, a
     /// world, an instant. The name is for humans; identity is the id.
-    Atom { name: Option<String> },
+    Atom {
+        name: Option<String>,
+    },
     Literal(LiteralValue),
     /// Operator application. The operator is itself an object, so new
     /// constructs need no enum variant and no storage migration.
-    Apply { operator: ObjectId, operands: Vec<ObjectId> },
+    Apply {
+        operator: ObjectId,
+        operands: Vec<ObjectId>,
+    },
     /// Variable binding. `bodies` is a vector because binders differ in arity —
     /// `Forall` takes one, `LetRec` takes a definition *and* a scope.
-    Bind { binder: ObjectId, vars: Vec<Binder>, bodies: Vec<ObjectId> },
+    Bind {
+        binder: ObjectId,
+        vars: Vec<Binder>,
+        bodies: Vec<ObjectId>,
+    },
     External(ExternalRef),
     /// A node from a producer this build does not understand, preserved
     /// verbatim so a round trip through an older binary is lossless.
-    Opaque { tag: String, payload: Vec<u8> },
+    Opaque {
+        tag: String,
+        payload: Vec<u8>,
+    },
 }
 
 /// Well-known object ids.
@@ -479,7 +494,12 @@ impl ObjectGraph {
             if label.is_empty() {
                 continue;
             }
-            g.nodes.insert(*id, CoreNode::Atom { name: Some((*label).to_string()) });
+            g.nodes.insert(
+                *id,
+                CoreNode::Atom {
+                    name: Some((*label).to_string()),
+                },
+            );
             g.names.insert((*label).to_string(), *id);
         }
         g
@@ -560,14 +580,18 @@ impl ObjectGraph {
     /// Static because callers that need this have no graph to intern into and do
     /// not want one: the id is a pure function of the name.
     pub fn content_atom(name: &str) -> ObjectId {
-        content_id(&CoreNode::Atom { name: Some(name.to_string()) })
+        content_id(&CoreNode::Atom {
+            name: Some(name.to_string()),
+        })
     }
 
     pub fn atom(&mut self, name: &str) -> ObjectId {
         if let Some(id) = self.names.get(name) {
             return *id;
         }
-        let id = self.intern(CoreNode::Atom { name: Some(name.to_string()) });
+        let id = self.intern(CoreNode::Atom {
+            name: Some(name.to_string()),
+        });
         self.names.insert(name.to_string(), id);
         id
     }
@@ -633,7 +657,11 @@ impl ObjectGraph {
             .into_iter()
             .map(|b| self.abstract_over(b, &names, 0))
             .collect();
-        self.intern(CoreNode::Bind { binder, vars: slots, bodies })
+        self.intern(CoreNode::Bind {
+            binder,
+            vars: slots,
+            bodies,
+        })
     }
 
     /// A bound occurrence: `(bvar k)`.
@@ -665,7 +693,9 @@ impl ObjectGraph {
             // Last-declared is index 0, so a later slot shadows an earlier one.
             return self.bvar(depth + (names.len() - 1 - k));
         }
-        self.map_children(id, depth, &mut |g, child, d| g.abstract_over(child, names, d))
+        self.map_children(id, depth, &mut |g, child, d| {
+            g.abstract_over(child, names, d)
+        })
     }
 
     /// Replace `(bvar …)` with `names`, `depth` binders in. Inverse of
@@ -705,7 +735,11 @@ impl ObjectGraph {
                 let operands = operands.into_iter().map(|o| f(self, o, depth)).collect();
                 self.intern(CoreNode::Apply { operator, operands })
             }
-            Some(CoreNode::Bind { binder, vars, bodies }) => {
+            Some(CoreNode::Bind {
+                binder,
+                vars,
+                bodies,
+            }) => {
                 let inner = vars.len();
                 let mut slots = Vec::with_capacity(inner);
                 for (j, slot) in vars.iter().enumerate() {
@@ -717,7 +751,11 @@ impl ObjectGraph {
                     .into_iter()
                     .map(|b| f(self, b, depth + inner))
                     .collect();
-                self.intern(CoreNode::Bind { binder, vars: slots, bodies })
+                self.intern(CoreNode::Bind {
+                    binder,
+                    vars: slots,
+                    bodies,
+                })
             }
             _ => id,
         }
@@ -729,18 +767,23 @@ impl ObjectGraph {
     /// This is the other half of locally-nameless. Storage is canonical so that
     /// alpha-equivalent facts share an identity; traversal is named so that
     /// nothing downstream has to do index arithmetic.
-    pub fn open_binder(
-        &mut self,
-        id: ObjectId,
-    ) -> Option<(ObjectId, Vec<Binding>, Vec<ObjectId>)> {
-        let Some(CoreNode::Bind { binder, vars, bodies }) = self.get(id).cloned() else {
+    pub fn open_binder(&mut self, id: ObjectId) -> Option<(ObjectId, Vec<Binding>, Vec<ObjectId>)> {
+        let Some(CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        }) = self.get(id).cloned()
+        else {
             return None;
         };
         let fresh: Vec<ObjectId> = (0..vars.len()).map(|_| self.fresh()).collect();
         let mut out = Vec::with_capacity(vars.len());
         for (j, slot) in vars.iter().enumerate() {
             let domain = slot.domain.map(|d| self.instantiate(d, &fresh[..j], 0));
-            out.push(Binding { var: fresh[j], domain });
+            out.push(Binding {
+                var: fresh[j],
+                domain,
+            });
         }
         let bodies = bodies
             .into_iter()
@@ -774,7 +817,11 @@ impl ObjectGraph {
                 v.extend(operands.iter().copied());
                 v
             }
-            Some(CoreNode::Bind { binder, vars, bodies }) => {
+            Some(CoreNode::Bind {
+                binder,
+                vars,
+                bodies,
+            }) => {
                 let mut v = vec![*binder];
                 for b in vars {
                     if let Some(d) = b.domain {
@@ -820,7 +867,11 @@ impl ObjectGraph {
         let mut map: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
         for id in self.reachable(root) {
             // Reserve first so a cyclic body can refer to its own new id.
-            let new = if id.0 < wk::FIRST_FREE.0 { id } else { dst.alloc() };
+            let new = if id.0 < wk::FIRST_FREE.0 {
+                id
+            } else {
+                dst.alloc()
+            };
             map.insert(id, new);
         }
         for (old, new) in &map {
@@ -840,11 +891,17 @@ fn remap(node: &CoreNode, map: &BTreeMap<ObjectId, ObjectId>) -> CoreNode {
             operator: m(operator),
             operands: operands.iter().map(m).collect(),
         },
-        CoreNode::Bind { binder, vars, bodies } => CoreNode::Bind {
+        CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        } => CoreNode::Bind {
             binder: m(binder),
             vars: vars
                 .iter()
-                .map(|b| Binder { domain: b.domain.as_ref().map(m) })
+                .map(|b| Binder {
+                    domain: b.domain.as_ref().map(m),
+                })
                 .collect(),
             bodies: bodies.iter().map(m).collect(),
         },
@@ -905,7 +962,11 @@ fn encode(node: &CoreNode, h: &mut blake3::Hasher) {
                 h.update(&o.0.to_le_bytes());
             }
         }
-        CoreNode::Bind { binder, vars, bodies } => {
+        CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        } => {
             h.update(b"bind\0");
             h.update(&binder.0.to_le_bytes());
             // No variable id is hashed: a stored binder has none. That is

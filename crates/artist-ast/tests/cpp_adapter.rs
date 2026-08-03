@@ -51,7 +51,10 @@ fn struct_fields_and_class_field_surfaced() {
     let s = run(&["map", FIXTURE]);
     assert!(s.contains("int x"), "struct field x missing:\n{s}");
     assert!(s.contains("int y"), "struct field y missing:\n{s}");
-    assert!(s.contains("int sides_"), "private class field missing:\n{s}");
+    assert!(
+        s.contains("int sides_"),
+        "private class field missing:\n{s}"
+    );
 }
 
 #[test]

@@ -14,8 +14,8 @@ mod outline;
 pub mod output;
 mod read;
 mod short_id;
-mod tree_jobs;
 pub mod skeleton;
+mod tree_jobs;
 mod workspace;
 mod write;
 

@@ -141,13 +141,16 @@ fn json_output_matches_squeeze_schema() {
         out.contains("ast-bro.squeeze.v1"),
         "missing JSON schema id:\n{out}"
     );
-    assert!(out.contains("\"emitted\""), "missing 'emitted' field:\n{out}");
+    assert!(
+        out.contains("\"emitted\""),
+        "missing 'emitted' field:\n{out}"
+    );
 
     // It must be valid JSON. We avoid a hard dep on a JSON crate's typed model
     // and instead do a lenient structural parse with serde_json::Value, which
     // is already a transitive dependency of the project.
-    let v: serde_json::Value =
-        serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not valid JSON: {e}\n{out}"));
+    let v: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON: {e}\n{out}"));
     assert_eq!(
         v.get("schema").and_then(|s| s.as_str()),
         Some("ast-bro.squeeze.v1"),
@@ -178,11 +181,14 @@ fn json_compact_is_single_line() {
         "compact JSON missing schema id:\n{out}"
     );
     // Compact JSON should still parse.
-    let _v: serde_json::Value =
-        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("compact stdout not valid JSON: {e}\n{out}"));
+    let _v: serde_json::Value = serde_json::from_str(out.trim())
+        .unwrap_or_else(|e| panic!("compact stdout not valid JSON: {e}\n{out}"));
     // pretty = !compact, so compact output is a single line (sans trailing newline).
     let line_count = out.trim_end_matches('\n').lines().count();
-    assert_eq!(line_count, 1, "compact JSON should be one line, got {line_count}:\n{out}");
+    assert_eq!(
+        line_count, 1,
+        "compact JSON should be one line, got {line_count}:\n{out}"
+    );
 }
 
 #[test]
@@ -196,7 +202,11 @@ fn raw_flag_emits_original_without_legend() {
     let out = run_ok(&["squeeze", path_str, "--raw"]);
 
     // --raw prints a `[raw ...]` header and NO legend / no squeeze claim.
-    assert!(out.contains("[raw"), "expected '[raw ...]' header:\n{}", &out[..out.len().min(200)]);
+    assert!(
+        out.contains("[raw"),
+        "expected '[raw ...]' header:\n{}",
+        &out[..out.len().min(200)]
+    );
     assert!(
         !out.contains("# legend:"),
         "--raw must not print a legend:\n{}",
@@ -230,12 +240,27 @@ fn line_range_limits_considered_lines() {
     let out = run_ok(&["squeeze", path_str, "2:4", "--raw"]);
 
     // Only lines 2..=4 should be considered.
-    assert!(out.contains("LINE_BRAVO"), "range should include line 2:\n{out}");
-    assert!(out.contains("LINE_CHARLIE"), "range should include line 3:\n{out}");
-    assert!(out.contains("LINE_DELTA"), "range should include line 4:\n{out}");
+    assert!(
+        out.contains("LINE_BRAVO"),
+        "range should include line 2:\n{out}"
+    );
+    assert!(
+        out.contains("LINE_CHARLIE"),
+        "range should include line 3:\n{out}"
+    );
+    assert!(
+        out.contains("LINE_DELTA"),
+        "range should include line 4:\n{out}"
+    );
     // Lines 1 and 5 are outside the range and must be excluded from the body.
-    assert!(!out.contains("LINE_ALPHA"), "line 1 should be excluded by range 2:4:\n{out}");
-    assert!(!out.contains("LINE_ECHO"), "line 5 should be excluded by range 2:4:\n{out}");
+    assert!(
+        !out.contains("LINE_ALPHA"),
+        "line 1 should be excluded by range 2:4:\n{out}"
+    );
+    assert!(
+        !out.contains("LINE_ECHO"),
+        "line 5 should be excluded by range 2:4:\n{out}"
+    );
 }
 
 #[test]
@@ -246,8 +271,8 @@ fn open_ended_json_range_clamps_end_to_eof() {
     let path_str = path.to_str().unwrap();
 
     let out = run_ok(&["squeeze", path_str, "2:", "--json"]);
-    let v: serde_json::Value =
-        serde_json::from_str(&out).unwrap_or_else(|e| panic!("stdout is not valid JSON: {e}\n{out}"));
+    let v: serde_json::Value = serde_json::from_str(&out)
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON: {e}\n{out}"));
     let range = v
         .get("range")
         .and_then(|r| r.as_object())

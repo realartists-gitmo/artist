@@ -27,6 +27,45 @@ async fn native_messages_round_trip_through_rig_memory() {
 }
 
 #[tokio::test]
+async fn resumed_child_memory_reads_only_its_exact_lineage() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = EventLogWriter::open(dir.path(), "s").unwrap();
+    let (recorder, task) = spawn_writer(writer, None);
+    let attachments = AttachmentStore::new(dir.path().join("attachments"));
+    let root = SessionMemory::new("s", dir.path(), recorder.clone(), attachments.clone());
+    let child_recorder = recorder.child_lineage("delegate-child");
+    let child = SessionMemory::for_lineage(
+        "s:main/delegate-child",
+        "main/delegate-child",
+        dir.path(),
+        child_recorder,
+        attachments,
+    );
+    root.append("s", vec![Message::user("root only")])
+        .await
+        .unwrap();
+    child
+        .append("s:main/delegate-child", vec![Message::user("child only")])
+        .await
+        .unwrap();
+    recorder.flush().await;
+
+    assert_eq!(
+        root.load("s").await.unwrap(),
+        normalized(vec![Message::user("root only")])
+    );
+    assert_eq!(
+        child.load("s:main/delegate-child").await.unwrap(),
+        normalized(vec![Message::user("child only")])
+    );
+
+    drop(root);
+    drop(child);
+    drop(recorder);
+    task.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn compaction_replaces_model_context_without_replacing_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let writer = EventLogWriter::open(dir.path(), "s").unwrap();

@@ -1,4 +1,4 @@
-use super::base::{collapse_ws, count_parse_errors, field_text, LanguageAdapter};
+use super::base::{LanguageAdapter, collapse_ws, count_parse_errors, field_text};
 use crate::core::{CallKind, CallSite, Declaration, DeclarationKind, ParseResult};
 use ast_grep_core::{Doc, Node};
 use std::path::Path;
@@ -576,8 +576,7 @@ fn _walk_calls_in_body<'a, D: Doc>(node: &Node<'a, D>, src: &[u8], out: &mut Vec
         if let Some(cs) = _call_site_from_invocation(node, src) {
             out.push(cs);
         }
-    } else if kind == "object_creation_expression"
-        || kind == "implicit_object_creation_expression"
+    } else if kind == "object_creation_expression" || kind == "implicit_object_creation_expression"
     {
         if let Some(cs) = _call_site_from_object_creation(node, src) {
             out.push(cs);
@@ -589,10 +588,7 @@ fn _walk_calls_in_body<'a, D: Doc>(node: &Node<'a, D>, src: &[u8], out: &mut Vec
     }
 }
 
-fn _call_site_from_invocation<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
+fn _call_site_from_invocation<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     let func = node.field("function")?;
     let (name, receiver) = _split_callee(&func, src)?;
     let line = node.start_pos().line() as u32 + 1;
@@ -604,10 +600,7 @@ fn _call_site_from_invocation<'a, D: Doc>(
     })
 }
 
-fn _call_site_from_object_creation<'a, D: Doc>(
-    node: &Node<'a, D>,
-    src: &[u8],
-) -> Option<CallSite> {
+fn _call_site_from_object_creation<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<CallSite> {
     let type_node = node.field("type")?;
     let raw = String::from_utf8_lossy(&src[type_node.range()]).to_string();
     let name = _last_type_segment(&raw);
@@ -635,16 +628,14 @@ fn _split_callee<'a, D: Doc>(node: &Node<'a, D>, src: &[u8]) -> Option<(String, 
             let object = node.field("expression");
             let name_node = node.field("name")?;
             let raw = String::from_utf8_lossy(&src[name_node.range()]).to_string();
-            let recv = object
-                .map(|o| collapse_ws(&String::from_utf8_lossy(&src[o.range()])));
+            let recv = object.map(|o| collapse_ws(&String::from_utf8_lossy(&src[o.range()])));
             Some((_strip_generics(&raw), recv))
         }
         "qualified_name" => {
             let name_node = node.field("name")?;
             let qualifier = node.field("qualifier");
             let raw = String::from_utf8_lossy(&src[name_node.range()]).to_string();
-            let recv = qualifier
-                .map(|q| collapse_ws(&String::from_utf8_lossy(&src[q.range()])));
+            let recv = qualifier.map(|q| collapse_ws(&String::from_utf8_lossy(&src[q.range()])));
             Some((_strip_generics(&raw), recv))
         }
         "alias_qualified_name" => {

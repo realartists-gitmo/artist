@@ -27,7 +27,9 @@ fn run_ok(args: &[&str]) -> String {
     assert!(
         code == 0,
         "expected exit 0, got {}\nstdout: {}\nstderr: {}",
-        code, stdout, stderr
+        code,
+        stdout,
+        stderr
     );
     stdout
 }
@@ -61,11 +63,7 @@ fn rust_simple_reverse_deps() {
 
 #[test]
 fn rust_cycle_detected() {
-    let (code, stdout, _stderr) = run(&[
-        "cycles",
-        "tests/fixtures/deps/rust_cycle",
-        "--rebuild",
-    ]);
+    let (code, stdout, _stderr) = run(&["cycles", "tests/fixtures/deps/rust_cycle", "--rebuild"]);
     assert_eq!(code, 3, "cycles command should exit 3 when cycle present");
     assert!(stdout.contains("cycle"), "missing cycle word: {stdout}");
     assert!(stdout.contains("a.rs"), "missing a.rs: {stdout}");
@@ -74,13 +72,12 @@ fn rust_cycle_detected() {
 
 #[test]
 fn rust_simple_no_cycle() {
-    let (code, stdout, _) = run(&[
-        "cycles",
-        "tests/fixtures/deps/rust_simple",
-        "--rebuild",
-    ]);
+    let (code, stdout, _) = run(&["cycles", "tests/fixtures/deps/rust_simple", "--rebuild"]);
     assert_eq!(code, 0, "expected exit 0 (no cycles): {stdout}");
-    assert!(stdout.contains("no cycles"), "expected no cycles message: {stdout}");
+    assert!(
+        stdout.contains("no cycles"),
+        "expected no cycles message: {stdout}"
+    );
 }
 
 // ---- Python ----
@@ -94,7 +91,10 @@ fn python_relative_from_import() {
         "1",
         "--rebuild",
     ]);
-    assert!(s.contains("helpers.py"), "expected helpers.py in deps:\n{s}");
+    assert!(
+        s.contains("helpers.py"),
+        "expected helpers.py in deps:\n{s}"
+    );
 }
 
 #[test]
@@ -225,15 +225,15 @@ fn cache_round_trip_returns_same_graph() {
         "--json",
         "--rebuild",
     ]);
-    let s2 = run_ok(&[
-        "graph",
-        "tests/fixtures/deps/rust_simple",
-        "--json",
-    ]);
+    let s2 = run_ok(&["graph", "tests/fixtures/deps/rust_simple", "--json"]);
     // Strip `built_at` since it differs run-to-run.
     let extract = |s: &str| {
         let v: serde_json::Value = serde_json::from_str(s).unwrap();
-        (v["file_count"].clone(), v["edge_count"].clone(), v["edges"].clone())
+        (
+            v["file_count"].clone(),
+            v["edge_count"].clone(),
+            v["edges"].clone(),
+        )
     };
     let (f1, e1, edges1) = extract(&s1);
     let (f2, e2, edges2) = extract(&s2);
@@ -382,7 +382,10 @@ fn cpp_reverse_deps() {
     ]);
     // util.h is included by lib.h and util.cpp; lib.h is included by main.cpp.
     assert!(s.contains("lib.h"), "expected lib.h as importer:\n{s}");
-    assert!(s.contains("util.cpp"), "expected util.cpp as importer:\n{s}");
+    assert!(
+        s.contains("util.cpp"),
+        "expected util.cpp as importer:\n{s}"
+    );
 }
 
 // ---- Ruby ----

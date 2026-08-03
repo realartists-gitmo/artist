@@ -8,10 +8,10 @@
 
 use artist_logic::graph_eval::Knowledge;
 use artist_logic::{Evidential, GraphEvaluator, GraphStructure, ObjectGraph, wk};
+use artist_memory::MemoryStore;
 use artist_memory::relational::{
     RelationalView, assert_stmt, assert_stmt_at, intern, oid, retract_stmt_at, well_known,
 };
-use artist_memory::{MemoryStore};
 use tempfile::TempDir;
 
 async fn store() -> (TempDir, MemoryStore) {
@@ -31,7 +31,9 @@ async fn sorts_and_closure_are_facts_not_schema() {
     let exists = intern(&s, "exists").await.expect("intern");
 
     for e in [a, b] {
-        assert_stmt(&s, well_known::TYPE, &[e, path], "t").await.expect("type");
+        assert_stmt(&s, well_known::TYPE, &[e, path], "t")
+            .await
+            .expect("type");
     }
     assert_stmt(&s, exists, &[a], "t").await.expect("exists");
 
@@ -42,10 +44,16 @@ async fn sorts_and_closure_are_facts_not_schema() {
 
     // No authority yet: absence proves nothing.
     let r = ev.eval(&mut g, missing, &view, 10_000);
-    assert_eq!(r.evidential(), Evidential::Open, "not-known, not known-false");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "not-known, not known-false"
+    );
 
     // One written fact tightens every negation over it.
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[exists], "t").await.expect("r");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[exists], "t")
+        .await
+        .expect("r");
     let view = RelationalView::load(&s).await.expect("reload");
     let r = ev.eval(&mut g, missing, &view, 10_000);
     assert_eq!(r.evidential(), Evidential::Refuted);
@@ -66,7 +74,11 @@ async fn arity_is_unbounded_in_storage() {
 
     let view = RelationalView::load(&s).await.expect("load");
     let lifted: Vec<_> = args.iter().map(|a| oid(*a)).collect();
-    assert_eq!(view.known(oid(wide), &lifted), Knowledge::Holds, "7-ary survives");
+    assert_eq!(
+        view.known(oid(wide), &lifted),
+        Knowledge::Holds,
+        "7-ary survives"
+    );
 }
 
 /// The store remembers what it used to believe.
@@ -77,9 +89,13 @@ async fn past_beliefs_survive_retraction() {
     let adam = intern(&s, "adam").await.expect("intern");
     let tabs = intern(&s, "tabs").await.expect("intern");
 
-    let id = assert_stmt_at(&s, p, &[adam, tabs], "t", Some(1_000)).await.expect("a");
+    let id = assert_stmt_at(&s, p, &[adam, tabs], "t", Some(1_000))
+        .await
+        .expect("a");
     retract_stmt_at(&s, id, Some(2_000)).await.expect("r");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t").await.expect("res");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t")
+        .await
+        .expect("res");
 
     let view = RelationalView::load(&s).await.expect("load");
     let mut g = ObjectGraph::new();
@@ -87,7 +103,10 @@ async fn past_beliefs_survive_retraction() {
     let held = g.apply(oid(p), vec![oid(adam), oid(tabs)]);
 
     // Now: no longer believed.
-    assert_eq!(ev.eval(&mut g, held, &view, 10_000).evidential(), Evidential::Refuted);
+    assert_eq!(
+        ev.eval(&mut g, held, &view, 10_000).evidential(),
+        Evidential::Refuted
+    );
 
     // Then: believed. Supersession is history the logic can see, not a flag.
     let when = g.int(1_500);
@@ -116,7 +135,9 @@ async fn asserted_identity_round_trips() {
         "two names, no asserted link"
     );
 
-    assert_stmt(&s, well_known::IS, &[short, full], "t").await.expect("is");
+    assert_stmt(&s, well_known::IS, &[short, full], "t")
+        .await
+        .expect("is");
     let view = RelationalView::load(&s).await.expect("reload");
     assert_eq!(
         view.known(oid(p), &[oid(adam), oid(short)]),
@@ -186,7 +207,9 @@ async fn a_stored_rule_fires_against_the_real_store() {
     let touches = intern(&s, "touches-parser").await.expect("intern");
     let needs = intern(&s, "needs-review").await.expect("intern");
     let commit = intern(&s, "c1").await.expect("intern");
-    assert_stmt(&s, touches, &[commit], "t").await.expect("fact");
+    assert_stmt(&s, touches, &[commit], "t")
+        .await
+        .expect("fact");
 
     // ∀x. touches-parser(x) → needs-review(x)
     let mut g = ObjectGraph::new();
@@ -236,7 +259,9 @@ async fn an_unasserted_rule_does_not_fire() {
     let touches = intern(&s, "touches-parser").await.expect("intern");
     let needs = intern(&s, "needs-review").await.expect("intern");
     let commit = intern(&s, "c1").await.expect("intern");
-    assert_stmt(&s, touches, &[commit], "t").await.expect("fact");
+    assert_stmt(&s, touches, &[commit], "t")
+        .await
+        .expect("fact");
 
     let mut g = ObjectGraph::new();
     let x = g.fresh();
@@ -252,7 +277,9 @@ async fn an_unasserted_rule_does_not_fire() {
 
     let goal = g.apply(oid(needs), vec![oid(commit)]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &view, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &view, 100_000)
+            .evidential(),
         Evidential::Open,
         "an expression nobody asserted must not derive anything"
     );
@@ -271,8 +298,12 @@ async fn learning_a_second_name_does_not_erase_the_fact() {
     let short = intern(&s, "chinmay").await.expect("intern");
     let full = intern(&s, "chinmay-mehta").await.expect("intern");
 
-    assert_stmt(&s, trusts, &[adam, short], "t").await.expect("fact");
-    assert_stmt(&s, well_known::IS, &[short, full], "t").await.expect("is");
+    assert_stmt(&s, trusts, &[adam, short], "t")
+        .await
+        .expect("fact");
+    assert_stmt(&s, well_known::IS, &[short, full], "t")
+        .await
+        .expect("is");
 
     let view = RelationalView::load(&s).await.expect("load");
     for name in [short, full] {
@@ -291,7 +322,9 @@ async fn an_unclosed_sort_does_not_license_a_universal() {
     let person = intern(&s, "Person").await.expect("intern");
     let mortal = intern(&s, "mortal").await.expect("intern");
     let adam = intern(&s, "adam").await.expect("intern");
-    assert_stmt(&s, well_known::TYPE, &[adam, person], "t").await.expect("type");
+    assert_stmt(&s, well_known::TYPE, &[adam, person], "t")
+        .await
+        .expect("type");
     assert_stmt(&s, mortal, &[adam], "t").await.expect("fact");
 
     let view = RelationalView::load(&s).await.expect("load");
@@ -300,7 +333,9 @@ async fn an_unclosed_sort_does_not_license_a_universal() {
     let body = g.apply(oid(mortal), vec![v]);
     let q = g.quantify(wk::FORALL, v, Some(oid(person)), body);
     assert_ne!(
-        GraphEvaluator::new().eval(&mut g, q, &view, 50_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, q, &view, 50_000)
+            .evidential(),
         Evidential::Supported,
         "nothing said those were all the people"
     );
@@ -345,7 +380,9 @@ async fn an_authority_does_not_reach_back_before_it_existed() {
     let (_d, s) = store().await;
     let green = intern(&s, "green").await.expect("intern");
     let artist = intern(&s, "artist").await.expect("intern");
-    assert_stmt_at(&s, green, &[artist], "t", Some(5000)).await.expect("fact");
+    assert_stmt_at(&s, green, &[artist], "t", Some(5000))
+        .await
+        .expect("fact");
     assert_stmt_at(&s, well_known::HAS_RESOLVER, &[green], "t", Some(5000))
         .await
         .expect("resolver");
@@ -374,7 +411,9 @@ async fn authority_does_not_span_arities() {
         intern(&s, "c").await.expect("intern"),
     );
     assert_stmt(&s, meets, &[a, b], "t").await.expect("fact");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[meets], "t").await.expect("resolver");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[meets], "t")
+        .await
+        .expect("resolver");
 
     let view = RelationalView::load(&s).await.expect("load");
     assert_eq!(
@@ -398,11 +437,21 @@ async fn a_dated_universal_uses_the_membership_of_that_instant() {
     let old = intern(&s, "old.rs").await.expect("intern");
     let new = intern(&s, "new.rs").await.expect("intern");
 
-    assert_stmt_at(&s, well_known::TYPE, &[old, path], "t", Some(1000)).await.expect("t");
-    assert_stmt_at(&s, compiles, &[old], "t", Some(1000)).await.expect("t");
-    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[compiles], "t", Some(1000)).await.expect("t");
-    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[path], "t", Some(1000)).await.expect("t");
-    assert_stmt_at(&s, well_known::TYPE, &[new, path], "t", Some(9000)).await.expect("t");
+    assert_stmt_at(&s, well_known::TYPE, &[old, path], "t", Some(1000))
+        .await
+        .expect("t");
+    assert_stmt_at(&s, compiles, &[old], "t", Some(1000))
+        .await
+        .expect("t");
+    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[compiles], "t", Some(1000))
+        .await
+        .expect("t");
+    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[path], "t", Some(1000))
+        .await
+        .expect("t");
+    assert_stmt_at(&s, well_known::TYPE, &[new, path], "t", Some(9000))
+        .await
+        .expect("t");
 
     let view = RelationalView::load(&s).await.expect("load");
     let mut g = ObjectGraph::new();
@@ -412,7 +461,9 @@ async fn a_dated_universal_uses_the_membership_of_that_instant() {
     let when = g.int(1500);
     let dated = g.apply(wk::AT, vec![when, q]);
     assert_ne!(
-        GraphEvaluator::new().eval(&mut g, dated, &view, 50_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, dated, &view, 50_000)
+            .evidential(),
         Evidential::Refuted,
         "new.rs did not exist at t=1500 and cannot be a counterexample there"
     );
@@ -428,12 +479,20 @@ async fn a_backdated_write_moves_the_snapshot() {
         intern(&s, "a").await.expect("intern"),
         intern(&s, "b").await.expect("intern"),
     );
-    assert_stmt_at(&s, p, &[a], "t", Some(9_000_000)).await.expect("late");
+    assert_stmt_at(&s, p, &[a], "t", Some(9_000_000))
+        .await
+        .expect("late");
     let before = RelationalView::load(&s).await.expect("load").snapshot();
 
-    assert_stmt_at(&s, p, &[b], "t", Some(1000)).await.expect("backdated");
+    assert_stmt_at(&s, p, &[b], "t", Some(1000))
+        .await
+        .expect("backdated");
     let after = RelationalView::load(&s).await.expect("load");
-    assert_ne!(before, after.snapshot(), "the universe changed; the version must too");
+    assert_ne!(
+        before,
+        after.snapshot(),
+        "the universe changed; the version must too"
+    );
     assert_eq!(after.known(oid(p), &[oid(b)]), Knowledge::Holds);
 }
 
@@ -451,9 +510,15 @@ async fn a_dated_query_sees_the_same_identities_as_an_undated_one() {
     let full = intern(&s, "adam-humphrey").await.expect("i");
     let tabs = intern(&s, "tabs").await.expect("i");
 
-    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[prefers], "t", Some(500)).await.expect("r");
-    assert_stmt_at(&s, prefers, &[adam, tabs], "t", Some(1000)).await.expect("f");
-    assert_stmt_at(&s, well_known::IS, &[adam, full], "t", Some(1500)).await.expect("is");
+    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[prefers], "t", Some(500))
+        .await
+        .expect("r");
+    assert_stmt_at(&s, prefers, &[adam, tabs], "t", Some(1000))
+        .await
+        .expect("f");
+    assert_stmt_at(&s, well_known::IS, &[adam, full], "t", Some(1500))
+        .await
+        .expect("is");
 
     let view = RelationalView::load(&s).await.expect("load");
     for name in [adam, full] {
@@ -478,9 +543,13 @@ async fn a_cycle_of_identities_has_one_representative() {
         intern(&s, "c").await.expect("i"),
     );
     assert_stmt(&s, p, &[a], "t").await.expect("f");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t").await.expect("r");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t")
+        .await
+        .expect("r");
     for (x, y) in [(a, b), (b, c), (c, a)] {
-        assert_stmt(&s, well_known::IS, &[x, y], "t").await.expect("is");
+        assert_stmt(&s, well_known::IS, &[x, y], "t")
+            .await
+            .expect("is");
     }
 
     let view = RelationalView::load(&s).await.expect("load");
@@ -509,7 +578,9 @@ async fn a_claim_on_file_both_ways_is_conflicted() {
     let norm = g.apply(wk::OBLIGED, vec![oid(fmt)]);
     store_expression(&s, &g, norm).await.expect("store");
 
-    record_assertion(&s, &Assertion::affirm(norm, 1)).await.expect("affirm");
+    record_assertion(&s, &Assertion::affirm(norm, 1))
+        .await
+        .expect("affirm");
     let mut deny = Assertion::affirm(norm, 2);
     deny.polarity = Polarity::Deny;
     record_assertion(&s, &deny.sealed()).await.expect("deny");
@@ -532,22 +603,37 @@ async fn a_claim_on_file_both_ways_is_conflicted() {
 async fn an_authority_gap_does_not_license_refutation() {
     let (_d, s) = store().await;
     let exists = intern(&s, "exists").await.expect("i");
-    let (x, y) = (intern(&s, "x").await.expect("i"), intern(&s, "y").await.expect("i"));
-    assert_stmt_at(&s, exists, &[x], "t", Some(50)).await.expect("f");
+    let (x, y) = (
+        intern(&s, "x").await.expect("i"),
+        intern(&s, "y").await.expect("i"),
+    );
+    assert_stmt_at(&s, exists, &[x], "t", Some(50))
+        .await
+        .expect("f");
     let id = assert_stmt_at(&s, well_known::HAS_RESOLVER, &[exists], "t", Some(100))
         .await
         .expect("r");
     retract_stmt_at(&s, id, Some(200)).await.expect("retract");
-    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[exists], "t", Some(300)).await.expect("r2");
+    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[exists], "t", Some(300))
+        .await
+        .expect("r2");
 
     let view = RelationalView::load(&s).await.expect("load");
-    assert_eq!(view.known_at(oid(exists), &[oid(y)], 150), Knowledge::Fails, "inside");
+    assert_eq!(
+        view.known_at(oid(exists), &[oid(y)], 150),
+        Knowledge::Fails,
+        "inside"
+    );
     assert_eq!(
         view.known_at(oid(exists), &[oid(y)], 250),
         Knowledge::Unknown,
         "no resolver existed in the gap"
     );
-    assert_eq!(view.known_at(oid(exists), &[oid(y)], 350), Knowledge::Fails, "after");
+    assert_eq!(
+        view.known_at(oid(exists), &[oid(y)], 350),
+        Knowledge::Fails,
+        "after"
+    );
 }
 
 /// **A norm asserted only in another world is not a current fact**, and neither
@@ -598,13 +684,21 @@ async fn affirming_a_rule_moves_the_version() {
     let imp = g.apply(wk::IMPLIES, vec![ante, cons]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
     store_expression(&s, &g, rule).await.expect("store");
-    record_assertion(&s, &Assertion::affirm(rule, 1)).await.expect("affirm");
+    record_assertion(&s, &Assertion::affirm(rule, 1))
+        .await
+        .expect("affirm");
 
     let after = RelationalView::load(&s).await.expect("load");
-    assert_ne!(before, after.snapshot(), "the answers changed; the version must too");
+    assert_ne!(
+        before,
+        after.snapshot(),
+        "the answers changed; the version must too"
+    );
     let goal = g.apply(oid(needs), vec![oid(c1)]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &after, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &after, 100_000)
+            .evidential(),
         Evidential::Supported
     );
 }
@@ -724,10 +818,15 @@ async fn a_rule_not_yet_in_force_does_not_fire() {
     record_assertion(&s, &a.sealed()).await.expect("affirm");
 
     let view = RelationalView::load(&s).await.expect("load");
-    assert!(view.rules(oid(needs)).is_empty(), "not yet in force is not in force");
+    assert!(
+        view.rules(oid(needs)).is_empty(),
+        "not yet in force is not in force"
+    );
     let goal = g.apply(oid(needs), vec![oid(c1)]);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, goal, &view, 100_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, goal, &view, 100_000)
+            .evidential(),
         Evidential::Open
     );
 }
@@ -742,15 +841,28 @@ async fn merging_two_sort_names_keeps_both_memberships() {
     let (_d, s) = store().await;
     let person = intern(&s, "Person").await.expect("i");
     let human = intern(&s, "Human").await.expect("i");
-    let (alice, bob) = (intern(&s, "alice").await.expect("i"), intern(&s, "bob").await.expect("i"));
+    let (alice, bob) = (
+        intern(&s, "alice").await.expect("i"),
+        intern(&s, "bob").await.expect("i"),
+    );
     let mortal = intern(&s, "mortal").await.expect("i");
 
-    assert_stmt(&s, well_known::TYPE, &[alice, person], "t").await.expect("t");
-    assert_stmt(&s, well_known::TYPE, &[bob, human], "t").await.expect("t");
-    assert_stmt(&s, well_known::IS, &[human, person], "t").await.expect("is");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[person], "t").await.expect("r");
+    assert_stmt(&s, well_known::TYPE, &[alice, person], "t")
+        .await
+        .expect("t");
+    assert_stmt(&s, well_known::TYPE, &[bob, human], "t")
+        .await
+        .expect("t");
+    assert_stmt(&s, well_known::IS, &[human, person], "t")
+        .await
+        .expect("is");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[person], "t")
+        .await
+        .expect("r");
     assert_stmt(&s, mortal, &[bob], "t").await.expect("f");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[mortal], "t").await.expect("r");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[mortal], "t")
+        .await
+        .expect("r");
 
     let view = RelationalView::load(&s).await.expect("load");
     let mut g = ObjectGraph::new();
@@ -758,7 +870,9 @@ async fn merging_two_sort_names_keeps_both_memberships() {
     let body = g.apply(oid(mortal), vec![v]);
     let q = g.quantify(wk::FORALL, v, Some(oid(person)), body);
     assert_eq!(
-        GraphEvaluator::new().eval(&mut g, q, &view, 50_000).evidential(),
+        GraphEvaluator::new()
+            .eval(&mut g, q, &view, 50_000)
+            .evidential(),
         Evidential::Refuted,
         "alice is a Person and is not mortal — she cannot be dropped from the sort"
     );
@@ -772,13 +886,24 @@ async fn merging_two_sort_names_keeps_both_memberships() {
 async fn the_present_and_the_log_agree_about_now() {
     let (_d, s) = store().await;
     let p = intern(&s, "p").await.expect("i");
-    let (a, b) = (intern(&s, "a").await.expect("i"), intern(&s, "b").await.expect("i"));
+    let (a, b) = (
+        intern(&s, "a").await.expect("i"),
+        intern(&s, "b").await.expect("i"),
+    );
 
-    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[p], "t", Some(500)).await.expect("r");
-    assert_stmt_at(&s, p, &[a], "t", Some(1000)).await.expect("f");
-    let id = assert_stmt_at(&s, p, &[b], "t", Some(1500)).await.expect("f");
+    assert_stmt_at(&s, well_known::HAS_RESOLVER, &[p], "t", Some(500))
+        .await
+        .expect("r");
+    assert_stmt_at(&s, p, &[a], "t", Some(1000))
+        .await
+        .expect("f");
+    let id = assert_stmt_at(&s, p, &[b], "t", Some(1500))
+        .await
+        .expect("f");
     retract_stmt_at(&s, id, Some(2000)).await.expect("retract");
-    assert_stmt_at(&s, well_known::IS, &[a, b], "t", Some(600)).await.expect("is");
+    assert_stmt_at(&s, well_known::IS, &[a, b], "t", Some(600))
+        .await
+        .expect("is");
 
     let view = RelationalView::load(&s).await.expect("load");
     for name in [a, b] {
@@ -828,12 +953,23 @@ async fn a_view_is_not_a_live_cursor() {
 async fn conflicting_denotations_decide_nothing() {
     let (_d, s) = store().await;
     let term = intern(&s, "duration-of-suite").await.expect("i");
-    let (four, nine) = (intern(&s, "four").await.expect("i"), intern(&s, "nine").await.expect("i"));
-    assert_stmt(&s, well_known::VALUE, &[term, four], "t").await.expect("v");
-    assert_stmt(&s, well_known::VALUE, &[term, nine], "t").await.expect("v");
+    let (four, nine) = (
+        intern(&s, "four").await.expect("i"),
+        intern(&s, "nine").await.expect("i"),
+    );
+    assert_stmt(&s, well_known::VALUE, &[term, four], "t")
+        .await
+        .expect("v");
+    assert_stmt(&s, well_known::VALUE, &[term, nine], "t")
+        .await
+        .expect("v");
 
     let view = RelationalView::load(&s).await.expect("load");
-    assert_eq!(view.value(oid(term)), None, "the store holds two answers, so it has none");
+    assert_eq!(
+        view.value(oid(term)),
+        None,
+        "the store holds two answers, so it has none"
+    );
 }
 
 /// **Sharpness is data.** A predicate declared borderline blocks certified
@@ -848,8 +984,12 @@ async fn declared_indeterminacy_reaches_the_evaluator() {
 
     let mut g = ObjectGraph::new();
     let claim = g.apply(oid(heap), vec![oid(n)]);
-    artist_memory::graph_store::store_expression(&s, &g, claim).await.expect("store");
-    assert_stmt(&s, well_known::INDETERMINATE, &[], "t").await.ok();
+    artist_memory::graph_store::store_expression(&s, &g, claim)
+        .await
+        .expect("store");
+    assert_stmt(&s, well_known::INDETERMINATE, &[], "t")
+        .await
+        .ok();
 
     // Declared over the *proposition*, not the predicate — sharpness is
     // interpretation- and region-relative.
@@ -887,10 +1027,16 @@ async fn a_name_with_two_aliases_keeps_both() {
     let nicholas = intern(&s, "nicholas").await.expect("i");
     let nicky = intern(&s, "nicky").await.expect("i");
 
-    assert_stmt(&s, well_known::IS, &[nick, nicholas], "t").await.expect("is");
-    assert_stmt(&s, well_known::IS, &[nick, nicky], "t").await.expect("is");
+    assert_stmt(&s, well_known::IS, &[nick, nicholas], "t")
+        .await
+        .expect("is");
+    assert_stmt(&s, well_known::IS, &[nick, nicky], "t")
+        .await
+        .expect("is");
     assert_stmt(&s, prefers, &[nicky], "t").await.expect("f");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[prefers], "t").await.expect("r");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[prefers], "t")
+        .await
+        .expect("r");
 
     let view = RelationalView::load(&s).await.expect("load");
     for name in [nick, nicholas, nicky] {
@@ -920,7 +1066,9 @@ async fn a_declared_indeterminacy_reaches_a_query() {
     let claim = g.apply(oid(heap), vec![oid(n)]);
     let decl = g.apply(wk::INDETERMINATE, vec![claim]);
     store_expression(&s, &g, decl).await.expect("store");
-    record_assertion(&s, &Assertion::affirm(decl, 1)).await.expect("affirm");
+    record_assertion(&s, &Assertion::affirm(decl, 1))
+        .await
+        .expect("affirm");
 
     let view = RelationalView::load(&s).await.expect("load");
     assert_eq!(
@@ -948,11 +1096,19 @@ async fn retracting_one_statement_leaves_the_other_standing() {
     let (_d, s) = store().await;
     let p = intern(&s, "p").await.expect("i");
     let a = intern(&s, "a").await.expect("i");
-    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t").await.expect("r");
+    assert_stmt(&s, well_known::HAS_RESOLVER, &[p], "t")
+        .await
+        .expect("r");
 
-    let _first = assert_stmt_at(&s, p, &[a], "t", Some(1000)).await.expect("A");
-    let second = assert_stmt_at(&s, p, &[a], "t", Some(1500)).await.expect("B");
-    retract_stmt_at(&s, second, Some(2000)).await.expect("retract B");
+    let _first = assert_stmt_at(&s, p, &[a], "t", Some(1000))
+        .await
+        .expect("A");
+    let second = assert_stmt_at(&s, p, &[a], "t", Some(1500))
+        .await
+        .expect("B");
+    retract_stmt_at(&s, second, Some(2000))
+        .await
+        .expect("retract B");
 
     let view = RelationalView::load(&s).await.expect("load");
     assert_eq!(
@@ -975,7 +1131,9 @@ async fn rule_selection_is_dated() {
     let touches = intern(&s, "touches").await.expect("i");
     let needs = intern(&s, "needs-review").await.expect("i");
     let c1 = intern(&s, "c1").await.expect("i");
-    assert_stmt_at(&s, touches, &[c1], "t", Some(500)).await.expect("f");
+    assert_stmt_at(&s, touches, &[c1], "t", Some(500))
+        .await
+        .expect("f");
 
     let mut g = ObjectGraph::new();
     let x = g.fresh();
@@ -993,6 +1151,12 @@ async fn rule_selection_is_dated() {
 
     let view = RelationalView::load(&s).await.expect("load");
     assert_eq!(view.rules_at(oid(needs), 1500).len(), 1, "in force at 1500");
-    assert!(view.rules_at(oid(needs), 500).is_empty(), "not yet believed at 500");
-    assert!(view.rules_at(oid(needs), 3000).is_empty(), "no longer believed at 3000");
+    assert!(
+        view.rules_at(oid(needs), 500).is_empty(),
+        "not yet believed at 500"
+    );
+    assert!(
+        view.rules_at(oid(needs), 3000).is_empty(),
+        "no longer believed at 3000"
+    );
 }

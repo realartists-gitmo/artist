@@ -194,8 +194,15 @@ async fn a_revision_leaves_the_old_belief_out_of_recall() {
     .await
     .expect("supersede");
 
-    let hits = s.search_facts("tabs indentation", &[], 5).await.expect("search");
-    assert_eq!(hits.len(), 1, "only the current belief should recall: {hits:?}");
+    let hits = s
+        .search_facts("tabs indentation", &[], 5)
+        .await
+        .expect("search");
+    assert_eq!(
+        hits.len(),
+        1,
+        "only the current belief should recall: {hits:?}"
+    );
     assert_eq!(hits[0].id, new);
     assert!(hits[0].text.starts_with("never"));
     assert!(

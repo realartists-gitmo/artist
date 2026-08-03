@@ -396,13 +396,24 @@ fn _modifiers(d: &Declaration, lang: &str) -> Vec<String> {
         "rust" => &["async", "unsafe", "const", "extern"],
         "python" => &["async"],
         "typescript" => &["async", "static", "abstract", "readonly", "override"],
-        "java" => &["static", "abstract", "final", "synchronized", "default", "native"],
+        "java" => &[
+            "static",
+            "abstract",
+            "final",
+            "synchronized",
+            "default",
+            "native",
+        ],
         "kotlin" => &[
             "suspend", "open", "inner", "value", "inline", "infix", "tailrec", "operator",
             "abstract", "override", "sealed", "final",
         ],
-        "scala" => &["sealed", "final", "abstract", "implicit", "inline", "lazy", "override"],
-        "csharp" => &["partial", "sealed", "static", "abstract", "virtual", "override", "async"],
+        "scala" => &[
+            "sealed", "final", "abstract", "implicit", "inline", "lazy", "override",
+        ],
+        "csharp" => &[
+            "partial", "sealed", "static", "abstract", "virtual", "override", "async",
+        ],
         _ => &[],
     };
     if want.is_empty() {
@@ -414,7 +425,14 @@ fn _modifiers(d: &Declaration, lang: &str) -> Vec<String> {
         "rust" => &["fn", "trait", "struct", "enum", "impl", "type", "mod"],
         "python" => &["def", "class"],
         "typescript" => &[
-            "function", "class", "interface", "enum", "type", "const", "let", "var",
+            "function",
+            "class",
+            "interface",
+            "enum",
+            "type",
+            "const",
+            "let",
+            "var",
         ],
         "java" => &["class", "interface", "enum", "record", "void"],
         "kotlin" => &["fun", "class", "interface", "object", "enum", "val", "var"],
@@ -530,7 +548,10 @@ fn _scan_siblings_for_legend(
         for w in siblings.windows(2) {
             if w[0].kind == w[1].kind
                 && w[0].name == w[1].name
-                && matches!(w[0].kind, Method | Function | Constructor | Destructor | Operator)
+                && matches!(
+                    w[0].kind,
+                    Method | Function | Constructor | Destructor | Operator
+                )
             {
                 *has_overloads = true;
                 break;
@@ -539,7 +560,10 @@ fn _scan_siblings_for_legend(
     }
     for d in siblings {
         if !*has_callable
-            && matches!(d.kind, Method | Function | Constructor | Destructor | Operator)
+            && matches!(
+                d.kind,
+                Method | Function | Constructor | Destructor | Operator
+            )
         {
             *has_callable = true;
         }
@@ -570,7 +594,6 @@ fn _size_label(line_count: usize) -> &'static str {
         _ => "xlarge",
     }
 }
-
 
 pub fn render_map(result: &ParseResult, opts: &MapOptions) -> String {
     let mut lines = vec![_format_file_header(
@@ -849,10 +872,7 @@ fn _digest_one(result: &ParseResult, opts: &DigestOptions) -> Vec<String> {
         }
         // Prefer `native_kind` (`trait`, `case class`, `data class`, …)
         // when the adapter set it; fall back to the canonical kind.
-        let kind_str = t
-            .native_kind
-            .as_deref()
-            .unwrap_or(t.kind.as_str());
+        let kind_str = t.native_kind.as_deref().unwrap_or(t.kind.as_str());
         // Modifiers (abstract / sealed / final / partial / …) — but skip
         // ones the native_kind already names, so we don't render
         // "sealed sealed class" for `sealed class Foo`.
@@ -892,8 +912,7 @@ fn _digest_one(result: &ParseResult, opts: &DigestOptions) -> Vec<String> {
 
     if !free_functions.is_empty() {
         let collapsed = _collapse_overloads(free_functions.iter().map(|d| (*d).clone()).collect());
-        let shown =
-            &collapsed[..std::cmp::min(collapsed.len(), opts.max_members_per_type)];
+        let shown = &collapsed[..std::cmp::min(collapsed.len(), opts.max_members_per_type)];
         let tokens: Vec<String> = shown.iter().map(_format_member_token).collect();
         lines.extend(_wrap_tokens(&tokens, 100, "    "));
     }
@@ -999,9 +1018,13 @@ fn _format_inline_attrs(attrs: &[String]) -> String {
     if joined.len() > 40 {
         // Fall back to a short marker so the reader knows attrs exist
         // without flooding the line.
-        return format!("[{}attr{}]", attrs.len(), if attrs.len() == 1 { "" } else { "s" })
-            .dimmed()
-            .to_string();
+        return format!(
+            "[{}attr{}]",
+            attrs.len(),
+            if attrs.len() == 1 { "" } else { "s" }
+        )
+        .dimmed()
+        .to_string();
     }
     joined.dimmed().to_string()
 }

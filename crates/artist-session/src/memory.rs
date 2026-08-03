@@ -19,6 +19,7 @@ use crate::{
 #[derive(Clone)]
 pub struct SessionMemory {
     session_id: String,
+    lineage: String,
     session_dir: PathBuf,
     recorder: Recorder,
     attachments: AttachmentStore,
@@ -33,6 +34,25 @@ impl SessionMemory {
     ) -> Self {
         Self {
             session_id: session_id.into(),
+            lineage: crate::MAIN_LINEAGE.into(),
+            session_dir: session_dir.as_ref().to_owned(),
+            recorder,
+            attachments,
+            cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Create a conversation memory projected from one exact agent lineage.
+    pub fn for_lineage(
+        conversation_id: impl Into<String>,
+        lineage: impl Into<String>,
+        session_dir: impl AsRef<Path>,
+        recorder: Recorder,
+        attachments: AttachmentStore,
+    ) -> Self {
+        Self {
+            session_id: conversation_id.into(),
+            lineage: lineage.into(),
             session_dir: session_dir.as_ref().to_owned(),
             recorder,
             attachments,
@@ -62,9 +82,17 @@ impl SessionMemory {
         let events = EventLogReader::new(&self.session_dir)
             .read_all()
             .map_err(memory_error)?;
-        let native = crate::history::has_native_conversation(&events, None);
-        let mut messages = build_history(&events, &self.attachments, &HistoryOptions::default())
-            .map_err(memory_error)?;
+        let native =
+            crate::history::has_native_conversation_for_lineage(&events, &self.lineage, None);
+        let mut messages = build_history(
+            &events,
+            &self.attachments,
+            &HistoryOptions {
+                lineage: &self.lineage,
+                ..HistoryOptions::default()
+            },
+        )
+        .map_err(memory_error)?;
         crate::convert::rehydrate_images(&mut messages, &self.attachments);
         let messages = normalize(messages)?;
         *cache = Some((messages.clone(), native));
@@ -74,9 +102,17 @@ impl SessionMemory {
     /// Rebuild the shared in-memory projection from the currently visible events.
     /// All clones observe the replacement immediately.
     pub fn reload_from_events(&self, events: &[crate::Envelope]) -> Result<(), MemoryError> {
-        let native = crate::history::has_native_conversation(events, None);
-        let mut messages = build_history(events, &self.attachments, &HistoryOptions::default())
-            .map_err(memory_error)?;
+        let native =
+            crate::history::has_native_conversation_for_lineage(events, &self.lineage, None);
+        let mut messages = build_history(
+            events,
+            &self.attachments,
+            &HistoryOptions {
+                lineage: &self.lineage,
+                ..HistoryOptions::default()
+            },
+        )
+        .map_err(memory_error)?;
         crate::convert::rehydrate_images(&mut messages, &self.attachments);
         *self
             .cache

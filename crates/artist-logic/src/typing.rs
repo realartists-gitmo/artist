@@ -46,9 +46,7 @@ fn infer(g: &mut ObjectGraph, node: ObjectId, depth: u32) -> Typing {
             LiteralValue::Int(_) => wk::INT_TYPE,
             LiteralValue::Decimal { .. } => wk::INT_TYPE,
             LiteralValue::Bool(_) => wk::PROP_TYPE,
-            LiteralValue::Text(_) | LiteralValue::Bytes(_) => {
-                g.atom("Text")
-            }
+            LiteralValue::Text(_) | LiteralValue::Bytes(_) => g.atom("Text"),
         }),
         Some(CoreNode::External(_)) | Some(CoreNode::Opaque { .. }) => Typing::Unknown,
         Some(CoreNode::Atom { .. }) => {
@@ -58,18 +56,18 @@ fn infer(g: &mut ObjectGraph, node: ObjectId, depth: u32) -> Typing {
                 Typing::Unknown
             }
         }
-        Some(CoreNode::Apply { operator, operands }) => {
-            apply_rule(g, operator, &operands, depth)
-        }
-        Some(CoreNode::Bind { binder, vars, bodies }) => match binder {
+        Some(CoreNode::Apply { operator, operands }) => apply_rule(g, operator, &operands, depth),
+        Some(CoreNode::Bind {
+            binder,
+            vars,
+            bodies,
+        }) => match binder {
             wk::FORALL | wk::EXISTS => {
                 for b in &bodies {
                     if let Typing::Known(t) = infer(g, *b, depth + 1)
                         && t != wk::PROP_TYPE
                     {
-                        return Typing::Mismatch(
-                            "quantifier body must be a proposition".into(),
-                        );
+                        return Typing::Mismatch("quantifier body must be a proposition".into());
                     }
                 }
                 Typing::Known(wk::PROP_TYPE)
@@ -77,8 +75,7 @@ fn infer(g: &mut ObjectGraph, node: ObjectId, depth: u32) -> Typing {
             wk::COUNT | wk::SUM => Typing::Known(wk::INT_TYPE),
             wk::LAMBDA => {
                 // λ over `n` parameters denotes a relation of those domains.
-                let doms: Vec<ObjectId> =
-                    vars.iter().filter_map(|b| b.domain).collect();
+                let doms: Vec<ObjectId> = vars.iter().filter_map(|b| b.domain).collect();
                 if doms.len() != vars.len() {
                     return Typing::Unknown;
                 }
@@ -139,25 +136,35 @@ fn apply_rule(
         wk::CONTAINS | wk::STARTS_WITH | wk::ENDS_WITH => Typing::Known(wk::PROP_TYPE),
         // Quoting lifts a proposition to an expression; `holds` lowers it back.
         wk::QUOTE => Typing::Known(wk::EXPR_TYPE),
-        wk::HOLDS => {
-            match operands.first().map(|o| infer(g, *o, depth + 1)) {
-                Some(Typing::Known(t)) if t != wk::EXPR_TYPE => {
-                    Typing::Mismatch("holds expects a quoted expression".into())
-                }
-                _ => Typing::Known(wk::PROP_TYPE),
+        wk::HOLDS => match operands.first().map(|o| infer(g, *o, depth + 1)) {
+            Some(Typing::Known(t)) if t != wk::EXPR_TYPE => {
+                Typing::Mismatch("holds expects a quoted expression".into())
             }
-        }
-        wk::AT | wk::IN_WORLD | wk::NECESSARILY | wk::POSSIBLY | wk::ALWAYS
-        | wk::EVENTUALLY | wk::SINCE | wk::COUNTERFACTUAL | wk::BEFORE | wk::DURING => {
-            Typing::Known(wk::PROP_TYPE)
-        }
+            _ => Typing::Known(wk::PROP_TYPE),
+        },
+        wk::AT
+        | wk::IN_WORLD
+        | wk::NECESSARILY
+        | wk::POSSIBLY
+        | wk::ALWAYS
+        | wk::EVENTUALLY
+        | wk::SINCE
+        | wk::COUNTERFACTUAL
+        | wk::BEFORE
+        | wk::DURING => Typing::Known(wk::PROP_TYPE),
         // `World` and `Context` are sorts in their own right, not propositions.
         // They fell to the catch-all below and were typed `Prop` — which is how
         // §4's sentence claiming `typing.rs` interprets the type constructors
         // covered them by assertion rather than by code. They were the last two
         // `wk::` constants referenced nowhere outside their own declaration.
-        wk::RELATION_TYPE | wk::FUNCTION_TYPE | wk::PRODUCT_TYPE | wk::SUM_TYPE
-        | wk::REFINEMENT_TYPE | wk::WORLD_TYPE | wk::CONTEXT_TYPE | wk::PROP_TYPE
+        wk::RELATION_TYPE
+        | wk::FUNCTION_TYPE
+        | wk::PRODUCT_TYPE
+        | wk::SUM_TYPE
+        | wk::REFINEMENT_TYPE
+        | wk::WORLD_TYPE
+        | wk::CONTEXT_TYPE
+        | wk::PROP_TYPE
         | wk::EXPR_TYPE => {
             // A type expression inhabits the next universe up.
             let zero = g.int(0);

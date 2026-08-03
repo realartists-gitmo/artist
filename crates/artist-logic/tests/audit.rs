@@ -86,10 +86,21 @@ fn defaulted(g: &mut ObjectGraph) -> (DefaultsEverywhere, ObjectId) {
     let (p, a) = (g.atom("fast"), g.atom("build"));
     let claim = g.apply(p, vec![a]);
     let hedged = g.apply(wk::USUALLY, vec![claim]);
-    (DefaultsEverywhere { world: w, default_for: claim }, hedged)
+    (
+        DefaultsEverywhere {
+            world: w,
+            default_for: claim,
+        },
+        hedged,
+    )
 }
 
-fn eval(g: &mut ObjectGraph, root: ObjectId, s: &dyn GraphStructure, budget: u64) -> (Evidential, ComputeStatus, Bound, Bound) {
+fn eval(
+    g: &mut ObjectGraph,
+    root: ObjectId,
+    s: &dyn GraphStructure,
+    budget: u64,
+) -> (Evidential, ComputeStatus, Bound, Bound) {
     let r = GraphEvaluator::new().eval(g, root, s, budget);
     (r.evidential(), r.compute_status, r.support, r.refutation)
 }
@@ -118,7 +129,10 @@ fn a_universal_over_defaults_is_not_definite() {
         Derivation::Default,
         "…and the defeasibility travels up the scan"
     );
-    assert!(!r.is_definite(), "a universal over defaults is not a definite reading");
+    assert!(
+        !r.is_definite(),
+        "a universal over defaults is not a definite reading"
+    );
 }
 
 /// The worse direction, and the one that should sting: the evaluator refuted a
@@ -133,7 +147,11 @@ fn an_existential_over_defaults_is_not_refuted() {
     let q = g.quantify(wk::EXISTS, v, Some(dom), hedged);
 
     let (instance, ..) = eval(&mut g, hedged, &s, 10_000);
-    assert_eq!(instance, Evidential::Supported, "the sole instance is supported");
+    assert_eq!(
+        instance,
+        Evidential::Supported,
+        "the sole instance is supported"
+    );
     let (ev, ..) = eval(&mut g, q, &s, 50_000);
     assert_ne!(
         ev,
@@ -158,7 +176,11 @@ fn no_scan_site_promotes_or_refutes_a_default() {
         assert_ne!(ev, Evidential::Refuted, "{label} must not refute a default");
         let r = GraphEvaluator::new().eval(&mut g, q, &s, 50_000);
         assert!(!r.is_definite(), "{label} must not settle a default");
-        assert_eq!(r.derivation, Derivation::Default, "{label} loses the defeasibility");
+        assert_eq!(
+            r.derivation,
+            Derivation::Default,
+            "{label} loses the defeasibility"
+        );
     }
 
     // …and the counterfactual, which takes two operands.
@@ -167,7 +189,10 @@ fn no_scan_site_promotes_or_refutes_a_default() {
     let cond = g.atom("merged");
     let q = g.apply(wk::COUNTERFACTUAL, vec![cond, hedged]);
     let r = GraphEvaluator::new().eval(&mut g, q, &s, 50_000);
-    assert!(!r.is_definite(), "a counterfactual must not settle a default");
+    assert!(
+        !r.is_definite(),
+        "a counterfactual must not settle a default"
+    );
 }
 
 /// A `letrec` body that is merely defaulted leaves the tuple *undetermined*,
@@ -185,13 +210,23 @@ fn letrec_does_not_publish_a_relation_built_from_defaults() {
     let node = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: p, domain: Some(rel_ty) },
-            Binding { var: x, domain: Some(dom) },
+            Binding {
+                var: p,
+                domain: Some(rel_ty),
+            },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
         ],
         vec![hedged, scope],
     );
     let (ev, ..) = eval(&mut g, node, &s, 50_000);
-    assert_ne!(ev, Evidential::Refuted, "an undetermined tuple is not an absent one");
+    assert_ne!(
+        ev,
+        Evidential::Refuted,
+        "an undetermined tuple is not an absent one"
+    );
 }
 
 /// A one-element disjunction lost information relative to its own operand:
@@ -205,9 +240,17 @@ fn the_connectives_carry_the_defeasibility_of_their_operands() {
 
     let disj = g.apply(wk::OR, vec![hedged]);
     let r = GraphEvaluator::new().eval(&mut g, disj, &s, 20_000);
-    assert_eq!(r.evidential(), Evidential::Supported, "a 1-ary disjunction is its operand");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Supported,
+        "a 1-ary disjunction is its operand"
+    );
     assert_eq!(r.support, Bound::Certain);
-    assert_eq!(r.derivation, Derivation::Default, "and carries its operand's defeasibility");
+    assert_eq!(
+        r.derivation,
+        Derivation::Default,
+        "and carries its operand's defeasibility"
+    );
 
     let neg = g.apply(wk::NOT, vec![hedged]);
     let conj = g.apply(wk::AND, vec![neg, wk::TOP]);
@@ -239,8 +282,14 @@ fn a_partial_index_does_not_bound_an_aggregate() {
 
     let v = g.fresh();
     let body = g.apply(broken, vec![v]);
-    let counted =
-        g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(files) }], vec![body]);
+    let counted = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(files),
+        }],
+        vec![body],
+    );
 
     let one = g.int(1);
     let at_most_one = g.apply(wk::LEQ, vec![counted, one]);
@@ -254,7 +303,11 @@ fn a_partial_index_does_not_bound_an_aggregate() {
     let two = g.int(2);
     let at_least_two = g.apply(wk::LEQ, vec![two, counted]);
     let (ev, ..) = eval(&mut g, at_least_two, &s, 50_000);
-    assert_ne!(ev, Evidential::Refuted, "…and cannot refute the other direction either");
+    assert_ne!(
+        ev,
+        Evidential::Refuted,
+        "…and cannot refute the other direction either"
+    );
 }
 
 /// A complete enumeration with an undecided *predicate* is the other case, and
@@ -269,11 +322,22 @@ fn a_complete_enumeration_still_bounds_an_aggregate() {
 
     let v = g.fresh();
     let body = g.apply(fails, vec![v]);
-    let counted = g.bind(wk::COUNT, vec![Binding { var: v, domain: Some(dom) }], vec![body]);
+    let counted = g.bind(
+        wk::COUNT,
+        vec![Binding {
+            var: v,
+            domain: Some(dom),
+        }],
+        vec![body],
+    );
     let four = g.int(4);
     let at_most_four = g.apply(wk::LEQ, vec![counted, four]);
     let (ev, ..) = eval(&mut g, at_most_four, &s, 50_000);
-    assert_eq!(ev, Evidential::Supported, "three members cannot total more than three");
+    assert_eq!(
+        ev,
+        Evidential::Supported,
+        "three members cannot total more than three"
+    );
 }
 
 /// Suspending and resuming was a soundness *upgrade*: `narrow` rebuilt the
@@ -296,7 +360,11 @@ fn a_continuation_is_never_stronger_than_the_question_that_made_it() {
     let q = g.quantify(wk::FORALL, v, Some(files), body);
 
     let whole = GraphEvaluator::new().eval(&mut g, q, &s, 1_000_000);
-    assert_eq!(whole.evidential(), Evidential::Open, "a partial index decides nothing");
+    assert_eq!(
+        whole.evidential(),
+        Evidential::Open,
+        "a partial index decides nothing"
+    );
 
     let cut = GraphEvaluator::new().eval(&mut g, q, &s, 40);
     let Some(k) = cut.continuation else {
@@ -364,7 +432,11 @@ fn the_tail_still_decides_what_it_can() {
     let body = g.apply(wk::LEQ, vec![n, succ]);
     let q = g.quantify(wk::FORALL, n, Some(wk::NAT_TYPE), body);
     let (ev, status, ..) = eval(&mut g, q, &EmptyStructure, 50_000);
-    assert_eq!(ev, Evidential::Supported, "n ≤ n + 1 holds throughout the tail");
+    assert_eq!(
+        ev,
+        Evidential::Supported,
+        "n ≤ n + 1 holds throughout the tail"
+    );
     assert_eq!(status, ComputeStatus::Exact);
 }
 
@@ -383,7 +455,11 @@ fn a_stable_truth_teller_does_not_depend_on_its_spelling() {
     let node = g.get(outer).cloned().expect("built");
     g.define(b, node);
     let r = GraphEvaluator::new().eval(&mut g, b, &EmptyStructure, 10_000);
-    assert_eq!(r.evidential(), Evidential::Open, "a truth-teller never gets a value");
+    assert_eq!(
+        r.evidential(),
+        Evidential::Open,
+        "a truth-teller never gets a value"
+    );
     assert!(!r.is_definite());
 
     // A := (not (not A)) — the same sentence, spelled differently.
@@ -394,7 +470,11 @@ fn a_stable_truth_teller_does_not_depend_on_its_spelling() {
     let node = h.get(outer).cloned().expect("built");
     h.define(a, node);
     let r2 = GraphEvaluator::new().eval(&mut h, a, &EmptyStructure, 10_000);
-    assert_eq!(r2.evidential(), Evidential::Open, "and neither does this one");
+    assert_eq!(
+        r2.evidential(),
+        Evidential::Open,
+        "and neither does this one"
+    );
 }
 
 /// `occurs_negatively` recognised only `not`, so `p(a) ↔ ¬p(a)` written with
@@ -413,8 +493,14 @@ fn a_negative_occurrence_spelled_with_implies_is_still_negative() {
     let node = g.bind(
         wk::LETREC,
         vec![
-            Binding { var: p, domain: Some(rel_ty) },
-            Binding { var: x, domain: Some(dom) },
+            Binding {
+                var: p,
+                domain: Some(rel_ty),
+            },
+            Binding {
+                var: x,
+                domain: Some(dom),
+            },
         ],
         vec![def, scope],
     );
@@ -441,7 +527,11 @@ fn derive_reports_budget_exhaustion_as_budget_exhaustion() {
             Knowledge::Unknown
         }
         fn rules(&self, pred: ObjectId) -> Vec<ObjectId> {
-            if pred == self.goal_pred { vec![self.rule] } else { Vec::new() }
+            if pred == self.goal_pred {
+                vec![self.rule]
+            } else {
+                Vec::new()
+            }
         }
     }
 
@@ -457,7 +547,10 @@ fn derive_reports_budget_exhaustion_as_budget_exhaustion() {
     let imp = g.apply(wk::IMPLIES, vec![antecedent, consequent]);
     let rule = g.quantify(wk::FORALL, x, None, imp);
 
-    let s = Chained { rule, goal_pred: needs };
+    let s = Chained {
+        rule,
+        goal_pred: needs,
+    };
     let goal = g.apply(needs, vec![item]);
     let r = GraphEvaluator::new().eval(&mut g, goal, &s, 40);
     assert_ne!(
@@ -473,7 +566,10 @@ fn derive_reports_budget_exhaustion_as_budget_exhaustion() {
 fn an_extreme_decimal_scale_does_not_panic() {
     let mut g = ObjectGraph::new();
     for scale in [i32::MIN, i32::MIN + 1, i32::MAX, 1_000_000, -1_000_000] {
-        let d = g.lit(LiteralValue::Decimal { mantissa: BigInt::from(1), scale });
+        let d = g.lit(LiteralValue::Decimal {
+            mantissa: BigInt::from(1),
+            scale,
+        });
         let one = g.int(1);
         let claim = g.apply(wk::EQ, vec![d, one]);
         let r = GraphEvaluator::new().eval(&mut g, claim, &EmptyStructure, 10_000);
@@ -494,8 +590,11 @@ fn an_extreme_decimal_scale_does_not_panic() {
 fn a_user_predicate_accepts_a_compound_argument() {
     let mut g = ObjectGraph::new();
     let causes = g.atom("causes");
-    let (omits, header, cstdint) =
-        (g.atom("omits"), g.atom("rocksdb-slice.h"), g.atom("cstdint"));
+    let (omits, header, cstdint) = (
+        g.atom("omits"),
+        g.atom("rocksdb-slice.h"),
+        g.atom("cstdint"),
+    );
     let (fails, crate_id) = (g.atom("build-fails"), g.atom("mnestic-rocks-0.1.10"));
 
     let cause = g.apply(omits, vec![header, cstdint]);
@@ -506,7 +605,11 @@ fn a_user_predicate_accepts_a_compound_argument() {
 
     let s = MapGraphStructure::new().fact(causes, vec![quoted_cause, quoted_effect]);
     let (ev, status, ..) = eval(&mut g, claim, &s, 20_000);
-    assert_eq!(ev, Evidential::Supported, "the store holds exactly this tuple");
+    assert_eq!(
+        ev,
+        Evidential::Supported,
+        "the store holds exactly this tuple"
+    );
     assert_eq!(status, ComputeStatus::Exact);
 }
 
@@ -522,5 +625,9 @@ fn equality_on_a_compound_still_refuses_to_refute() {
     let four = g.int(4);
     let claim = g.apply(wk::EQ, vec![term, four]);
     let (ev, ..) = eval(&mut g, claim, &EmptyStructure, 10_000);
-    assert_eq!(ev, Evidential::Open, "the ids differ; the denotations may not");
+    assert_eq!(
+        ev,
+        Evidential::Open,
+        "the ids differ; the denotations may not"
+    );
 }

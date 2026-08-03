@@ -25,13 +25,17 @@ static RE_VIEW: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?((?:\w+\.)?\w+)["']?"#).unwrap()
 });
 static RE_FUNC: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+["']?((?:\w+\.)?\w+)["']?"#).unwrap()
+    Regex::new(
+        r#"(?im)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+["']?((?:\w+\.)?\w+)["']?"#,
+    )
+    .unwrap()
 });
 static RE_INDEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?im)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?((?:\w+\.)?\w+)["']?\s+ON"#).unwrap()
 });
 static RE_SEQ: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?im)^\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?((?:\w+\.)?\w+)["']?"#).unwrap()
+    Regex::new(r#"(?im)^\s*CREATE\s+SEQUENCE\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?((?:\w+\.)?\w+)["']?"#)
+        .unwrap()
 });
 
 /// Parse a SQL source. Takes `&str` because UTF-8 validation has already
@@ -76,7 +80,11 @@ pub fn parse_sql(path: &Path, source: &str) -> ParseResult {
             DeclarationKind::Function,
             // Native kind preserves the source-true keyword
             // (`function` vs `procedure`).
-            if kind_str == "procedure" { "procedure" } else { "function" },
+            if kind_str == "procedure" {
+                "procedure"
+            } else {
+                "function"
+            },
             &name,
             &format!("{} {}", kind_str, name),
             m.start(),
@@ -340,7 +348,10 @@ CREATE SEQUENCE order_seq;
         let src = "CREATE TABLE app.users (id INT);\nCREATE VIEW reporting.daily_sales AS SELECT 1;\nCREATE INDEX app.idx_x ON app.users(id);\n";
         let r = parse_sql(Path::new("x.sql"), src);
         let names: Vec<_> = r.declarations.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(names, vec!["app.users", "reporting.daily_sales", "app.idx_x"]);
+        assert_eq!(
+            names,
+            vec!["app.users", "reporting.daily_sales", "app.idx_x"]
+        );
     }
 
     #[test]

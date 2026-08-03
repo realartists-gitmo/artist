@@ -60,5 +60,7 @@ pub fn ensure_with_calls(
     if unified.calls.is_some() {
         return Ok(unified);
     }
-    promote_calls(root, |g| crate::calls::build::build_call_graph(root, &g.deps))
+    promote_calls(root, |g| {
+        crate::calls::build::build_call_graph(root, &g.deps)
+    })
 }

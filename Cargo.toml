@@ -15,6 +15,12 @@ members = [
     "crates/artist-canvas",
     "crates/artist-computer",
     "crates/artist-ast",
+    "crates/artist-config",
+    "crates/artist-registry",
+    "crates/artist-ui-core",
+    "crates/artist-gpui",
+    "crates/artist-session-host",
+    "crates/artist-mcp-server",
 ]
 resolver = "3"
 
@@ -68,3 +74,17 @@ rustflags = ["-C", "target-cpu=native", "-Z", "tune-cpu=native"]
 [profile.release-debug]
 inherits = "release"
 debug = true
+
+# rten-text cannot load SentencePiece-derived tokenizers (Gemma, Llama): its
+# `Split` pre-tokenizer rejects the `MergedWithPrevious` behaviour, and its BPE
+# hard-requires the GPT-2 byte alphabet in the vocabulary, which those models do
+# not have. This is a local checkout carrying both fixes; the diff is at
+# `scripts/rten-text-sentencepiece.patch` and is intended for upstream.
+[patch.crates-io]
+rten-text = { path = "../../rten-src/rten-text" }
+
+# mnestic 0.13.1 on crates.io predates `set_durable_writes`, so RocksDB commits
+# without fsyncing its WAL and a power cut can lose acknowledged writes. The fix
+# is upstream but unreleased, so we track the repo rather than carrying a
+# backported copy of a stale release.
+mnestic = { path = "../../mnestic-src/cozo-core" }

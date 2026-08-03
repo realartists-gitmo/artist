@@ -14,8 +14,8 @@
 //! keeps `stmt`/`arg` narrow.
 
 use anyhow::{Result, anyhow};
-use artist_logic::{GraphStructure, ObjectGraph, ObjectId, wk};
 use artist_logic::graph_eval::{Extension, Knowledge};
+use artist_logic::{GraphStructure, ObjectGraph, ObjectId, wk};
 
 /// Storage-level symbol id. Lifted into the universal identity space at the
 /// boundary, so the store stays compact while the *language* keeps one
@@ -29,11 +29,12 @@ pub fn oid(s: Sym) -> ObjectId {
 
 /// Lower an object id back to a storage symbol, when it is one.
 pub fn desym(o: ObjectId) -> Option<Sym> {
-    o.0.checked_sub(wk::FIRST_FREE.0).and_then(|v| u32::try_from(v).ok())
+    o.0.checked_sub(wk::FIRST_FREE.0)
+        .and_then(|v| u32::try_from(v).ok())
 }
 use cozo::{DataValue, NamedRows};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::store::MemoryStore;
 
@@ -303,7 +304,11 @@ impl RelationalView {
     /// Read every live statement into memory.
     pub async fn load(store: &MemoryStore) -> Result<Self> {
         let syms = store
-            .script("?[sym_id, name] := *sym{sym_id, name}", BTreeMap::new(), false)
+            .script(
+                "?[sym_id, name] := *sym{sym_id, name}",
+                BTreeMap::new(),
+                false,
+            )
             .await?;
         // No `@` selector, so every version comes back — the whole history.
         let stmts = store
@@ -363,10 +368,10 @@ impl RelationalView {
                     denied.insert(b.proposition);
                 }
             }
-            let believed: BTreeSet<ObjectId> =
-                affirmed.difference(&denied).copied().collect();
+            let believed: BTreeSet<ObjectId> = affirmed.difference(&denied).copied().collect();
             for b in &beliefs {
-                view.rule_validity.insert(b.proposition, (b.valid_from, b.valid_to));
+                view.rule_validity
+                    .insert(b.proposition, (b.valid_from, b.valid_to));
             }
             view.index_rules(&g, &ids, &believed);
             view.index_reserved(&g, &beliefs);
@@ -401,11 +406,18 @@ impl RelationalView {
         // point of naming an authority.
         for (id, name) in &self.source_names {
             if g.get(*id).is_none() {
-                g.define(*id, artist_logic::object::CoreNode::Atom { name: Some(name.clone()) });
+                g.define(
+                    *id,
+                    artist_logic::object::CoreNode::Atom {
+                        name: Some(name.clone()),
+                    },
+                );
             }
         }
         for id in self.rule_graph.all_ids() {
-            let Some(node) = self.rule_graph.get(id) else { continue };
+            let Some(node) = self.rule_graph.get(id) else {
+                continue;
+            };
             match g.get(id) {
                 None => g.define(id, node.clone()),
                 // An id the caller already defines **differently** is a
@@ -488,7 +500,9 @@ impl RelationalView {
                 }
             }
             for (_, is_assert, tuple, source) in live.values() {
-                let (true, Some(src)) = (*is_assert, *source) else { continue };
+                let (true, Some(src)) = (*is_assert, *source) else {
+                    continue;
+                };
                 // **Index every alias spelling, not just the canonical one.**
                 // `history` has been through `canonicalise_log`, so these tuples
                 // are canonical — while the evaluator asks with whatever name the
@@ -548,7 +562,9 @@ impl RelationalView {
             let (ts, is_assert) = validity_at(row, 1)?;
             let pred = int_at(row, 2)? as Sym;
             let arity = int_at(row, 3)? as usize;
-            let Some(slots) = by_stmt.get(&id) else { continue };
+            let Some(slots) = by_stmt.get(&id) else {
+                continue;
+            };
             if slots.len() != arity {
                 // A torn statement is dropped rather than silently evaluated at
                 // the wrong arity; the event log remains the system of record.
@@ -556,8 +572,7 @@ impl RelationalView {
                 view.torn.insert(pred);
                 continue;
             }
-            let tuple: Vec<ObjectId> =
-                slots.values().map(|v| oid(*v as Sym)).collect();
+            let tuple: Vec<ObjectId> = slots.values().map(|v| oid(*v as Sym)).collect();
             instants.insert(ts);
             // Provenance, as an object rather than a string. `source_session`
             // names the run that wrote the row and `origin` names where it came
@@ -718,13 +733,14 @@ impl RelationalView {
                 }
             }
         }
-
     }
 
     fn derive_rest(&mut self) {
         if let Some(members) = self.rels.get(&(well_known::TYPE, 2)) {
             for t in members {
-                let (Some(x), Some(sort)) = (desym(t[0]), desym(t[1])) else { continue };
+                let (Some(x), Some(sort)) = (desym(t[0]), desym(t[1])) else {
+                    continue;
+                };
                 let entry = self.sorts.entry(sort).or_default();
                 let member = oid(x);
                 if !entry.contains(&member) {
@@ -783,9 +799,15 @@ impl RelationalView {
         // a conversion, and is skipped rather than guessed at.
         if let Some(rows) = self.rels.get(&(well_known::SCALE, 3)).cloned() {
             for t in &rows {
-                let Some(factor_sym) = desym(t[1]) else { continue };
-                let Some(name) = self.by_sym.get(&factor_sym) else { continue };
-                let Ok(factor) = name.parse::<num_bigint::BigInt>() else { continue };
+                let Some(factor_sym) = desym(t[1]) else {
+                    continue;
+                };
+                let Some(name) = self.by_sym.get(&factor_sym) else {
+                    continue;
+                };
+                let Ok(factor) = name.parse::<num_bigint::BigInt>() else {
+                    continue;
+                };
                 // Zero makes every quantity in the unit provably equal to every
                 // other; a negative factor is not a conversion either. Skipped
                 // the way an unparseable name already is.
@@ -837,7 +859,9 @@ impl RelationalView {
     /// whole reason both polarities are indexed rather than subtracted.
     fn reserved_lookup(&self, pred: ObjectId, args: &[ObjectId], at: Option<i64>) -> Knowledge {
         let key = (pred, self.canonical_args(pred, args));
-        let Some(claims) = self.reserved.get(&key) else { return Knowledge::Unknown };
+        let Some(claims) = self.reserved.get(&key) else {
+            return Knowledge::Unknown;
+        };
         // The view's own present, not the wall clock: a snapshot that answers
         // differently depending on when you ask is not a snapshot.
         let when = at.unwrap_or(self.now);
@@ -861,7 +885,11 @@ impl RelationalView {
             // was otherwise unreachable under *either* name.
             let key = (*operator, self.canonical_args(*operator, operands));
             self.reserved.entry(key).or_default().push(ReservedClaim {
-                knowledge: if b.affirmed { Knowledge::Holds } else { Knowledge::Denied },
+                knowledge: if b.affirmed {
+                    Knowledge::Holds
+                } else {
+                    Knowledge::Denied
+                },
                 valid_from: b.valid_from,
                 valid_to: b.valid_to,
             });
@@ -874,24 +902,25 @@ impl RelationalView {
     /// and still be *about* the goal predicate, so the wrappers are seen through
     /// here too. An index that missed them would leave exactly the defeasible
     /// rules — the shape most of this memory is made of — unreachable.
-    fn index_rules(
-        &mut self,
-        g: &ObjectGraph,
-        ids: &[ObjectId],
-        affirmed: &BTreeSet<ObjectId>,
-    ) {
+    fn index_rules(&mut self, g: &ObjectGraph, ids: &[ObjectId], affirmed: &BTreeSet<ObjectId>) {
         use artist_logic::object::CoreNode;
         for id in ids {
             // Presence in the object table is not belief.
             if !affirmed.contains(id) {
                 continue;
             }
-            let Some(CoreNode::Bind { binder, bodies, .. }) = g.get(*id) else { continue };
+            let Some(CoreNode::Bind { binder, bodies, .. }) = g.get(*id) else {
+                continue;
+            };
             if *binder != wk::FORALL {
                 continue;
             }
-            let Some(body) = bodies.first().copied() else { continue };
-            let Some(CoreNode::Apply { operator, operands }) = g.get(body) else { continue };
+            let Some(body) = bodies.first().copied() else {
+                continue;
+            };
+            let Some(CoreNode::Apply { operator, operands }) = g.get(body) else {
+                continue;
+            };
             if *operator != wk::IMPLIES || operands.len() != 2 {
                 continue;
             }
@@ -903,7 +932,9 @@ impl RelationalView {
                 if !matches!(*operator, wk::USUALLY | wk::NOT) {
                     break;
                 }
-                let Some(inner) = operands.last().copied() else { break };
+                let Some(inner) = operands.last().copied() else {
+                    break;
+                };
                 conclusion = inner;
             }
             if let Some(CoreNode::Apply { operator, .. }) = g.get(conclusion) {
@@ -976,7 +1007,11 @@ pub async fn intern(store: &MemoryStore, name: &str) -> Result<Sym> {
     let mut params = BTreeMap::new();
     params.insert("n".to_string(), DataValue::from(name));
     let existing = store
-        .script("?[sym_id] := *sym{sym_id, name}, name == $n", params.clone(), false)
+        .script(
+            "?[sym_id] := *sym{sym_id, name}, name == $n",
+            params.clone(),
+            false,
+        )
         .await?;
     if let Some(row) = existing.rows.first() {
         return Ok(int_at(row, 0)? as Sym);
@@ -996,7 +1031,11 @@ pub async fn intern(store: &MemoryStore, name: &str) -> Result<Sym> {
 
     params.insert("id".to_string(), DataValue::from(next));
     store
-        .script("?[sym_id, name] <- [[$id, $n]] :put sym {sym_id => name}", params, true)
+        .script(
+            "?[sym_id, name] <- [[$id, $n]] :put sym {sym_id => name}",
+            params,
+            true,
+        )
         .await?;
     Ok(next as Sym)
 }
@@ -1034,7 +1073,10 @@ pub async fn assert_stmt_at(
 
     let mut params = BTreeMap::new();
     params.insert("id".to_string(), DataValue::from(id));
-    params.insert("ts".to_string(), DataValue::from(at.unwrap_or_else(now_micros)));
+    params.insert(
+        "ts".to_string(),
+        DataValue::from(at.unwrap_or_else(now_micros)),
+    );
     params.insert("pred".to_string(), DataValue::from(pred as i64));
     params.insert("arity".to_string(), DataValue::from(args.len() as i64));
     params.insert("origin".to_string(), DataValue::from(origin));
@@ -1080,11 +1122,7 @@ pub async fn retract_stmt(store: &MemoryStore, id: i64) -> Result<()> {
     retract_stmt_at(store, id, None).await
 }
 
-pub async fn retract_stmt_at(
-    store: &MemoryStore,
-    id: i64,
-    at: Option<i64>,
-) -> Result<()> {
+pub async fn retract_stmt_at(store: &MemoryStore, id: i64, at: Option<i64>) -> Result<()> {
     let mut params = BTreeMap::new();
     params.insert("id".to_string(), DataValue::from(id));
     store
@@ -1118,9 +1156,14 @@ impl GraphStructure for RelationalView {
         }
         // A predicate outside this view's symbol space is not something the
         // view can speak to at all — Unknown, never a refutation.
-        let Some(p) = desym(pred) else { return Knowledge::Unknown };
+        let Some(p) = desym(pred) else {
+            return Knowledge::Unknown;
+        };
         let canon = self.canonical_args(pred, args);
-        let found = self.rels.get(&(p, args.len())).is_some_and(|t| t.contains(&canon));
+        let found = self
+            .rels
+            .get(&(p, args.len()))
+            .is_some_and(|t| t.contains(&canon));
         if found {
             return Knowledge::Holds;
         }
@@ -1140,7 +1183,9 @@ impl GraphStructure for RelationalView {
         if wk::name_of(pred).is_some() {
             return self.reserved_lookup(pred, args, Some(t));
         }
-        let Some(p) = desym(pred) else { return Knowledge::Unknown };
+        let Some(p) = desym(pred) else {
+            return Knowledge::Unknown;
+        };
         let tuples = self.state_at(p, args.len(), t);
         let canon = self.canonical_args(pred, args);
         if tuples.contains(&canon) {
@@ -1197,11 +1242,13 @@ impl GraphStructure for RelationalView {
         // corrupting one `arg` row shrank the enumeration while it still claimed
         // to be complete, and a universal flipped from `Refuted` to a confident
         // `Supported`. Knowing you lost rows is knowing you cannot enumerate.
-        Some(if self.closed.contains(&sort) && !self.torn.contains(&well_known::TYPE) {
-            Extension::complete(members)
-        } else {
-            Extension::partial(members)
-        })
+        Some(
+            if self.closed.contains(&sort) && !self.torn.contains(&well_known::TYPE) {
+                Extension::complete(members)
+            } else {
+                Extension::partial(members)
+            },
+        )
     }
 
     fn attribution(&self, proposition: ObjectId) -> Vec<ObjectId> {
@@ -1215,7 +1262,10 @@ impl GraphStructure for RelationalView {
         // The index carries every alias spelling (see `derive_attribution`),
         // because this receives an opaque node id and cannot decompose it into
         // predicate and arguments to canonicalise the way `known` does.
-        self.attribution.get(&proposition).cloned().unwrap_or_default()
+        self.attribution
+            .get(&proposition)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn is_closed(&self, pred: ObjectId) -> bool {
@@ -1241,11 +1291,9 @@ impl GraphStructure for RelationalView {
             .map(|rs| {
                 rs.iter()
                     .filter(|r| {
-                        self.rule_validity
-                            .get(r)
-                            .is_none_or(|(from, to)| {
-                                from.is_none_or(|f| f <= t) && to.is_none_or(|e| t < e)
-                            })
+                        self.rule_validity.get(r).is_none_or(|(from, to)| {
+                            from.is_none_or(|f| f <= t) && to.is_none_or(|e| t < e)
+                        })
                     })
                     .copied()
                     .collect()
@@ -1284,7 +1332,9 @@ impl GraphStructure for RelationalView {
         // retraction and conflict.
         let p = self.canonical(proposition);
         let holds = |sym: Sym, op: ObjectId| {
-            self.rels.get(&(sym, 1)).is_some_and(|t| t.contains(&vec![p]))
+            self.rels
+                .get(&(sym, 1))
+                .is_some_and(|t| t.contains(&vec![p]))
                 || self.reserved_lookup(op, &[p], None) == Knowledge::Holds
         };
         match (
@@ -1421,7 +1471,11 @@ impl RelationalView {
         args.iter()
             .enumerate()
             .map(|(i, a)| {
-                if wk::is_extensional_at(pred, i) { self.canonical(*a) } else { *a }
+                if wk::is_extensional_at(pred, i) {
+                    self.canonical(*a)
+                } else {
+                    *a
+                }
             })
             .collect()
     }
@@ -1437,8 +1491,12 @@ impl RelationalView {
         let mut out: Vec<Vec<ObjectId>> = vec![Vec::new()];
         for (i, a) in tuple.iter().enumerate() {
             let members: Vec<ObjectId> = if wk::is_extensional_at(p, i) {
-                let mut m: Vec<ObjectId> =
-                    self.same.iter().filter(|(_, v)| *v == a).map(|(k, _)| *k).collect();
+                let mut m: Vec<ObjectId> = self
+                    .same
+                    .iter()
+                    .filter(|(_, v)| *v == a)
+                    .map(|(k, _)| *k)
+                    .collect();
                 m.push(*a);
                 m.sort_unstable();
                 m.dedup();

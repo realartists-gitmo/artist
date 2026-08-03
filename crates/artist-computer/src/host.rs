@@ -83,6 +83,38 @@ const CHROMIUM_FAMILY: &[&str] = &[
     "msedge",
 ];
 
+fn clone_profile(src: &std::path::Path, dst: &std::path::Path) -> Result<(), StepError> {
+    use std::fs;
+    if !src.is_dir() {
+        return Err(StepError::Backend(
+            "browser profile must be a directory".into(),
+        ));
+    }
+    fn copy(s: &std::path::Path, d: &std::path::Path) -> std::io::Result<()> {
+        fs::create_dir_all(d)?;
+        for e in fs::read_dir(s)? {
+            let e = e?;
+            let n = e.file_name();
+            let name = n.to_string_lossy();
+            if name.starts_with("Singleton") || name == "DevToolsActivePort" {
+                continue;
+            }
+            let t = e.file_type()?;
+            if t.is_symlink() {
+                continue;
+            }
+            let target = d.join(&n);
+            if t.is_dir() {
+                copy(&e.path(), &target)?;
+            } else if t.is_file() {
+                fs::copy(e.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+    copy(src, dst).map_err(|e| StepError::Backend(format!("clone browser profile: {e}")))
+}
+
 fn is_chromium(program: &str) -> bool {
     let base = program
         .rsplit('/')
@@ -122,6 +154,13 @@ struct StageHandle {
     bus: StageBus,
     #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
     wayland: Arc<crate::stage::wayland::StageWayland>,
+    /// The Android container, once something has asked for it.
+    ///
+    /// Lazy because bringing it up costs a container boot and a host-wide
+    /// exclusive claim — neither of which a session that only wants a browser
+    /// should pay for.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    android: Option<Arc<crate::android::AndroidStage>>,
     runtime_dir: PathBuf,
 }
 
@@ -261,15 +300,66 @@ impl Host {
         )?;
         let mut env = crate::stage::StageEnv::default();
         bus.apply_to(&mut env);
+        // Applied to every stage, not only Android ones. It has to be in place
+        // *before* the stage starts, and a stage does not know in advance
+        // whether Android will later be asked for; setting one variable that
+        // nothing else reads is cheaper than the alternative, which is a
+        // container that refuses to start with an error about audio.
+        if let Some(host_runtime) = self.state_dir.as_ref().and_then(|dir| dir.parent()) {
+            crate::android::prepare_env(&mut env, host_runtime);
+        }
         wayland.extend_env(&env);
 
         let socket = wayland.socket_name().to_owned();
         *slot = Some(StageHandle {
             bus,
             wayland: Arc::new(wayland),
+            android: None,
             runtime_dir,
         });
         Ok(socket)
+    }
+
+    /// Bring the Android container up on this stage, if it is not already.
+    ///
+    /// Returns the stage everything should then be launched against: once
+    /// Android is running, its wrapper is what fills in package identity and
+    /// thaws the container before acting, so bypassing it would silently lose
+    /// both.
+    #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+    pub async fn ensure_android(
+        &self,
+        mode: crate::android::WindowMode,
+    ) -> Result<Arc<crate::android::AndroidStage>, StepError> {
+        self.ensure_stage().await?;
+
+        // Built outside the lock. `AndroidStage::open` boots a container, which
+        // is minutes on a cold start — holding the stage lock across it would
+        // block every unrelated surface operation for the duration.
+        let wayland = {
+            let slot = self.stage.lock().await;
+            let handle = slot
+                .as_ref()
+                .ok_or_else(|| StepError::Backend("stage vanished".into()))?;
+            if let Some(android) = handle.android.as_ref() {
+                return Ok(Arc::clone(android));
+            }
+            Arc::clone(&handle.wayland)
+        };
+
+        let android = Arc::new(
+            crate::android::AndroidStage::open(wayland as Arc<dyn crate::stage::Stage>, mode)
+                .await?,
+        );
+
+        let mut slot = self.stage.lock().await;
+        let handle = slot.as_mut().ok_or_else(|| {
+            StepError::Backend("the stage went away while Android started".into())
+        })?;
+        // Another caller may have won the race while the container booted. Theirs
+        // is the one already installed, and a second container cannot exist, so
+        // hand back what is there rather than replacing it.
+        Ok(Arc::clone(handle.android.get_or_insert(android)))
     }
 
     #[cfg(not(all(target_os = "linux", feature = "stage-wayland")))]
@@ -290,6 +380,7 @@ impl Host {
         program: &str,
         args: &[String],
         cwd: Option<&std::path::Path>,
+        browser_profile: Option<&std::path::Path>,
     ) -> Result<Launched, StepError> {
         use crate::stage::{AppCommand, Stage};
 
@@ -300,7 +391,11 @@ impl Host {
                 .as_ref()
                 .ok_or_else(|| StepError::Backend("stage vanished".into()))?;
             (
-                Arc::clone(&handle.wayland) as Arc<dyn Stage>,
+                handle
+                    .android
+                    .as_ref()
+                    .map(|android| Arc::clone(android) as Arc<dyn Stage>)
+                    .unwrap_or_else(|| Arc::clone(&handle.wayland) as Arc<dyn Stage>),
                 handle.runtime_dir.clone(),
                 handle.bus.a11y_address().map(str::to_owned),
             )
@@ -321,6 +416,11 @@ impl Host {
         let chromium = is_chromium(program);
         let profile = runtime_dir.join("chrome-profile");
         let mut command = AppCommand::new(program);
+        if chromium {
+            if let Some(source) = browser_profile {
+                clone_profile(source, &profile)?;
+            }
+        }
         // `cwd` was accepted on the tool and dropped here, so a GUI launch
         // silently ran wherever the harness happened to be — which for a file
         // manager or an editor is the difference between opening the right
@@ -410,6 +510,43 @@ impl Host {
             // No remedy: a program that is not Chromium-based will never speak
             // CDP, and inventing a to-do here would be noise in every report.
             declined.push(Decline::new(Rung::Engine, "not a Chromium process", None));
+        }
+
+        // Rung 2, Android first. An Android window's accessibility tree lives
+        // inside the container and reaches us over the bridge, never over
+        // AT-SPI — so trying AT-SPI first would find nothing and drop a
+        // perfectly driveable window to pixels.
+        #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
+        if let Some(bridge) = stage.bridge() {
+            match bridge.ping().await {
+                Ok(()) => {
+                    // The package, which `AndroidStage::windows` has already
+                    // resolved from the container. It narrows a tree that spans
+                    // every window to the one this launch meant.
+                    let package = window
+                        .as_ref()
+                        .map(|window| window.app_id.clone())
+                        .unwrap_or_default();
+                    let surface = crate::android::surface::AndroidSurface::new(
+                        artist_tools::short_id("android"),
+                        bridge,
+                        package,
+                    );
+                    return Ok(Launched {
+                        surface: Arc::new(surface),
+                        declined,
+                    });
+                }
+                Err(error) => declined.push(Decline::new(
+                    Rung::Accessibility,
+                    error.to_string(),
+                    Some(
+                        "build and install the bridge: \
+                         `bash scripts/build-android-service.sh`, then \
+                         `artist computer doctor` for how to enable it",
+                    ),
+                )),
+            }
         }
 
         // Rung 2. The application is on the stage's *private* a11y bus, which

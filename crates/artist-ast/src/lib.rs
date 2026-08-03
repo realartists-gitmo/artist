@@ -23,10 +23,10 @@ pub mod path_glob;
 pub mod project_root;
 pub mod search;
 
-#[cfg(feature = "cli")]
-pub mod cli;
 #[cfg(feature = "graphs")]
 pub mod calls;
+#[cfg(feature = "cli")]
+pub mod cli;
 #[cfg(feature = "context")]
 pub mod context;
 #[cfg(feature = "graphs")]

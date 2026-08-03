@@ -54,7 +54,9 @@ pub(crate) fn profile_description(name: &str) -> &'static str {
         "planner" => {
             "Planning agent that turns requirements and code evidence into an executable plan"
         }
-        "reviewer" => "Review agent focused on correctness, regressions, security, and missing tests",
+        "reviewer" => {
+            "Review agent focused on correctness, regressions, security, and missing tests"
+        }
         // A name with no text of its own, rather than the last arm's. This used
         // to fall through to the reviewer, so a sixth built-in would have
         // shipped describing itself as one.

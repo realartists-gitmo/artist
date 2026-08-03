@@ -120,9 +120,7 @@ impl SessionInfo {
     fn belongs_to(&self, env: &StageEnv) -> bool {
         let display = env.get("WAYLAND_DISPLAY").unwrap_or_default();
         let runtime = env.get("XDG_RUNTIME_DIR").unwrap_or_default();
-        !display.is_empty()
-            && self.wayland_display == display
-            && self.xdg_runtime_dir == runtime
+        !display.is_empty() && self.wayland_display == display && self.xdg_runtime_dir == runtime
     }
 }
 
@@ -169,9 +167,8 @@ impl Lease {
                 // A lease whose holder is gone is not a lease. Crashes happen,
                 // and refusing every later run because of one is worse than the
                 // race we would be avoiding.
-                let alive = pid.is_some_and(|pid| {
-                    std::path::Path::new(&format!("/proc/{pid}")).exists()
-                });
+                let alive =
+                    pid.is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
                 if alive {
                     return Err(StepError::Backend(format!(
                         "Android is held by {owner} (pid {}). There is one container per host, \
@@ -288,7 +285,10 @@ impl Session {
     /// What the container service currently reports, if there is a session.
     pub async fn info(&self) -> Result<Option<SessionInfo>, StepError> {
         let proxy = self.proxy().await?;
-        match proxy.call::<_, _, HashMap<String, String>>("GetSession", &()).await {
+        match proxy
+            .call::<_, _, HashMap<String, String>>("GetSession", &())
+            .await
+        {
             Ok(dict) if dict.is_empty() => Ok(None),
             Ok(dict) => Ok(Some(SessionInfo::from_dict(&dict))),
             // No session is reported as an error by the service rather than as
@@ -572,10 +572,7 @@ mod tests {
         let path = dir.path().join("lease");
         std::fs::write(&path, format!("{}\nstage-one\n", std::process::id())).unwrap();
 
-        let mut lease = Lease {
-            path,
-            held: false,
-        };
+        let mut lease = Lease { path, held: false };
         let error = lease.try_claim("stage-two").unwrap_err();
         let message = error.to_string();
         assert!(message.contains("stage-one"), "{message}");

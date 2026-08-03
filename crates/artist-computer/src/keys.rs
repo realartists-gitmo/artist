@@ -52,8 +52,36 @@ pub enum Key {
     End,
     PageUp,
     PageDown,
+    Insert,
+    CapsLock,
+    PrintScreen,
+    /// The context-menu key. The keyboard-only way to open what a right click
+    /// opens, and the only route to a context menu on a surface whose seat has
+    /// no second button.
+    Menu,
+    /// A function key, `F1` through `F24`.
+    ///
+    /// One variant rather than twenty-four, because every backend translates
+    /// them arithmetically and spelling each out would be twenty-four chances
+    /// to mistype a keycode. Out-of-range numbers are refused at parse time.
+    Function(u8),
+    /// A media key. Absent from a keymap on many machines, but a stage owns its
+    /// own keymap and can simply have them.
+    Media(MediaKey),
     /// A single printable character.
     Char(char),
+}
+
+/// The media keys, as their own vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKey {
+    PlayPause,
+    Stop,
+    Next,
+    Previous,
+    VolumeUp,
+    VolumeDown,
+    Mute,
 }
 
 /// A parsed key stroke.
@@ -115,6 +143,34 @@ pub fn parse(stroke: &str) -> Result<Chord, StepError> {
         "end" => Key::End,
         "pageup" | "pgup" => Key::PageUp,
         "pagedown" | "pgdn" => Key::PageDown,
+        "insert" | "ins" => Key::Insert,
+        "capslock" => Key::CapsLock,
+        "printscreen" | "prtsc" | "sysrq" => Key::PrintScreen,
+        "menu" | "contextmenu" | "compose" => Key::Menu,
+        "playpause" | "play" => Key::Media(MediaKey::PlayPause),
+        "stop" => Key::Media(MediaKey::Stop),
+        "next" | "nexttrack" => Key::Media(MediaKey::Next),
+        "previous" | "prevtrack" | "prev" => Key::Media(MediaKey::Previous),
+        "volumeup" => Key::Media(MediaKey::VolumeUp),
+        "volumedown" => Key::Media(MediaKey::VolumeDown),
+        "mute" => Key::Media(MediaKey::Mute),
+        // `f` followed by digits, and nothing else. Checked before the
+        // single-character fallback so `f` alone still types the letter.
+        function
+            if function.len() >= 2
+                && function.starts_with('f')
+                && function[1..].chars().all(|digit| digit.is_ascii_digit()) =>
+        {
+            let number: u8 = function[1..]
+                .parse()
+                .map_err(|_| StepError::Backend(format!("unknown key {base:?}")))?;
+            if !(1..=24).contains(&number) {
+                return Err(StepError::Backend(format!(
+                    "no function key {base:?}; F1 through F24 exist"
+                )));
+            }
+            Key::Function(number)
+        }
         _ => {
             let mut chars = base.chars();
             match (chars.next(), chars.next()) {
@@ -130,6 +186,37 @@ pub fn parse(stroke: &str) -> Result<Chord, StepError> {
     };
 
     Ok(Chord { modifiers, key })
+}
+
+/// Parse a modifiers-only string like `"ctrl"` or `"ctrl+shift"`.
+///
+/// Separate from [`parse`], which always wants a base key. A modifier held
+/// across a click or a drag has no base key by definition, and routing it
+/// through the chord parser would require inventing one — which is how
+/// `ctrl+click` would end up also typing a character.
+///
+/// `None` is no modifiers, which is the overwhelmingly common case and costs
+/// nothing to state.
+pub fn parse_modifiers(held: Option<&str>) -> Result<Modifiers, StepError> {
+    let Some(held) = held else {
+        return Ok(Modifiers::default());
+    };
+    let mut modifiers = Modifiers::default();
+    for part in held.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers.ctrl = true,
+            "alt" | "option" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            "meta" | "super" | "cmd" | "command" | "win" => modifiers.meta = true,
+            "" => {}
+            other => {
+                return Err(StepError::Backend(format!(
+                    "{other:?} is not a modifier; use ctrl, alt, shift or meta"
+                )));
+            }
+        }
+    }
+    Ok(modifiers)
 }
 
 impl Key {
@@ -150,6 +237,21 @@ impl Key {
             Self::End => ("End".into(), 35),
             Self::PageUp => ("PageUp".into(), 33),
             Self::PageDown => ("PageDown".into(), 34),
+            Self::Insert => ("Insert".into(), 45),
+            Self::CapsLock => ("CapsLock".into(), 20),
+            Self::PrintScreen => ("PrintScreen".into(), 44),
+            Self::Menu => ("ContextMenu".into(), 93),
+            // VK_F1 is 112 and the range is contiguous through F24.
+            Self::Function(number) => (format!("F{number}"), 111 + i64::from(*number)),
+            Self::Media(media) => match media {
+                MediaKey::PlayPause => ("MediaPlayPause".into(), 179),
+                MediaKey::Stop => ("MediaStop".into(), 178),
+                MediaKey::Next => ("MediaTrackNext".into(), 176),
+                MediaKey::Previous => ("MediaTrackPrevious".into(), 177),
+                MediaKey::VolumeUp => ("AudioVolumeUp".into(), 175),
+                MediaKey::VolumeDown => ("AudioVolumeDown".into(), 174),
+                MediaKey::Mute => ("AudioVolumeMute".into(), 173),
+            },
             Self::Char(character) => (character.to_string(), character.to_ascii_uppercase() as i64),
         }
     }
@@ -174,6 +276,30 @@ impl Key {
             Self::Down => 108,
             Self::PageDown => 109,
             Self::Delete => 111,
+            Self::Insert => 110,
+            Self::CapsLock => 58,
+            Self::PrintScreen => 99, // KEY_SYSRQ
+            Self::Menu => 127,       // KEY_COMPOSE, which is the context-menu key
+            // F1..F10 are contiguous from 59; F11 and F12 sit apart at 87 and
+            // 88, and F13 onward resume at 183. Three ranges, because that is
+            // what evdev actually is — a single formula here would be wrong for
+            // eight of the twenty-four.
+            Self::Function(number) => match *number {
+                1..=10 => 58 + u32::from(*number),
+                11 => 87,
+                12 => 88,
+                13..=24 => 170 + u32::from(*number),
+                _ => return None,
+            },
+            Self::Media(media) => match media {
+                MediaKey::Mute => 113,
+                MediaKey::VolumeDown => 114,
+                MediaKey::VolumeUp => 115,
+                MediaKey::Next => 163,
+                MediaKey::PlayPause => 164,
+                MediaKey::Previous => 165,
+                MediaKey::Stop => 166, // KEY_STOPCD
+            },
             Self::Char(character) => return evdev_for_char(*character),
         };
         Some(code)
@@ -308,6 +434,32 @@ pub fn terminal_bytes(chord: &Chord) -> Result<Vec<u8>, StepError> {
         Key::End => b"\x1b[F".to_vec(),
         Key::PageUp => b"\x1b[5~".to_vec(),
         Key::PageDown => b"\x1b[6~".to_vec(),
+        Key::Insert => b"\x1b[2~".to_vec(),
+        // The xterm sequences, which every terminfo in practical use agrees on.
+        // F1-F4 are SS3-prefixed and the rest are CSI with a number that skips
+        // 16, 22 and 25 — an irregularity in the standard, not a typo here.
+        Key::Function(number) => match *number {
+            1 => b"\x1bOP".to_vec(),
+            2 => b"\x1bOQ".to_vec(),
+            3 => b"\x1bOR".to_vec(),
+            4 => b"\x1bOS".to_vec(),
+            5 => b"\x1b[15~".to_vec(),
+            6..=10 => format!("\x1b[{}~", 11 + u16::from(*number)).into_bytes(),
+            11 | 12 => format!("\x1b[{}~", 12 + u16::from(*number)).into_bytes(),
+            _ => {
+                return Err(StepError::Backend(format!(
+                    "a terminal has no F{number}; F1 through F12 are the ones it can receive"
+                )));
+            }
+        },
+        // No byte sequence exists for any of these. A terminal is a byte
+        // stream, and a key with no encoding cannot be approximated by another
+        // one — sending something close would run a different command.
+        key @ (Key::CapsLock | Key::PrintScreen | Key::Menu | Key::Media(_)) => {
+            return Err(StepError::Backend(format!(
+                "a terminal has no encoding for {key:?}"
+            )));
+        }
         Key::Char(character) => {
             if chord.modifiers.ctrl && character.is_ascii_alphabetic() {
                 // Ctrl-A is 0x01: the letter's position in the alphabet.

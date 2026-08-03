@@ -263,17 +263,14 @@ impl PortableTool for Delegate {
     }
 
     async fn call(&self, args: DelegateArgs) -> Result<String, DelegateError> {
-        let mode = args
-            .mode
-            .clone()
-            .unwrap_or_else(|| {
-                if args.background.unwrap_or(false) {
-                    "start"
-                } else {
-                    "run"
-                }
-                .to_owned()
-            });
+        let mode = args.mode.clone().unwrap_or_else(|| {
+            if args.background.unwrap_or(false) {
+                "start"
+            } else {
+                "run"
+            }
+            .to_owned()
+        });
         // Only the modes that block this run on a child give up its seat. A
         // background `start` returns immediately and the child claims a seat of
         // its own, so the spawner keeps working and keeps its own.
@@ -746,6 +743,13 @@ impl Delegate {
                 // A subagent is addressable too: it has a name for the run's
                 // lifetime, so a sibling or its parent can reach it while it
                 // works rather than only when it returns.
+                // Never in a child: a background subagent blocking on a human
+                // nobody is watching is the worst version of asking, and it has
+                // a better option — `query`, whose target is the parent that
+                // spawned it and is right there. An underspecified task comes
+                // back as a blocked result for the parent to resolve.
+                ask: None,
+                cancel: self.handles.cancel.clone(),
                 inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
                 dynamic: self.dynamic.clone(),
                 disabled: self.disabled_tools.clone(),
@@ -777,6 +781,7 @@ impl Delegate {
                     .or_else(|| provider.reasoning_effort.clone()),
                 agent: Some(identity.name.clone()),
                 actor: Some(identity.actor.clone()),
+                profile: Some(role.name.clone()),
             });
 
             let mut stream = agent

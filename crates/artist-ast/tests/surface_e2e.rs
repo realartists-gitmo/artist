@@ -133,24 +133,24 @@ fn ts_barrel_resolves_named_glob_and_rename() {
         "Direct.greet missing:\n{s}"
     );
     // `export { Client } from './client'` — barrel resolution.
-    assert!(s.contains("ts_barrel.Client"), "Client barrel missing:\n{s}");
+    assert!(
+        s.contains("ts_barrel.Client"),
+        "Client barrel missing:\n{s}"
+    );
     assert!(
         s.contains("ts_barrel.Client.connect"),
         "Client.connect missing:\n{s}"
     );
     // Rename via `export { Util as Helper }`.
-    assert!(s.contains("ts_barrel.Helper"), "Helper rename missing:\n{s}");
     assert!(
-        !s.contains("ts_barrel.Util"),
-        "unrenamed Util leaked:\n{s}"
+        s.contains("ts_barrel.Helper"),
+        "Helper rename missing:\n{s}"
     );
+    assert!(!s.contains("ts_barrel.Util"), "unrenamed Util leaked:\n{s}");
     // `export *` glob — type and interface.
     assert!(s.contains("ts_barrel.Id"), "Id glob missing:\n{s}");
     assert!(s.contains("ts_barrel.Spec"), "Spec glob missing:\n{s}");
-    assert!(
-        s.contains("[via *]"),
-        "glob marker missing:\n{s}"
-    );
+    assert!(s.contains("[via *]"), "glob marker missing:\n{s}");
 }
 
 #[test]

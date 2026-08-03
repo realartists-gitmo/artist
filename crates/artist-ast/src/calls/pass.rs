@@ -5,7 +5,9 @@
 //! `build` would otherwise import `resolve::run` while `resolve` imported
 //! `build::FilePass`, forming an avoidable file-level cycle.
 
-use crate::calls::graph::{CallEdge, CallKindCompat, CallTarget, CallableMeta, Confidence, Qn, TypeMeta};
+use crate::calls::graph::{
+    CallEdge, CallKindCompat, CallTarget, CallableMeta, Confidence, Qn, TypeMeta,
+};
 use crate::core::ImportBinding;
 use std::path::{Path, PathBuf};
 
