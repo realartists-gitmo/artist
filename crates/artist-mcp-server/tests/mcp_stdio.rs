@@ -89,6 +89,27 @@ fn text_content(result: &rmcp::model::CallToolResult) -> String {
         .join("")
 }
 
+fn assert_output_schemas(tools: &[rmcp::model::Tool]) {
+    for tool in tools {
+        let schema = tool
+            .output_schema
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no outputSchema", tool.name));
+        assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
+        assert_eq!(
+            schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .and_then(|properties| properties.get("tool"))
+                .and_then(Value::as_object)
+                .and_then(|tool_property| tool_property.get("const")),
+            Some(&json!(tool.name.as_ref())),
+            "{}",
+            tool.name
+        );
+    }
+}
+
 #[tokio::test]
 async fn publishes_the_worker_surface_and_runs_a_tool() -> Result<(), Box<dyn std::error::Error>> {
     if !binary_available() {
@@ -98,6 +119,7 @@ async fn publishes_the_worker_surface_and_runs_a_tool() -> Result<(), Box<dyn st
     let state = tempfile::tempdir()?;
     let client = ().serve(isolated_server(&project, &state)?).await?;
     let tools = client.list_all_tools().await?;
+    assert_output_schemas(&tools);
     let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
 
     // The headless worker surface: the structural + file + shell core is
@@ -420,6 +442,7 @@ api_key = "not-used"
 
     let client = ().serve(fully_enabled_server(&project, &state, &config)?).await?;
     let tools = client.list_all_tools().await?;
+    assert_output_schemas(&tools);
     let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
     for expected in [
         "computer",

@@ -23,7 +23,7 @@ use rmcp::{
     service::RequestContext,
 };
 
-use crate::envelope::Envelope;
+use crate::{envelope::Envelope, output_schema};
 
 /// What ChatGPT's web agent is told about how these tools behave. The
 /// non-obvious parts are the handle-then-poll shape of long-running tools and
@@ -137,7 +137,7 @@ impl McpServer {
             ))]);
         };
         match tool.execute(arguments).await {
-            Ok(output) => render_output(output),
+            Ok(output) => render_output(name, output),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error}"))]),
         }
     }
@@ -225,21 +225,25 @@ fn idempotency_key(meta: &Meta) -> Option<String> {
 /// Adapt one harness tool to the MCP `tools/list` shape.
 fn mcp_tool(tool: &PortableDynamicTool) -> Tool {
     let definition = tool.definition();
-    Tool::new(
+    let mut tool = Tool::new(
         definition.name.clone(),
         definition.description.clone(),
         rmcp::model::object(definition.parameters),
-    )
+    );
+    tool.output_schema = Some(Arc::new(rmcp::model::object(output_schema::for_tool(
+        &definition.name,
+    ))));
+    tool
 }
 
-/// Render a harness tool output as MCP content: the model-visible text, plus
-/// the raw JSON as `structuredContent` when the tool produced one.
-fn render_output(output: ToolOutput) -> CallToolResult {
+/// Render a harness tool output as MCP content and the structured object
+/// promised by the tool's `outputSchema`. The existing model-visible text is
+/// preserved verbatim; the object gives MCP clients a stable contract and
+/// carries native or legacy JSON in `data` when one exists.
+fn render_output(name: &str, output: ToolOutput) -> CallToolResult {
     let mut result = CallToolResult::default();
     result.content.push(ContentBlock::text(output.render()));
-    if let Some(json) = output.as_json() {
-        result.structured_content = Some(json.clone());
-    }
+    result.structured_content = Some(output_schema::structured_result(name, &output));
     result
 }
 

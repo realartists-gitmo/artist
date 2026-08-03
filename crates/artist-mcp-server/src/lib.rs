@@ -9,6 +9,7 @@
 pub mod canvas_host;
 pub mod daemon;
 pub mod envelope;
+mod output_schema;
 pub mod server;
 
 pub use daemon::{Allow, McpDaemon};
