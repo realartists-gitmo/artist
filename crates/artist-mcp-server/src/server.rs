@@ -10,11 +10,7 @@
 //! `Router`, because the router drops the per-call `_meta` that carries the
 //! idempotency key the envelope dedups on.
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use rig_core::tool::{PortableDynamicTool, ToolOutput};
 use rmcp::{
@@ -67,6 +63,9 @@ pub struct McpServer {
     tools: Vec<PortableDynamicTool>,
     by_name: Arc<HashMap<String, PortableDynamicTool>>,
     envelope: Envelope,
+    /// Serializes keyed operations across HTTP sessions so two simultaneous
+    /// retries cannot both pass the replay check and execute the same effect.
+    idempotency_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl McpServer {
@@ -82,12 +81,16 @@ impl McpServer {
             tools,
             by_name: Arc::new(by_name),
             envelope: Envelope::open(state_dir)?,
+            idempotency_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
     /// The published tool names, in surface order.
     pub fn names(&self) -> Vec<String> {
-        self.tools.iter().map(|tool| tool.name().to_owned()).collect()
+        self.tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect()
     }
 
     /// Invoke a tool by name, running the same path an MCP `tools/call` takes —
@@ -95,23 +98,32 @@ impl McpServer {
     ///
     /// The canvas bridge dispatches through here so a page cannot disagree with
     /// the model about what a tool does: it sees exactly what `call_tool` sees.
-    pub async fn invoke(&self, name: &str, arguments: serde_json::Value, meta: Meta) -> CallToolResult {
+    pub async fn invoke(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        meta: Meta,
+    ) -> CallToolResult {
         let arguments = if arguments.is_object() {
             arguments
         } else {
             serde_json::Value::Object(Default::default())
         };
         if let Some(key) = idempotency_key(&meta) {
+            // The replay check and eventual commit are one critical section.
+            // Without this, two HTTP sessions carrying the same key can both
+            // observe a miss and perform the side effect before either commits.
+            let _guard = self.idempotency_gate.lock().await;
             if let Some(replayed) = self.envelope.replay(&key) {
                 return serde_json::from_value(replayed).unwrap_or(CallToolResult::error(vec![
                     ContentBlock::text("corrupt envelope record"),
                 ]));
             }
-            let result = self.execute(name, arguments).await;
-            if let Ok(encoded) = serde_json::to_value(&result) {
-                if let Err(error) = self.envelope.commit(&key, name, &arguments, &encoded) {
-                    tracing::warn!("envelope commit failed: {error:#}");
-                }
+            let result = self.execute(name, arguments.clone()).await;
+            if let Ok(encoded) = serde_json::to_value(&result)
+                && let Err(error) = self.envelope.commit(&key, name, &arguments, &encoded)
+            {
+                tracing::warn!("envelope commit failed: {error:#}");
             }
             return result;
         }
@@ -229,4 +241,61 @@ fn render_output(output: ToolOutput) -> CallToolResult {
         result.structured_content = Some(json.clone());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use serde_json::{Map, json};
+
+    use super::*;
+
+    fn keyed(key: &str) -> Meta {
+        let mut meta = Map::new();
+        meta.insert("idempotencyKey".into(), json!(key));
+        Meta(meta)
+    }
+
+    fn counter_tool(calls: Arc<AtomicUsize>) -> PortableDynamicTool {
+        PortableDynamicTool::new(
+            "count",
+            "count executions",
+            json!({"type": "object", "additionalProperties": false}),
+            move |_arguments| {
+                let calls = Arc::clone(&calls);
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Ok(ToolOutput::text("done"))
+                })
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn volatile_envelope_replays_without_a_state_directory() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+
+        server.invoke("count", json!({}), keyed("same")).await;
+        server.invoke("count", json!({}), keyed("same")).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_retries_execute_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+
+        let left = server.invoke("count", json!({}), keyed("same"));
+        let right = server.invoke("count", json!({}), keyed("same"));
+        let (_left, _right) = tokio::join!(left, right);
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }

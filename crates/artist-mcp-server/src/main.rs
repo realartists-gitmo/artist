@@ -91,13 +91,20 @@ fn main() -> anyhow::Result<()> {
 /// same machine (a local tunnel, or the user's browser). Nothing else should
 /// be able to reach the process that drives this machine.
 fn daemon_addr() -> anyhow::Result<std::net::SocketAddr> {
-    use std::net::IpAddr;
-    let host: IpAddr = std::env::var("ARTIST_MCP_HOST")
-        .unwrap_or_else(|_| "127.0.0.1".to_owned())
+    let host = std::env::var("ARTIST_MCP_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
+    let port = std::env::var("ARTIST_MCP_PORT").unwrap_or_else(|_| "8317".to_owned());
+    parse_daemon_addr(&host, &port)
+}
+
+fn parse_daemon_addr(host: &str, port: &str) -> anyhow::Result<std::net::SocketAddr> {
+    let host: std::net::IpAddr = host
         .parse()
         .context("ARTIST_MCP_HOST is not an IP address")?;
-    let port: u16 = std::env::var("ARTIST_MCP_PORT")
-        .unwrap_or_else(|_| "8317".to_owned())
+    anyhow::ensure!(
+        host.is_loopback(),
+        "ARTIST_MCP_HOST must be a loopback address"
+    );
+    let port: u16 = port
         .parse()
         .context("ARTIST_MCP_PORT is not a port number")?;
     Ok(std::net::SocketAddr::new(host, port))
@@ -120,7 +127,9 @@ fn project_state_dir(project: &std::path::Path) -> anyhow::Result<PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     project.hash(&mut hasher);
     let config_root = config_root()?;
-    Ok(config_root.join("tools").join(format!("{:x}", hasher.finish())))
+    Ok(config_root
+        .join("tools")
+        .join(format!("{:x}", hasher.finish())))
 }
 
 async fn run(common: Common, http: Option<std::net::SocketAddr>) -> anyhow::Result<()> {
@@ -144,9 +153,33 @@ async fn run(common: Common, http: Option<std::net::SocketAddr>) -> anyhow::Resu
         subagent: common.allow_subagent,
         comms: common.allow_comms,
     };
-    let daemon = McpDaemon::build(&project, &state_dir, &common.profile, &common.actor, allow).await?;
+    let daemon =
+        McpDaemon::build(&project, &state_dir, &common.profile, &common.actor, allow).await?;
     match http {
         Some(addr) => daemon.serve_http(addr).await,
         None => daemon.serve_stdio().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_accepts_ipv4_and_ipv6_loopback() {
+        assert_eq!(
+            parse_daemon_addr("127.0.0.1", "8317").unwrap(),
+            "127.0.0.1:8317".parse().unwrap()
+        );
+        assert_eq!(
+            parse_daemon_addr("::1", "8317").unwrap(),
+            "[::1]:8317".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn daemon_rejects_non_loopback_hosts() {
+        let error = parse_daemon_addr("0.0.0.0", "8317").unwrap_err();
+        assert!(error.to_string().contains("loopback"));
     }
 }

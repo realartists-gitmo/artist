@@ -70,28 +70,26 @@ impl McpDaemon {
         let conversation_id = format!("mcp:{actor}");
         let session_dir = state_dir.join("sessions").join(actor);
         let attachments = artist_session::AttachmentStore::new(session_dir.join("attachments"));
-        let (recorder, writer) = match artist_session::EventLogWriter::open(
-            &session_dir,
-            &conversation_id,
-        ) {
-            Ok(writer) => {
-                let (recorder, task) = artist_session::spawn_writer(writer, None);
-                (recorder, Some(task))
-            }
-            Err(error) => {
-                tracing::warn!(
-                    session = %session_dir.display(),
-                    "could not open the session log: {error:#}; recording disabled"
-                );
-                (artist_session::Recorder::noop(), None)
-            }
-        };
+        let (recorder, writer) =
+            match artist_session::EventLogWriter::open(&session_dir, &conversation_id) {
+                Ok(writer) => {
+                    let (recorder, task) = artist_session::spawn_writer(writer, None);
+                    (recorder, Some(task))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session = %session_dir.display(),
+                        "could not open the session log: {error:#}; recording disabled"
+                    );
+                    (artist_session::Recorder::noop(), None)
+                }
+            };
 
         // Computer: drives the machine this daemon runs on. Cheap to construct;
         // binding a surface is only the model reaching for the tool.
-        let computer = allow
-            .computer
-            .then(|| artist_computer::SurfaceRegistry::for_project(&project, screen(&settings.computer)));
+        let computer = allow.computer.then(|| {
+            artist_computer::SurfaceRegistry::for_project(&project, screen(&settings.computer))
+        });
 
         // Memory: one undivided store, exclusive lock. `None` (off, or locked
         // by another artist) also gates code_search/code_related.
@@ -105,9 +103,14 @@ impl McpDaemon {
             .map(|handle| handle.writer(recorder.clone(), conversation_id.clone()));
 
         // Canvas: lazy — the page only comes up when the model reaches for it.
-        let canvas_host = allow
-            .canvas
-            .then(|| Arc::new(McpCanvasHost::new(outbox.clone(), actor, &project, profile_name)));
+        let canvas_host = allow.canvas.then(|| {
+            Arc::new(McpCanvasHost::new(
+                outbox.clone(),
+                actor,
+                &project,
+                profile_name,
+            ))
+        });
         let canvas = canvas_host.as_ref().map(|host| {
             Lazy::new(
                 project.clone(),
@@ -132,24 +135,30 @@ impl McpDaemon {
         };
 
         // Comms: claim the durable identity once; the model re-claims on `init`.
-        let identity = allow.comms.then(|| {
-            let name = artist_registry::names()
-                .claim(&artist_registry::Registration {
-                    session: actor.to_owned(),
-                    actor: actor.to_owned(),
-                    project: Some(project.display().to_string()),
-                    profile: Some(profile_name.to_owned()),
-                    parent: None,
-                })
-                .map(|name| name.name)
-                .unwrap_or_else(|_| actor.to_owned());
-            McpIdentity {
+        // If the registry is unavailable, omit messaging entirely rather than
+        // binding the inbox to a fallback name that `init` may later replace.
+        let identity = if allow.comms {
+            match artist_registry::names().claim(&artist_registry::Registration {
+                session: actor.to_owned(),
                 actor: actor.to_owned(),
-                profile: profile_name.to_owned(),
-                project: project.display().to_string(),
-                name,
+                project: Some(project.display().to_string()),
+                profile: Some(profile_name.to_owned()),
+                parent: None,
+            }) {
+                Ok(name) => Some(McpIdentity {
+                    actor: actor.to_owned(),
+                    profile: profile_name.to_owned(),
+                    project: project.display().to_string(),
+                    name: name.name,
+                }),
+                Err(error) => {
+                    tracing::warn!("could not claim MCP identity: {error}; messaging disabled");
+                    None
+                }
             }
-        });
+        } else {
+            None
+        };
 
         let tools = artist_agent::tool_set::mcp_surface(McpSurface {
             workspace,
@@ -202,7 +211,7 @@ impl McpDaemon {
             .await
             .with_context(|| format!("bind {addr}"))?;
         let service = StreamableHttpService::new(
-            || Ok(self.server()),
+            move || Ok(self.server()),
             Arc::new(LocalSessionManager::default()),
             // Loopback-only hosts by default, which also blocks DNS-rebinding
             // attacks against a daemon running on the user's machine.
@@ -211,6 +220,11 @@ impl McpDaemon {
         let router = axum::Router::new().nest_service("/mcp", service);
         tracing::info!(addr = %listener.local_addr()?, "serving artist over MCP http");
         axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                if let Err(error) = tokio::signal::ctrl_c().await {
+                    tracing::warn!("failed to install shutdown signal handler: {error}");
+                }
+            })
             .await
             .map_err(|error| anyhow!(error))
     }
@@ -254,7 +268,7 @@ struct MemorySettings {
     dim: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ResolvedMemory {
     enabled: bool,
     model_dir: Option<String>,
@@ -270,10 +284,7 @@ impl FileSettings {
         let project_layer = load_file(&project.join(".artist").join("settings.toml"));
         Self {
             computer: ComputerSettings {
-                screen: project_layer
-                    .computer
-                    .screen
-                    .or(global.computer.screen),
+                screen: project_layer.computer.screen.or(global.computer.screen),
             },
             memory: MemorySettings {
                 enabled: project_layer.memory.enabled.or(global.memory.enabled),
@@ -468,7 +479,14 @@ fn migrate_credentials(document: &mut toml::Value) {
         }
         provider.insert("credentials".into(), credentials);
         provider.entry("provider").or_insert_with(|| {
-            toml::Value::String(if is_legacy_chatgpt { "chatgpt" } else { "openai" }.into())
+            toml::Value::String(
+                if is_legacy_chatgpt {
+                    "chatgpt"
+                } else {
+                    "openai"
+                }
+                .into(),
+            )
         });
     }
 }
@@ -489,13 +507,15 @@ fn build_delegation(
     let (providers, parent) = load_providers(config_root);
     let parent = parent?;
     let (events, _display) = tokio::sync::mpsc::unbounded_channel();
-    let mut handles = SessionHandles::default();
-    handles.recorder = recorder.clone();
-    handles.conversation_id = conversation_id.to_owned();
-    handles.providers = providers;
-    handles.attachments = Some(attachments);
-    handles.computer = computer;
-    handles.durable_memory = memory;
+    let handles = SessionHandles {
+        recorder: recorder.clone(),
+        conversation_id: conversation_id.to_owned(),
+        providers,
+        attachments: Some(attachments),
+        computer,
+        durable_memory: memory,
+        ..SessionHandles::default()
+    };
     Some(McpDelegation {
         provider: parent,
         context: Arc::new(Vec::new()),

@@ -1,13 +1,17 @@
 //! End-to-end stdio tests: spawn the real `artist-mcp serve` binary and drive
 //! it over MCP the way a tunnel or local client would.
 //!
-//! The worker profile is permissive, so the headless surface is the full set of
-//! tools the environment can build: everything except computer/canvas/memory/
-//! messaging/ask, which the web environment does not provide.
+//! The worker profile is permissive, so each test observes the complete set of
+//! tools its explicitly enabled environment can build. Optional machine, memory,
+//! provider, and messaging capabilities remain absent unless configured.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::Path};
 
-use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+use rmcp::{
+    ServiceExt,
+    model::CallToolRequestParams,
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
+};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
 
@@ -15,20 +19,46 @@ fn binary_available() -> bool {
     std::env::var("CARGO_BIN_EXE_artist-mcp").is_ok()
 }
 
-/// Spawn `artist-mcp serve` against a throwaway project + state dir.
-fn isolated_server(project: &tempfile::TempDir, state: &tempfile::TempDir) -> Result<TokioChildProcess, std::io::Error> {
+fn base_command(mode: &str, project: &Path, state: &Path) -> Command {
     let binary = env!("CARGO_BIN_EXE_artist-mcp");
     let mut command = Command::new(binary);
     command
-        .arg("serve")
+        .arg(mode)
         .arg("--project")
-        .arg(project.path())
+        .arg(project)
         .arg("--state-dir")
-        .arg(state.path())
+        .arg(state)
         .arg("--profile")
         .arg("worker")
         .arg("--log")
         .arg("debug");
+    command
+}
+
+/// Spawn `artist-mcp serve` against a throwaway project + state dir.
+fn isolated_server(
+    project: &tempfile::TempDir,
+    state: &tempfile::TempDir,
+) -> Result<TokioChildProcess, std::io::Error> {
+    TokioChildProcess::new(base_command("serve", project.path(), state.path()))
+}
+
+fn fully_enabled_server(
+    project: &tempfile::TempDir,
+    state: &tempfile::TempDir,
+    config: &tempfile::TempDir,
+) -> Result<TokioChildProcess, std::io::Error> {
+    let mut command = base_command("serve", project.path(), state.path());
+    command
+        .arg("--actor")
+        .arg("mcp-e2e")
+        .arg("--allow-computer")
+        .arg("--allow-canvas")
+        .arg("--allow-memory")
+        .arg("--allow-subagent")
+        .arg("--allow-comms")
+        .env("ARTIST_CONFIG_DIR", config.path())
+        .env("ARTIST_STATE_DIR", state.path().join("registry"));
     TokioChildProcess::new(command)
 }
 
@@ -60,8 +90,7 @@ fn text_content(result: &rmcp::model::CallToolResult) -> String {
 }
 
 #[tokio::test]
-async fn publishes_the_worker_surface_and_runs_a_tool()
--> Result<(), Box<dyn std::error::Error>> {
+async fn publishes_the_worker_surface_and_runs_a_tool() -> Result<(), Box<dyn std::error::Error>> {
     if !binary_available() {
         return Ok(());
     }
@@ -69,10 +98,7 @@ async fn publishes_the_worker_surface_and_runs_a_tool()
     let state = tempfile::tempdir()?;
     let client = ().serve(isolated_server(&project, &state)?).await?;
     let tools = client.list_all_tools().await?;
-    let names: BTreeSet<String> = tools
-        .iter()
-        .map(|tool| tool.name.to_string())
-        .collect();
+    let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
 
     // The headless worker surface: the structural + file + shell core is
     // present, the display/index/messaging extras are absent by availability.
@@ -129,7 +155,10 @@ async fn an_idempotency_key_replays_the_stored_result() -> Result<(), Box<dyn st
             "test-idi-1",
         ))
         .await?;
-    assert!(text_content(&first).contains("status: completed"), "bash failed");
+    assert!(
+        text_content(&first).contains("status: completed"),
+        "bash failed"
+    );
 
     let second = client
         .call_tool(with_idempotency_key(
@@ -137,7 +166,10 @@ async fn an_idempotency_key_replays_the_stored_result() -> Result<(), Box<dyn st
             "test-idi-1",
         ))
         .await?;
-    assert!(text_content(&second).contains("status: completed"), "bash failed");
+    assert!(
+        text_content(&second).contains("status: completed"),
+        "bash failed"
+    );
 
     let lines = client
         .call_tool(call(
@@ -234,7 +266,10 @@ async fn ask_posts_then_polls_then_answers() -> Result<(), Box<dyn std::error::E
         .await?;
     let posted_text = text_content(&posted);
     assert!(posted_text.contains("posted q-"), "got: {posted_text}");
-    assert!(posted_text.contains("awaiting answer"), "got: {posted_text}");
+    assert!(
+        posted_text.contains("awaiting answer"),
+        "got: {posted_text}"
+    );
 
     // Poll while unanswered: still pending.
     let id = posted_text
@@ -334,8 +369,7 @@ async fn a_posted_question_survives_connection_death() -> Result<(), Box<dyn std
         .await?;
     let polled_text = text_content(&polled);
     assert!(
-        polled_text.contains("\"status\":\"pending\"")
-            && polled_text.contains("Which provider?"),
+        polled_text.contains("\"status\":\"pending\"") && polled_text.contains("Which provider?"),
         "expected pending with the wording: got {polled_text}"
     );
 
@@ -353,5 +387,155 @@ async fn a_posted_question_survives_connection_death() -> Result<(), Box<dyn std
     );
 
     client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn publishes_every_enabled_harness_surface() -> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let config = tempfile::tempdir()?;
+    std::fs::write(
+        config.path().join("settings.toml"),
+        "[memory]\nenabled = true\nmodel_dir = 'missing-test-model'\ndim = 8\n",
+    )?;
+    std::fs::write(
+        config.path().join("providers.toml"),
+        r#"version = 4
+default_provider = "test"
+[[providers]]
+id = "test"
+name = "Test"
+provider = "openai"
+base_url = "https://example.invalid/v1/"
+model = "test-model"
+[providers.credentials]
+type = "api_key"
+api_key = "not-used"
+"#,
+    )?;
+
+    let client = ().serve(fully_enabled_server(&project, &state, &config)?).await?;
+    let tools = client.list_all_tools().await?;
+    let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
+    for expected in [
+        "computer",
+        "canvas",
+        "memory",
+        "code_search",
+        "code_related",
+        "subagent",
+        "init",
+        "tell",
+        "query",
+        "reply",
+        "gc",
+    ] {
+        assert!(
+            names.contains(expected),
+            "missing enabled tool {expected}: {names:?}"
+        );
+    }
+    assert!(
+        !names.contains("handoff"),
+        "handoff is meaningless over MCP"
+    );
+
+    let first = client.call_tool(call("init", json!({}))).await?;
+    let second = client.call_tool(call("init", json!({}))).await?;
+    let first = text_content(&first);
+    let second = text_content(&second);
+    assert!(first.starts_with("You are "), "got: {first}");
+    assert_eq!(first, second, "identity must be stable across re-claims");
+
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn simultaneous_idempotent_calls_execute_once() -> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let client = ().serve(isolated_server(&project, &state)?).await?;
+    let script = "mkdir -p .e2e; sleep 0.1; echo once >> .e2e/concurrent.txt";
+    let left = client.call_tool(with_idempotency_key(
+        call("bash", json!({"mode": "exec", "command": script})),
+        "concurrent-key",
+    ));
+    let right = client.call_tool(with_idempotency_key(
+        call("bash", json!({"mode": "exec", "command": script})),
+        "concurrent-key",
+    ));
+    let (left, right) = tokio::join!(left, right);
+    left?;
+    right?;
+
+    let lines = client
+        .call_tool(call(
+            "bash",
+            json!({"mode": "exec", "command": "wc -l < .e2e/concurrent.txt"}),
+        ))
+        .await?;
+    assert!(
+        text_content(&lines).contains("1"),
+        "got: {}",
+        text_content(&lines)
+    );
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn streamable_http_daemon_serves_the_same_tools() -> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = socket.local_addr()?.port();
+    drop(socket);
+
+    let mut command = base_command("daemon", project.path(), state.path());
+    command
+        .env("ARTIST_MCP_HOST", "127.0.0.1")
+        .env("ARTIST_MCP_PORT", port.to_string())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let uri = format!("http://127.0.0.1:{port}/mcp");
+
+    let client = {
+        let mut connected = None;
+        for _ in 0..100 {
+            let transport = StreamableHttpClientTransport::from_uri(uri.clone());
+            match ().serve(transport).await {
+                Ok(client) => {
+                    connected = Some(client);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+        connected.ok_or("daemon did not accept MCP connections")?
+    };
+
+    let tools = client.list_all_tools().await?;
+    assert!(tools.iter().any(|tool| tool.name == "bash"));
+    let output = client
+        .call_tool(call(
+            "bash",
+            json!({"mode": "exec", "command": "printf http-mcp"}),
+        ))
+        .await?;
+    assert!(text_content(&output).contains("http-mcp"));
+
+    client.cancel().await?;
+    child.kill().await?;
     Ok(())
 }

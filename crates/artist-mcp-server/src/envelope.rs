@@ -100,17 +100,19 @@ impl Envelope {
             result: result.clone(),
             ts: now(),
         };
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.path.as_deref().expect("envelope has no state dir"))?;
-        serde_json::to_writer(&mut file, &record)?;
-        file.write_all(b"\n")?;
-        // The fsync is the durability: without it the kernel may still be
-        // holding the bytes when the process dies, and the replay promise —
-        // "we saw this response once, you may not see it again" — quietly
-        // breaks.
-        file.sync_all()?;
+        if let Some(path) = self.path.as_deref() {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            serde_json::to_writer(&mut file, &record)?;
+            file.write_all(b"\n")?;
+            // The fsync is the durability: without it the kernel may still be
+            // holding the bytes when the process dies, and the replay promise —
+            // "we saw this response once, you may not see it again" — quietly
+            // breaks.
+            file.sync_all()?;
+        }
         self.seen
             .write()
             .unwrap_or_else(|poison| poison.into_inner())
