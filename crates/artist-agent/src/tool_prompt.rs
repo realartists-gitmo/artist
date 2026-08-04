@@ -47,12 +47,12 @@ pub(crate) fn guard(
 ) -> ArtistDynamicTool {
     let name = tool.name().to_owned();
     let original = Arc::new(tool.clone());
-    tool.with_callback(move |arguments| {
+    tool.with_context_callback(move |arguments, context| {
         let tool = Arc::clone(&original);
         let name = name.clone();
         let drift = drift.clone();
         Box::pin(async move {
-            let outcome = match AssertUnwindSafe(tool.execute(arguments))
+            let outcome = match AssertUnwindSafe(tool.execute_with_context(arguments, context))
                 .catch_unwind()
                 .await
             {

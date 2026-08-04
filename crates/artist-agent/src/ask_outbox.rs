@@ -374,14 +374,17 @@ mod tests {
             }]}),
         )
         .await;
-        let id = posted.structured["questions"][0]["questionId"]
+        let id = posted.structured["data"]["questions"][0]["questionId"]
             .as_str()
             .unwrap();
         assert!(posted.presentation.render().contains("awaiting answer"));
         let pending = output(ask_result, json!({"questionIds": [id]})).await;
-        assert_eq!(pending.structured["results"][0]["status"], "pending");
         assert_eq!(
-            pending.structured["results"][0]["question"]["question"],
+            pending.structured["data"]["results"][0]["status"],
+            "pending"
+        );
+        assert_eq!(
+            pending.structured["data"]["results"][0]["question"]["question"],
             "Where should canvases live?"
         );
     }
@@ -404,7 +407,7 @@ mod tests {
             }]}),
         )
         .await;
-        let id = posted.structured["questions"][0]["questionId"]
+        let id = posted.structured["data"]["questions"][0]["questionId"]
             .as_str()
             .unwrap();
         let first = output(
@@ -412,21 +415,24 @@ mod tests {
             json!({"questionId": id, "selected": ["OpenAI"]}),
         )
         .await;
-        assert_eq!(first.structured["recorded"], true);
+        assert_eq!(first.structured["data"]["recorded"], true);
         let second = output(
             ask_answer,
             json!({"questionId": id, "selected": ["Anthropic"]}),
         )
         .await;
-        assert_eq!(second.structured["recorded"], false);
+        assert_eq!(second.structured["data"]["recorded"], false);
         assert!(
-            second.structured["answer"]
+            second.structured["data"]["answer"]
                 .as_str()
                 .unwrap()
                 .contains("OpenAI")
         );
         let polled = output(ask_result, json!({"questionIds": [id]})).await;
-        assert_eq!(polled.structured["results"][0]["status"], "answered");
+        assert_eq!(
+            polled.structured["data"]["results"][0]["status"],
+            "answered"
+        );
     }
 
     #[tokio::test]
@@ -435,7 +441,7 @@ mod tests {
         let ask = all.iter().find(|tool| tool.name() == "ask").unwrap();
         let ask_list = all.iter().find(|tool| tool.name() == "ask_list").unwrap();
         assert_eq!(
-            output(ask_list, json!({})).await.structured["pending"],
+            output(ask_list, json!({})).await.structured["data"]["pending"],
             json!([])
         );
         output(
@@ -452,7 +458,7 @@ mod tests {
         .await;
         let listed = output(ask_list, json!({})).await;
         assert_eq!(
-            listed.structured["pending"][0]["question"],
+            listed.structured["data"]["pending"][0]["question"],
             "Which provider?"
         );
     }

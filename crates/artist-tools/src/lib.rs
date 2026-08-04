@@ -20,7 +20,7 @@ mod tree_jobs;
 mod workspace;
 mod write;
 
-pub use bash::BashTool;
+pub use bash::{BashResult, BashStatus, BashTool};
 pub use code::{
     AstQueryTool, AstRewriteTool, CodeCallsTool, CodeCyclesTool, CodeDepsTool, CodeImpactTool,
     CodeImplementsTool, CodeMapTool, CodeShowTool, CodeSurfaceTool, CodeTraceTool,

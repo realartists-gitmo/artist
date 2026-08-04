@@ -5,11 +5,15 @@
 //! tools its explicitly enabled environment can build. Optional machine, memory,
 //! provider, and messaging capabilities remain absent unless configured.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use rmcp::{
-    ServiceExt,
-    model::CallToolRequestParams,
+    ClientHandler, RoleClient, ServiceExt,
+    model::{CallToolRequestParams, ProgressNotificationParam},
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use serde_json::{Map, Value, json};
@@ -18,6 +22,24 @@ use tokio::{
     net::TcpStream,
     process::Command,
 };
+
+#[derive(Clone, Default)]
+struct ProgressClient {
+    notifications: Arc<Mutex<Vec<ProgressNotificationParam>>>,
+}
+
+impl ClientHandler for ProgressClient {
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: rmcp::service::NotificationContext<RoleClient>,
+    ) {
+        self.notifications
+            .lock()
+            .expect("progress mutex poisoned")
+            .push(params);
+    }
+}
 
 fn binary_available() -> bool {
     std::env::var("CARGO_BIN_EXE_artist-mcp").is_ok()
@@ -112,14 +134,76 @@ fn assert_output_schemas(tools: &[rmcp::model::Tool]) {
             .output_schema
             .as_ref()
             .unwrap_or_else(|| panic!("{} has no outputSchema", tool.name));
-        assert!(!schema.is_empty(), "{} outputSchema is empty", tool.name);
-        assert!(
-            schema.get("type") == Some(&json!("object"))
-                || schema.get("oneOf").and_then(Value::as_array).is_some()
-                || schema.get("anyOf").and_then(Value::as_array).is_some(),
-            "{} has no root object or tagged union schema: {schema:?}",
+        assert_eq!(
+            schema.get("x-artist-envelope"),
+            Some(&json!(true)),
+            "{} does not publish the common Artist result envelope: {schema:?}",
             tool.name
         );
+        assert!(
+            schema.get("oneOf").and_then(Value::as_array).is_some(),
+            "{} has no success/failure union: {schema:?}",
+            tool.name
+        );
+        let annotations = tool
+            .annotations
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no annotations", tool.name));
+        assert!(
+            annotations.read_only_hint.is_some(),
+            "{} lacks readOnlyHint",
+            tool.name
+        );
+        assert!(
+            annotations.destructive_hint.is_some(),
+            "{} lacks destructiveHint",
+            tool.name
+        );
+        assert!(
+            annotations.idempotent_hint.is_some(),
+            "{} lacks idempotentHint",
+            tool.name
+        );
+        assert!(
+            annotations.open_world_hint.is_some(),
+            "{} lacks openWorldHint",
+            tool.name
+        );
+        assert!(
+            !(annotations.read_only_hint == Some(true)
+                && annotations.destructive_hint == Some(true)),
+            "{} is both read-only and destructive",
+            tool.name
+        );
+    }
+
+    let annotation = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("missing annotation fixture {name}"))
+            .annotations
+            .clone()
+            .expect("annotations")
+    };
+    let read = annotation("read");
+    assert_eq!(read.read_only_hint, Some(true));
+    assert_eq!(read.destructive_hint, Some(false));
+    assert_eq!(read.idempotent_hint, Some(true));
+    assert_eq!(read.open_world_hint, Some(false));
+
+    let bash = annotation("bash");
+    assert_eq!(bash.read_only_hint, Some(false));
+    assert_eq!(bash.destructive_hint, Some(true));
+    assert_eq!(bash.idempotent_hint, Some(false));
+    assert_eq!(bash.open_world_hint, Some(true));
+
+    for name in ["operation", "page"] {
+        let admin = annotation(name);
+        assert_eq!(admin.read_only_hint, Some(true));
+        assert_eq!(admin.destructive_hint, Some(false));
+        assert_eq!(admin.idempotent_hint, Some(true));
+        assert_eq!(admin.open_world_hint, Some(false));
     }
 }
 
@@ -152,6 +236,8 @@ async fn publishes_the_worker_surface_and_runs_a_tool() -> Result<(), Box<dyn st
         "ask_result",
         "ask_answer",
         "ask_list",
+        "operation",
+        "page",
     ] {
         assert!(names.contains(expected), "missing {expected}");
     }
@@ -167,6 +253,18 @@ async fn publishes_the_worker_surface_and_runs_a_tool() -> Result<(), Box<dyn st
         .await?;
     let output = text_content(&result);
     assert!(output.contains("hello-mcp"), "got: {output}");
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("structured result");
+    assert_eq!(structured["ok"], true);
+    assert_eq!(structured["data"]["status"], "completed");
+    assert!(
+        structured["meta"]["operationId"]
+            .as_str()
+            .unwrap()
+            .starts_with("op_")
+    );
 
     client.cancel().await?;
     Ok(())
@@ -231,7 +329,7 @@ async fn a_blank_idempotency_key_is_ignored() -> Result<(), Box<dyn std::error::
     let state = tempfile::tempdir()?;
     let client = ().serve(isolated_server(&project, &state)?).await?;
 
-    let script = "echo blank >> .e2e/blank.txt";
+    let script = "mkdir -p .e2e && echo blank >> .e2e/blank.txt";
     for _ in 0..2 {
         client
             .call_tool(with_idempotency_key(
@@ -253,6 +351,130 @@ async fn a_blank_idempotency_key_is_ignored() -> Result<(), Box<dyn std::error::
         text_content(&lines)
     );
 
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_arguments_return_a_structured_recovery_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let client = ().serve(isolated_server(&project, &state)?).await?;
+    let result = client
+        .call_tool(call(
+            "read",
+            json!({"path": "Cargo.toml", "unexpected": true}),
+        ))
+        .await?;
+    assert_eq!(result.is_error, Some(true));
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("structured failure");
+    assert_eq!(structured["ok"], false);
+    assert_eq!(structured["error"]["code"], "input_validation_failed");
+    assert!(
+        !structured["error"]["fieldErrors"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        structured["meta"]["operationId"]
+            .as_str()
+            .unwrap()
+            .starts_with("op_")
+    );
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_results_continue_through_the_public_page_tool()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let client = ().serve(isolated_server(&project, &state)?).await?;
+    let result = client
+        .call_tool(call(
+            "bash",
+            json!({
+                "mode": "exec",
+                "command": "python3 -c 'print(\"x\" * 90000)'",
+                "maxBytes": 200000
+            }),
+        ))
+        .await?;
+    let structured = result.structured_content.as_ref().expect("paged result");
+    assert_eq!(structured["ok"], true);
+    assert!(structured["data"].is_null());
+    let cursor = structured["page"]["cursor"].as_str().expect("page cursor");
+    assert_eq!(structured["nextActions"][0]["kind"], "read_page");
+
+    let page = client
+        .call_tool(call("page", json!({"cursor": cursor, "maxBytes": 4096})))
+        .await?;
+    let page = page.structured_content.as_ref().expect("page result");
+    assert_eq!(page["ok"], true);
+    assert_eq!(page["data"]["returnedBytes"], 4096);
+    assert!(page["data"]["content"].as_str().unwrap().contains('x'));
+    client.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_calls_emit_monotonic_progress_when_the_client_supplies_a_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let handler = ProgressClient::default();
+    let notifications = Arc::clone(&handler.notifications);
+    let client = handler.serve(isolated_server(&project, &state)?).await?;
+    let result = client
+        .call_tool(call(
+            "bash",
+            json!({"mode": "exec", "command": "printf progress-ok"}),
+        ))
+        .await?;
+    assert!(text_content(&result).contains("progress-ok"));
+    let events = notifications
+        .lock()
+        .expect("progress mutex poisoned")
+        .clone();
+    assert!(
+        events.len() >= 4,
+        "expected start, tool phases, and completion: {events:?}"
+    );
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].progress < pair[1].progress),
+        "progress was not monotonic: {events:?}"
+    );
+    assert!(
+        events
+            .first()
+            .and_then(|event| event.message.as_deref())
+            .unwrap_or("")
+            .contains("Started")
+    );
+    assert!(
+        events
+            .last()
+            .and_then(|event| event.message.as_deref())
+            .unwrap_or("")
+            .contains("completed")
+    );
     client.cancel().await?;
     Ok(())
 }

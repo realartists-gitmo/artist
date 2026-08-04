@@ -691,6 +691,7 @@ dependencies = [
  "llm-provider",
  "rig-core",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
@@ -700,6 +701,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

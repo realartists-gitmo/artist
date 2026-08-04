@@ -10,10 +10,16 @@
 //! `Router`, because the router drops the per-call `_meta` that carries the
 //! idempotency key the envelope dedups on.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 
-use artist_tool_api::{ArtistDynamicTool, ArtistToolOutput};
-use rig_core::completion::message::{DocumentSourceKind, MimeType, ToolResultContent};
+use artist_tool_api::{
+    ArtistDynamicTool, ArtistFailure, ArtistToolOutput, FieldError, NextAction, ResultMeta,
+    ToolCallContext, failure_envelope, set_page, set_result_meta,
+};
+use rig_core::{
+    completion::message::{DocumentSourceKind, MimeType, ToolResultContent},
+    tool::{ToolErrorKind, ToolExecutionError, ToolOutput},
+};
 use rmcp::{
     ErrorData, RoleServer,
     handler::server::ServerHandler,
@@ -24,7 +30,7 @@ use rmcp::{
     service::RequestContext,
 };
 
-use crate::envelope::Envelope;
+use crate::{envelope::Envelope, pagination::PageStore, progress::ProgressSession};
 
 /// What ChatGPT's web agent is told about how these tools behave. The
 /// non-obvious parts are the handle-then-poll shape of long-running tools and
@@ -65,6 +71,7 @@ pub struct McpServer {
     by_name: Arc<HashMap<String, ArtistDynamicTool>>,
     identity: artist_agent::tool_set::McpIdentity,
     envelope: Envelope,
+    pages: PageStore,
     /// Serializes keyed operations across HTTP sessions so two simultaneous
     /// retries cannot both pass the replay check and execute the same effect.
     idempotency_gate: Arc<tokio::sync::Mutex<()>>,
@@ -94,11 +101,18 @@ impl McpServer {
         identity: artist_agent::tool_set::McpIdentity,
     ) -> anyhow::Result<Self> {
         let envelope = Envelope::open(state_dir)?;
+        let pages = PageStore::open(state_dir)?;
         anyhow::ensure!(
-            !tools.iter().any(|tool| tool.name() == "operation"),
-            "tool surface already defines reserved tool operation"
+            !tools
+                .iter()
+                .any(|tool| matches!(tool.name(), "operation" | "page")),
+            "tool surface already defines a reserved administrative tool"
         );
+        for tool in &tools {
+            validate_annotations(tool)?;
+        }
         tools.push(crate::admin::operation_tool(envelope.clone()));
+        tools.push(crate::admin::page_tool(pages.clone()));
         let by_name = tools
             .iter()
             .map(|tool| (tool.name().to_owned(), tool.clone()))
@@ -108,6 +122,7 @@ impl McpServer {
             by_name: Arc::new(by_name),
             identity,
             envelope,
+            pages,
             idempotency_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -131,28 +146,58 @@ impl McpServer {
         arguments: serde_json::Value,
         meta: Meta,
     ) -> CallToolResult {
+        let operation_id = operation_id();
+        self.invoke_with_context(
+            name,
+            arguments,
+            meta,
+            ToolCallContext {
+                operation_id: Some(operation_id),
+                progress: Default::default(),
+            },
+        )
+        .await
+    }
+
+    async fn invoke_with_context(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        meta: Meta,
+        context: ToolCallContext,
+    ) -> CallToolResult {
         let arguments = if arguments.is_object() {
             arguments
         } else {
             serde_json::Value::Object(Default::default())
         };
         if let Some(key) = idempotency_key(&meta) {
-            // The replay check and eventual commit are one critical section.
-            // Without this, two HTTP sessions carrying the same key can both
-            // observe a miss and perform the side effect before either commits.
             let _guard = self.idempotency_gate.lock().await;
             if let Some(record) = self.envelope.get(&key) {
                 if record.tool != name || record.arguments != arguments {
-                    return CallToolResult::error(vec![ContentBlock::text(format!(
-                        "idempotency key {key:?} was already used for {} with different arguments; use a new key for a different logical operation",
+                    let error = ToolExecutionError::other(format!(
+                        "idempotency key {key:?} was already used for {} with different arguments",
                         record.tool
-                    ))]);
+                    ))
+                    .with_code("idempotency_conflict")
+                    .with_retryable(false);
+                    return render_failure(
+                        &error,
+                        vec![NextAction::UseNewIdempotencyKey],
+                        result_meta(&context, None),
+                        Vec::new(),
+                    );
                 }
-                return serde_json::from_value(record.result).unwrap_or(CallToolResult::error(
-                    vec![ContentBlock::text("corrupt envelope record")],
-                ));
+                return serde_json::from_value(record.result).unwrap_or_else(|_| {
+                    let error = ToolExecutionError::other("corrupt envelope record")
+                        .with_code("operation_corrupt")
+                        .with_retryable(false);
+                    render_failure(&error, Vec::new(), result_meta(&context, None), Vec::new())
+                });
             }
-            let result = self.execute(name, arguments.clone()).await;
+            let result = self
+                .execute(name, arguments.clone(), context, Some(&key))
+                .await;
             if let Ok(encoded) = serde_json::to_value(&result)
                 && let Err(error) = self.envelope.commit(&key, name, &arguments, &encoded)
             {
@@ -160,34 +205,143 @@ impl McpServer {
             }
             return result;
         }
-        self.execute(name, arguments).await
+        self.execute(name, arguments, context, None).await
     }
 
-    async fn execute(&self, name: &str, arguments: serde_json::Value) -> CallToolResult {
+    async fn execute(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        context: ToolCallContext,
+        recovery_key: Option<&str>,
+    ) -> CallToolResult {
+        let started = Instant::now();
         let Some(tool) = self.by_name.get(name) else {
-            return CallToolResult::error(vec![ContentBlock::text(format!(
-                "unknown tool: {name}"
-            ))]);
+            let error = ToolExecutionError::not_found(format!("unknown tool: {name}"));
+            return render_failure(
+                &error,
+                Vec::new(),
+                result_meta(&context, Some(started.elapsed())),
+                Vec::new(),
+            );
         };
-        if let Err(error) =
+        if let Err(validation) =
             validate_schema(&tool.definition().input_schema, &arguments, "input", name)
         {
-            return CallToolResult::error(vec![ContentBlock::text(error)]);
+            let error = ToolExecutionError::invalid_args(validation.message.clone())
+                .with_code("input_validation_failed")
+                .with_retryable(false);
+            return render_failure(
+                &error,
+                recovery_actions(name, &arguments, &error, recovery_key),
+                result_meta(&context, Some(started.elapsed())),
+                validation.field_errors,
+            );
         }
-        match tool.execute(arguments).await {
-            Ok(output) => {
-                if let Err(error) = validate_schema(
+
+        let operation_id = context.operation_id.clone();
+        match tool.execute_with_context(arguments.clone(), context).await {
+            Ok(mut output) => {
+                if let Some((error, partial_data)) = promoted_failure(name, &output.structured) {
+                    return render_failure_with_partial(
+                        &error,
+                        recovery_actions(name, &arguments, &error, recovery_key),
+                        ResultMeta {
+                            operation_id: operation_id.clone(),
+                            duration_ms: Some(started.elapsed().as_millis() as u64),
+                        },
+                        Vec::new(),
+                        partial_data,
+                    );
+                }
+                set_result_meta(
+                    &mut output.structured,
+                    ResultMeta {
+                        operation_id: operation_id.clone(),
+                        duration_ms: Some(started.elapsed().as_millis() as u64),
+                    },
+                );
+                if let Err(validation) = validate_schema(
                     &tool.definition().output_schema,
                     &output.structured,
                     "output",
                     name,
                 ) {
-                    tracing::error!(tool = name, "{error}");
-                    return CallToolResult::error(vec![ContentBlock::text(error)]);
+                    tracing::error!(tool = name, error = %validation.message, "tool contract violation");
+                    let error = ToolExecutionError::other(validation.message)
+                        .with_code("output_contract_violation")
+                        .with_retryable(false);
+                    return render_failure(
+                        &error,
+                        Vec::new(),
+                        ResultMeta {
+                            operation_id: output
+                                .structured
+                                .get("meta")
+                                .and_then(|meta| meta.get("operationId"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(ToOwned::to_owned),
+                            duration_ms: Some(started.elapsed().as_millis() as u64),
+                        },
+                        validation.field_errors,
+                    );
+                }
+
+                if name != "page" {
+                    let rendered = output.presentation.render();
+                    match self.pages.paginate(name, &output.structured, &rendered) {
+                        Ok(Some(page)) => {
+                            output.presentation = ToolOutput::text(format!(
+                                "{}\n\n[Result bounded for transport. Continue with page cursor {}.]",
+                                page.preview, page.cursor
+                            ));
+                            set_page(&mut output.structured, page);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return render_failure(
+                                &error,
+                                recovery_actions(name, &arguments, &error, recovery_key),
+                                ResultMeta {
+                                    operation_id: operation_id.clone(),
+                                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                                },
+                                Vec::new(),
+                            );
+                        }
+                    }
+                }
+
+                if let Err(validation) = validate_schema(
+                    &tool.definition().output_schema,
+                    &output.structured,
+                    "output",
+                    name,
+                ) {
+                    let error = ToolExecutionError::other(validation.message)
+                        .with_code("output_contract_violation")
+                        .with_retryable(false);
+                    return render_failure(
+                        &error,
+                        Vec::new(),
+                        ResultMeta {
+                            operation_id,
+                            duration_ms: Some(started.elapsed().as_millis() as u64),
+                        },
+                        validation.field_errors,
+                    );
                 }
                 render_output(output)
             }
-            Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error}"))]),
+            Err(error) => render_failure(
+                &error,
+                recovery_actions(name, &arguments, &error, recovery_key),
+                ResultMeta {
+                    operation_id,
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                },
+                Vec::new(),
+            ),
         }
     }
 
@@ -276,11 +430,32 @@ Other agents and the user address you as {name}. Identity was {registration}.\n\
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
 
         // Replay before executing: a tunnel reconnect may re-deliver a call we
-        // already ran, and running it again is how a stray double-`bash` happens.
-        // rmcp strips `_meta` off the params and carries it on the request
-        // context, so the key is read from `context.meta`, not `request.meta`.
-        Ok(self.invoke(name, arguments, context.meta.clone()).await)
+        // already ran. The progress token and cancellation scope live on the
+        // request context rather than on CallToolRequestParams.
+        let operation_id = operation_id();
+        let (tool_context, progress) = ProgressSession::start(
+            &context.meta,
+            context.peer.clone(),
+            operation_id,
+            name,
+            &arguments,
+        );
+        let result = self
+            .invoke_with_context(name, arguments, context.meta.clone(), tool_context)
+            .await;
+        if let Some(progress) = progress {
+            progress
+                .finish(name, !result.is_error.unwrap_or(false))
+                .await;
+        }
+        Ok(result)
     }
+}
+
+#[derive(Debug)]
+struct ValidationFailure {
+    message: String,
+    field_errors: Vec<FieldError>,
 }
 
 fn validate_schema(
@@ -288,16 +463,29 @@ fn validate_schema(
     value: &serde_json::Value,
     kind: &str,
     tool: &str,
-) -> Result<(), String> {
-    let compiled = jsonschema::JSONSchema::compile(schema)
-        .map_err(|error| format!("invalid {kind} schema for {tool}: {error}"))?;
+) -> Result<(), ValidationFailure> {
+    let compiled = jsonschema::JSONSchema::compile(schema).map_err(|error| ValidationFailure {
+        message: format!("invalid {kind} schema for {tool}: {error}"),
+        field_errors: Vec::new(),
+    })?;
     if let Err(errors) = compiled.validate(value) {
-        let detail = errors
-            .take(8)
-            .map(|error| format!("{}: {}", error.instance_path, error))
+        let errors = errors.take(8).collect::<Vec<_>>();
+        let field_errors = errors
+            .iter()
+            .map(|error| FieldError {
+                field: error.instance_path.to_string(),
+                message: error.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let detail = field_errors
+            .iter()
+            .map(|error| format!("{}: {}", error.field, error.message))
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(format!("{kind} validation failed for {tool}: {detail}"));
+        return Err(ValidationFailure {
+            message: format!("{kind} validation failed for {tool}: {detail}"),
+            field_errors,
+        });
     }
     Ok(())
 }
@@ -311,6 +499,164 @@ fn idempotency_key(meta: &Meta) -> Option<String> {
     } else {
         Some(key.to_owned())
     }
+}
+
+fn validate_annotations(tool: &ArtistDynamicTool) -> anyhow::Result<()> {
+    let annotations = tool.definition().annotations;
+    anyhow::ensure!(
+        !(annotations.read_only && annotations.destructive),
+        "tool {} cannot be both read-only and destructive",
+        tool.name()
+    );
+    anyhow::ensure!(
+        !annotations.read_only || annotations.idempotent,
+        "read-only tool {} must be idempotent",
+        tool.name()
+    );
+    Ok(())
+}
+
+fn operation_id() -> String {
+    format!("op_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn result_meta(context: &ToolCallContext, elapsed: Option<std::time::Duration>) -> ResultMeta {
+    ResultMeta {
+        operation_id: context.operation_id.clone(),
+        duration_ms: elapsed.map(|duration| duration.as_millis() as u64),
+    }
+}
+
+fn recovery_actions(
+    tool: &str,
+    arguments: &serde_json::Value,
+    error: &ToolExecutionError,
+    recovery_key: Option<&str>,
+) -> Vec<NextAction> {
+    let mut actions = Vec::new();
+    if error.code() == Some("idempotency_conflict") {
+        actions.push(NextAction::UseNewIdempotencyKey);
+        return actions;
+    }
+    if let Some(key) = recovery_key {
+        actions.push(NextAction::RecoverOperation {
+            key: key.to_owned(),
+        });
+    }
+    match error.kind() {
+        ToolErrorKind::Timeout => {
+            if tool == "bash" {
+                let mut background = arguments.clone();
+                if let Some(object) = background.as_object_mut() {
+                    object.insert("mode".into(), serde_json::json!("start"));
+                    object.insert("background".into(), serde_json::json!(true));
+                    object.remove("timeout");
+                }
+                actions.push(NextAction::StartBackground {
+                    tool: tool.to_owned(),
+                    arguments: background,
+                });
+            }
+            actions.push(NextAction::Retry { after_ms: None });
+        }
+        ToolErrorKind::RateLimited => {
+            actions.push(NextAction::Retry {
+                after_ms: Some(1_000),
+            });
+        }
+        ToolErrorKind::Network | ToolErrorKind::Provider if error.retryable() != Some(false) => {
+            actions.push(NextAction::Retry { after_ms: None });
+        }
+        _ => {}
+    }
+    match error.code() {
+        Some("cursor_invalid" | "cursor_stale") => {
+            let mut restart = arguments.clone();
+            if let Some(object) = restart.as_object_mut() {
+                object.remove("cursor");
+            }
+            actions.push(NextAction::RestartPagination {
+                tool: tool.to_owned(),
+                arguments: restart,
+            });
+        }
+        Some("capability_unavailable") => actions.push(NextAction::EnableCapability {
+            capability: tool.to_owned(),
+            flag: format!("--allow-{tool}"),
+        }),
+        _ => {}
+    }
+    actions
+}
+
+fn promoted_failure(
+    tool: &str,
+    structured: &serde_json::Value,
+) -> Option<(ToolExecutionError, serde_json::Value)> {
+    if tool != "bash" {
+        return None;
+    }
+    let data = structured.get("data")?.clone();
+    let status = data.get("status")?.as_str()?;
+    let error = match status {
+        "timed_out" => ToolExecutionError::timeout(
+            "The command exceeded its foreground timeout and was terminated.",
+        )
+        .with_code("command_timed_out"),
+        "failed" => ToolExecutionError::other(format!(
+            "The command exited unsuccessfully{}.",
+            data.get("exitCode")
+                .and_then(serde_json::Value::as_i64)
+                .map(|code| format!(" with exit code {code}"))
+                .unwrap_or_default()
+        ))
+        .with_code("process_failed")
+        .with_retryable(false),
+        "superseded" => ToolExecutionError::cancelled(
+            "The command was superseded by a newer coalesced operation.",
+        )
+        .with_code("operation_superseded")
+        .with_retryable(true),
+        _ => return None,
+    };
+    Some((error, data))
+}
+
+fn render_failure_with_partial(
+    error: &ToolExecutionError,
+    next_actions: Vec<NextAction>,
+    meta: ResultMeta,
+    field_errors: Vec<FieldError>,
+    partial_data: serde_json::Value,
+) -> CallToolResult {
+    let mut result = render_failure(error, next_actions, meta, field_errors);
+    if let Some(structured) = result.structured_content.as_mut()
+        && let Some(error) = structured
+            .get_mut("error")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        error.insert("partialData".into(), partial_data);
+    }
+    result
+}
+
+fn render_failure(
+    error: &ToolExecutionError,
+    next_actions: Vec<NextAction>,
+    meta: ResultMeta,
+    field_errors: Vec<FieldError>,
+) -> CallToolResult {
+    let mut failure = ArtistFailure::from_tool_error(error);
+    failure.field_errors = field_errors;
+    let structured = failure_envelope(failure, next_actions, Some(meta));
+    let mut result = CallToolResult::error(vec![ContentBlock::text(
+        error
+            .model_feedback()
+            .unwrap_or_else(|| error.message())
+            .to_owned(),
+    )]);
+    result.structured_content = Some(structured);
+    result
 }
 
 /// Adapt one harness tool to the MCP `tools/list` shape.
@@ -482,6 +828,13 @@ mod tests {
                 .text
                 .contains("already used")
         );
+        let structured = collision.structured_content.as_ref().unwrap();
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "idempotency_conflict");
+        assert_eq!(
+            structured["nextActions"][0]["kind"],
+            "use_new_idempotency_key"
+        );
         let record = server.envelope.get("same").unwrap();
         assert_eq!(record.tool, "count");
         assert_eq!(record.arguments, json!({}));
@@ -503,6 +856,21 @@ mod tests {
                 .unwrap()
                 .text
                 .contains("input validation failed")
+        );
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "input_validation_failed");
+        assert!(
+            !structured["error"]["fieldErrors"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            structured["meta"]["operationId"]
+                .as_str()
+                .unwrap()
+                .starts_with("op_")
         );
     }
 
@@ -539,6 +907,154 @@ mod tests {
                 .text
                 .contains("output validation failed")
         );
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "output_contract_violation");
+    }
+
+    #[tokio::test]
+    async fn every_success_uses_the_common_envelope() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+        let result = server.invoke("count", json!({}), Meta::default()).await;
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(structured["ok"], true);
+        assert_eq!(structured["data"]["text"], "done");
+        assert!(
+            structured["meta"]["operationId"]
+                .as_str()
+                .unwrap()
+                .starts_with("op_")
+        );
+        assert!(structured["meta"]["durationMs"].as_u64().is_some());
+    }
+
+    #[test]
+    fn invalid_annotation_combinations_are_rejected() {
+        let tool = ArtistDynamicTool::new(
+            artist_tool_api::ArtistToolDefinition {
+                name: "unsafe_read".into(),
+                title: "Unsafe Read".into(),
+                description: "invalid annotation fixture".into(),
+                input_schema: json!({"type":"object"}),
+                output_schema: artist_tool_api::text_output_schema("unsafe_read", "fixture"),
+                category: artist_tool_api::ToolCategory::Administration,
+                annotations: artist_tool_api::ArtistToolAnnotations {
+                    read_only: true,
+                    destructive: true,
+                    idempotent: true,
+                    open_world: false,
+                },
+            },
+            |_| Box::pin(async { Ok(ArtistToolOutput::text("no")) }),
+        );
+        let error = match McpServer::new(vec![tool], None) {
+            Ok(_) => panic!("invalid annotations must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("read-only and destructive"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_status_becomes_a_recoverable_failure() {
+        let tool = ArtistDynamicTool::new(
+            artist_tool_api::ArtistToolDefinition {
+                name: "bash".into(),
+                title: "Bash".into(),
+                description: "timeout fixture".into(),
+                input_schema: json!({"type":"object"}),
+                output_schema: artist_tool_api::schema_for::<artist_tools::BashResult>(),
+                category: artist_tool_api::ToolCategory::Shell,
+                annotations: artist_tool_api::ArtistToolAnnotations {
+                    read_only: false,
+                    destructive: true,
+                    idempotent: false,
+                    open_world: true,
+                },
+            },
+            |_| {
+                Box::pin(async {
+                    Ok(ArtistToolOutput {
+                        presentation: ToolOutput::text("timed out"),
+                        structured: serde_json::to_value(artist_tools::BashResult {
+                            status: artist_tools::BashStatus::TimedOut,
+                            exit_code: None,
+                            session_id: None,
+                            stdout: "partial".into(),
+                            stderr: String::new(),
+                            output: "partial".into(),
+                            duration_ms: Some(1_000),
+                            timeout_secs: Some(1),
+                            terminated_by: Some("SIGKILL".into()),
+                            truncated: false,
+                            retry_as_background: true,
+                        })
+                        .unwrap(),
+                    })
+                })
+            },
+        );
+        let server = McpServer::new(vec![tool], None).unwrap();
+        let result = server
+            .invoke(
+                "bash",
+                json!({"command":"sleep 5", "timeout":1}),
+                Meta::default(),
+            )
+            .await;
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(structured["ok"], false);
+        assert_eq!(structured["error"]["code"], "command_timed_out");
+        assert_eq!(structured["error"]["partialData"]["status"], "timed_out");
+        assert!(
+            structured["nextActions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|action| action["kind"] == "start_background")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_results_are_recovered_through_the_page_tool() {
+        let huge = "x".repeat(crate::pagination::MAX_INLINE_RESULT_BYTES + 4096);
+        let tool = ArtistDynamicTool::new(
+            artist_tool_api::ArtistToolDefinition {
+                name: "huge".into(),
+                title: "Huge".into(),
+                description: "oversized fixture".into(),
+                input_schema: json!({"type":"object"}),
+                output_schema: artist_tool_api::text_output_schema("huge", "huge fixture"),
+                category: artist_tool_api::ToolCategory::Administration,
+                annotations: artist_tool_api::ArtistToolAnnotations::read_only(),
+            },
+            move |_| {
+                let huge = huge.clone();
+                Box::pin(async move { Ok(ArtistToolOutput::text(huge)) })
+            },
+        );
+        let state = tempfile::tempdir().unwrap();
+        let server = McpServer::new(vec![tool], Some(state.path())).unwrap();
+        let result = server.invoke("huge", json!({}), Meta::default()).await;
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["ok"], true);
+        assert!(structured["data"].is_null());
+        let cursor = structured["page"]["cursor"].as_str().unwrap();
+        assert_eq!(structured["nextActions"][0]["kind"], "read_page");
+
+        let page = server
+            .invoke(
+                "page",
+                json!({"cursor": cursor, "maxBytes": 4096}),
+                Meta::default(),
+            )
+            .await;
+        let page = page.structured_content.as_ref().unwrap();
+        assert_eq!(page["ok"], true);
+        assert_eq!(page["data"]["returnedBytes"], 4096);
+        assert!(page["data"]["content"].as_str().unwrap().contains('x'));
     }
 
     #[tokio::test]
@@ -555,9 +1071,9 @@ mod tests {
             )
             .await;
         let structured = result.structured_content.unwrap();
-        assert_eq!(structured["found"], true);
-        assert_eq!(structured["operation"]["key"], "build-42");
-        assert_eq!(structured["operation"]["tool"], "count");
+        assert_eq!(structured["data"]["found"], true);
+        assert_eq!(structured["data"]["operation"]["key"], "build-42");
+        assert_eq!(structured["data"]["operation"]["tool"], "count");
     }
 
     #[tokio::test]

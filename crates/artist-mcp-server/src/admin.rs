@@ -4,12 +4,63 @@ use std::path::{Path, PathBuf};
 
 use artist_tool_api::{
     ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, ArtistToolOutput, ToolCategory,
+    schema_for,
 };
 use rig_core::tool::{ToolExecutionError, ToolOutput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::envelope::Envelope;
+use crate::{
+    envelope::Envelope,
+    pagination::{DEFAULT_PAGE_BYTES, MAX_PAGE_BYTES, PageChunk, PageStore},
+};
+
+pub fn page_tool(store: PageStore) -> ArtistDynamicTool {
+    ArtistDynamicTool::new(
+        ArtistToolDefinition {
+            name: "page".into(),
+            title: "Read Result Page".into(),
+            description: "Read the next bounded chunk of an oversized Artist tool result using the opaque cursor returned in that result's page metadata.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "cursor": {"type": "string", "description": "Opaque cursor returned by a previous tool result or page call."},
+                    "maxBytes": {"type": "integer", "minimum": 1, "maximum": MAX_PAGE_BYTES, "default": DEFAULT_PAGE_BYTES}
+                },
+                "required": ["cursor"],
+                "additionalProperties": false
+            }),
+            output_schema: schema_for::<PageChunk>(),
+            category: ToolCategory::Administration,
+            annotations: ArtistToolAnnotations::read_only(),
+        },
+        move |arguments| {
+            let store = store.clone();
+            Box::pin(async move {
+                let cursor = arguments
+                    .get("cursor")
+                    .and_then(Value::as_str)
+                    .filter(|cursor| !cursor.is_empty())
+                    .ok_or_else(|| ToolExecutionError::invalid_args("cursor is required"))?;
+                let max_bytes = arguments
+                    .get("maxBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(DEFAULT_PAGE_BYTES as u64)
+                    .clamp(1, MAX_PAGE_BYTES as u64) as usize;
+                let chunk = store.read(cursor, max_bytes)?;
+                let structured = serde_json::to_value(&chunk)
+                    .map_err(ToolExecutionError::from_error)?;
+                Ok(ArtistToolOutput {
+                    presentation: ToolOutput::text(format!(
+                        "{}\n\n{}",
+                        chunk.content, chunk.summary
+                    )),
+                    structured,
+                })
+            })
+        },
+    )
+}
 
 pub fn operation_tool(envelope: Envelope) -> ArtistDynamicTool {
     ArtistDynamicTool::new(
@@ -308,13 +359,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(output.structured["restartRequired"], true);
+        assert_eq!(output.structured["data"]["restartRequired"], true);
         assert_eq!(
             WorkspaceStore::selected(config.path()).unwrap().unwrap(),
             std::fs::canonicalize(next.path()).unwrap()
         );
         assert_eq!(
-            output.structured["currentWorkspace"],
+            output.structured["data"]["currentWorkspace"],
             std::fs::canonicalize(current.path())
                 .unwrap()
                 .display()

@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use rig_core::tool::{
-    IntoToolOutput, PortableDynamicTool, PortableTool, ToolExecutionError, ToolOutput,
+    IntoToolOutput, PortableDynamicTool, PortableTool, ToolErrorKind, ToolExecutionError,
+    ToolOutput,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,180 @@ impl ArtistToolAnnotations {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistWarning {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldError {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NextAction {
+    Retry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        after_ms: Option<u64>,
+    },
+    RetryWith {
+        tool: String,
+        arguments: Value,
+        reason: String,
+    },
+    StartBackground {
+        tool: String,
+        arguments: Value,
+    },
+    RecoverOperation {
+        key: String,
+    },
+    ReadPage {
+        cursor: String,
+    },
+    RestartPagination {
+        tool: String,
+        arguments: Value,
+    },
+    SelectWorkspace {
+        path: String,
+    },
+    EnableCapability {
+        capability: String,
+        flag: String,
+    },
+    UseNewIdempotencyKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_errors: Vec<FieldError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partial_data: Option<Value>,
+}
+
+impl ArtistFailure {
+    pub fn from_tool_error(error: &ToolExecutionError) -> Self {
+        Self {
+            code: error
+                .code()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| error.kind().as_str().to_owned()),
+            message: error
+                .model_feedback()
+                .unwrap_or_else(|| error.message())
+                .to_owned(),
+            retryable: error.retryable().unwrap_or(matches!(
+                error.kind(),
+                ToolErrorKind::Timeout | ToolErrorKind::RateLimited | ToolErrorKind::Network
+            )),
+            retry_after_ms: None,
+            field_errors: Vec::new(),
+            partial_data: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PageInfo {
+    pub cursor: String,
+    pub preview: String,
+    pub returned_bytes: usize,
+    pub total_bytes: usize,
+    pub has_more: bool,
+    pub content_type: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEvent {
+    pub progress: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<f64>,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+trait ProgressCallback:
+    Fn(ProgressEvent) + rig_core::wasm_compat::WasmCompatSend + rig_core::wasm_compat::WasmCompatSync
+{
+}
+impl<F> ProgressCallback for F where
+    F: Fn(ProgressEvent)
+        + rig_core::wasm_compat::WasmCompatSend
+        + rig_core::wasm_compat::WasmCompatSync
+{
+}
+
+#[derive(Clone, Default)]
+pub struct ProgressReporter {
+    callback: Option<Arc<dyn ProgressCallback>>,
+}
+
+impl std::fmt::Debug for ProgressReporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressReporter")
+            .field("enabled", &self.callback.is_some())
+            .finish()
+    }
+}
+
+impl ProgressReporter {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(ProgressEvent)
+            + rig_core::wasm_compat::WasmCompatSend
+            + rig_core::wasm_compat::WasmCompatSync
+            + 'static,
+    {
+        Self {
+            callback: Some(Arc::new(callback)),
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.callback.is_some()
+    }
+
+    pub fn emit(&self, event: ProgressEvent) {
+        if let Some(callback) = &self.callback {
+            callback(event);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ToolCallContext {
+    pub operation_id: Option<String>,
+    pub progress: ProgressReporter,
+}
+
 #[derive(Clone, Debug)]
 pub struct ArtistToolDefinition {
     pub name: String,
@@ -108,6 +283,7 @@ impl ArtistToolOutput {
 trait Callback:
     Fn(
         Value,
+        ToolCallContext,
     ) -> rig_core::wasm_compat::WasmBoxedFuture<
         'static,
         Result<ArtistToolOutput, ToolExecutionError>,
@@ -119,6 +295,7 @@ trait Callback:
 impl<F> Callback for F where
     F: Fn(
             Value,
+            ToolCallContext,
         ) -> rig_core::wasm_compat::WasmBoxedFuture<
             'static,
             Result<ArtistToolOutput, ToolExecutionError>,
@@ -152,8 +329,23 @@ impl ArtistDynamicTool {
             + rig_core::wasm_compat::WasmCompatSync
             + 'static,
     {
+        Self::new_with_context(definition, move |arguments, _context| callback(arguments))
+    }
+
+    pub fn new_with_context<F>(definition: ArtistToolDefinition, callback: F) -> Self
+    where
+        F: Fn(
+                Value,
+                ToolCallContext,
+            ) -> rig_core::wasm_compat::WasmBoxedFuture<
+                'static,
+                Result<ArtistToolOutput, ToolExecutionError>,
+            > + rig_core::wasm_compat::WasmCompatSend
+            + rig_core::wasm_compat::WasmCompatSync
+            + 'static,
+    {
         Self {
-            definition,
+            definition: enveloped_definition(definition),
             callback: Arc::new(callback),
         }
     }
@@ -183,15 +375,30 @@ impl ArtistDynamicTool {
             })
         })
     }
+
     pub fn name(&self) -> &str {
         &self.definition.name
     }
+
     pub fn definition(&self) -> &ArtistToolDefinition {
         &self.definition
     }
 
     pub async fn execute(&self, arguments: Value) -> Result<ArtistToolOutput, ToolExecutionError> {
-        (self.callback)(arguments).await
+        self.execute_with_context(arguments, ToolCallContext::default())
+            .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        arguments: Value,
+        context: ToolCallContext,
+    ) -> Result<ArtistToolOutput, ToolExecutionError> {
+        let mut output = (self.callback)(arguments, context).await?;
+        if !is_result_envelope(&output.structured) {
+            output.structured = success_envelope(output.structured);
+        }
+        Ok(output)
     }
 
     pub fn portable(&self) -> PortableDynamicTool {
@@ -223,7 +430,25 @@ impl ArtistDynamicTool {
             + rig_core::wasm_compat::WasmCompatSync
             + 'static,
     {
-        Self::new(self.definition.clone(), callback)
+        self.with_context_callback(move |arguments, _context| callback(arguments))
+    }
+
+    pub fn with_context_callback<F>(&self, callback: F) -> Self
+    where
+        F: Fn(
+                Value,
+                ToolCallContext,
+            ) -> rig_core::wasm_compat::WasmBoxedFuture<
+                'static,
+                Result<ArtistToolOutput, ToolExecutionError>,
+            > + rig_core::wasm_compat::WasmCompatSend
+            + rig_core::wasm_compat::WasmCompatSync
+            + 'static,
+    {
+        Self {
+            definition: self.definition.clone(),
+            callback: Arc::new(callback),
+        }
     }
 }
 
@@ -260,15 +485,29 @@ where
         annotations: tool.annotations(),
     };
     let tool = Arc::new(tool);
-    ArtistDynamicTool::new(definition, move |arguments| {
+    ArtistDynamicTool::new_with_context(definition, move |arguments, context| {
         let tool = Arc::clone(&tool);
         Box::pin(async move {
+            context.progress.emit(ProgressEvent {
+                progress: 0.0,
+                total: None,
+                phase: "executing".into(),
+                message: Some(format!("Executing {}.", T::NAME)),
+                unit: Some("phase".into()),
+            });
             let arguments =
                 serde_json::from_value(arguments).map_err(ToolExecutionError::from_error)?;
             let raw = tool
                 .call(arguments)
                 .await
                 .map_err(|error| tool.map_error(error))?;
+            context.progress.emit(ProgressEvent {
+                progress: 0.0,
+                total: None,
+                phase: "serializing".into(),
+                message: Some(format!("Preparing {} result.", T::NAME)),
+                unit: Some("phase".into()),
+            });
             let structured = tool.structured_output(&raw)?;
             let presentation = raw.into_tool_output()?;
             Ok(ArtistToolOutput {
@@ -277,6 +516,192 @@ where
             })
         })
     })
+}
+
+fn enveloped_definition(mut definition: ArtistToolDefinition) -> ArtistToolDefinition {
+    if !is_result_schema(&definition.output_schema) {
+        definition.output_schema = result_output_schema(definition.output_schema);
+    }
+    definition
+}
+
+pub fn is_result_envelope(value: &Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("ok"))
+        .and_then(Value::as_bool)
+        .is_some()
+}
+
+fn is_result_schema(value: &Value) -> bool {
+    value
+        .get("x-artist-envelope")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn success_envelope(data: Value) -> Value {
+    json!({"ok": true, "data": data})
+}
+
+pub fn failure_envelope(
+    failure: ArtistFailure,
+    next_actions: Vec<NextAction>,
+    meta: Option<ResultMeta>,
+) -> Value {
+    let mut value = json!({
+        "ok": false,
+        "error": failure,
+    });
+    let object = value
+        .as_object_mut()
+        .expect("failure envelope is an object");
+    if !next_actions.is_empty() {
+        object.insert(
+            "nextActions".into(),
+            serde_json::to_value(next_actions).expect("next actions serialize"),
+        );
+    }
+    if let Some(meta) = meta {
+        object.insert(
+            "meta".into(),
+            serde_json::to_value(meta).expect("result metadata serializes"),
+        );
+    }
+    value
+}
+
+pub fn set_result_meta(value: &mut Value, meta: ResultMeta) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "meta".into(),
+            serde_json::to_value(meta).expect("result metadata serializes"),
+        );
+    }
+}
+
+pub fn set_page(value: &mut Value, page: PageInfo) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("data".into(), Value::Null);
+        object.insert(
+            "page".into(),
+            serde_json::to_value(&page).expect("page metadata serializes"),
+        );
+        object.insert(
+            "nextActions".into(),
+            serde_json::to_value(vec![NextAction::ReadPage {
+                cursor: page.cursor,
+            }])
+            .expect("page action serializes"),
+        );
+    }
+}
+
+pub fn result_output_schema(mut data_schema: Value) -> Value {
+    let warning_schema = json!({
+        "type": "object",
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"}
+        },
+        "required": ["code", "message"],
+        "additionalProperties": false
+    });
+    let field_error_schema = json!({
+        "type": "object",
+        "properties": {
+            "field": {"type": "string"},
+            "message": {"type": "string"}
+        },
+        "required": ["field", "message"],
+        "additionalProperties": false
+    });
+    let next_action_schema = json!({
+        "type": "object",
+        "required": ["kind"],
+        "properties": {"kind": {"type": "string"}},
+        "additionalProperties": true
+    });
+    let meta_schema = json!({
+        "type": "object",
+        "properties": {
+            "operationId": {"type": "string"},
+            "durationMs": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+    });
+    let page_schema = json!({
+        "type": "object",
+        "properties": {
+            "cursor": {"type": "string"},
+            "preview": {"type": "string"},
+            "returnedBytes": {"type": "integer", "minimum": 0},
+            "totalBytes": {"type": "integer", "minimum": 0},
+            "hasMore": {"type": "boolean"},
+            "contentType": {"type": "string"},
+            "summary": {"type": "string"}
+        },
+        "required": ["cursor", "preview", "returnedBytes", "totalBytes", "hasMore", "contentType", "summary"],
+        "additionalProperties": false
+    });
+    let definitions = data_schema
+        .as_object_mut()
+        .and_then(|object| object.remove("definitions"));
+    let defs = data_schema
+        .as_object_mut()
+        .and_then(|object| object.remove("$defs"));
+
+    let failure_schema = json!({
+        "type": "object",
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "retryable": {"type": "boolean"},
+            "retryAfterMs": {"type": "integer", "minimum": 0},
+            "fieldErrors": {"type": "array", "items": field_error_schema},
+            "partialData": {}
+        },
+        "required": ["code", "message", "retryable"],
+        "additionalProperties": false
+    });
+    let mut schema = json!({
+        "x-artist-envelope": true,
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "ok": {"const": true},
+                    "data": {"anyOf": [data_schema, {"type": "null"}]},
+                    "warnings": {"type": "array", "items": warning_schema},
+                    "nextActions": {"type": "array", "items": next_action_schema},
+                    "meta": meta_schema,
+                    "page": page_schema
+                },
+                "required": ["ok", "data"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "ok": {"const": false},
+                    "error": failure_schema,
+                    "warnings": {"type": "array", "items": warning_schema},
+                    "nextActions": {"type": "array", "items": next_action_schema},
+                    "meta": meta_schema
+                },
+                "required": ["ok", "error"],
+                "additionalProperties": false
+            }
+        ]
+    });
+    let root = schema.as_object_mut().expect("result schema is an object");
+    if let Some(defs) = defs {
+        root.insert("$defs".into(), defs);
+    }
+    if let Some(definitions) = definitions {
+        root.insert("definitions".into(), definitions);
+    }
+    schema
 }
 
 pub fn schema_for<T: JsonSchema>() -> Value {
