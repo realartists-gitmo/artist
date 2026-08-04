@@ -29,6 +29,11 @@ pub(crate) struct ReplyTarget {
     pub audience: Audience,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Delivery {
+    pub from: String,
+    pub text: String,
+}
 /// This agent's mailbox, and what it last saw.
 #[derive(Clone)]
 pub(crate) struct Inbox {
@@ -62,28 +67,30 @@ impl Inbox {
 
     /// Take anything waiting and record who to reply to.
     ///
-    /// Returns the text to inject, or `None` when the inbox is empty. Draining
-    /// and recording happen together so there is no window in which a message
-    /// has been consumed but its sender is not yet the reply target.
+    /// Returns the rendered text to inject, or `None` when the inbox is empty.
+    /// Draining and recording happen together so there is no window in which a
+    /// message has been consumed but its sender is not yet the reply target.
     pub fn collect(&self) -> Option<String> {
+        self.collect_delivery().map(|delivery| delivery.text)
+    }
+
+    /// Drain a batch while retaining the actual sender of its last message.
+    /// Query results use this rather than echoing the requested target, which
+    /// matters when a group member answers a group query.
+    pub fn collect_delivery(&self) -> Option<Delivery> {
         let messages = self.store.drain(&self.name).ok()?;
-        if messages.is_empty() {
-            return None;
-        }
-        // The last message in the batch is what `reply` answers. Stated as a
-        // rule rather than left implicit, because a batch can hold several
-        // senders and "the last one you were shown" is the only reading a
-        // person would predict.
-        if let Some(last) = messages.last() {
-            *self
-                .last_delivered
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = Some(ReplyTarget {
-                to: last.from.clone(),
-                audience: last.audience.clone(),
-            });
-        }
-        Some(render(&messages))
+        let last = messages.last()?;
+        *self
+            .last_delivered
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(ReplyTarget {
+            to: last.from.clone(),
+            audience: last.audience.clone(),
+        });
+        Some(Delivery {
+            from: last.from.clone(),
+            text: render(&messages),
+        })
     }
 
     /// Who `reply` addresses, if anything has been delivered.

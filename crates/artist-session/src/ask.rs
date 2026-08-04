@@ -320,7 +320,7 @@ mod tests {
     fn pending_order_is_stable_so_two_surfaces_agree() {
         let registry = AskRegistry::new();
         for id in ["q3", "q1", "q2"] {
-            let _ = registry.post(question(id));
+            std::mem::drop(registry.post(question(id)));
         }
         let ids: Vec<_> = registry.pending().into_iter().map(|q| q.id).collect();
         assert_eq!(ids, ["q1", "q2", "q3"]);

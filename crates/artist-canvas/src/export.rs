@@ -433,20 +433,6 @@ fn lobby_page(pages: &[(String, String, String)], imports: &BTreeMap<String, Str
     )
 }
 
-/// Escape a whole document so it can live inside an HTML attribute.
-///
-/// `srcdoc` holds markup as an attribute value, so anything that could close
-/// the attribute or the tag has to go — and `&` first, or the escapes escape
-/// each other.
-fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
 /// A sortable, readable UTC stamp: `20260801-014233`.
 ///
 /// Exports accumulate in a directory the user is expected to browse — it is the

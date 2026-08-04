@@ -2,7 +2,8 @@ use crate::{ToolError, Workspace, output};
 use dashmap::{DashMap, DashSet};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use rig_core::tool::PortableTool;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -10,7 +11,7 @@ use std::{
     path::Path,
     process::Stdio,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
@@ -18,9 +19,141 @@ use tokio::{
 };
 
 const EXEC_CAP: usize = 50 * 1024;
-const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 300;
 const SESSION_CAP: usize = 2 * 1024 * 1024;
 const INPUT_SESSION_ID: &str = "artist-input-shell";
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BashStatus {
+    Completed,
+    Failed,
+    TimedOut,
+    Superseded,
+    Running,
+    Stopping,
+    Stopped,
+    Listed,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BashResult {
+    pub status: BashStatus,
+    pub exit_code: Option<i32>,
+    pub session_id: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub output: String,
+    pub duration_ms: Option<u64>,
+    pub timeout_secs: Option<u64>,
+    pub terminated_by: Option<String>,
+    pub truncated: bool,
+    pub retry_as_background: bool,
+}
+
+impl BashResult {
+    pub fn parse(text: &str) -> Self {
+        let mut status = BashStatus::Unknown;
+        let mut exit_code = None;
+        let mut session_id = None;
+        let mut duration_ms = None;
+        let mut timeout_secs = None;
+        let mut terminated_by = None;
+        let mut truncated = false;
+        let mut header_done = false;
+        let mut output_lines = Vec::new();
+        for line in text.lines() {
+            if !header_done {
+                if let Some(value) = line.strip_prefix("status: ") {
+                    status = match value.trim() {
+                        "completed" => BashStatus::Completed,
+                        "failed" => BashStatus::Failed,
+                        "timedOut" | "timed_out" => BashStatus::TimedOut,
+                        "superseded" => BashStatus::Superseded,
+                        "running" => BashStatus::Running,
+                        value if value.starts_with("stopping") => BashStatus::Stopping,
+                        value if value.starts_with("stopped") => BashStatus::Stopped,
+                        _ => BashStatus::Unknown,
+                    };
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("exitCode: ") {
+                    exit_code = value.trim().parse().ok();
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("sessionId: ") {
+                    session_id = Some(value.trim().to_owned());
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("durationMs: ") {
+                    duration_ms = value.trim().parse().ok();
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("timeoutSecs: ") {
+                    timeout_secs = value.trim().parse().ok();
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("terminatedBy: ") {
+                    if value.trim() != "none" {
+                        terminated_by = Some(value.trim().to_owned());
+                    }
+                    continue;
+                }
+                if let Some(value) = line.strip_prefix("truncated: ") {
+                    truncated = value.trim() == "true";
+                    continue;
+                }
+                if line == "--- output ---" || line == "--- stdout ---" {
+                    header_done = true;
+                    continue;
+                }
+                if text.starts_with("sessions:") {
+                    return Self {
+                        status: BashStatus::Listed,
+                        exit_code: None,
+                        session_id: None,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        output: text.to_owned(),
+                        duration_ms: None,
+                        timeout_secs: None,
+                        terminated_by: None,
+                        truncated: false,
+                        retry_as_background: false,
+                    };
+                }
+            } else {
+                output_lines.push(line);
+            }
+        }
+        let joined = output_lines.join("\n");
+        let (stdout, stderr) = match joined.split_once("\n--- stderr ---\n") {
+            Some((stdout, stderr)) => (stdout.to_owned(), stderr.to_owned()),
+            None => (String::new(), String::new()),
+        };
+        let output = if stdout.is_empty() && stderr.is_empty() {
+            joined
+        } else {
+            String::new()
+        };
+        let retry_as_background = matches!(status, BashStatus::TimedOut);
+        Self {
+            status,
+            exit_code,
+            session_id,
+            stdout,
+            stderr,
+            output,
+            duration_ms,
+            timeout_secs,
+            terminated_by,
+            truncated,
+            retry_as_background,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct BashTool {
@@ -104,13 +237,12 @@ impl BashTool {
 }
 
 fn clean_input_output(output: &str, command: Option<&str>) -> String {
-    // The status header spans a variable number of lines — `status: <word>`,
-    // an optional `exitCode:` line for a finished child, then `sessionId:` —
-    // so consume through the `sessionId:` line rather than a fixed count, which
-    // used to leak the `exitCode:`/`sessionId:` line for completed commands.
+    // Consume the complete machine-readable header through the output marker.
+    // The header grows as lifecycle fields are added, so a marker is stable
+    // while a fixed line count or `sessionId` boundary is not.
     let mut lines = output.lines();
     for line in lines.by_ref() {
-        if line.starts_with("sessionId:") {
+        if line == "--- output ---" {
             break;
         }
     }
@@ -260,10 +392,20 @@ impl BashTool {
             process.envs(env);
         }
         let cap = args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP);
+        let started = Instant::now();
         let mut child = process.spawn()?;
-        let buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
-        let mut stdout = tokio::spawn(pump(child.stdout.take().unwrap(), buffer.clone(), cap));
-        let mut stderr = tokio::spawn(pump(child.stderr.take().unwrap(), buffer.clone(), cap));
+        let stdout_buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
+        let stderr_buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
+        let mut stdout = tokio::spawn(pump(
+            child.stdout.take().unwrap(),
+            stdout_buffer.clone(),
+            cap,
+        ));
+        let mut stderr = tokio::spawn(pump(
+            child.stderr.take().unwrap(),
+            stderr_buffer.clone(),
+            cap,
+        ));
         let timeout_secs = args.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
         let timeout = Duration::from_secs(timeout_secs);
         // Supersession is why the token is here: a newer request for the same
@@ -319,16 +461,20 @@ impl BashTool {
             stdout.abort();
             stderr.abort();
         }
-        let buffer = buffer.lock().await;
-        let output = String::from_utf8_lossy(&buffer.0);
-        let timeout_notice = if status == "timedOut" {
-            format!("timeout: command exceeded {timeout_secs}s and was terminated\n")
+        let stdout_buffer = stdout_buffer.lock().await;
+        let stderr_buffer = stderr_buffer.lock().await;
+        let stdout_text = String::from_utf8_lossy(&stdout_buffer.0);
+        let stderr_text = String::from_utf8_lossy(&stderr_buffer.0);
+        let duration_ms = started.elapsed().as_millis();
+        let terminated_by = if matches!(status, "timedOut" | "superseded") {
+            "SIGKILL"
         } else {
-            String::new()
+            "none"
         };
         Ok(format!(
-            "status: {status}\nexitCode: {exit_code:?}\n{timeout_notice}truncated: {}\n{output}",
-            buffer.1
+            "status: {status}\nexitCode: {}\ndurationMs: {duration_ms}\ntimeoutSecs: {timeout_secs}\nterminatedBy: {terminated_by}\ntruncated: {}\n--- stdout ---\n{stdout_text}\n--- stderr ---\n{stderr_text}",
+            exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
+            stdout_buffer.1 || stderr_buffer.1,
         ))
     }
     async fn start(&self, args: BashArgs) -> Result<String, ToolError> {
@@ -468,7 +614,7 @@ impl BashTool {
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(250))).await;
         let output = self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?;
         Ok(format!(
-            "status: {}sessionId: {id}\n{output}",
+            "status: {}\nsessionId: {id}\ntruncated: false\n--- output ---\n{output}",
             self.session_status(&id)?
         ))
     }
@@ -484,7 +630,7 @@ impl BashTool {
         session.writer.lock().unwrap().flush()?;
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(100))).await;
         Ok(format!(
-            "status: {}sessionId: {id}\n{}",
+            "status: {}\nsessionId: {id}\ntruncated: false\n--- output ---\n{}",
             self.session_status(&id)?,
             self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
         ))
@@ -495,7 +641,7 @@ impl BashTool {
             .ok_or_else(|| ToolError::Message("sessionId is required".into()))?;
         tokio::time::sleep(Duration::from_millis(args.wait_ms.unwrap_or(0))).await;
         Ok(format!(
-            "status: {}sessionId: {id}\n{}",
+            "status: {}\nsessionId: {id}\ntruncated: false\n--- output ---\n{}",
             self.session_status(&id)?,
             self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
         ))
@@ -551,7 +697,9 @@ impl BashTool {
         } else {
             "stopping"
         };
-        Ok(format!("status: {status}\nsessionId: {id}\n{output}"))
+        Ok(format!(
+            "status: {status}\nsessionId: {id}\ntruncated: false\n--- output ---\n{output}"
+        ))
     }
     fn list(&self) -> String {
         if self.sessions.is_empty() {

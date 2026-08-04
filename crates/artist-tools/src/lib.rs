@@ -2,6 +2,7 @@ mod annotate;
 mod bash;
 mod coalesce;
 mod code;
+mod contracts;
 mod drift;
 mod edit;
 mod find;
@@ -21,8 +22,8 @@ mod write;
 
 pub use bash::BashTool;
 pub use code::{
-    AstQueryTool, AstRewriteTool, CodeCyclesTool, CodeDepsTool, CodeImpactTool, CodeImplementsTool,
-    CodeMapTool, CodeShowTool, CodeSurfaceTool, CodeTraceTool,
+    AstQueryTool, AstRewriteTool, CodeCallsTool, CodeCyclesTool, CodeDepsTool, CodeImpactTool,
+    CodeImplementsTool, CodeMapTool, CodeShowTool, CodeSurfaceTool, CodeTraceTool,
 };
 pub use drift::{DRIFT_BUDGET, DriftWatch, report as drift_report};
 pub use edit::EditTool;
@@ -68,6 +69,7 @@ pub struct ToolBundle {
     pub code_implements: CodeImplementsTool,
     pub code_deps: CodeDepsTool,
     pub code_cycles: CodeCyclesTool,
+    pub code_calls: CodeCallsTool,
     pub code_trace: CodeTraceTool,
     pub code_impact: CodeImpactTool,
     pub ast_query: AstQueryTool,
@@ -88,6 +90,7 @@ impl ToolBundle {
             code_implements: CodeImplementsTool(workspace.clone()),
             code_deps: CodeDepsTool(workspace.clone()),
             code_cycles: CodeCyclesTool(workspace.clone()),
+            code_calls: CodeCallsTool(workspace.clone()),
             code_trace: CodeTraceTool(workspace.clone()),
             code_impact: CodeImpactTool(workspace.clone()),
             ast_query: AstQueryTool(workspace.clone()),

@@ -134,33 +134,39 @@ impl McpDaemon {
             None
         };
 
-        // Comms: claim the durable identity once; the model re-claims on `init`.
-        // If the registry is unavailable, omit messaging entirely rather than
-        // binding the inbox to a fallback name that `init` may later replace.
-        let identity = if allow.comms {
-            match artist_registry::names().claim(&artist_registry::Registration {
-                session: actor.to_owned(),
+        // Claim once before serving. Identity is always available to MCP
+        // initialization; messaging is exposed only when the registry claim
+        // succeeded and communications were enabled.
+        let project_text = project.display().to_string();
+        let claimed = artist_registry::names().claim(&artist_registry::Registration {
+            session: actor.to_owned(),
+            actor: actor.to_owned(),
+            project: Some(project_text.clone()),
+            profile: Some(profile_name.to_owned()),
+            parent: None,
+        });
+        let identity = match claimed {
+            Ok(name) => McpIdentity {
                 actor: actor.to_owned(),
-                project: Some(project.display().to_string()),
-                profile: Some(profile_name.to_owned()),
-                parent: None,
-            }) {
-                Ok(name) => Some(McpIdentity {
+                profile: profile_name.to_owned(),
+                project: project_text,
+                name: name.name,
+                registered: true,
+            },
+            Err(error) => {
+                tracing::warn!("could not claim MCP identity: {error}; using actor fallback");
+                McpIdentity {
                     actor: actor.to_owned(),
                     profile: profile_name.to_owned(),
-                    project: project.display().to_string(),
-                    name: name.name,
-                }),
-                Err(error) => {
-                    tracing::warn!("could not claim MCP identity: {error}; messaging disabled");
-                    None
+                    project: project_text,
+                    name: actor.to_owned(),
+                    registered: false,
                 }
             }
-        } else {
-            None
         };
+        let messaging_identity = (allow.comms && identity.registered).then(|| identity.clone());
 
-        let tools = artist_agent::tool_set::mcp_surface(McpSurface {
+        let mut tools = artist_agent::tool_set::mcp_surface(McpSurface {
             workspace,
             profile,
             recorder: Some(recorder),
@@ -170,8 +176,11 @@ impl McpDaemon {
             canvas,
             memory: memory_writer,
             delegation,
-            identity,
+            identity: messaging_identity,
         });
+        tools.push(crate::admin::workspace_tool(
+            crate::admin::WorkspaceStore::new(&config_root, &project),
+        ));
         if tools.is_empty() {
             return Err(anyhow!(
                 "profile {profile_name:?} permits no tools in this environment"
@@ -180,7 +189,7 @@ impl McpDaemon {
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         tracing::info!(tools = ?names, "built tool surface");
 
-        let server = McpServer::new(tools, Some(state_dir))?;
+        let server = McpServer::with_identity(tools, Some(state_dir), identity)?;
         if let Some(host) = &canvas_host {
             host.attach(server.clone());
         }
@@ -217,16 +226,53 @@ impl McpDaemon {
             // attacks against a daemon running on the user's machine.
             StreamableHttpServerConfig::default(),
         );
-        let router = axum::Router::new().nest_service("/mcp", service);
+        let router = axum::Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(no_oauth_metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                axum::routing::get(no_oauth_metadata),
+            )
+            .nest_service("/mcp", service);
         tracing::info!(addr = %listener.local_addr()?, "serving artist over MCP http");
         axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                if let Err(error) = tokio::signal::ctrl_c().await {
-                    tracing::warn!("failed to install shutdown signal handler: {error}");
-                }
-            })
+            .with_graceful_shutdown(shutdown_signal())
             .await
             .map_err(|error| anyhow!(error))
+    }
+}
+async fn no_oauth_metadata() -> (axum::http::StatusCode, &'static str) {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        "OAuth protected resource metadata is not configured for this MCP server.",
+    )
+}
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::warn!("failed to install SIGTERM handler: {error}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::warn!("failed to receive interrupt signal: {error}");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!("failed to receive shutdown signal: {error}");
     }
 }
 

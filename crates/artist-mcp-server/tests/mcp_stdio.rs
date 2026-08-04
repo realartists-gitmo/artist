@@ -13,7 +13,11 @@ use rmcp::{
     transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 use serde_json::{Map, Value, json};
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    process::Command,
+};
 
 fn binary_available() -> bool {
     std::env::var("CARGO_BIN_EXE_artist-mcp").is_ok()
@@ -33,6 +37,19 @@ fn base_command(mode: &str, project: &Path, state: &Path) -> Command {
         .arg("--log")
         .arg("debug");
     command
+}
+
+async fn raw_http_get(port: u16, path: &str) -> Result<String, std::io::Error> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
 }
 
 /// Spawn `artist-mcp serve` against a throwaway project + state dir.
@@ -95,16 +112,12 @@ fn assert_output_schemas(tools: &[rmcp::model::Tool]) {
             .output_schema
             .as_ref()
             .unwrap_or_else(|| panic!("{} has no outputSchema", tool.name));
-        assert_eq!(schema.get("type"), Some(&json!("object")), "{}", tool.name);
-        assert_eq!(
-            schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .and_then(|properties| properties.get("tool"))
-                .and_then(Value::as_object)
-                .and_then(|tool_property| tool_property.get("const")),
-            Some(&json!(tool.name.as_ref())),
-            "{}",
+        assert!(!schema.is_empty(), "{} outputSchema is empty", tool.name);
+        assert!(
+            schema.get("type") == Some(&json!("object"))
+                || schema.get("oneOf").and_then(Value::as_array).is_some()
+                || schema.get("anyOf").and_then(Value::as_array).is_some(),
+            "{} has no root object or tagged union schema: {schema:?}",
             tool.name
         );
     }
@@ -451,7 +464,6 @@ api_key = "not-used"
         "code_search",
         "code_related",
         "subagent",
-        "init",
         "tell",
         "query",
         "reply",
@@ -467,12 +479,17 @@ api_key = "not-used"
         "handoff is meaningless over MCP"
     );
 
-    let first = client.call_tool(call("init", json!({}))).await?;
-    let second = client.call_tool(call("init", json!({}))).await?;
-    let first = text_content(&first);
-    let second = text_content(&second);
-    assert!(first.starts_with("You are "), "got: {first}");
-    assert_eq!(first, second, "identity must be stable across re-claims");
+    let info = client.peer_info().expect("server initialization metadata");
+    let instructions = info.instructions.as_deref().expect("identity instructions");
+    assert!(
+        instructions.contains("Artist actor mcp-e2e"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("Other agents and the user address you as"));
+    let identity = &info.meta.as_ref().expect("server metadata").0["artist"]["identity"];
+    assert_eq!(identity["actor"], "mcp-e2e");
+    assert_eq!(identity["profile"], "worker");
+    assert_eq!(identity["registered"], true);
 
     client.cancel().await?;
     Ok(())
@@ -548,6 +565,14 @@ async fn streamable_http_daemon_serves_the_same_tools() -> Result<(), Box<dyn st
         connected.ok_or("daemon did not accept MCP connections")?
     };
 
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        let response = raw_http_get(port, path).await?;
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert!(response.contains("not configured"), "{response}");
+    }
     let tools = client.list_all_tools().await?;
     assert!(tools.iter().any(|tool| tool.name == "bash"));
     let output = client

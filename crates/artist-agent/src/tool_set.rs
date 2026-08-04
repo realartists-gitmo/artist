@@ -27,9 +27,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use artist_session::Recorder;
+use artist_tool_api::ArtistDynamicTool;
 use artist_tools::ToolBundle;
-use rig_core::{completion::Message, tool::PortableDynamicTool};
-use serde_json::{Value, json};
+use rig_core::completion::Message;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
@@ -91,7 +91,7 @@ pub(crate) struct ToolEnv {
     pub inbox: Option<crate::messaging::Inbox>,
     /// MCP and extension tools. Not enumerable at compile time, but subject to
     /// exactly the same policy pass as everything else.
-    pub dynamic: Vec<PortableDynamicTool>,
+    pub dynamic: Vec<ArtistDynamicTool>,
     /// The session's live tool toggles. Applied after profile policy because
     /// they are the user's override rather than the profile author's intent.
     pub disabled: Vec<String>,
@@ -145,6 +145,7 @@ pub(crate) enum Tool {
     CodeImplements,
     CodeDeps,
     CodeCycles,
+    CodeCalls,
     CodeTrace,
     CodeImpact,
     CodeSearch,
@@ -163,7 +164,7 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 30] = [
+    pub(crate) const ALL: [Tool; 31] = [
         Tool::Bash,
         Tool::Read,
         Tool::Find,
@@ -179,6 +180,7 @@ impl Tool {
         Tool::CodeImplements,
         Tool::CodeDeps,
         Tool::CodeCycles,
+        Tool::CodeCalls,
         Tool::CodeTrace,
         Tool::CodeImpact,
         Tool::CodeSearch,
@@ -218,6 +220,7 @@ impl Tool {
             Tool::CodeImplements => "code_implements",
             Tool::CodeDeps => "code_deps",
             Tool::CodeCycles => "code_cycles",
+            Tool::CodeCalls => "code_calls",
             Tool::CodeTrace => "code_trace",
             Tool::CodeImpact => "code_impact",
             Tool::CodeSearch => "code_search",
@@ -240,7 +243,7 @@ impl Tool {
     ///
     /// This is the *only* definition of availability: there is no parallel
     /// table of what is gated on what that could disagree with it.
-    fn construct(self, env: &ToolEnv) -> Option<PortableDynamicTool> {
+    fn construct(self, env: &ToolEnv) -> Option<ArtistDynamicTool> {
         let bundle = &env.bundle;
         Some(match self {
             Tool::Bash => tool_prompt::dynamic(bundle.bash.clone()),
@@ -265,6 +268,7 @@ impl Tool {
             Tool::CodeImplements => tool_prompt::dynamic(bundle.code_implements.clone()),
             Tool::CodeDeps => tool_prompt::dynamic(bundle.code_deps.clone()),
             Tool::CodeCycles => tool_prompt::dynamic(bundle.code_cycles.clone()),
+            Tool::CodeCalls => tool_prompt::dynamic(bundle.code_calls.clone()),
             Tool::CodeTrace => tool_prompt::dynamic(bundle.code_trace.clone()),
             Tool::CodeImpact => tool_prompt::dynamic(bundle.code_impact.clone()),
             // Code retrieval rides on the memory index, so it exists only where
@@ -365,17 +369,18 @@ pub struct McpDelegation {
     pub profiles: Profiles,
 }
 
-/// The durable identity an MCP connection claims, so the model learns — and
-/// other agents can address it by — who it is.
+/// The durable identity claimed for an MCP actor before any connection serves.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpIdentity {
     /// Claim key and actor in one: reconnects re-claim the same name because
-    /// `claim` is idempotent on the session.
+    /// registry claims are idempotent on the session.
     pub actor: String,
     pub profile: String,
     pub project: String,
-    /// The name claimed at surface-build time, which binds the inbox. The
-    /// `init` tool re-claims idempotently on call, so the two always agree.
     pub name: String,
+    /// False when the registry was unavailable and `name` fell back to actor.
+    pub registered: bool,
 }
 
 /// Everything the MCP surface is built from. An optional field means "the
@@ -409,7 +414,7 @@ pub struct McpSurface {
 /// main agent and subagent paths — this is the same [`build`], with a different
 /// environment, so the "one place a tool becomes available" invariant holds
 /// for the MCP surface too.
-pub fn mcp_surface(surface: McpSurface) -> Vec<PortableDynamicTool> {
+pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
     let mut dynamic = Vec::new();
     if let Some(outbox) = &surface.outbox {
         // The blocking in-process ask tool is deliberately not available over
@@ -418,12 +423,10 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<PortableDynamicTool> {
         // it. `ask` in `Tool::ALL` stays absent because `env.ask` is None.
         dynamic.extend(crate::ask_outbox::tools(outbox.clone()));
     }
-    let inbox = surface.identity.as_ref().map(|identity| {
-        // Over MCP there is no system-prompt slot the name could ride in, so
-        // the model learns who it is from the `init` tool's result instead.
-        dynamic.push(init_tool(identity));
-        crate::messaging::Inbox::new(identity.name.clone())
-    });
+    let inbox = surface
+        .identity
+        .as_ref()
+        .map(|identity| crate::messaging::Inbox::new(identity.name.clone()));
     let env = ToolEnv {
         bundle: ToolBundle::new(surface.workspace.clone()),
         recorder: surface
@@ -456,54 +459,6 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<PortableDynamicTool> {
     build(&surface.profile, &env)
 }
 
-/// The tool that tells a fresh web session who it is.
-///
-/// MCP gives the model tools, not a system prompt, so the identity has to ride
-/// a tool result. The claim is idempotent on `session` — which is the actor
-/// itself, so a tunnel reconnect re-claims the same name rather than consuming
-/// a new one and leaving the directory pointing at a ghost.
-fn init_tool(identity: &McpIdentity) -> PortableDynamicTool {
-    let actor = identity.actor.clone();
-    let profile = identity.profile.clone();
-    let project = identity.project.clone();
-    PortableDynamicTool::new(
-        "init",
-        "Claim this connection's durable identity in the artist directory and \
-         return the name this session is known by. Call this first, before any \
-         work: the name is what other agents (and the person at the keyboard) \
-         address you as, it is stable across reconnects because the claim is \
-         keyed to this actor, and it is what the tell/query/reply message tools \
-         key off. The claim also records which project and profile you run as, \
-         so the directory can route predicates like 'everyone on this repo'.",
-        json!({"type": "object", "additionalProperties": false}),
-        move |_arguments: Value| {
-            let actor = actor.clone();
-            let profile = profile.clone();
-            let project = project.clone();
-            Box::pin(async move {
-                let claimed = artist_registry::names().claim(&artist_registry::Registration {
-                    session: actor.clone(),
-                    actor: actor.clone(),
-                    project: Some(project),
-                    profile: Some(profile),
-                    parent: None,
-                });
-                let name = match claimed {
-                    Ok(name) => name.name,
-                    // An unreachable registry degrades to the actor id: an
-                    // unnameable agent is a worse failure than an unaesthetic one.
-                    Err(_) => actor.clone(),
-                };
-                Ok(rig_core::tool::ToolOutput::text(format!(
-                    "You are {name}, an Artist in the so-named agentic coding harness.\n\
-                     Other agents and the person driving this session address you as \
-                     \"{name}\" (actor {actor}).",
-                )))
-            })
-        },
-    )
-}
-
 /// Build the tools a profile may use in this environment.
 ///
 /// Order of operations, and why: construct everything the environment can
@@ -512,8 +467,8 @@ fn init_tool(identity: &McpIdentity) -> PortableDynamicTool {
 /// down to the handful it needs, in a subagent as much as at the root. Session
 /// tool toggles come last because they are the user's live override rather than
 /// the profile author's intent.
-pub(crate) fn build(profile: &Profile, env: &ToolEnv) -> Vec<PortableDynamicTool> {
-    let mut tools: Vec<PortableDynamicTool> = Tool::ALL
+pub(crate) fn build(profile: &Profile, env: &ToolEnv) -> Vec<ArtistDynamicTool> {
+    let mut tools: Vec<ArtistDynamicTool> = Tool::ALL
         .into_iter()
         .filter_map(|tool| tool.construct(env))
         .collect();
@@ -679,11 +634,16 @@ pub(crate) mod tests {
         env.dynamic = ["mcp:github/list_issues", "mcp:github/create_issue"]
             .into_iter()
             .map(|name| {
-                PortableDynamicTool::new(
-                    name,
-                    "an mcp tool",
-                    serde_json::json!({"type": "object"}),
-                    |_| Box::pin(async { Ok(rig_core::tool::ToolOutput::text("")) }),
+                ArtistDynamicTool::from_portable(
+                    rig_core::tool::PortableDynamicTool::new(
+                        name,
+                        "an mcp tool",
+                        serde_json::json!({"type": "object"}),
+                        |_| Box::pin(async { Ok(rig_core::tool::ToolOutput::text("")) }),
+                    ),
+                    artist_tool_api::text_output_schema(name, "MCP test output."),
+                    artist_tool_api::ToolCategory::External,
+                    artist_tool_api::ArtistToolAnnotations::external_read(),
                 )
             })
             .collect();

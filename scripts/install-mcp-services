@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.config/artist"
+install -m 0755 "$repo/scripts/start-artist-mcp-daemon" "$HOME/.local/bin/start-artist-mcp-daemon"
+install -m 0755 "$repo/scripts/start-mcp-tunnel" "$HOME/.local/bin/start-mcp-tunnel"
+install -m 0644 "$repo/packaging/systemd/artist-mcp.service" "$HOME/.config/systemd/user/artist-mcp.service"
+install -m 0644 "$repo/packaging/systemd/artist-mcp-tunnel.service" "$HOME/.config/systemd/user/artist-mcp-tunnel.service"
+systemctl --user daemon-reload
+printf '%s\n' 'Installed artist-mcp.service and artist-mcp-tunnel.service.'
+printf '%s\n' 'Create ~/.config/artist/mcp-tunnel.env before enabling the tunnel.'

@@ -416,10 +416,8 @@ impl Host {
         let chromium = is_chromium(program);
         let profile = runtime_dir.join("chrome-profile");
         let mut command = AppCommand::new(program);
-        if chromium {
-            if let Some(source) = browser_profile {
-                clone_profile(source, &profile)?;
-            }
+        if chromium && let Some(source) = browser_profile {
+            clone_profile(source, &profile)?;
         }
         // `cwd` was accepted on the tool and dropped here, so a GUI launch
         // silently ran wherever the harness happened to be — which for a file

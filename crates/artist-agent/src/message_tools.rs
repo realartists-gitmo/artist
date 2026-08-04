@@ -19,7 +19,8 @@
 
 use artist_registry::{Audience, Group, Message};
 use rig_core::tool::PortableTool;
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::messaging::Inbox;
@@ -34,6 +35,56 @@ const DEFAULT_QUERY_MS: u64 = 120_000;
 const MAX_QUERY_MS: u64 = 600_000;
 const POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TellResult {
+    pub from: String,
+    pub to: String,
+    pub delivered: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum QueryResult {
+    Answered {
+        from: String,
+        response: String,
+        #[serde(rename = "waitedMs")]
+        waited_ms: u64,
+    },
+    NoResponse {
+        target: String,
+        detail: String,
+        #[serde(rename = "waitedMs")]
+        waited_ms: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReplyResult {
+    pub from: String,
+    pub to: String,
+    pub delivered: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum GroupChatResult {
+    Preview {
+        #[serde(rename = "wouldInclude")]
+        would_include: Vec<String>,
+        unknown: Vec<String>,
+    },
+    Created {
+        #[serde(rename = "groupId")]
+        group_id: String,
+        members: Vec<String>,
+        delivered: usize,
+        unknown: Vec<String>,
+    },
+}
+
 #[derive(Clone)]
 pub(crate) struct MessageTools {
     inbox: Inbox,
@@ -41,15 +92,29 @@ pub(crate) struct MessageTools {
     /// rather than requiring a model to know its own absolute path.
     project: String,
     /// Released while blocked in `query` — see the module note.
+    /// Released while blocked in `query` — see the module note.
     seat: Option<crate::delegate::PermitSlot>,
+    /// Address resolution and group selection. Injected so tests and isolated
+    /// harnesses do not depend on process-global environment mutation.
+    names: artist_registry::Names,
 }
 
 impl MessageTools {
     pub fn new(inbox: Inbox, project: String, seat: Option<crate::delegate::PermitSlot>) -> Self {
+        Self::with_names(inbox, project, seat, artist_registry::names())
+    }
+
+    fn with_names(
+        inbox: Inbox,
+        project: String,
+        seat: Option<crate::delegate::PermitSlot>,
+        names: artist_registry::Names,
+    ) -> Self {
         Self {
             inbox,
             project,
             seat,
+            names,
         }
     }
 
@@ -101,14 +166,14 @@ impl MessageTools {
     /// Yields the delegation seat for the duration: this agent is parked, and
     /// holding a seat while parked is what turns a conversation between two
     /// agents into a stall for everyone else on the project.
-    async fn wait_for_reply(&self, deadline_ms: u64) -> Option<String> {
+    async fn wait_for_reply(&self, deadline_ms: u64) -> Option<crate::messaging::Delivery> {
         if let Some(seat) = &self.seat {
             seat.yield_seat().await;
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(deadline_ms);
         let answer = loop {
-            if let Some(text) = self.inbox.collect() {
-                break Some(text);
+            if let Some(delivery) = self.inbox.collect_delivery() {
+                break Some(delivery);
             }
             if tokio::time::Instant::now() >= deadline {
                 break None;
@@ -137,7 +202,7 @@ impl PortableTool for MessageTools {
     const NAME: &'static str = "tell";
     type Error = MessageError;
     type Args = TellArgs;
-    type Output = String;
+    type Output = TellResult;
 
     fn description(&self) -> String {
         "Send a message to another agent, or to a group. Returns immediately \
@@ -158,7 +223,7 @@ impl PortableTool for MessageTools {
         })
     }
 
-    async fn call(&self, args: TellArgs) -> Result<String, MessageError> {
+    async fn call(&self, args: TellArgs) -> Result<TellResult, MessageError> {
         let audience = if args.group {
             Audience::Group {
                 id: args.target.clone(),
@@ -168,20 +233,18 @@ impl PortableTool for MessageTools {
         };
         // Reject an unknown name rather than writing into an inbox nobody
         // drains: silently accepting would look like delivery.
-        if !args.group
-            && artist_registry::names()
-                .resolve(&args.target)
-                .ok()
-                .flatten()
-                .is_none()
-        {
+        if !args.group && self.names.resolve(&args.target).ok().flatten().is_none() {
             return Err(MessageError(format!(
                 "no agent named {} on this machine",
                 args.target
             )));
         }
         let delivered = self.send_to(&audience, &args.target, &args.message, false)?;
-        Ok(json!({"delivered": delivered}).to_string())
+        Ok(TellResult {
+            from: self.inbox.name.to_string(),
+            to: args.target,
+            delivered,
+        })
     }
 }
 
@@ -206,7 +269,7 @@ impl PortableTool for QueryTool {
     const NAME: &'static str = "query";
     type Error = MessageError;
     type Args = QueryArgs;
-    type Output = String;
+    type Output = QueryResult;
 
     fn description(&self) -> String {
         "Ask another agent something and wait for their response. Any message \
@@ -228,7 +291,7 @@ impl PortableTool for QueryTool {
         })
     }
 
-    async fn call(&self, args: QueryArgs) -> Result<String, MessageError> {
+    async fn call(&self, args: QueryArgs) -> Result<QueryResult, MessageError> {
         let audience = if args.group {
             Audience::Group {
                 id: args.target.clone(),
@@ -236,13 +299,7 @@ impl PortableTool for QueryTool {
         } else {
             Audience::Direct
         };
-        if !args.group
-            && artist_registry::names()
-                .resolve(&args.target)
-                .ok()
-                .flatten()
-                .is_none()
-        {
+        if !args.group && self.0.names.resolve(&args.target).ok().flatten().is_none() {
             return Err(MessageError(format!(
                 "no agent named {} on this machine",
                 args.target
@@ -257,15 +314,16 @@ impl PortableTool for QueryTool {
 
         let budget = args.wait_ms.unwrap_or(DEFAULT_QUERY_MS).min(MAX_QUERY_MS);
         match self.0.wait_for_reply(budget).await {
-            Some(text) => Ok(text),
-            // Timing out is reported as a result, not an error: the question
-            // was asked and may still be answered later, which is a different
-            // situation from the send having failed.
-            None => Ok(json!({
-                "status": "no_response",
-                "detail": format!("no response within {budget}ms; they may still reply later"),
-            })
-            .to_string()),
+            Some(response) => Ok(QueryResult::Answered {
+                from: response.from,
+                response: response.text,
+                waited_ms: budget,
+            }),
+            None => Ok(QueryResult::NoResponse {
+                target: args.target,
+                detail: format!("no response within {budget}ms; they may still reply later"),
+                waited_ms: budget,
+            }),
         }
     }
 }
@@ -283,7 +341,7 @@ impl PortableTool for ReplyTool {
     const NAME: &'static str = "reply";
     type Error = MessageError;
     type Args = ReplyArgs;
-    type Output = String;
+    type Output = ReplyResult;
 
     fn description(&self) -> String {
         "Respond to the most recent message you were shown, whether it came \
@@ -300,7 +358,7 @@ impl PortableTool for ReplyTool {
         })
     }
 
-    async fn call(&self, args: ReplyArgs) -> Result<String, MessageError> {
+    async fn call(&self, args: ReplyArgs) -> Result<ReplyResult, MessageError> {
         // Fails cleanly rather than guessing a recipient. A reply with nothing
         // to reply to is a model mistake worth surfacing, not a message worth
         // inventing an audience for.
@@ -312,7 +370,11 @@ impl PortableTool for ReplyTool {
         let delivered = self
             .0
             .send_to(&target.audience, &target.to, &args.message, false)?;
-        Ok(json!({"delivered": delivered, "to": target.to}).to_string())
+        Ok(ReplyResult {
+            from: self.0.inbox.name.to_string(),
+            to: target.to,
+            delivered,
+        })
     }
 }
 
@@ -354,7 +416,7 @@ impl PortableTool for GroupTool {
     const NAME: &'static str = "gc";
     type Error = MessageError;
     type Args = GroupArgs;
-    type Output = String;
+    type Output = GroupChatResult;
 
     fn description(&self) -> String {
         "Open a group conversation over a set of agents and send the first \
@@ -382,7 +444,7 @@ impl PortableTool for GroupTool {
         })
     }
 
-    async fn call(&self, args: GroupArgs) -> Result<String, MessageError> {
+    async fn call(&self, args: GroupArgs) -> Result<GroupChatResult, MessageError> {
         let selector = artist_registry::Selector {
             // "current" is spelled by the caller but resolved here: a model
             // should not have to know the absolute path of its own worktree to
@@ -404,25 +466,27 @@ impl PortableTool for GroupTool {
         // the question — a standing predicate would mean membership differed
         // between send and delivery, and a reply would have no defined
         // audience.
-        let selected = artist_registry::names()
+        let selected = self
+            .0
+            .names
             .select(&selector)
             .map_err(|error| MessageError(error.to_string()))?;
         let mut members: Vec<String> = selected.into_iter().map(|name| name.name).collect();
-        let unknown: Vec<&String> = args
+        let unknown: Vec<String> = args
             .members
             .iter()
             .filter(|wanted| !members.contains(wanted))
+            .cloned()
             .collect();
         // The caller is a member of its own group, but is not an audience for
         // its own messages — `send_to` skips itself.
         members.retain(|member| member != &*self.0.inbox.name);
 
         if args.preview {
-            return Ok(json!({
-                "wouldInclude": members,
-                "unknown": unknown,
-            })
-            .to_string());
+            return Ok(GroupChatResult::Preview {
+                would_include: members,
+                unknown,
+            });
         }
 
         let Some(message) = args.message else {
@@ -457,13 +521,12 @@ impl PortableTool for GroupTool {
             id: group.id.clone(),
         };
         let delivered = self.0.send_to(&audience, &group.id, &message, false)?;
-        Ok(json!({
-            "groupId": group.id,
-            "members": group.members,
-            "delivered": delivered,
-            "unknown": unknown,
+        Ok(GroupChatResult::Created {
+            group_id: group.id,
+            members: group.members,
+            delivered,
+            unknown,
         })
-        .to_string())
     }
 }
 
@@ -472,13 +535,12 @@ mod tests {
     use super::*;
 
     fn tools(name: &str, root: &std::path::Path) -> MessageTools {
-        MessageTools::new(
-            Inbox::with_store(
-                name,
-                artist_registry::Registry::at(root).messages_for_test(),
-            ),
+        let registry = artist_registry::Registry::at(root);
+        MessageTools::with_names(
+            Inbox::with_store(name, registry.messages_for_test()),
             "/p".into(),
             None,
+            registry.names_for_test(),
         )
     }
 
@@ -624,7 +686,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(answer.contains("no_response"), "{answer}");
+        assert!(
+            matches!(answer, QueryResult::NoResponse { waited_ms: 500, .. }),
+            "{answer:?}"
+        );
     }
 
     /// The blocked caller unblocks the moment anything comes back, and what it
@@ -671,22 +736,33 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(answer.contains("which parser?"), "{answer}");
-        assert!(answer.contains("from=\"Bach\""), "{answer}");
+        assert_eq!(
+            answer,
+            QueryResult::Answered {
+                from: "Bach".into(),
+                response: "<agent_message from=\"Bach\" awaiting-reply=\"true\">\nwhich parser?\n</agent_message>"
+                    .into(),
+                waited_ms: 5_000,
+            }
+        );
     }
 
-    /// Serialised: these share a process-wide roster via `ARTIST_STATE_DIR`.
+    /// Use one explicit registry root so parallel tests never mutate a
+    /// process-global environment variable or the user's real roster.
     fn with_directory<T>(body: impl FnOnce(&std::path::Path) -> T) -> T {
-        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _held = GUARD.lock().unwrap_or_else(|error| error.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded within the guard.
-        unsafe { std::env::set_var("ARTIST_STATE_DIR", dir.path()) };
         body(dir.path())
     }
 
-    fn register(session: &str, project: &str, profile: &str, parent: Option<&str>) -> String {
-        artist_registry::names()
+    fn register(
+        root: &std::path::Path,
+        session: &str,
+        project: &str,
+        profile: &str,
+        parent: Option<&str>,
+    ) -> String {
+        artist_registry::Registry::at(root)
+            .names_for_test()
             .claim(&artist_registry::Registration {
                 session: session.into(),
                 actor: session.into(),
@@ -703,19 +779,12 @@ mod tests {
     #[tokio::test]
     async fn a_group_can_be_opened_by_predicate_rather_than_by_name() {
         let selected = with_directory(|root| {
-            let lead = register("s-lead", "/p", "default", None);
-            register("s-rev-a", "/p", "reviewer", Some(&lead));
-            register("s-rev-b", "/p", "reviewer", Some(&lead));
-            register("s-elsewhere", "/other", "reviewer", None);
+            let lead = register(root, "s-lead", "/p", "default", None);
+            register(root, "s-rev-a", "/p", "reviewer", Some(&lead));
+            register(root, "s-rev-b", "/p", "reviewer", Some(&lead));
+            register(root, "s-elsewhere", "/other", "reviewer", None);
 
-            let tools = MessageTools::new(
-                Inbox::with_store(
-                    lead.clone(),
-                    artist_registry::Registry::at(root).messages_for_test(),
-                ),
-                "/p".into(),
-                None,
-            );
+            let tools = tools(&lead, root);
             futures::executor::block_on(GroupTool(tools).call(GroupArgs {
                 project: Some("current".into()),
                 profile: Some("reviewer".into()),
@@ -729,10 +798,14 @@ mod tests {
             .unwrap()
         });
 
-        let parsed: Value = serde_json::from_str(&selected).unwrap();
-        let members = parsed["members"].as_array().unwrap();
-        assert_eq!(members.len(), 2, "{selected}");
-        assert_eq!(parsed["delivered"], 2);
+        let GroupChatResult::Created {
+            members, delivered, ..
+        } = selected
+        else {
+            panic!("expected created group: {selected:?}");
+        };
+        assert_eq!(members.len(), 2);
+        assert_eq!(delivered, 2);
     }
 
     /// Preview is the directory read: it answers "who is out there" without
@@ -740,17 +813,10 @@ mod tests {
     #[tokio::test]
     async fn preview_reports_the_selection_without_creating_a_group() {
         let output = with_directory(|root| {
-            let me = register("s-me", "/p", "default", None);
-            register("s-other", "/p", "worker", None);
+            let me = register(root, "s-me", "/p", "default", None);
+            register(root, "s-other", "/p", "worker", None);
 
-            let tools = MessageTools::new(
-                Inbox::with_store(
-                    me.clone(),
-                    artist_registry::Registry::at(root).messages_for_test(),
-                ),
-                "/p".into(),
-                None,
-            );
+            let tools = tools(&me, root);
             futures::executor::block_on(GroupTool(tools.clone()).call(GroupArgs {
                 project: None,
                 profile: None,
@@ -764,9 +830,10 @@ mod tests {
             .unwrap()
         });
 
-        let parsed: Value = serde_json::from_str(&output).unwrap();
-        assert!(parsed.get("groupId").is_none(), "preview creates nothing");
-        assert_eq!(parsed["wouldInclude"].as_array().unwrap().len(), 1);
+        let GroupChatResult::Preview { would_include, .. } = output else {
+            panic!("preview created a group: {output:?}");
+        };
+        assert_eq!(would_include.len(), 1);
     }
 
     /// A predicate that matches nobody must say so rather than open an empty
@@ -774,12 +841,8 @@ mod tests {
     #[tokio::test]
     async fn an_empty_selection_is_refused_with_a_pointer_to_preview() {
         let error = with_directory(|root| {
-            let me = register("s-me", "/p", "default", None);
-            let tools = MessageTools::new(
-                Inbox::with_store(me, artist_registry::Registry::at(root).messages_for_test()),
-                "/p".into(),
-                None,
-            );
+            let me = register(root, "s-me", "/p", "default", None);
+            let tools = tools(&me, root);
             futures::executor::block_on(GroupTool(tools).call(GroupArgs {
                 project: Some("current".into()),
                 profile: Some("nobody-has-this".into()),

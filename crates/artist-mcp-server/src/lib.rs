@@ -6,10 +6,10 @@
 //! [`artist_agent::tool_set::mcp_surface`]; this crate adapts those tools onto
 //! the wire and makes the request path survive transport death.
 
+pub mod admin;
 pub mod canvas_host;
 pub mod daemon;
 pub mod envelope;
-mod output_schema;
 pub mod server;
 
 pub use daemon::{Allow, McpDaemon};

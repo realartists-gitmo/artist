@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+artist-tool-api = { path = "../artist-tool-api" }
 anyhow = "1"
 dirs = "6"
 futures = "0.3"

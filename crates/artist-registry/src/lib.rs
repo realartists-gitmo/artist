@@ -89,6 +89,19 @@ impl Registry {
     /// Only for tests: real delivery is machine-wide, because an agent name is
     /// unique across the machine and a project-scoped mailbox would make
     /// inter-repository coordination impossible.
+    /// A name roster rooted here rather than machine-wide.
+    ///
+    /// Only for tests and isolated harnesses that must not mutate the user's
+    /// machine-wide roster.
+    pub fn names_for_test(&self) -> Names {
+        Names::new(self.root.join("names"))
+    }
+
+    /// A message store rooted here rather than machine-wide.
+    ///
+    /// Only for tests: real delivery is machine-wide, because an agent name is
+    /// unique across the machine and a project-scoped mailbox would make
+    /// inter-repository coordination impossible.
     pub fn messages_for_test(&self) -> Messages {
         Messages::new(self.root.join("messages"))
     }

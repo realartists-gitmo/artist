@@ -11,6 +11,7 @@ use crate::{
 use artist_session::{
     ConversationMessages, DelegateFinished, DelegateStarted, RunFinished, RunStarted,
 };
+use artist_tool_api::ArtistDynamicTool;
 use artist_tools::ToolBundle;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
@@ -20,7 +21,7 @@ use rig_core::{
     client::CompletionClient,
     completion::{Message, message::ToolResultContent},
     streaming::{StreamedAssistantContent, StreamedUserContent},
-    tool::{PortableDynamicTool, PortableTool},
+    tool::PortableTool,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -134,7 +135,7 @@ pub(crate) struct Delegate {
     /// spawner had, rather than a narrower one assembled here.
     memory: Option<crate::memory::MemoryWriter>,
     canvas: Option<Arc<artist_canvas::server::Lazy>>,
-    dynamic: Vec<PortableDynamicTool>,
+    dynamic: Vec<ArtistDynamicTool>,
     /// The seat held by the run that owns this tool. `None` at the session
     /// root, which holds none.
     parent_permit: Option<PermitSlot>,
@@ -758,7 +759,7 @@ impl Delegate {
                 .dynamic_tools(
                     tool_set::build(role, &env)
                         .into_iter()
-                        .map(rig_agent::tool::DynamicTool::from)
+                        .map(|tool| rig_agent::tool::DynamicTool::from(tool.portable()))
                         .collect(),
                 )
                 .add_hook(CaptureHook::new(tool_meta.clone()))

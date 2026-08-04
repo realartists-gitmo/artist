@@ -40,13 +40,12 @@ impl ProviderContextHandle {
         // snapshot from a divergent future must never be resurrected.
         let mut masks = Vec::new();
         for envelope in events.iter().rev() {
-            if let SessionEvent::HistoryRewind(rewind) = envelope.event() {
-                if !masks
+            if let SessionEvent::HistoryRewind(rewind) = envelope.event()
+                && !masks
                     .iter()
                     .any(|(start, end)| *start <= envelope.seq && envelope.seq <= *end)
-                {
-                    masks.push((rewind.to_seq.saturating_add(1), envelope.seq));
-                }
+            {
+                masks.push((rewind.to_seq.saturating_add(1), envelope.seq));
             }
         }
         for envelope in events {
@@ -56,16 +55,16 @@ impl ProviderContextHandle {
             {
                 continue;
             }
-            if let SessionEvent::ProviderContext(context) = envelope.event() {
-                if context.schema == 1 || context.schema == PROVIDER_CONTEXT_SCHEMA {
-                    contexts.insert(
-                        (context.conversation_id, context.provider),
-                        Snapshot {
-                            items: context.items,
-                            input_fingerprints: context.input_fingerprints,
-                        },
-                    );
-                }
+            if let SessionEvent::ProviderContext(context) = envelope.event()
+                && (context.schema == 1 || context.schema == PROVIDER_CONTEXT_SCHEMA)
+            {
+                contexts.insert(
+                    (context.conversation_id, context.provider),
+                    Snapshot {
+                        items: context.items,
+                        input_fingerprints: context.input_fingerprints,
+                    },
+                );
             }
         }
         Self {

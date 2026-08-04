@@ -21,6 +21,7 @@ members = [
     "crates/artist-gpui",
     "crates/artist-session-host",
     "crates/artist-mcp-server",
+    "crates/artist-tool-api",
 ]
 resolver = "3"
 

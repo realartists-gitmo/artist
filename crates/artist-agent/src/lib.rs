@@ -1,11 +1,12 @@
 //! The Artist agent loop, built on Rig.
 
-mod ask_tool;
 mod ask_outbox;
+mod ask_tool;
 pub mod canvas;
 mod capture;
 mod code_search;
 pub mod compaction;
+mod contracts;
 mod conversation;
 mod delegate;
 mod delegate_jobs;
@@ -1024,7 +1025,7 @@ where
             gemini_cache::GeminiCache {
                 http: &gemini_http,
                 base_url: provider.base_url.as_str(),
-                api_key: &api_key,
+                api_key,
                 ledger: ledger.as_ref(),
                 capabilities: &handles.capabilities,
             }
@@ -1128,7 +1129,7 @@ where
             .dynamic_tools(
                 registered
                     .into_iter()
-                    .map(rig_agent::tool::DynamicTool::from)
+                    .map(|tool| rig_agent::tool::DynamicTool::from(tool.portable()))
                     .collect(),
             )
             .add_hook(steering::SteeringHook {

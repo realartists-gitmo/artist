@@ -1,0 +1,21 @@
+[Unit]
+Description=Artist MCP harness daemon
+Documentation=https://github.com/earendil-works/artist
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/start-artist-mcp-daemon
+Environment=ARTIST_MCP_HOST=127.0.0.1
+Environment=ARTIST_MCP_PORT=8317
+Environment=ARTIST_MCP_DEFAULT_PROJECT=%h/Projects/artist
+EnvironmentFile=-%h/.config/artist/mcp-daemon.env
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

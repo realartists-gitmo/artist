@@ -40,6 +40,6 @@ async fn roundtrip_restart_and_latest_compaction_pruning() {
             .len(),
         2
     );
-    assert!(artist_session::render_markdown(&events).contains("secret") == false);
-    assert!(artist_session::render_markdown(&events).contains("encrypted_content") == false);
+    assert!(!artist_session::render_markdown(&events).contains("secret"));
+    assert!(!artist_session::render_markdown(&events).contains("encrypted_content"));
 }

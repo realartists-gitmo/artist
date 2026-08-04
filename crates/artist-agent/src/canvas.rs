@@ -465,11 +465,11 @@ impl CanvasTool {
             out.push_str(&format!("\n{} error(s):\n", problems.len()));
             for report in &problems {
                 out.push_str(&format!("  [{}] {}\n", report.level, report.message));
-                if let Some(detail) = &report.detail {
-                    if let Some(stack) = detail.get("stack").and_then(|v| v.as_str()) {
-                        for line in stack.lines().take(4) {
-                            out.push_str(&format!("      {line}\n"));
-                        }
+                if let Some(detail) = &report.detail
+                    && let Some(stack) = detail.get("stack").and_then(|value| value.as_str())
+                {
+                    for line in stack.lines().take(4) {
+                        out.push_str(&format!("      {line}\n"));
                     }
                 }
             }
@@ -478,7 +478,7 @@ impl CanvasTool {
         if !style.is_empty() {
             out.push_str("\nOff-palette values (these bypass the canvas theme):\n");
             for report in &style {
-                out.push_str(&report.message.trim_start_matches('\n').to_string());
+                out.push_str(report.message.trim_start_matches('\n'));
             }
         }
 

@@ -2239,6 +2239,7 @@ struct Buffers<'a> {
     held: &'a Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     state: &mut StageState,
     keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,

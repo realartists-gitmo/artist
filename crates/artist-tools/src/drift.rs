@@ -65,7 +65,7 @@ pub fn report(mut drifts: Vec<Drift>, budget: usize) -> Option<String> {
     if drifts.is_empty() {
         return None;
     }
-    drifts.sort_by(|left, right| right.touched.cmp(&left.touched));
+    drifts.sort_by_key(|drift| std::cmp::Reverse(drift.touched));
 
     let mut sections: Vec<String> = Vec::new();
     let mut overflow: Vec<String> = Vec::new();

@@ -1,0 +1,18 @@
+[Unit]
+Description=OpenAI Secure MCP Tunnel for Artist
+Documentation=https://github.com/earendil-works/artist
+After=network-online.target artist-mcp.service
+Wants=network-online.target artist-mcp.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/start-mcp-tunnel
+Environment=ARTIST_MCP_SERVER_URL=http://127.0.0.1:8317/mcp
+EnvironmentFile=-%h/.config/artist/mcp-tunnel-service.env
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

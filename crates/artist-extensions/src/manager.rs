@@ -1,6 +1,10 @@
 use crate::{Diagnostic, Event, EventBus, ExtensionContext, HostControl, Instance, Registry};
 use anyhow::{Result, anyhow};
-use rig_core::tool::{PortableDynamicTool, ToolExecutionError};
+use artist_tool_api::{
+    ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, ArtistToolOutput, ToolCategory,
+    text_output_schema,
+};
+use rig_core::tool::ToolExecutionError;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -90,29 +94,42 @@ impl Manager {
         ids
     }
 
-    pub fn tools(&self) -> Vec<PortableDynamicTool> {
+    pub fn tools(&self) -> Vec<ArtistDynamicTool> {
         self.registry
             .tools()
             .filter_map(|(manifest, declaration)| {
                 let instance = self.instances.get(&manifest.id)?.clone();
                 let name = declaration.name.clone();
                 let invoked_name = name.clone();
-                Some(PortableDynamicTool::new(
-                    name,
-                    declaration.description.clone(),
-                    declaration.parameters.clone(),
-                    move |arguments| {
-                        let instance = instance.clone();
-                        let name = invoked_name.clone();
-                        Box::pin(async move {
-                            instance
-                                .invoke_tool(&name, &arguments)
-                                .await
-                                .map(Into::into)
-                                .map_err(|error| ToolExecutionError::other(error.to_string()))
-                        })
+                let definition = ArtistToolDefinition {
+                    title: artist_tool_api::humanize(&name),
+                    name: name.clone(),
+                    description: declaration.description.clone(),
+                    input_schema: declaration.parameters.clone(),
+                    output_schema: text_output_schema(
+                        &name,
+                        "Result returned by the extension tool.",
+                    ),
+                    category: ToolCategory::External,
+                    annotations: ArtistToolAnnotations {
+                        read_only: false,
+                        destructive: true,
+                        idempotent: false,
+                        open_world: true,
                     },
-                ))
+                };
+                Some(ArtistDynamicTool::new(definition, move |arguments| {
+                    let instance = instance.clone();
+                    let name = invoked_name.clone();
+                    Box::pin(async move {
+                        let output: rig_core::tool::ToolOutput = instance
+                            .invoke_tool(&name, &arguments)
+                            .await
+                            .map(Into::into)
+                            .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+                        ArtistToolOutput::from_tool_output(output)
+                    })
+                }))
             })
             .collect()
     }

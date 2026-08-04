@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use rig_core::completion::Message;
 use rig_core::memory::{ConversationMemory, MemoryError};
-
+type CachedConversation = Option<(Vec<Message>, bool)>;
 use crate::{
     AttachmentStore, ConversationCompacted, ConversationMessages, EventLogReader, HistoryOptions,
     Recorder, build_history,
@@ -23,7 +23,7 @@ pub struct SessionMemory {
     session_dir: PathBuf,
     recorder: Recorder,
     attachments: AttachmentStore,
-    cache: Arc<Mutex<Option<(Vec<Message>, bool)>>>,
+    cache: Arc<Mutex<CachedConversation>>,
 }
 impl SessionMemory {
     pub fn new(

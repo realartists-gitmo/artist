@@ -68,18 +68,6 @@ pub(crate) fn resolve_masks(events: &[Envelope], up_to_seq: Option<u64>) -> Mask
     masks
 }
 
-/// Whether the active projection contains Rig-native conversation batches.
-pub(crate) fn has_native_conversation(events: &[Envelope], up_to_seq: Option<u64>) -> bool {
-    native_conversation(
-        events,
-        &HistoryOptions {
-            up_to_seq,
-            ..HistoryOptions::default()
-        },
-    )
-    .is_some()
-}
-
 pub(crate) fn has_native_conversation_for_lineage(
     events: &[Envelope],
     lineage: &str,

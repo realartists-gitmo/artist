@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use rig_core::tool::PortableDynamicTool;
+use artist_tool_api::{
+    ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, ArtistToolOutput, ToolCategory,
+    text_output_schema,
+};
 use rmcp::{RoleClient, ServiceExt, model::Tool as McpDefinition, service::RunningService};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,8 +46,15 @@ struct Config {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CachedTool {
     name: String,
+    #[serde(default)]
+    title: Option<String>,
     description: String,
-    parameters: serde_json::Value,
+    #[serde(alias = "parameters")]
+    input_schema: serde_json::Value,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    annotations: ArtistToolAnnotations,
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Cache {
@@ -245,7 +255,7 @@ impl McpManager {
         }
         out
     }
-    pub async fn tools(&self) -> Vec<PortableDynamicTool> {
+    pub async fn tools(&self) -> Vec<ArtistDynamicTool> {
         let mut out = Vec::new();
         for server_name in self.names().await {
             let Some(server) = self.0.servers.read().await.get(&server_name).cloned() else {
@@ -311,10 +321,33 @@ async fn connect(config: &ServerConfig) -> Result<Service> {
     bail!("server requires `command` or `url`")
 }
 fn cached(tool: &McpDefinition) -> CachedTool {
+    let annotations = tool.annotations.as_ref();
     CachedTool {
         name: tool.name.to_string(),
+        title: tool
+            .title
+            .clone()
+            .or_else(|| annotations.and_then(|value| value.title.clone())),
         description: tool.description.clone().unwrap_or_default().to_string(),
-        parameters: tool.schema_as_json_value(),
+        input_schema: tool.schema_as_json_value(),
+        output_schema: tool
+            .output_schema
+            .as_ref()
+            .map(|schema| serde_json::Value::Object((**schema).clone())),
+        annotations: ArtistToolAnnotations {
+            read_only: annotations
+                .and_then(|value| value.read_only_hint)
+                .unwrap_or(false),
+            destructive: annotations
+                .and_then(|value| value.destructive_hint)
+                .unwrap_or(true),
+            idempotent: annotations
+                .and_then(|value| value.idempotent_hint)
+                .unwrap_or(false),
+            open_world: annotations
+                .and_then(|value| value.open_world_hint)
+                .unwrap_or(true),
+        },
     }
 }
 
@@ -329,15 +362,28 @@ pub struct McpProxyTool {
     tool: CachedTool,
 }
 impl McpProxyTool {
-    fn into_dynamic(self) -> PortableDynamicTool {
+    fn into_dynamic(self) -> ArtistDynamicTool {
         let name = format!(
             "mcp__{}__{}",
             sanitize(&self.server),
             sanitize(&self.tool.name)
         );
-        let description = self.tool.description.clone();
-        let parameters = self.tool.parameters.clone();
-        PortableDynamicTool::new(name, description, parameters, move |args| {
+        let definition = ArtistToolDefinition {
+            title: self
+                .tool
+                .title
+                .clone()
+                .unwrap_or_else(|| artist_tool_api::humanize(&self.tool.name)),
+            name,
+            description: self.tool.description.clone(),
+            input_schema: self.tool.input_schema.clone(),
+            output_schema: self.tool.output_schema.clone().unwrap_or_else(|| {
+                text_output_schema(&self.tool.name, "Result returned by the remote MCP tool.")
+            }),
+            category: ToolCategory::External,
+            annotations: self.tool.annotations,
+        };
+        ArtistDynamicTool::new(definition, move |args| {
             let tool = self.clone();
             Box::pin(async move {
                 tool.call_inner(args).await.map_err(|error| {
@@ -349,7 +395,7 @@ impl McpProxyTool {
         })
     }
 
-    async fn call_inner(&self, args: serde_json::Value) -> Result<rig_core::tool::ToolOutput> {
+    async fn call_inner(&self, args: serde_json::Value) -> Result<ArtistToolOutput> {
         self.manager.start(&self.server).await?;
         let server = self
             .manager
@@ -378,58 +424,64 @@ impl McpProxyTool {
         } else {
             request
         };
-        let mut result = tokio::time::timeout(CALL_TIMEOUT, peer.call_tool(request))
+        let result = tokio::time::timeout(CALL_TIMEOUT, peer.call_tool(request))
             .await
             .context("MCP tool timed out")??;
-        // Lift image blocks out before serializing. Left in place they would be
-        // inline base64 inside the JSON envelope — unreadable to the model, and
-        // large enough to blow the truncation budget on its own. Screenshot MCP
-        // servers are the common case.
-        let mut images = Vec::new();
-        result.content.retain(|block| match block {
-            rmcp::model::ContentBlock::Image(image) => {
-                images.push(mcp_image(&image.data, &image.mime_type));
-                false
-            }
-            _ => true,
-        });
-        let mut text = serde_json::to_string(&result)?;
-        if text.len() > MAX_OUTPUT {
-            // Truncating serialized JSON at a byte boundary would hand the
-            // model malformed JSON; wrap the prefix in a valid envelope with
-            // an explicit truncation marker instead. The prefix is re-escaped
-            // inside a JSON string (quotes/backslashes double), so the envelope
-            // can still exceed MAX_OUTPUT — shrink the prefix until the
-            // *serialized envelope* fits.
-            let floor = |text: &str, max: usize| {
-                text.char_indices()
-                    .map(|(index, _)| index)
-                    .take_while(|index| *index <= max)
-                    .last()
-                    .unwrap_or(0)
-            };
-            let original_bytes = text.len();
-            let mut boundary = floor(&text, MAX_OUTPUT);
-            loop {
-                let envelope = serde_json::to_string(&serde_json::json!({
-                    "truncated": true,
-                    "original_bytes": original_bytes,
-                    "partial_output": &text[..boundary],
-                }))?;
-                if envelope.len() <= MAX_OUTPUT || boundary == 0 {
-                    text = envelope;
-                    break;
+        let is_error = result.is_error.unwrap_or(false);
+        let mut text_parts = Vec::new();
+        let mut content_items = Vec::new();
+        for block in result.content {
+            match block {
+                rmcp::model::ContentBlock::Text(text) => text_parts.push(text.text),
+                rmcp::model::ContentBlock::Image(image) => {
+                    content_items.push(mcp_image(&image.data, &image.mime_type));
                 }
-                let overflow = envelope.len() - MAX_OUTPUT;
-                boundary = floor(&text, boundary.saturating_sub(overflow.max(64)));
+                other => text_parts.push(serde_json::to_string(&other)?),
             }
         }
-        let mut content =
-            rig_core::OneOrMany::one(rig_core::completion::message::ToolResultContent::text(text));
-        for image in images {
-            content.push(image);
+        let mut text = text_parts.join("\n");
+        if text.is_empty()
+            && let Some(structured) = &result.structured_content
+        {
+            text = structured.to_string();
         }
-        Ok(rig_core::tool::ToolOutput::content(content))
+        if text.len() > MAX_OUTPUT {
+            let mut boundary = MAX_OUTPUT.min(text.len());
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            let original_bytes = text.len();
+            text.truncate(boundary);
+            text.push_str(&format!(
+                "\n[truncated remote MCP output: {original_bytes} bytes total]"
+            ));
+        }
+        if is_error {
+            bail!(if text.is_empty() {
+                "remote MCP tool returned an error".to_owned()
+            } else {
+                text
+            });
+        }
+        if !text.is_empty() {
+            content_items.insert(
+                0,
+                rig_core::completion::message::ToolResultContent::text(text.clone()),
+            );
+        }
+        let presentation = match rig_core::OneOrMany::many(content_items) {
+            Ok(content) => rig_core::tool::ToolOutput::content(content),
+            Err(_) => rig_core::tool::ToolOutput::text(text.clone()),
+        };
+        let structured = match result.structured_content {
+            Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+            Some(value) => serde_json::json!({"value": value}),
+            None => serde_json::json!({"text": text}),
+        };
+        Ok(ArtistToolOutput {
+            presentation,
+            structured,
+        })
     }
 }
 

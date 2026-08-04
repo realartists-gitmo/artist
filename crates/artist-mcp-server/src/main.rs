@@ -17,9 +17,10 @@ struct Cli {
 /// Shared options, identical for both transports.
 #[derive(Args, Clone)]
 struct Common {
-    /// The project the tools operate on. Defaults to the current directory.
-    #[arg(long, default_value = ".")]
-    project: PathBuf,
+    /// The project the tools operate on. When omitted, use the persisted MCP
+    /// workspace selection, then ARTIST_MCP_DEFAULT_PROJECT, then the current directory.
+    #[arg(long)]
+    project: Option<PathBuf>,
     /// Directory for durable state (anchors, envelopes, session logs). Defaults
     /// to `<config>/artist/tools/<hash-of-project>`, the same place the CLI
     /// keeps per-project tool state.
@@ -133,7 +134,17 @@ fn project_state_dir(project: &std::path::Path) -> anyhow::Result<PathBuf> {
 }
 
 async fn run(common: Common, http: Option<std::net::SocketAddr>) -> anyhow::Result<()> {
-    let project = std::fs::canonicalize(&common.project).context("canonicalize project root")?;
+    let config_root = config_root()?;
+    let requested = match common.project {
+        Some(project) => project,
+        None => match artist_mcp_server::admin::WorkspaceStore::selected(&config_root)? {
+            Some(project) => project,
+            None => std::env::var_os("ARTIST_MCP_DEFAULT_PROJECT")
+                .map(PathBuf::from)
+                .unwrap_or(std::env::current_dir()?),
+        },
+    };
+    let project = std::fs::canonicalize(&requested).context("canonicalize project root")?;
     let state_dir = match &common.state_dir {
         Some(dir) => dir.clone(),
         None => project_state_dir(&project)?,

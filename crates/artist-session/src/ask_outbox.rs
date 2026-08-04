@@ -41,14 +41,8 @@ fn now() -> u64 {
 /// One append in the outbox log.
 #[derive(Serialize, Deserialize)]
 enum Record {
-    Posted {
-        question: Question,
-        ts: u64,
-    },
-    Answered {
-        answer: Answer,
-        ts: u64,
-    },
+    Posted { question: Question, ts: u64 },
+    Answered { answer: Answer, ts: u64 },
 }
 
 /// Durable store of posted questions and their answers.
@@ -159,7 +153,10 @@ impl AskOutbox {
         }
         // Durability before memory: a failed append must not leave the question
         // silently answered in memory but not on disk.
-        self.append(&Record::Answered { ts: now(), answer: answer.clone() })?;
+        self.append(&Record::Answered {
+            ts: now(),
+            answer: answer.clone(),
+        })?;
         self.pending
             .write()
             .expect("ask outbox poisoned")
@@ -172,10 +169,7 @@ impl AskOutbox {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pending
-            .read()
-            .expect("ask outbox poisoned")
-            .is_empty()
+        self.pending.read().expect("ask outbox poisoned").is_empty()
     }
 
     fn append(&self, record: &Record) -> Result<()> {
@@ -243,10 +237,7 @@ mod tests {
         outbox.post(question("q1")).unwrap();
         assert!(outbox.answer(answer("q1", "Project-local")).unwrap());
         assert!(outbox.pending().is_empty());
-        assert_eq!(
-            outbox.result("q1").unwrap().selected,
-            ["Project-local"]
-        );
+        assert_eq!(outbox.result("q1").unwrap().selected, ["Project-local"]);
     }
 
     #[test]

@@ -81,10 +81,10 @@ pub async fn first_touch(workspace: &Workspace, file: &Path) -> Option<String> {
         sections.push(format!("in an import cycle with {}", summarise(others)));
     }
 
-    if is_module_root(file) {
-        if let Some(surface) = module_surface(workspace, file) {
-            sections.push(surface);
-        }
+    if is_module_root(file)
+        && let Some(surface) = module_surface(workspace, file)
+    {
+        sections.push(surface);
     }
 
     if sections.is_empty() {

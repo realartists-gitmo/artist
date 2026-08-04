@@ -12,13 +12,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use rig_core::tool::{PortableDynamicTool, ToolExecutionError};
+use artist_tool_api::ArtistDynamicTool;
+use rig_core::tool::ToolExecutionError;
 use tokio_util::sync::CancellationToken;
 
 /// A shared, swappable view of the tools registered for the current attempt.
 #[derive(Clone, Default)]
 pub struct ToolRegistryHandle {
-    tools: Arc<Mutex<Arc<Vec<PortableDynamicTool>>>>,
+    tools: Arc<Mutex<Arc<Vec<ArtistDynamicTool>>>>,
     /// Cancelled and replaced on every publish.
     ///
     /// A canvas call that began under one attempt would otherwise keep running
@@ -35,7 +36,7 @@ impl ToolRegistryHandle {
 
     /// Replace the published set. Called once per attempt, after policy has
     /// already filtered it — so what lands here is exactly what the model got.
-    pub fn publish(&self, tools: Vec<PortableDynamicTool>) {
+    pub fn publish(&self, tools: Vec<ArtistDynamicTool>) {
         *self.tools.lock().expect("tool registry poisoned") = Arc::new(tools);
         let mut generation = self.generation.lock().expect("tool registry poisoned");
         generation.cancel();
@@ -55,7 +56,7 @@ impl ToolRegistryHandle {
         self.snapshot()
             .iter()
             .find(|tool| tool.name() == name)
-            .map(|tool| tool.definition().parameters)
+            .map(|tool| tool.definition().input_schema.clone())
     }
 
     /// Invoke a tool by name.
@@ -80,14 +81,14 @@ impl ToolRegistryHandle {
             .expect("tool registry poisoned")
             .clone();
         Some(tokio::select! {
-            result = tool.execute(arguments) => result.map(flatten),
+            result = tool.execute(arguments) => result.map(|output| flatten(output.presentation)),
             () = cancel.cancelled() => Err(ToolExecutionError::other(
                 "the turn moved on before this canvas call finished",
             )),
         })
     }
 
-    fn snapshot(&self) -> Arc<Vec<PortableDynamicTool>> {
+    fn snapshot(&self) -> Arc<Vec<ArtistDynamicTool>> {
         Arc::clone(&self.tools.lock().expect("tool registry poisoned"))
     }
 }
@@ -123,8 +124,8 @@ impl std::fmt::Debug for ToolRegistryHandle {
 mod tests {
     use super::*;
 
-    fn echo(name: &str) -> PortableDynamicTool {
-        PortableDynamicTool::new(
+    fn echo(name: &str) -> ArtistDynamicTool {
+        let portable = rig_core::tool::PortableDynamicTool::new(
             name,
             "echo",
             serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}}),
@@ -139,6 +140,12 @@ mod tests {
                     ))
                 })
             },
+        );
+        ArtistDynamicTool::from_portable(
+            portable,
+            artist_tool_api::text_output_schema(name, "Echoed text."),
+            artist_tool_api::ToolCategory::Administration,
+            artist_tool_api::ArtistToolAnnotations::read_only(),
         )
     }
 
@@ -192,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn republishing_cancels_a_call_already_running() {
         let registry = ToolRegistryHandle::new();
-        registry.publish(vec![PortableDynamicTool::new(
+        let slow = rig_core::tool::PortableDynamicTool::new(
             "slow",
             "never finishes",
             serde_json::json!({"type": "object"}),
@@ -202,6 +209,12 @@ mod tests {
                     unreachable!()
                 })
             },
+        );
+        registry.publish(vec![ArtistDynamicTool::from_portable(
+            slow,
+            artist_tool_api::text_output_schema("slow", "Never completes."),
+            artist_tool_api::ToolCategory::Administration,
+            artist_tool_api::ArtistToolAnnotations::read_only(),
         )]);
 
         let running = {

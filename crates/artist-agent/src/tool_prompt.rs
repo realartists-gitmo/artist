@@ -6,8 +6,11 @@
 //! built-in, MCP, and extension tools. Per-tool usage guidance therefore lives
 //! in each tool's own `description`.
 
+use artist_tool_api::{ArtistDynamicTool, ArtistToolContract, ArtistToolOutput};
 use futures::FutureExt;
-use rig_core::tool::{IntoToolOutput, PortableDynamicTool, PortableTool, ToolExecutionError};
+#[cfg(test)]
+use rig_core::tool::PortableTool;
+use rig_core::tool::ToolExecutionError;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -39,35 +42,29 @@ struct Panicked {
 /// checkout. All of them stale the model's view identically, and none of them
 /// would be caught by instrumenting the harness's own write paths.
 pub(crate) fn guard(
-    tool: PortableDynamicTool,
+    tool: ArtistDynamicTool,
     drift: Option<artist_tools::DriftWatch>,
-) -> PortableDynamicTool {
-    let definition = tool.definition();
-    let name = definition.name.clone();
-    let tool = Arc::new(tool);
-    PortableDynamicTool::new(
-        definition.name,
-        definition.description,
-        definition.parameters,
-        move |arguments| {
-            let tool = Arc::clone(&tool);
-            let name = name.clone();
-            let drift = drift.clone();
-            Box::pin(async move {
-                let outcome = match AssertUnwindSafe(tool.execute(arguments))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(result) => result,
-                    Err(panic) => Err(ToolExecutionError::from_error(Panicked {
-                        tool: name,
-                        detail: panic_detail(&panic),
-                    })),
-                };
-                append_drift(outcome, drift).await
-            })
-        },
-    )
+) -> ArtistDynamicTool {
+    let name = tool.name().to_owned();
+    let original = Arc::new(tool.clone());
+    tool.with_callback(move |arguments| {
+        let tool = Arc::clone(&original);
+        let name = name.clone();
+        let drift = drift.clone();
+        Box::pin(async move {
+            let outcome = match AssertUnwindSafe(tool.execute(arguments))
+                .catch_unwind()
+                .await
+            {
+                Ok(result) => result,
+                Err(panic) => Err(ToolExecutionError::from_error(Panicked {
+                    tool: name,
+                    detail: panic_detail(&panic),
+                })),
+            };
+            append_drift(outcome, drift).await
+        })
+    })
 }
 
 /// Splice a drift report onto a tool result.
@@ -77,10 +74,10 @@ pub(crate) fn guard(
 /// error harder to read for no gain — the drift will still be there, and
 /// reported, on the next call that works.
 async fn append_drift(
-    outcome: Result<rig_core::tool::ToolOutput, ToolExecutionError>,
+    outcome: Result<ArtistToolOutput, ToolExecutionError>,
     drift: Option<artist_tools::DriftWatch>,
-) -> Result<rig_core::tool::ToolOutput, ToolExecutionError> {
-    let Ok(output) = outcome else {
+) -> Result<ArtistToolOutput, ToolExecutionError> {
+    let Ok(mut output) = outcome else {
         return outcome;
     };
     let Some(watch) = drift else {
@@ -91,12 +88,8 @@ async fn append_drift(
     };
 
     use rig_core::completion::message::ToolResultContent;
-    // Through a Vec because `OneOrMany`'s iterator is not double-ended, and the
-    // *last* text item is the one to extend.
-    let mut items: Vec<ToolResultContent> = output.into_content().into_iter().collect();
-    // Onto the last text item rather than as a new one: a tool result is a
-    // single message to the model, and splitting it invites the report being
-    // read as a separate tool's output.
+    let mut items: Vec<ToolResultContent> =
+        output.presentation.into_content().into_iter().collect();
     match items
         .iter()
         .rposition(|item| matches!(item, ToolResultContent::Text(_)))
@@ -106,16 +99,13 @@ async fn append_drift(
                 text.text.push_str(&report);
             }
         }
-        // Image-only output, which nothing does today — but a new tool could,
-        // and losing the report to it would be silent.
         None => items.push(ToolResultContent::text(report.clone())),
     }
-    match rig_core::OneOrMany::many(items) {
-        Ok(content) => Ok(rig_core::tool::ToolOutput::content(content)),
-        // Unreachable: the vec came from a non-empty `OneOrMany`. Reporting the
-        // drift alone still beats losing it to an unwrap.
-        Err(_) => Ok(rig_core::tool::ToolOutput::text(report)),
-    }
+    output.presentation = match rig_core::OneOrMany::many(items) {
+        Ok(content) => rig_core::tool::ToolOutput::content(content),
+        Err(_) => rig_core::tool::ToolOutput::text(report),
+    };
+    Ok(output)
 }
 
 fn panic_detail(panic: &Box<dyn std::any::Any + Send>) -> String {
@@ -127,28 +117,14 @@ fn panic_detail(panic: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Erase a typed portable tool into Rig's runtime-authored portable contract.
-pub(crate) fn dynamic<T>(tool: T) -> PortableDynamicTool
+pub(crate) fn dynamic<T>(tool: T) -> ArtistDynamicTool
 where
-    T: PortableTool + 'static,
+    T: ArtistToolContract + 'static,
 {
-    let name = T::NAME;
-    let description = tool.description();
-    let parameters = tool.parameters();
-    let tool = Arc::new(tool);
-    PortableDynamicTool::new(name, description, parameters, move |arguments| {
-        let tool = Arc::clone(&tool);
-        Box::pin(async move {
-            let arguments = serde_json::from_value(arguments)
-                .map_err(rig_core::tool::ToolExecutionError::from_error)?;
-            tool.call(arguments)
-                .await
-                .map_err(|error| tool.map_error(error))?
-                .into_tool_output()
-        })
-    })
+    artist_tool_api::dynamic(tool)
 }
 
-pub(crate) fn retain_enabled(tools: &mut Vec<PortableDynamicTool>, disabled: &[String]) {
+pub(crate) fn retain_enabled(tools: &mut Vec<ArtistDynamicTool>, disabled: &[String]) {
     tools.retain(|tool| !disabled.iter().any(|name| name == tool.name()));
 }
 
@@ -175,6 +151,13 @@ mod tests {
             Ok(String::new())
         }
     }
+    artist_tool_api::impl_text_tool_contract!(
+        Stub,
+        artist_tool_api::ToolCategory::Files,
+        artist_tool_api::ArtistToolAnnotations::read_only(),
+        "Stub output."
+    );
+
     #[test]
     fn disabled_tools_are_dropped() {
         let mut tools = vec![dynamic(Stub("Inspect files"))];
@@ -192,8 +175,8 @@ mod tests {
         (workspace, project)
     }
 
-    fn text_of(output: &rig_core::tool::ToolOutput) -> String {
-        output.render()
+    fn text_of(output: &artist_tool_api::ArtistToolOutput) -> String {
+        output.presentation.render()
     }
 
     /// The whole path, without a model: read a file so the session holds

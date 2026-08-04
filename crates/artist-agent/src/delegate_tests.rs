@@ -72,14 +72,23 @@ fn nested_prompt_event_preserves_child_identity_and_full_tool_result() {
     let value = serde_json::to_value(event).unwrap();
 
     assert_eq!(value["type"], "subagent_event");
-    assert_eq!(value["id"], "a-quiet-river");
-    assert_eq!(value["event"]["type"], "tool_result");
-    assert_eq!(value["event"]["id"], "call-1");
-    assert_eq!(value["event"]["content"], "complete tool output");
-    assert_eq!(value["event"]["outcome"]["status"], "success");
-    assert_eq!(value["event"]["duration_ms"], 42);
-    assert_eq!(value["event"]["images"][0]["attachment"], "ab12cd");
-    assert_eq!(value["event"]["images"][0]["bytes"], 1024);
+    assert_eq!(value["data"]["id"], "a-quiet-river");
+    assert_eq!(value["data"]["event"]["type"], "tool_result");
+    assert_eq!(value["data"]["event"]["data"]["id"], "call-1");
+    assert_eq!(
+        value["data"]["event"]["data"]["content"],
+        "complete tool output"
+    );
+    assert_eq!(
+        value["data"]["event"]["data"]["outcome"]["status"],
+        "success"
+    );
+    assert_eq!(value["data"]["event"]["data"]["duration_ms"], 42);
+    assert_eq!(
+        value["data"]["event"]["data"]["images"][0]["attachment"],
+        "ab12cd"
+    );
+    assert_eq!(value["data"]["event"]["data"]["images"][0]["bytes"], 1024);
 }
 
 #[tokio::test]

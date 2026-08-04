@@ -17,6 +17,7 @@ stage-wayland = ["dep:smithay", "dep:calloop"]
 ocr = ["dep:rten", "dep:rten-tensor", "dep:rten-onnx"]
 
 [dependencies]
+artist-tool-api = { path = "../artist-tool-api" }
 anyhow = "1"
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }

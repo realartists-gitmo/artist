@@ -17,10 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone, Debug)]
@@ -589,7 +586,7 @@ pub struct StreamResponse {
 }
 impl GetTokenUsage for StreamResponse {
     fn token_usage(&self) -> Usage {
-        self.usage.clone()
+        self.usage
     }
 }
 
@@ -783,16 +780,26 @@ impl CompletionModel for ArtistOpenAiModel {
                                 accumulated_text.push_str(parsed.get("delta").and_then(Value::as_str).unwrap_or(""));
                             } else if kind == "response.output_text.done" && accumulated_text.is_empty() {
                                 accumulated_text.push_str(parsed.get("text").and_then(Value::as_str).unwrap_or(""));
-                            } else if matches!(kind, "response.output_item.added" | "response.output_item.done") {
-                                if let Some(item) = parsed.get("item") {
-                                    let id = item.get("id").and_then(Value::as_str);
-                                    if !accumulated_items.iter().any(|old| id.is_some() && old.get("id").and_then(Value::as_str) == id) {
-                                        accumulated_items.push(item.clone());
-                                    } else if kind.ends_with(".done") && let Some(position) = accumulated_items.iter().position(|old| id.is_some() && old.get("id").and_then(Value::as_str) == id) {
-                                        accumulated_items[position] = item.clone();
-                                    }
+                            } else if matches!(
+                                kind,
+                                "response.output_item.added" | "response.output_item.done"
+                            ) && let Some(item) = parsed.get("item")
+                            {
+                                let id = item.get("id").and_then(Value::as_str);
+                                if !accumulated_items.iter().any(|old| {
+                                    id.is_some() && old.get("id").and_then(Value::as_str) == id
+                                }) {
+                                    accumulated_items.push(item.clone());
+                                } else if kind.ends_with(".done")
+                                    && let Some(position) = accumulated_items.iter().position(|old| {
+                                        id.is_some()
+                                            && old.get("id").and_then(Value::as_str) == id
+                                    })
+                                {
+                                    accumulated_items[position] = item.clone();
                                 }
                             }
+
                             match parse_event(&data) {
                                 Ok(mut events) => {
                                     if kind == "response.output_text.done" && !had_text && !accumulated_text.is_empty() {
@@ -1313,7 +1320,7 @@ mod transport_tests {
 
     #[test]
     fn a_rewritten_history_falls_short_of_the_checkpoint() {
-        let told = vec![
+        let told = [
             json!({"role": "user", "content": "one"}),
             json!({"role": "user", "content": "two"}),
         ];
@@ -1419,7 +1426,7 @@ mod transport_tests {
         let mut buffer = "data: one\n\ndata: two\r\n\r".to_owned();
         assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: one"));
         assert!(take_sse_event(&mut buffer).is_none());
-        buffer.push_str("\n");
+        buffer.push('\n');
         assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: two"));
         assert!(buffer.is_empty());
     }

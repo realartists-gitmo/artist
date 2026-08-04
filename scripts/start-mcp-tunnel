@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}/artist"
+env_file="${ARTIST_MCP_TUNNEL_ENV_FILE:-$config_root/mcp-tunnel.env}"
+[[ -r "$env_file" ]] || { echo "missing tunnel environment file: $env_file" >&2; exit 1; }
+# shellcheck disable=SC1090
+set -a
+source "$env_file"
+set +a
+
+: "${CONTROL_PLANE_TUNNEL_ID:?CONTROL_PLANE_TUNNEL_ID is required}"
+: "${CONTROL_PLANE_API_KEY:?CONTROL_PLANE_API_KEY is required}"
+
+tunnel="${ARTIST_TUNNEL_CLIENT:-$(command -v tunnel-client || true)}"
+[[ -n "$tunnel" && -x "$tunnel" ]] || { echo "tunnel-client is not installed" >&2; exit 1; }
+
+runtime_dir="${ARTIST_MCP_TUNNEL_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/artist-mcp-tunnel}"
+state_dir="${ARTIST_MCP_TUNNEL_STATE_DIR:-$HOME/.local/state/artist/mcp-tunnel}"
+mkdir -p "$runtime_dir" "$state_dir"
+
+server_url="${ARTIST_MCP_SERVER_URL:-http://127.0.0.1:8317/mcp}"
+health_addr="${ARTIST_MCP_TUNNEL_HEALTH_ADDR:-127.0.0.1:8080}"
+
+exec "$tunnel" run \
+  --control-plane.tunnel-id "$CONTROL_PLANE_TUNNEL_ID" \
+  --control-plane.api-key env:CONTROL_PLANE_API_KEY \
+  --mcp.server-url "channel=main,url=$server_url" \
+  --health.listen-addr "$health_addr" \
+  --health.url-file "$runtime_dir/health.url" \
+  --log.level "${ARTIST_MCP_TUNNEL_LOG_LEVEL:-info}" \
+  --log.file "$state_dir/tunnel-client.log"

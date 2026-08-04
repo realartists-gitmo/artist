@@ -120,12 +120,8 @@ impl Harness {
     async fn new() -> Self {
         let project = tempfile::tempdir().unwrap();
         let config = tempfile::tempdir().unwrap();
-        let workspace = artist_tools::Workspace::open(
-            project.path().to_path_buf(),
-            config.path().to_path_buf(),
-            "test",
-        )
-        .unwrap();
+        let workspace =
+            artist_tools::Workspace::open(project.path(), config.path(), "test").unwrap();
         let mcp = artist_agent::mcp::McpManager::load(config.path())
             .await
             .unwrap();
@@ -677,8 +673,7 @@ async fn a_backend_without_uploads_probes_once_then_inlines() {
 
     let last = requests
         .iter()
-        .filter(|r| r.starts_with("POST /responses"))
-        .next_back()
+        .rfind(|request| request.starts_with("POST /responses"))
         .expect("a completion request");
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"first image");
     assert!(
@@ -761,78 +756,6 @@ async fn a_chained_request_omits_what_the_provider_already_holds() {
         restated.contains("the file body"),
         "the chained request dropped the new tool result: {restated}"
     );
-}
-
-/// A scripted server that also stores prompts.
-async fn scripted_with_prompts(
-    bodies: Vec<String>,
-    stored: Option<(&'static str, &'static str)>,
-) -> (String, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
-
-    tokio::spawn(async move {
-        let mut bodies = bodies.into_iter();
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut raw = Vec::new();
-            let mut buffer = [0u8; 8192];
-            loop {
-                let read = socket.read(&mut buffer).await.unwrap_or(0);
-                if read == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buffer[..read]);
-                let text = String::from_utf8_lossy(&raw);
-                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
-                    let declared = head
-                        .lines()
-                        .find_map(|line| {
-                            line.strip_prefix("Content-Length: ")
-                                .or_else(|| line.strip_prefix("content-length: "))
-                        })
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    if rest.len() >= declared {
-                        break;
-                    }
-                }
-            }
-            let text = String::from_utf8_lossy(&raw).into_owned();
-            let is_publish = text.starts_with("POST /prompts");
-            captured.lock().unwrap().push(text);
-
-            let reply = if is_publish {
-                match stored {
-                    Some((id, version)) => {
-                        let body = format!(r#"{{"id":"{id}","version":"{version}"}}"#);
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        )
-                    }
-                    None => {
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_owned()
-                    }
-                }
-            } else {
-                let Some(body) = bodies.next() else { return };
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-            };
-            let _ = socket.write_all(reply.as_bytes()).await;
-            let _ = socket.flush().await;
-        }
-    });
-
-    (format!("http://{address}"), requests)
 }
 
 /// The strongest form of the prompt-cache rule: the preamble is not in the
@@ -947,8 +870,7 @@ async fn an_endpoint_without_stored_prompts_keeps_sending_instructions() {
     );
     let last = requests
         .iter()
-        .filter(|r| r.starts_with("POST /responses"))
-        .next_back()
+        .rfind(|request| request.starts_with("POST /responses"))
         .unwrap();
     assert!(
         last.contains("a distinctive instruction"),
@@ -1000,8 +922,7 @@ async fn the_chatgpt_backend_is_never_probed_for_side_endpoints() {
     );
     let last = requests
         .iter()
-        .filter(|r| r.starts_with("POST /responses"))
-        .next_back()
+        .rfind(|request| request.starts_with("POST /responses"))
         .expect("a completion request");
     let encoded = base64::engine::general_purpose::STANDARD.encode(b"pretend png bytes");
     assert!(

@@ -144,8 +144,7 @@ impl AndroidStage {
         let component = resolved
             .lines()
             .map(str::trim)
-            .filter(|line| line.contains('/'))
-            .next_back()
+            .rfind(|line| line.contains('/'))
             .ok_or_else(|| {
                 StepError::Backend(format!(
                     "{package} has no launchable activity — is it installed? \

@@ -80,9 +80,7 @@ impl CanvasHost for McpCanvasHost {
             if !allowed.iter().any(|name| name == &tool) {
                 return Err(Denied::NotDeclared { tool });
             }
-            let result = server
-                .invoke(&tool, arguments, Default::default())
-                .await;
+            let result = server.invoke(&tool, arguments, Default::default()).await;
             Ok(render(result))
         })
     }

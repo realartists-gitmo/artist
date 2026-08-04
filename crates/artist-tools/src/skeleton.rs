@@ -421,7 +421,7 @@ fn ownership(units: &[(String, PathBuf)]) -> Vec<(PathBuf, String)> {
         .map(|(name, path)| (path.clone(), name.clone()))
         .collect();
     // Longest path first, so a nested unit wins over its parent.
-    owner.sort_by(|a, b| b.0.as_os_str().len().cmp(&a.0.as_os_str().len()));
+    owner.sort_by_key(|item| std::cmp::Reverse(item.0.as_os_str().len()));
     owner
 }
 
@@ -533,7 +533,7 @@ fn aggregate_edges(
         .collect();
 
     let dev = dev_only(units);
-    let mut link = |from: &str, to: &str, edges: &mut BTreeMap<String, BTreeSet<String>>| {
+    let link = |from: &str, to: &str, edges: &mut BTreeMap<String, BTreeSet<String>>| {
         if from != to && !dev.contains(&(from.to_owned(), to.to_owned())) {
             edges
                 .entry(from.to_owned())
@@ -1063,7 +1063,7 @@ fn trim_to(text: &str, width: usize) -> String {
     }
     let cut: String = text.chars().take(width).collect();
     let cut = cut
-        .rsplit_once(|c: char| c == ' ' || c == ',')
+        .rsplit_once([' ', ','])
         .map(|(head, _)| head)
         .unwrap_or(&cut);
     format!("{}…", cut.trim_end_matches(','))

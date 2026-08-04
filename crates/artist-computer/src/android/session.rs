@@ -267,19 +267,17 @@ impl Session {
         Ok(session)
     }
 
-    fn proxy(&self) -> impl std::future::Future<Output = Result<zbus::Proxy<'_>, StepError>> {
-        async move {
-            zbus::Proxy::new(
-                &self.connection,
-                CONTAINER_SERVICE,
-                CONTAINER_PATH,
-                CONTAINER_INTERFACE,
-            )
-            .await
-            .map_err(|error| {
-                StepError::Backend(format!("the container service did not answer: {error}"))
-            })
-        }
+    async fn proxy(&self) -> Result<zbus::Proxy<'_>, StepError> {
+        zbus::Proxy::new(
+            &self.connection,
+            CONTAINER_SERVICE,
+            CONTAINER_PATH,
+            CONTAINER_INTERFACE,
+        )
+        .await
+        .map_err(|error| {
+            StepError::Backend(format!("the container service did not answer: {error}"))
+        })
     }
 
     /// What the container service currently reports, if there is a session.

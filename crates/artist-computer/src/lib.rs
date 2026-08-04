@@ -20,6 +20,7 @@
 pub mod anchors;
 #[cfg(all(target_os = "linux", feature = "stage-wayland"))]
 pub mod android;
+mod contracts;
 pub mod doctor;
 pub mod extract;
 pub mod host;

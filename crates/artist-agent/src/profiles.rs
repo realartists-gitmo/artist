@@ -531,6 +531,7 @@ pub(crate) const NAVIGATION_TOOLS: &[&str] = &[
     Tool::CodeImplements.name(),
     Tool::CodeDeps.name(),
     Tool::CodeCycles.name(),
+    Tool::CodeCalls.name(),
     Tool::CodeTrace.name(),
     Tool::CodeImpact.name(),
     Tool::CodeSearch.name(),

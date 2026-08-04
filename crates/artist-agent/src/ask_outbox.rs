@@ -1,31 +1,102 @@
-//! Durable ask tools for surfaces with no in-process answerer.
-//!
-//! The blocking [`AskTool`](crate::ask_tool::AskTool) waits on an in-memory
-//! [`AskRegistry`](artist_session::AskRegistry) answered by a picker or canvas
-//! in the same process. Over MCP that contract breaks — the connection dies
-//! every few minutes and the person answering is not in the MCP process — so a
-//! blocked call would outlive the transport and its question with it. These
-//! tools speak to the durable [`AskOutbox`](artist_session::AskOutbox) instead:
-//! posting is non-blocking, the question survives reconnect, and the answer is
-//! recorded by whoever gets to it first.
-//!
-//! The post-and-poll shape is what the tunnel can actually sustain:
-//!
-//! * `ask` writes the questions to the outbox and returns immediately with
-//!   their ids.
-//! * `ask_result` polls by id — "still pending" or the recorded answer.
-//! * `ask_answer` records the user's choice, first answer wins.
-//! * `ask_list` returns everything currently pending, so a fresh connection
-//!   can rediscover work its predecessor posted.
+//! Durable post-and-poll questions for MCP and other disconnected surfaces.
 
 use artist_session::ask::{Answer, Question, QuestionOption};
-use rig_core::tool::{PortableDynamicTool, ToolExecutionError, ToolOutput};
+use artist_tool_api::{
+    ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, ArtistToolOutput, ToolCategory,
+    schema_for,
+};
+use rig_core::tool::{ToolErrorKind, ToolExecutionError, ToolOutput};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::ask_tool::{AskArgs, into_questions, validate_questions};
 
-/// Build the durable ask tools, bound to `outbox`.
-pub fn tools(outbox: artist_session::AskOutbox) -> Vec<PortableDynamicTool> {
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct QuestionOptionView {
+    label: String,
+    description: String,
+    preview: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct QuestionView {
+    id: String,
+    header: String,
+    question: String,
+    multi_select: bool,
+    options: Vec<QuestionOptionView>,
+}
+
+impl From<&Question> for QuestionView {
+    fn from(question: &Question) -> Self {
+        Self {
+            id: question.id.clone(),
+            header: question.header.clone(),
+            question: question.question.clone(),
+            multi_select: question.multi_select,
+            options: question
+                .options
+                .iter()
+                .map(|option: &QuestionOption| QuestionOptionView {
+                    label: option.label.clone(),
+                    description: option.description.clone(),
+                    preview: option.preview.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PostedQuestion {
+    question_id: String,
+    question: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+struct AskPostedResult {
+    questions: Vec<PostedQuestion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum AskPollItem {
+    Pending {
+        #[serde(rename = "questionId")]
+        question_id: String,
+        question: Option<QuestionView>,
+    },
+    Answered {
+        #[serde(rename = "questionId")]
+        question_id: String,
+        answer: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+struct AskPollResult {
+    results: Vec<AskPollItem>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AskAnswerResult {
+    question_id: String,
+    recorded: bool,
+    answer: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+struct AskListResult {
+    pending: Vec<QuestionView>,
+}
+
+pub fn tools(outbox: artist_session::AskOutbox) -> Vec<ArtistDynamicTool> {
     vec![
         ask(outbox.clone()),
         ask_result(outbox.clone()),
@@ -34,139 +105,159 @@ pub fn tools(outbox: artist_session::AskOutbox) -> Vec<PortableDynamicTool> {
     ]
 }
 
-/// The on-the-wire shape of a question, shared by `ask_result` (pending) and
-/// `ask_list` so both present the same vocabulary.
-fn question_json(question: &Question) -> Value {
-    json!({
-        "id": question.id,
-        "header": question.header,
-        "question": question.question,
-        "multiSelect": question.multi_select,
-        "options": question.options.iter().map(|option: &QuestionOption| json!({
-            "label": option.label,
-            "description": option.description,
-            "preview": option.preview,
-        })).collect::<Vec<_>>(),
+fn definition<T: JsonSchema>(
+    name: &str,
+    title: &str,
+    description: &str,
+    input_schema: Value,
+    idempotent: bool,
+) -> ArtistToolDefinition {
+    ArtistToolDefinition {
+        name: name.to_owned(),
+        title: title.to_owned(),
+        description: description.to_owned(),
+        input_schema,
+        output_schema: schema_for::<T>(),
+        category: ToolCategory::UserInteraction,
+        annotations: ArtistToolAnnotations {
+            read_only: name == "ask_result" || name == "ask_list",
+            destructive: false,
+            idempotent,
+            open_world: true,
+        },
+    }
+}
+
+fn response<T: Serialize>(value: &T, text: String) -> Result<ArtistToolOutput, ToolExecutionError> {
+    Ok(ArtistToolOutput {
+        presentation: ToolOutput::text(text),
+        structured: serde_json::to_value(value).map_err(ToolExecutionError::from_error)?,
     })
 }
 
-fn ask(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
-    PortableDynamicTool::new(
-        "ask",
-        "Pose questions to the user and return immediately. The questions are \
-         written to a durable outbox — they survive the connection dying — and \
-         are answered out-of-band by the user. Do not block waiting for the \
-         answer; poll ask_result with the returned question ids. Reserve it for \
-         choices where different answers lead to materially different work, and \
-         make routine judgement calls yourself.",
-        crate::ask_tool::ask_parameters(),
+fn ask(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
+    ArtistDynamicTool::new(
+        definition::<AskPostedResult>(
+            "ask",
+            "Ask User",
+            "Post durable questions and return immediately with their identifiers.",
+            crate::ask_tool::ask_parameters(),
+            false,
+        ),
         move |arguments: Value| {
             let outbox = outbox.clone();
             Box::pin(async move {
-                let args: AskArgs =
-                    serde_json::from_value(arguments).map_err(|error| {
-                        ToolExecutionError::invalid_args(error.to_string())
-                    })?;
-                validate_questions(&args.questions)
-                    .map_err(ToolExecutionError::invalid_args)?;
+                let args: AskArgs = serde_json::from_value(arguments)
+                    .map_err(|error| ToolExecutionError::invalid_args(error.to_string()))?;
+                validate_questions(&args.questions).map_err(ToolExecutionError::invalid_args)?;
                 let questions = into_questions(args);
                 for question in &questions {
                     outbox.post(question.clone()).map_err(|error| {
                         ToolExecutionError::new(
-                            rig_core::tool::ToolErrorKind::Other,
+                            ToolErrorKind::Other,
                             format!("posting question failed: {error}"),
                         )
                     })?;
                 }
-                Ok(ToolOutput::text(
-                    questions
+                let result = AskPostedResult {
+                    questions: questions
                         .iter()
-                        .map(|question| {
-                            format!("posted {} (awaiting answer): {}", question.id, question.question)
+                        .map(|question| PostedQuestion {
+                            question_id: question.id.clone(),
+                            question: question.question.clone(),
+                            status: "pending".into(),
                         })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ))
+                        .collect(),
+                };
+                let text = result
+                    .questions
+                    .iter()
+                    .map(|question| {
+                        format!(
+                            "posted {} (awaiting answer): {}",
+                            question.question_id, question.question
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                response(&result, text)
             })
         },
     )
 }
 
-fn ask_result(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
-    PortableDynamicTool::new(
-        "ask_result",
-        "Poll questions previously posted with ask. For each question id \
-         returns whether it is still pending or has been answered, and the \
-         answer when one exists.",
-        json!({
-            "type": "object",
-            "properties": {
-                "questionIds": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {"type": "string"}
-                }
-            },
-            "required": ["questionIds"],
-            "additionalProperties": false
-        }),
+fn ask_result(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
+    ArtistDynamicTool::new(
+        definition::<AskPollResult>(
+            "ask_result",
+            "Poll User Questions",
+            "Return pending or answered state for each durable question identifier.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "questionIds": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+                },
+                "required": ["questionIds"],
+                "additionalProperties": false
+            }),
+            true,
+        ),
         move |arguments: Value| {
             let outbox = outbox.clone();
             Box::pin(async move {
                 let ids: Vec<String> = arguments
                     .get("questionIds")
-                    .and_then(|value| value.as_array())
+                    .and_then(Value::as_array)
                     .map(|values| {
                         values
                             .iter()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
                             .collect()
                     })
                     .unwrap_or_default();
-                let results: Vec<Value> = ids
-                    .iter()
-                    .map(|id| match outbox.result(id) {
-                        Some(answer) => json!({
-                            "questionId": id,
-                            "status": "answered",
-                            "answer": answer.describe(),
-                        }),
-                        None => json!({
-                            "questionId": id,
-                            "status": "pending",
-                            "question": outbox.question(id).as_ref().map(question_json),
-                        }),
-                    })
-                    .collect();
-                Ok(ToolOutput::text(json!({ "results": results }).to_string()))
+                let result = AskPollResult {
+                    results: ids
+                        .iter()
+                        .map(|id| match outbox.result(id) {
+                            Some(answer) => AskPollItem::Answered {
+                                question_id: id.clone(),
+                                answer: answer.describe(),
+                            },
+                            None => AskPollItem::Pending {
+                                question_id: id.clone(),
+                                question: outbox.question(id).as_ref().map(QuestionView::from),
+                            },
+                        })
+                        .collect(),
+                };
+                response(
+                    &result,
+                    serde_json::to_string(&result).map_err(ToolExecutionError::from_error)?,
+                )
             })
         },
     )
 }
 
-fn ask_answer(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
-    PortableDynamicTool::new(
-        "ask_answer",
-        "Record the user's answer to a question previously posted with ask. \
-         First answer wins: a second answer to the same question is ignored. \
-         Prefer this over ask_result when the user has already answered.",
-        json!({
-            "type": "object",
-            "properties": {
-                "questionId": {"type": "string"},
-                "selected": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Chosen option labels. Empty means the question was dismissed."
+fn ask_answer(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
+    ArtistDynamicTool::new(
+        definition::<AskAnswerResult>(
+            "ask_answer",
+            "Record User Answer",
+            "Record an answer to a durable question; the first answer wins.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "questionId": {"type": "string"},
+                    "selected": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"}
                 },
-                "notes": {
-                    "type": "string",
-                    "description": "Free text the user added alongside their choice."
-                }
-            },
-            "required": ["questionId", "selected"],
-            "additionalProperties": false
-        }),
+                "required": ["questionId", "selected"],
+                "additionalProperties": false
+            }),
+            false,
+        ),
         move |arguments: Value| {
             let outbox = outbox.clone();
             Box::pin(async move {
@@ -195,53 +286,58 @@ fn ask_answer(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
                     selected,
                     notes,
                 };
-                let recorded = outbox
-                    .answer(answer.clone())
-                    .map_err(|error| {
-                        ToolExecutionError::new(
-                            rig_core::tool::ToolErrorKind::Other,
-                            format!("recording answer failed: {error}"),
-                        )
-                    })?;
+                let recorded = outbox.answer(answer.clone()).map_err(|error| {
+                    ToolExecutionError::new(
+                        ToolErrorKind::Other,
+                        format!("recording answer failed: {error}"),
+                    )
+                })?;
                 let stored = if recorded {
-                    answer.clone()
+                    answer
                 } else {
-                    // First answer wins: the existing one is what governs. The
-                    // user's later word, relayed here, is the race the outbox
-                    // exists to resolve — report the survivor, not the loser.
-                    outbox.result(&answer.question_id).unwrap_or(answer.clone())
+                    outbox.result(&answer.question_id).unwrap_or(answer)
                 };
-                let suffix = if recorded {
+                let result = AskAnswerResult {
+                    question_id: stored.question_id.clone(),
+                    recorded,
+                    answer: stored.describe(),
+                };
+                let qualifier = if recorded {
                     ""
                 } else {
                     " (ignored: already answered or unknown question)"
                 };
-                Ok(ToolOutput::text(format!(
-                    "recorded answer for {}{}: {}",
-                    stored.question_id,
-                    suffix,
-                    stored.describe()
-                )))
+                response(
+                    &result,
+                    format!(
+                        "recorded answer for {}{}: {}",
+                        result.question_id, qualifier, result.answer
+                    ),
+                )
             })
         },
     )
 }
 
-fn ask_list(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
-    PortableDynamicTool::new(
-        "ask_list",
-        "List every question currently awaiting an answer, so a fresh \
-         connection can rediscover work its predecessor posted.",
-        json!({"type": "object", "additionalProperties": false}),
+fn ask_list(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
+    ArtistDynamicTool::new(
+        definition::<AskListResult>(
+            "ask_list",
+            "List Pending Questions",
+            "List every durable question currently awaiting an answer.",
+            json!({"type": "object", "additionalProperties": false}),
+            true,
+        ),
         move |_arguments: Value| {
             let outbox = outbox.clone();
             Box::pin(async move {
-                let questions: Vec<Value> = outbox
-                    .pending()
-                    .into_iter()
-                    .map(|question| question_json(&question))
-                    .collect();
-                Ok(ToolOutput::text(json!({ "pending": questions }).to_string()))
+                let result = AskListResult {
+                    pending: outbox.pending().iter().map(QuestionView::from).collect(),
+                };
+                response(
+                    &result,
+                    serde_json::to_string(&result).map_err(ToolExecutionError::from_error)?,
+                )
             })
         },
     )
@@ -251,34 +347,22 @@ fn ask_list(outbox: artist_session::AskOutbox) -> PortableDynamicTool {
 mod tests {
     use super::*;
 
-    fn outbox_tools() -> Vec<PortableDynamicTool> {
+    fn outbox_tools() -> Vec<ArtistDynamicTool> {
         tools(artist_session::AskOutbox::default())
     }
 
-    async fn text_of(tool: &PortableDynamicTool, args: Value) -> String {
+    async fn output(tool: &ArtistDynamicTool, args: Value) -> ArtistToolOutput {
         tool.execute(args)
             .await
-            .expect("tool call should succeed")
-            .into_content()
-            .into_iter()
-            .filter_map(|content| match content {
-                rig_core::completion::message::ToolResultContent::Text(text) => Some(text.text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .unwrap_or_else(|error| panic!("{} should succeed: {error:?}", tool.name()))
     }
 
     #[tokio::test]
     async fn ask_returns_ids_without_blocking_then_ask_result_polls() {
         let all = outbox_tools();
         let ask = all.iter().find(|tool| tool.name() == "ask").unwrap();
-        let ask_result = all
-            .iter()
-            .find(|tool| tool.name() == "ask_result")
-            .unwrap();
-
-        let posted = text_of(
+        let ask_result = all.iter().find(|tool| tool.name() == "ask_result").unwrap();
+        let posted = output(
             ask,
             json!({"questions": [{
                 "question": "Where should canvases live?",
@@ -290,15 +374,15 @@ mod tests {
             }]}),
         )
         .await;
-        assert!(posted.contains("posted q-"), "got: {posted}");
-        assert!(posted.contains("awaiting answer"), "got: {posted}");
-
-        let id = posted.split("posted ").nth(1).unwrap().split(' ').next().unwrap();
-        let pending = text_of(ask_result, json!({"questionIds": [id]})).await;
-        assert!(
-            pending.contains("\"status\":\"pending\"")
-                && pending.contains("Where should canvases live?"),
-            "pending must carry the question wording: got: {pending}"
+        let id = posted.structured["questions"][0]["questionId"]
+            .as_str()
+            .unwrap();
+        assert!(posted.presentation.render().contains("awaiting answer"));
+        let pending = output(ask_result, json!({"questionIds": [id]})).await;
+        assert_eq!(pending.structured["results"][0]["status"], "pending");
+        assert_eq!(
+            pending.structured["results"][0]["question"]["question"],
+            "Where should canvases live?"
         );
     }
 
@@ -306,16 +390,9 @@ mod tests {
     async fn ask_answer_records_and_first_wins() {
         let all = outbox_tools();
         let ask = all.iter().find(|tool| tool.name() == "ask").unwrap();
-        let ask_answer = all
-            .iter()
-            .find(|tool| tool.name() == "ask_answer")
-            .unwrap();
-        let ask_result = all
-            .iter()
-            .find(|tool| tool.name() == "ask_result")
-            .unwrap();
-
-        let posted = text_of(
+        let ask_answer = all.iter().find(|tool| tool.name() == "ask_answer").unwrap();
+        let ask_result = all.iter().find(|tool| tool.name() == "ask_result").unwrap();
+        let posted = output(
             ask,
             json!({"questions": [{
                 "question": "Which provider?",
@@ -327,61 +404,56 @@ mod tests {
             }]}),
         )
         .await;
-        let id = posted.split("posted ").nth(1).unwrap().split(' ').next().unwrap();
-
-        let first = text_of(
+        let id = posted.structured["questions"][0]["questionId"]
+            .as_str()
+            .unwrap();
+        let first = output(
             ask_answer,
             json!({"questionId": id, "selected": ["OpenAI"]}),
         )
         .await;
-        assert!(first.contains("OpenAI"), "got: {first}");
-
-        let second = text_of(
+        assert_eq!(first.structured["recorded"], true);
+        let second = output(
             ask_answer,
             json!({"questionId": id, "selected": ["Anthropic"]}),
         )
         .await;
+        assert_eq!(second.structured["recorded"], false);
         assert!(
-            second.contains("ignored") && second.contains("OpenAI"),
-            "first answer must win: got: {second}"
+            second.structured["answer"]
+                .as_str()
+                .unwrap()
+                .contains("OpenAI")
         );
-
-        let polled = text_of(ask_result, json!({"questionIds": [id]})).await;
-        assert!(
-            polled.contains("\"status\":\"answered\"") && polled.contains("OpenAI"),
-            "got: {polled}"
-        );
+        let polled = output(ask_result, json!({"questionIds": [id]})).await;
+        assert_eq!(polled.structured["results"][0]["status"], "answered");
     }
 
     #[tokio::test]
     async fn ask_list_is_empty_then_round_trips() {
         let all = outbox_tools();
         let ask = all.iter().find(|tool| tool.name() == "ask").unwrap();
-        let ask_list = all
-            .iter()
-            .find(|tool| tool.name() == "ask_list")
-            .unwrap();
-
-        assert!(
-            text_of(ask_list, json!({})).await.contains("\"pending\":[]")
+        let ask_list = all.iter().find(|tool| tool.name() == "ask_list").unwrap();
+        assert_eq!(
+            output(ask_list, json!({})).await.structured["pending"],
+            json!([])
         );
-
-        text_of(
+        output(
             ask,
             json!({"questions": [{
                 "question": "Which provider?",
                 "header": "Provider",
                 "options": [
                     {"label": "OpenAI", "description": "Default"},
-                    {"label": "Anthropic", "description": "Claude"}
+                    {"label": "Anthropic", "description": "Alternative"}
                 ]
             }]}),
         )
         .await;
-        let listed = text_of(ask_list, json!({})).await;
-        assert!(
-            listed.contains("Which provider?") && listed.contains("OpenAI"),
-            "got: {listed}"
+        let listed = output(ask_list, json!({})).await;
+        assert_eq!(
+            listed.structured["pending"][0]["question"],
+            "Which provider?"
         );
     }
 }

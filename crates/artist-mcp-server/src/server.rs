@@ -12,18 +12,19 @@
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-use rig_core::tool::{PortableDynamicTool, ToolOutput};
+use artist_tool_api::{ArtistDynamicTool, ArtistToolOutput};
+use rig_core::completion::message::{DocumentSourceKind, MimeType, ToolResultContent};
 use rmcp::{
     ErrorData, RoleServer,
     handler::server::ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, ContentBlock, ListToolsResult, Meta,
-        PaginatedRequestParams, ServerInfo, Tool,
+        PaginatedRequestParams, Resource, ResourceContents, ServerInfo, Tool, ToolAnnotations,
     },
     service::RequestContext,
 };
 
-use crate::{envelope::Envelope, output_schema};
+use crate::envelope::Envelope;
 
 /// What ChatGPT's web agent is told about how these tools behave. The
 /// non-obvious parts are the handle-then-poll shape of long-running tools and
@@ -60,8 +61,9 @@ and wait for the answer before acting on it.";
 /// The MCP server for one project.
 #[derive(Clone)]
 pub struct McpServer {
-    tools: Vec<PortableDynamicTool>,
-    by_name: Arc<HashMap<String, PortableDynamicTool>>,
+    tools: Vec<ArtistDynamicTool>,
+    by_name: Arc<HashMap<String, ArtistDynamicTool>>,
+    identity: artist_agent::tool_set::McpIdentity,
     envelope: Envelope,
     /// Serializes keyed operations across HTTP sessions so two simultaneous
     /// retries cannot both pass the replay check and execute the same effect.
@@ -72,7 +74,31 @@ impl McpServer {
     /// Wrap a tool surface (from [`artist_agent::tool_set::mcp_surface`]) as
     /// an MCP server. `state_dir` is where the durable envelope lives; `None`
     /// makes calls volatile across restarts but still replay-safe in-process.
-    pub fn new(tools: Vec<PortableDynamicTool>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
+    pub fn new(tools: Vec<ArtistDynamicTool>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
+        Self::with_identity(
+            tools,
+            state_dir,
+            artist_agent::tool_set::McpIdentity {
+                actor: "mcp".into(),
+                profile: "worker".into(),
+                project: "unknown".into(),
+                name: "mcp".into(),
+                registered: false,
+            },
+        )
+    }
+
+    pub fn with_identity(
+        mut tools: Vec<ArtistDynamicTool>,
+        state_dir: Option<&Path>,
+        identity: artist_agent::tool_set::McpIdentity,
+    ) -> anyhow::Result<Self> {
+        let envelope = Envelope::open(state_dir)?;
+        anyhow::ensure!(
+            !tools.iter().any(|tool| tool.name() == "operation"),
+            "tool surface already defines reserved tool operation"
+        );
+        tools.push(crate::admin::operation_tool(envelope.clone()));
         let by_name = tools
             .iter()
             .map(|tool| (tool.name().to_owned(), tool.clone()))
@@ -80,7 +106,8 @@ impl McpServer {
         Ok(Self {
             tools,
             by_name: Arc::new(by_name),
-            envelope: Envelope::open(state_dir)?,
+            identity,
+            envelope,
             idempotency_gate: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
@@ -114,10 +141,16 @@ impl McpServer {
             // Without this, two HTTP sessions carrying the same key can both
             // observe a miss and perform the side effect before either commits.
             let _guard = self.idempotency_gate.lock().await;
-            if let Some(replayed) = self.envelope.replay(&key) {
-                return serde_json::from_value(replayed).unwrap_or(CallToolResult::error(vec![
-                    ContentBlock::text("corrupt envelope record"),
-                ]));
+            if let Some(record) = self.envelope.get(&key) {
+                if record.tool != name || record.arguments != arguments {
+                    return CallToolResult::error(vec![ContentBlock::text(format!(
+                        "idempotency key {key:?} was already used for {} with different arguments; use a new key for a different logical operation",
+                        record.tool
+                    ))]);
+                }
+                return serde_json::from_value(record.result).unwrap_or(CallToolResult::error(
+                    vec![ContentBlock::text("corrupt envelope record")],
+                ));
             }
             let result = self.execute(name, arguments.clone()).await;
             if let Ok(encoded) = serde_json::to_value(&result)
@@ -136,8 +169,24 @@ impl McpServer {
                 "unknown tool: {name}"
             ))]);
         };
+        if let Err(error) =
+            validate_schema(&tool.definition().input_schema, &arguments, "input", name)
+        {
+            return CallToolResult::error(vec![ContentBlock::text(error)]);
+        }
         match tool.execute(arguments).await {
-            Ok(output) => render_output(name, output),
+            Ok(output) => {
+                if let Err(error) = validate_schema(
+                    &tool.definition().output_schema,
+                    &output.structured,
+                    "output",
+                    name,
+                ) {
+                    tracing::error!(tool = name, "{error}");
+                    return CallToolResult::error(vec![ContentBlock::text(error)]);
+                }
+                render_output(output)
+            }
             Err(error) => CallToolResult::error(vec![ContentBlock::text(format!("{error}"))]),
         }
     }
@@ -167,7 +216,30 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities.tools = Some(Default::default());
-        info.instructions = Some(INSTRUCTIONS.into());
+        info.server_info.title = Some(format!("Artist — {}", self.identity.name));
+        info.server_info.description = Some(format!(
+            "Artist MCP harness for {} using profile {}",
+            self.identity.project, self.identity.profile
+        ));
+        info.instructions = Some(format!(
+            "You are {name}, Artist actor {actor}, using profile {profile} in {project}. \
+Other agents and the user address you as {name}. Identity was {registration}.\n\n{INSTRUCTIONS}",
+            name = self.identity.name,
+            actor = self.identity.actor,
+            profile = self.identity.profile,
+            project = self.identity.project,
+            registration = if self.identity.registered {
+                "registered successfully"
+            } else {
+                "derived from the actor because the registry was unavailable"
+            },
+        ));
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "artist".into(),
+            serde_json::json!({"identity": self.identity}),
+        );
+        info.meta = Some(Meta(meta));
         info
     }
 
@@ -211,6 +283,25 @@ impl ServerHandler for McpServer {
     }
 }
 
+fn validate_schema(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    kind: &str,
+    tool: &str,
+) -> Result<(), String> {
+    let compiled = jsonschema::JSONSchema::compile(schema)
+        .map_err(|error| format!("invalid {kind} schema for {tool}: {error}"))?;
+    if let Err(errors) = compiled.validate(value) {
+        let detail = errors
+            .take(8)
+            .map(|error| format!("{}: {}", error.instance_path, error))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!("{kind} validation failed for {tool}: {detail}"));
+    }
+    Ok(())
+}
+
 /// The per-call idempotency key, from `_meta.idempotencyKey`. A present but
 /// blank key is treated as absent: the client is not asking for replay.
 fn idempotency_key(meta: &Meta) -> Option<String> {
@@ -223,27 +314,102 @@ fn idempotency_key(meta: &Meta) -> Option<String> {
 }
 
 /// Adapt one harness tool to the MCP `tools/list` shape.
-fn mcp_tool(tool: &PortableDynamicTool) -> Tool {
+fn mcp_tool(tool: &ArtistDynamicTool) -> Tool {
     let definition = tool.definition();
-    let mut tool = Tool::new(
+    let annotations = ToolAnnotations::from_raw(
+        Some(definition.title.clone()),
+        Some(definition.annotations.read_only),
+        Some(definition.annotations.destructive),
+        Some(definition.annotations.idempotent),
+        Some(definition.annotations.open_world),
+    );
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "artist".into(),
+        serde_json::json!({
+            "category": definition.category,
+        }),
+    );
+    Tool::new(
         definition.name.clone(),
         definition.description.clone(),
-        rmcp::model::object(definition.parameters),
-    );
-    tool.output_schema = Some(Arc::new(rmcp::model::object(output_schema::for_tool(
-        &definition.name,
-    ))));
-    tool
+        rmcp::model::object(definition.input_schema.clone()),
+    )
+    .with_title(definition.title.clone())
+    .with_raw_output_schema(Arc::new(rmcp::model::object(
+        definition.output_schema.clone(),
+    )))
+    .with_annotations(annotations)
+    .with_meta(Meta(meta))
 }
 
-/// Render a harness tool output as MCP content and the structured object
-/// promised by the tool's `outputSchema`. The existing model-visible text is
-/// preserved verbatim; the object gives MCP clients a stable contract and
-/// carries native or legacy JSON in `data` when one exists.
-fn render_output(name: &str, output: ToolOutput) -> CallToolResult {
+/// Preserve the harness's canonical model content while publishing the exact
+/// typed object promised by the tool's output schema.
+fn render_output(output: ArtistToolOutput) -> CallToolResult {
     let mut result = CallToolResult::default();
-    result.content.push(ContentBlock::text(output.render()));
-    result.structured_content = Some(output_schema::structured_result(name, &output));
+    for block in output.presentation.into_content() {
+        match block {
+            ToolResultContent::Text(text) => result.content.push(ContentBlock::text(text.text)),
+            ToolResultContent::Json { value } => {
+                result.content.push(ContentBlock::text(value.to_string()));
+            }
+            ToolResultContent::Image(image) => match image.data {
+                DocumentSourceKind::Base64(data) => {
+                    let mime = image
+                        .media_type
+                        .as_ref()
+                        .map(MimeType::to_mime_type)
+                        .unwrap_or("image/png");
+                    result.content.push(ContentBlock::image(data, mime));
+                }
+                DocumentSourceKind::Raw(data) => {
+                    use base64::Engine as _;
+                    let data = base64::engine::general_purpose::STANDARD.encode(data);
+                    let mime = image
+                        .media_type
+                        .as_ref()
+                        .map(MimeType::to_mime_type)
+                        .unwrap_or("image/png");
+                    result.content.push(ContentBlock::image(data, mime));
+                }
+                DocumentSourceKind::Url(url) => {
+                    let mime = image
+                        .media_type
+                        .as_ref()
+                        .map(MimeType::to_mime_type)
+                        .unwrap_or("application/octet-stream");
+                    result.content.push(ContentBlock::resource_link(
+                        Resource::new(url, "tool-result-image")
+                            .with_title("Tool result image")
+                            .with_description("Image returned by the Artist tool. Fetch this URI when the client supports linked resources.")
+                            .with_mime_type(mime),
+                    ));
+                }
+                DocumentSourceKind::FileId(file_id) => {
+                    result.content.push(ContentBlock::text(format!(
+                        "provider file reference: {file_id} (the originating provider must resolve this identifier)"
+                    )));
+                }
+                DocumentSourceKind::String(value) => {
+                    result.content.push(ContentBlock::resource(
+                        ResourceContents::text(value, "artist://tool-result/text")
+                            .with_mime_type("text/plain"),
+                    ));
+                }
+                DocumentSourceKind::Unknown => {
+                    result.content.push(ContentBlock::text(
+                        "image result omitted because the source was unknown",
+                    ));
+                }
+                other => {
+                    result.content.push(ContentBlock::text(format!(
+                        "unsupported image source: {other:?}"
+                    )));
+                }
+            },
+        }
+    }
+    result.structured_content = Some(output.structured);
     result
 }
 
@@ -264,17 +430,23 @@ mod tests {
         Meta(meta)
     }
 
-    fn counter_tool(calls: Arc<AtomicUsize>) -> PortableDynamicTool {
-        PortableDynamicTool::new(
-            "count",
-            "count executions",
-            json!({"type": "object", "additionalProperties": false}),
+    fn counter_tool(calls: Arc<AtomicUsize>) -> ArtistDynamicTool {
+        ArtistDynamicTool::new(
+            artist_tool_api::ArtistToolDefinition {
+                name: "count".into(),
+                title: "Count".into(),
+                description: "count executions".into(),
+                input_schema: json!({"type": "object", "additionalProperties": false}),
+                output_schema: artist_tool_api::text_output_schema("count", "Counter result."),
+                category: artist_tool_api::ToolCategory::Administration,
+                annotations: artist_tool_api::ArtistToolAnnotations::read_only(),
+            },
             move |_arguments| {
                 let calls = Arc::clone(&calls);
                 Box::pin(async move {
                     calls.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    Ok(ToolOutput::text("done"))
+                    Ok(artist_tool_api::ArtistToolOutput::text("done"))
                 })
             },
         )
@@ -289,6 +461,103 @@ mod tests {
         server.invoke("count", json!({}), keyed("same")).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reusing_a_key_for_a_different_operation_is_rejected() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+
+        server.invoke("count", json!({}), keyed("same")).await;
+        let collision = server
+            .invoke("count", json!({"different": true}), keyed("same"))
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(collision.is_error, Some(true));
+        assert!(
+            collision.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("already used")
+        );
+        let record = server.envelope.get("same").unwrap();
+        assert_eq!(record.tool, "count");
+        assert_eq!(record.arguments, json!({}));
+    }
+    #[tokio::test]
+    async fn invalid_input_is_rejected_before_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+
+        let result = server
+            .invoke("count", json!({"unexpected": true}), Meta::default())
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("input validation failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_structured_output_is_rejected() {
+        let tool = ArtistDynamicTool::new(
+            artist_tool_api::ArtistToolDefinition {
+                name: "bad_output".into(),
+                title: "Bad Output".into(),
+                description: "returns the wrong shape".into(),
+                input_schema: json!({"type": "object", "additionalProperties": false}),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                    "required": ["count"],
+                    "additionalProperties": false
+                }),
+                category: artist_tool_api::ToolCategory::Administration,
+                annotations: artist_tool_api::ArtistToolAnnotations::read_only(),
+            },
+            |_| Box::pin(async { Ok(artist_tool_api::ArtistToolOutput::text("wrong")) }),
+        );
+        let server = McpServer::new(vec![tool], None).unwrap();
+
+        let result = server
+            .invoke("bad_output", json!({}), Meta::default())
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("output validation failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn operation_tool_recovers_a_keyed_result() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = McpServer::new(vec![counter_tool(Arc::clone(&calls))], None).unwrap();
+        server.invoke("count", json!({}), keyed("build-42")).await;
+
+        let result = server
+            .invoke(
+                "operation",
+                json!({"action": "get", "key": "build-42"}),
+                Meta::default(),
+            )
+            .await;
+        let structured = result.structured_content.unwrap();
+        assert_eq!(structured["found"], true);
+        assert_eq!(structured["operation"]["key"], "build-42");
+        assert_eq!(structured["operation"]["tool"], "count");
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+artist-tool-api = { path = "../artist-tool-api" }
 anyhow = "1"
 async-stream = "0.3"
 artist-memory = { path = "../artist-memory" }
@@ -32,6 +33,7 @@ similar = "3"
 llm-provider = { path = "../llm-provider" }
 rig-core = "0.41.0"
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+schemars = "1"
 # `default-features = false` is load-bearing: the default set includes
 # `default-tls`, which pulls native-tls and links OpenSSL *alongside* the rustls
 # stack everything else here already uses. Cargo unifies features across the
