@@ -83,6 +83,172 @@ const CHROMIUM_FAMILY: &[&str] = &[
     "msedge",
 ];
 
+/// Where a Chromium launch's browser profile comes from, and whether the
+/// session's state is written back for the next one.
+///
+/// E1/E2: identity continuity is the point of running against the user's real
+/// profile, not an afterthought. The default (`Auto`) finds this family's real
+/// profile under `$XDG_CONFIG_HOME` and clones it in, and every session writes
+/// its accumulated state back to a working profile under `$XDG_CACHE_HOME`, so
+/// a returning visitor is actually the same visitor. An empty profile is only
+/// used when isolation is asked for explicitly.
+#[derive(Debug, Clone, Default)]
+pub enum BrowserProfile {
+    /// Carry this directory (normally the user's real profile) as the seed, and
+    /// persist the session's state for the next launch.
+    From(std::path::PathBuf),
+    /// Find this family's real profile automatically; if there is none, use an
+    /// empty one. Either way the session's state is persisted.
+    #[default]
+    Auto,
+    /// Start clean and persist nothing: a one-session isolation.
+    Fresh,
+}
+
+/// The user's real profile directory for a Chromium-family binary.
+///
+/// Mirrors the on-disk layout Chromium itself uses. Only families with known
+/// layouts are recognised; anything else has no discoverable profile and falls
+/// back to a fresh one.
+fn real_profile_dir(program: &str) -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let leaf = match program
+        .rsplit('/')
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "chromium" | "chromium-browser" => "chromium",
+        "google-chrome" | "google-chrome-stable" => "google-chrome",
+        "brave" | "brave-browser" => "BraveSoftware/Brave-Browser",
+        "msedge" | "microsoft-edge" => "microsoft-edge",
+        _ => return None,
+    };
+    let dir = config.join(leaf);
+    dir.is_dir().then_some(dir)
+}
+
+/// A stable, filesystem-safe name for a source profile directory.
+///
+/// Two launches of the same real profile must land on the *same* working
+/// profile or there is no continuity; two different sources must not collide.
+fn profile_slug(path: &std::path::Path) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+/// The persistent working profile for a source, under
+/// `$XDG_CACHE_HOME/artist/computers/`.
+///
+/// Unlike the stage's runtime directory — tmpfs, wiped on reboot — this lives
+/// on real disk, so the identity it holds survives the process.
+fn working_profile_dir(source: &std::path::Path) -> Option<PathBuf> {
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(
+        cache
+            .join("artist")
+            .join("computers")
+            .join(profile_slug(source)),
+    )
+}
+
+/// Create `path` and every missing parent with `0700`.
+///
+/// A credentials-bearing directory must not be world-traversable at any point
+/// while it is being created, so the mode is set as the directories are made —
+/// the same reasoning as [`create_private_dir`], extended to several levels.
+fn create_private_tree(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
+}
+
+/// Whether a directory already carries state, i.e. is not empty.
+fn directory_has_state(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+/// Establish the session's live profile from the seed, writing into the given
+/// `working` profile (which is `None` when persistence does not apply), and
+/// return the working profile that should be written back to.
+///
+/// On a first sight the working profile is cloned from the seed, giving a
+/// stable baseline later sessions reuse; on a returning sight the *working*
+/// profile is the seed, so state accumulated last time carries over.
+fn seed_profile(
+    seed: &std::path::Path,
+    live: &std::path::Path,
+    working: Option<PathBuf>,
+) -> Result<Option<PathBuf>, StepError> {
+    if let Some(working) = &working {
+        create_private_tree(working.parent().unwrap_or(working.as_path())).map_err(|error| {
+            StepError::Backend(format!(
+                "create working profile dir {}: {error}",
+                working.display()
+            ))
+        })?;
+    }
+
+    match &working {
+        Some(working) if directory_has_state(working) => {
+            // Returning visitor: pick up where the last session left off.
+            clone_profile(working, live)?;
+        }
+        _ => {
+            // First sight: seed the live profile from the user's real one, and
+            // keep a baseline copy to write back over.
+            clone_profile(seed, live)?;
+            if let Some(working) = &working {
+                let _ = std::fs::remove_dir_all(working);
+                create_private_tree(working).map_err(|error| {
+                    StepError::Backend(format!(
+                        "create working profile {}: {error}",
+                        working.display()
+                    ))
+                })?;
+                clone_profile(live, working)?;
+            }
+        }
+    }
+    Ok(working)
+}
+
+/// Write the session's live profile back to the working profile once the
+/// browser exits, so the identity the next session inherits includes what this
+/// one logged into.
+fn watch_profile_writeback(live: PathBuf, working: Option<PathBuf>, pid: i32) {
+    let Some(working) = working else {
+        return;
+    };
+    let proc = format!("/proc/{pid}");
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if !std::path::Path::new(&proc).exists() {
+                break;
+            }
+        }
+        // The browser has exited and released its locks; only now is a copy
+        // coherent. Best effort: the harness may be dying itself, and losing
+        // the write-back then is the correct amount of degradation.
+        let _ = std::fs::remove_dir_all(&working);
+        let _ = create_private_tree(&working);
+        let _ = clone_profile(&live, &working);
+    });
+}
+
 fn clone_profile(src: &std::path::Path, dst: &std::path::Path) -> Result<(), StepError> {
     use std::fs;
     if !src.is_dir() {
@@ -380,7 +546,7 @@ impl Host {
         program: &str,
         args: &[String],
         cwd: Option<&std::path::Path>,
-        browser_profile: Option<&std::path::Path>,
+        browser_profile: BrowserProfile,
     ) -> Result<Launched, StepError> {
         use crate::stage::{AppCommand, Stage};
 
@@ -415,10 +581,23 @@ impl Host {
 
         let chromium = is_chromium(program);
         let profile = runtime_dir.join("chrome-profile");
+        // E1/E2: resolve where this session's profile comes from — the user's
+        // real profile by default, persisted across sessions — before the
+        // browser starts, because the choice is baked into the command line.
+        let working = if chromium {
+            let source = match &browser_profile {
+                BrowserProfile::From(path) => Some(path.clone()),
+                BrowserProfile::Auto => real_profile_dir(program),
+                BrowserProfile::Fresh => None,
+            };
+            match &source {
+                Some(seed) => seed_profile(seed, &profile, working_profile_dir(seed))?,
+                None => None,
+            }
+        } else {
+            None
+        };
         let mut command = AppCommand::new(program);
-        if chromium && let Some(source) = browser_profile {
-            clone_profile(source, &profile)?;
-        }
         // `cwd` was accepted on the tool and dropped here, so a GUI launch
         // silently ran wherever the harness happened to be — which for a file
         // manager or an editor is the difference between opening the right
@@ -444,6 +623,15 @@ impl Host {
                 // the stage refused it. Two silent failures stacked, and the
                 // suite was green.
                 .arg("--ozone-platform=wayland")
+                // The no-first-run flags below are what Chromium reads, but
+                // `--enable-automation` is what it sets in return: it flips
+                // `navigator.webdriver` and adds the "Chrome is being
+                // controlled" infobar. Both are launch-time properties of the
+                // automation build, so both are excluded here — the runtime
+                // mask (in `CdpPage::build`) handles the getter for a browser
+                // already open.
+                .arg("--exclude-switches=enable-automation")
+                .arg("--disable-blink-features=AutomationControlled")
                 .arg("--no-first-run")
                 .arg("--no-default-browser-check");
         }
@@ -457,6 +645,9 @@ impl Host {
         let window = wait_for_window(stage.as_ref(), app.pid).await;
 
         if chromium {
+            // E2: watch the browser; when it exits, write its accumulated state
+            // back to the persistent working profile for the next session.
+            watch_profile_writeback(profile.clone(), working, app.pid);
             let browser = Arc::new(crate::surface::cdp::connect(&profile).await?);
             let page = first_page(&browser).await?;
             let surface = crate::surface::cdp::CdpPage::attach_owned(
@@ -930,5 +1121,69 @@ mod tests {
             ..Probe::default()
         };
         assert_eq!(select(&probe, &adapters).rung, Rung::Programmatic);
+    }
+
+    #[test]
+    fn profile_slug_is_stable_and_filesystem_safe() {
+        // The same source must always map to the same working profile, and
+        // hostile paths must produce something a directory name can hold.
+        let first = profile_slug(std::path::Path::new("/home/me/.config/chromium"));
+        let second = profile_slug(std::path::Path::new("/home/me/.config/chromium"));
+        assert_eq!(first, second);
+        assert!(first.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn the_working_profile_is_seeded_once_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("real-profile");
+        let live = dir.path().join("live-profile");
+        let working = dir.path().join("working-profile");
+
+        // A real profile with some state in it.
+        std::fs::create_dir_all(seed.join("Default")).unwrap();
+        std::fs::write(seed.join("Default/Cookies"), b"session one").unwrap();
+
+        // First sight: the live profile is seeded from it, and a baseline
+        // working copy is established.
+        let returned = seed_profile(&seed, &live, Some(working.clone())).unwrap();
+        assert_eq!(returned, Some(working.clone()));
+        assert!(live.join("Default/Cookies").exists());
+
+        // The session now logs in somewhere new — state lands in the live
+        // profile, not in the seed (the user's real profile is untouched).
+        std::fs::write(live.join("Default/Cookies"), b"session two, now logged in").unwrap();
+
+        // On exit the watcher writes the live profile back over the working one.
+        std::fs::remove_dir_all(&working).unwrap();
+        clone_profile(&live, &working).unwrap();
+
+        // A returning sight: the *working* profile is the seed, so what the
+        // last session gained carries over instead of being re-cloned away.
+        let live2 = dir.path().join("live-profile-2");
+        seed_profile(&seed, &live2, Some(working.clone())).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(live2.join("Default/Cookies")).unwrap(),
+            "session two, now logged in"
+        );
+        // And the user's real profile was never overwritten.
+        assert_eq!(
+            std::fs::read_to_string(seed.join("Default/Cookies")).unwrap(),
+            "session one"
+        );
+    }
+
+    #[test]
+    fn no_working_profile_means_plain_clone_without_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("real-profile");
+        std::fs::create_dir_all(seed.join("Default")).unwrap();
+        std::fs::write(seed.join("Default/Cookies"), b"session one").unwrap();
+
+        let live = dir.path().join("live-profile");
+        let returned = seed_profile(&seed, &live, None).unwrap();
+        assert_eq!(returned, None);
+        assert!(live.join("Default/Cookies").exists());
     }
 }

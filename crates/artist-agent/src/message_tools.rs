@@ -18,7 +18,7 @@
 //!   parent yield while awaiting a child.
 
 use artist_registry::{Audience, Group, Message};
-use rig_core::tool::PortableTool;
+use rig_core::tool::{PortableTool, ToolExecutionError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -204,6 +204,12 @@ impl PortableTool for MessageTools {
     type Args = TellArgs;
     type Output = TellResult;
 
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        ToolExecutionError::other(error.to_string())
+            .with_code("message_error")
+            .with_retryable(false)
+    }
+
     fn description(&self) -> String {
         "Send a message to another agent, or to a group. Returns immediately \
          without waiting for a response."
@@ -270,6 +276,12 @@ impl PortableTool for QueryTool {
     type Error = MessageError;
     type Args = QueryArgs;
     type Output = QueryResult;
+
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        ToolExecutionError::other(error.to_string())
+            .with_code("message_error")
+            .with_retryable(false)
+    }
 
     fn description(&self) -> String {
         "Ask another agent something and wait for their response. Any message \
@@ -342,6 +354,12 @@ impl PortableTool for ReplyTool {
     type Error = MessageError;
     type Args = ReplyArgs;
     type Output = ReplyResult;
+
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        ToolExecutionError::other(error.to_string())
+            .with_code("message_error")
+            .with_retryable(false)
+    }
 
     fn description(&self) -> String {
         "Respond to the most recent message you were shown, whether it came \
@@ -417,6 +435,12 @@ impl PortableTool for GroupTool {
     type Error = MessageError;
     type Args = GroupArgs;
     type Output = GroupChatResult;
+
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        ToolExecutionError::other(error.to_string())
+            .with_code("message_error")
+            .with_retryable(false)
+    }
 
     fn description(&self) -> String {
         "Open a group conversation over a set of agents and send the first \
@@ -555,6 +579,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("no message to reply to"));
+        let mapped = reply.map_error(error);
+        assert_eq!(mapped.code(), Some("message_error"));
+        assert!(
+            mapped
+                .model_feedback()
+                .is_some_and(|message| message.contains("no message to reply to"))
+        );
     }
 
     /// A reply goes to the sender of the message that was actually shown.

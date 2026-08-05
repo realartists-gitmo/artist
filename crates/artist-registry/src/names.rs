@@ -214,24 +214,32 @@ impl Names {
     /// filesystems.
     pub fn select(&self, selector: &Selector) -> Result<Vec<Name>> {
         let all = self.list()?;
-        let mut matched: Vec<Name> = all
-            .iter()
-            .filter(|name| {
-                selector
-                    .project
-                    .as_ref()
-                    .is_none_or(|wanted| name.project.as_ref() == Some(wanted))
-                    && selector
-                        .profile
+        let has_predicate = selector.project.is_some()
+            || selector.profile.is_some()
+            || selector.descendant_of.is_some();
+        let mut matched: Vec<Name> = if has_predicate || selector.names.is_empty() {
+            all.iter()
+                .filter(|name| {
+                    selector
+                        .project
                         .as_ref()
-                        .is_none_or(|wanted| name.profile.as_ref() == Some(wanted))
-                    && selector
-                        .descendant_of
-                        .as_ref()
-                        .is_none_or(|root| is_descendant(&all, &name.name, root))
-            })
-            .cloned()
-            .collect();
+                        .is_none_or(|wanted| name.project.as_ref() == Some(wanted))
+                        && selector
+                            .profile
+                            .as_ref()
+                            .is_none_or(|wanted| name.profile.as_ref() == Some(wanted))
+                        && selector
+                            .descendant_of
+                            .as_ref()
+                            .is_none_or(|root| is_descendant(&all, &name.name, root))
+                })
+                .cloned()
+                .collect()
+        } else {
+            // Explicit names without a predicate mean exactly those names. An empty
+            // selector still means "everyone", preserving directory discovery.
+            Vec::new()
+        };
 
         // Unioned after the predicate, so an explicit name reaches someone the
         // predicate excludes rather than being filtered back out by it.
@@ -617,6 +625,28 @@ mod tests {
         assert!(matched.iter().any(|n| n.session == "s-other"));
     }
 
+    #[test]
+    fn explicit_names_without_a_predicate_select_only_those_names() {
+        let root = tempfile::tempdir().unwrap();
+        let roster = populated(root.path());
+        let selected_name = roster
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|name| name.session == "s-child")
+            .unwrap()
+            .name;
+
+        let matched = roster
+            .select(&Selector {
+                names: vec![selected_name],
+                ..Selector::default()
+            })
+            .unwrap();
+
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].session, "s-child");
+    }
     /// Exclusion is applied last so it always wins, which is the safe
     /// direction when a predicate turns out wider than its author expected.
     #[test]

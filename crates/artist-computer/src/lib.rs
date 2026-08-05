@@ -24,6 +24,7 @@ mod contracts;
 pub mod doctor;
 pub mod extract;
 pub mod host;
+pub mod human;
 pub mod keys;
 pub mod ladder;
 pub mod macros;

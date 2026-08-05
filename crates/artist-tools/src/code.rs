@@ -29,6 +29,19 @@ fn scope(ws: &Workspace, path: Option<&str>) -> Result<PathBuf, ToolError> {
     }
 }
 
+/// Root an explicit analysis at the requested subtree instead of silently
+/// widening it to the enclosing repository. A file scopes to its directory.
+fn analysis_root(target: &Path) -> PathBuf {
+    if target.is_file() {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| target.to_path_buf())
+    } else {
+        target.to_path_buf()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // code_map — structural outline, anchored
 // ---------------------------------------------------------------------------
@@ -421,6 +434,14 @@ impl PortableTool for CodeDepsTool {
             .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
         let graph = artist_ast::graph_cache::shared::get_or_init(&root)
             .map_err(|e| ToolError::Message(format!("dep graph: {e}")))?;
+        let scoped_graph;
+        let deps = if graph.deps.forward.contains_key(&file) {
+            &graph.deps
+        } else {
+            scoped_graph = artist_ast::deps::build_graph(&analysis_root(&file))
+                .map_err(|e| ToolError::Message(format!("scoped dep graph: {e}")))?;
+            &scoped_graph
+        };
         let depth = args.depth.unwrap_or(3).min(10);
 
         let body = if args.direction.as_deref() == Some("reverse") {
@@ -428,7 +449,7 @@ impl PortableTool for CodeDepsTool {
             // that is what the test-path filter applies to.
             let exclude_tests = args.exclude_tests.unwrap_or(false);
             let hits = artist_ast::deps::traverse::reverse(
-                &graph.deps,
+                deps,
                 &file,
                 depth,
                 args.limit.unwrap_or(200),
@@ -436,15 +457,15 @@ impl PortableTool for CodeDepsTool {
                     !exclude_tests || !artist_ast::file_filter::is_test_file(&edge.target, &root)
                 },
             );
-            artist_ast::deps::render::render_reverse_deps_text(&graph.deps, &file, &hits)
+            artist_ast::deps::render::render_reverse_deps_text(deps, &file, &hits)
         } else {
             let hits = artist_ast::deps::traverse::forward_limited(
-                &graph.deps,
+                deps,
                 &file,
                 depth,
                 args.limit.unwrap_or(200),
             );
-            artist_ast::deps::render::render_deps_text(&graph.deps, &file, &hits, true)
+            artist_ast::deps::render::render_deps_text(deps, &file, &hits, true)
         };
         Ok(output::head(body, output::OUTPUT_CAP))
     }
@@ -489,16 +510,25 @@ impl PortableTool for CodeCyclesTool {
 
     async fn call(&self, args: CodeCyclesArgs) -> Result<String, ToolError> {
         let target = scope(&self.0, args.path.as_deref())?;
-        let root = artist_ast::project_root::find_root_for(&target)
-            .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
-        let graph = artist_ast::graph_cache::shared::get_or_init(&root)
-            .map_err(|e| ToolError::Message(format!("dep graph: {e}")))?;
-        let cycles = artist_ast::deps::scc::detect(&graph.deps, args.min_size.unwrap_or(2));
+        let scoped_graph;
+        let project_graph;
+        let deps = if args.path.is_some() {
+            scoped_graph = artist_ast::deps::build_graph(&analysis_root(&target))
+                .map_err(|e| ToolError::Message(format!("scoped dep graph: {e}")))?;
+            &scoped_graph
+        } else {
+            let root = artist_ast::project_root::find_root_for(&target)
+                .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
+            project_graph = artist_ast::graph_cache::shared::get_or_init(&root)
+                .map_err(|e| ToolError::Message(format!("dep graph: {e}")))?;
+            &project_graph.deps
+        };
+        let cycles = artist_ast::deps::scc::detect(deps, args.min_size.unwrap_or(2));
         if cycles.is_empty() {
             return Ok("no import cycles found".into());
         }
         Ok(output::head(
-            artist_ast::deps::render::render_cycles_text(&graph.deps, &cycles),
+            artist_ast::deps::render::render_cycles_text(deps, &cycles),
             output::OUTPUT_CAP,
         ))
     }
@@ -551,16 +581,26 @@ impl PortableTool for CodeCallsTool {
 
     async fn call(&self, args: CodeCallsArgs) -> Result<String, ToolError> {
         let target = scope(&self.0, args.path.as_deref())?;
-        let root = artist_ast::project_root::find_root_for(&target)
-            .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
         let depth = args.depth.unwrap_or(1).min(5);
         let limit = args.limit.unwrap_or(200);
-        let graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
-            .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
-        let calls = graph
-            .calls
-            .as_ref()
-            .ok_or_else(|| ToolError::Message("call graph is empty".into()))?;
+        let scoped_calls;
+        let project_graph;
+        let calls = if args.path.is_some() {
+            let root = analysis_root(&target);
+            let deps = artist_ast::deps::build_graph(&root)
+                .map_err(|e| ToolError::Message(format!("scoped dep graph: {e}")))?;
+            scoped_calls = artist_ast::calls::build::build_call_graph(&root, &deps);
+            &scoped_calls
+        } else {
+            let root = artist_ast::project_root::find_root_for(&target)
+                .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
+            project_graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
+                .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
+            project_graph
+                .calls
+                .as_ref()
+                .ok_or_else(|| ToolError::Message("call graph is empty".into()))?
+        };
         let targets = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.symbol);
         let Some(target) = targets.first() else {
             return Ok(format!(
@@ -644,14 +684,24 @@ impl PortableTool for CodeTraceTool {
 
     async fn call(&self, args: CodeTraceArgs) -> Result<String, ToolError> {
         let target = scope(&self.0, args.path.as_deref())?;
-        let root = artist_ast::project_root::find_root_for(&target)
-            .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
-        let graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
-            .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
-        let calls = graph
-            .calls
-            .as_ref()
-            .ok_or_else(|| ToolError::Message("call graph is empty".into()))?;
+        let scoped_calls;
+        let project_graph;
+        let calls = if args.path.is_some() {
+            let root = analysis_root(&target);
+            let deps = artist_ast::deps::build_graph(&root)
+                .map_err(|e| ToolError::Message(format!("scoped dep graph: {e}")))?;
+            scoped_calls = artist_ast::calls::build::build_call_graph(&root, &deps);
+            &scoped_calls
+        } else {
+            let root = artist_ast::project_root::find_root_for(&target)
+                .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
+            project_graph = artist_ast::graph_cache::ensure_with_calls(&root, false)
+                .map_err(|e| ToolError::Message(format!("call graph: {e}")))?;
+            project_graph
+                .calls
+                .as_ref()
+                .ok_or_else(|| ToolError::Message("call graph is empty".into()))?
+        };
         let froms = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.from);
         let tos = artist_ast::calls::cli_helpers::resolve_target_qns(calls, &args.to);
         if froms.is_empty() || tos.is_empty() {
@@ -1345,8 +1395,12 @@ impl PortableTool for CodeImpactTool {
 
     async fn call(&self, args: CodeImpactArgs) -> Result<String, ToolError> {
         let target = scope(&self.0, args.path.as_deref())?;
-        let root = artist_ast::project_root::find_root_for(&target)
-            .map_err(|e| ToolError::Message(format!("project root: {e}")))?;
+        let root = if args.path.is_some() {
+            analysis_root(&target)
+        } else {
+            artist_ast::project_root::find_root_for(&target)
+                .map_err(|e| ToolError::Message(format!("project root: {e}")))?
+        };
         let mode = artist_ast::impact::ImpactMode::parse(args.mode.as_deref().unwrap_or("all"))
             .ok_or_else(|| ToolError::Message("invalid mode".into()))?;
         let opts = artist_ast::impact::ImpactOptions {
@@ -1408,5 +1462,79 @@ impl PortableTool for CodeImpactTool {
             }
         }
         Ok(output::head(out, output::OUTPUT_CAP))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hidden_workspace() -> (tempfile::TempDir, tempfile::TempDir, Workspace) {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let src = project.path().join(".hidden/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            "pub mod a;\npub mod b;\npub fn double(value: i32) -> i32 { value * 2 }\npub fn quadruple(value: i32) -> i32 { double(double(value)) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("a.rs"),
+            "use crate::b::from_b;\npub fn from_a(value: i32) -> i32 { from_b(value) + 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("b.rs"),
+            "use crate::a::from_a;\npub fn from_b(value: i32) -> i32 { if value == 0 { 0 } else { from_a(value - 1) } }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::open(project.path(), state.path(), "code-test").unwrap();
+        (project, state, workspace)
+    }
+
+    #[tokio::test]
+    async fn explicit_hidden_paths_are_analyzed_without_widening_or_disappearing() {
+        let (_project, _state, workspace) = hidden_workspace();
+
+        let deps = CodeDepsTool(workspace.clone())
+            .call(CodeDepsArgs {
+                file: ".hidden/src/a.rs".into(),
+                direction: None,
+                depth: Some(2),
+                limit: Some(20),
+                exclude_tests: None,
+            })
+            .await
+            .unwrap();
+        assert!(deps.contains("b.rs"), "{deps}");
+
+        let cycles = CodeCyclesTool(workspace.clone())
+            .call(CodeCyclesArgs {
+                path: Some(".hidden/src".into()),
+                min_size: Some(2),
+            })
+            .await
+            .unwrap();
+        assert!(cycles.contains("cycle of 2 files"), "{cycles}");
+        assert!(
+            cycles.contains("a.rs") && cycles.contains("b.rs"),
+            "{cycles}"
+        );
+
+        let trace = CodeTraceTool(workspace)
+            .call(CodeTraceArgs {
+                from: "quadruple".into(),
+                to: "double".into(),
+                path: Some(".hidden/src".into()),
+                depth: Some(4),
+            })
+            .await
+            .unwrap();
+        assert!(
+            trace.contains("quadruple") && trace.contains("double"),
+            "{trace}"
+        );
+        assert!(!trace.contains("no callable symbol matches"), "{trace}");
     }
 }

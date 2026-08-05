@@ -13,7 +13,7 @@ path = "src/main.rs"
 artist-tool-api = { path = "../artist-tool-api" }
 anyhow = "1"
 artist-agent = { path = "../artist-agent" }
-artist-canvas = { path = "../artist-canvas" }
+artist-canvas = { path = "../artist-canvas", features = ["webview"] }
 artist-computer = { path = "../artist-computer" }
 artist-memory = { path = "../artist-memory" }
 artist-registry = { path = "../artist-registry" }

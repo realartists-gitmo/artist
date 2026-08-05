@@ -8,16 +8,12 @@ fn main() -> anyhow::Result<()> {
     let project = std::env::var_os("ARTIST_HOST_PROJECT")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let executable = std::env::var_os("ARTIST_EXECUTABLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("artist"));
     let registry = HostRegistry::platform_default()?;
     SessionHostDaemon::bind(
         &registry,
         DaemonOptions {
             session,
             project,
-            executable,
             idle_timeout: Duration::from_secs(15 * 60),
         },
     )?

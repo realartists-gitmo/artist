@@ -23,6 +23,7 @@ members = [
     "crates/artist-mcp-server",
     "crates/artist-tool-api",
 ]
+exclude = ["vendor/zed-gpui", "vendor/wgpu-core", "vendor/wgpu-hal"]
 resolver = "3"
 
 [workspace.package]
@@ -89,3 +90,11 @@ rten-text = { path = "../../rten-src/rten-text" }
 # is upstream but unreleased, so we track the repo rather than carrying a
 # backported copy of a stale release.
 mnestic = { path = "../../mnestic-src/cozo-core" }
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
+
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/zed-gpui/crates/gpui" }
+gpui_linux = { path = "vendor/zed-gpui/crates/gpui_linux" }
+gpui_platform = { path = "vendor/zed-gpui/crates/gpui_platform" }
+gpui_wgpu = { path = "vendor/zed-gpui/crates/gpui_wgpu" }

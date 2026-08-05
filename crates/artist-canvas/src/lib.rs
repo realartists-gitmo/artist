@@ -27,6 +27,7 @@ pub mod state;
 pub mod templates;
 pub mod transform;
 pub mod window;
+pub mod window_ui;
 
 pub use bridge::{CanvasHost, Denied, SendMode};
 pub use manifest::Manifest;

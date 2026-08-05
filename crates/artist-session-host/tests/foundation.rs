@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
-use artist_session_host::{DaemonOptions, ServerPacket, SessionHostDaemon};
+use artist_session_host::{
+    DaemonOptions, RuntimeDriver, RuntimeFactory, RuntimeTurn, ServerPacket, SessionHostDaemon,
+};
 use artist_session_host::{
     EventJournal, HostCommand, HostCore, HostEvent, HostRegistry, HostRequest, RuntimeAction,
     RuntimePhase, RuntimeState,
@@ -7,6 +9,60 @@ use artist_session_host::{
 #[cfg(target_os = "linux")]
 use artist_session_host::{SeqPacket, SeqPacketListener};
 use std::{fs, os::unix::fs::PermissionsExt};
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum TestOutput {
+    Fixed(&'static str),
+    Lineage,
+}
+
+#[cfg(target_os = "linux")]
+struct TestRuntimeFactory {
+    delay: std::time::Duration,
+    output: TestOutput,
+}
+
+#[cfg(target_os = "linux")]
+struct TestRuntime {
+    delay: std::time::Duration,
+    output: TestOutput,
+}
+
+#[cfg(target_os = "linux")]
+impl RuntimeFactory for TestRuntimeFactory {
+    fn open(
+        &self,
+        _options: &DaemonOptions,
+        _lineage: &str,
+    ) -> anyhow::Result<Box<dyn RuntimeDriver>> {
+        Ok(Box::new(TestRuntime {
+            delay: self.delay,
+            output: self.output,
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RuntimeDriver for TestRuntime {
+    fn run_turn(&mut self, turn: RuntimeTurn<'_>) -> anyhow::Result<()> {
+        std::thread::sleep(self.delay);
+        let text = match self.output {
+            TestOutput::Fixed(text) => text.to_owned(),
+            TestOutput::Lineage => turn.lineage.to_owned(),
+        };
+        turn.events
+            .send(
+                HostEvent::StreamingDelta {
+                    lineage: turn.lineage.to_owned(),
+                    event: artist_ui_core::PromptEvent::TextDelta(text),
+                }
+                .into(),
+            )
+            .map_err(|_| anyhow::anyhow!("test runtime receiver stopped"))?;
+        Ok(())
+    }
+}
 
 #[test]
 fn registry_is_private_exclusive_and_recoverable() {
@@ -196,24 +252,20 @@ fn attach_authenticates_and_falls_back_to_snapshot_after_gap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn daemon_keeps_run_events_across_client_disconnect_and_replays_them() {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    use std::{sync::Arc, time::Duration};
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake-artist");
-    fs::write(
-        &executable,
-        "#!/bin/sh\nsleep 0.15\necho '{\"type\":\"text_delta\",\"data\":\"survived\"}' >&2\nsleep 0.05\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let registry = HostRegistry::new(temp.path().join("hosts")).unwrap();
-    let daemon = SessionHostDaemon::bind(
+    let daemon = SessionHostDaemon::bind_with_factory(
         &registry,
         DaemonOptions {
             session: "root-live".into(),
             project: temp.path().into(),
-            executable,
             idle_timeout: Duration::from_secs(2),
         },
+        Arc::new(TestRuntimeFactory {
+            delay: Duration::from_millis(150),
+            output: TestOutput::Fixed("survived"),
+        }),
     )
     .unwrap();
     let record = registry.resolve("root-live").unwrap().unwrap();
@@ -260,24 +312,20 @@ fn daemon_keeps_run_events_across_client_disconnect_and_replays_them() {
 #[cfg(target_os = "linux")]
 #[test]
 fn one_root_host_runs_distinct_agent_lineages_concurrently() {
-    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    use std::{sync::Arc, time::Duration};
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake-artist");
-    fs::write(
-        &executable,
-        "#!/bin/sh\nsleep 0.2\nprintf '{\"type\":\"text_delta\",\"data\":\"%s\"}\\n' \"$6\" >&2\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let registry = HostRegistry::new(temp.path().join("hosts")).unwrap();
-    let daemon = SessionHostDaemon::bind(
+    let daemon = SessionHostDaemon::bind_with_factory(
         &registry,
         DaemonOptions {
             session: "root-parallel".into(),
             project: temp.path().into(),
-            executable,
             idle_timeout: Duration::from_secs(2),
         },
+        Arc::new(TestRuntimeFactory {
+            delay: Duration::from_millis(200),
+            output: TestOutput::Lineage,
+        }),
     )
     .unwrap();
     let record = registry.resolve("root-parallel").unwrap().unwrap();
@@ -310,7 +358,7 @@ fn one_root_host_runs_distinct_agent_lineages_concurrently() {
         .unwrap();
     let _: ServerPacket = replay.receive().unwrap();
     let mut lineages = std::collections::BTreeSet::new();
-    for _ in 0..6 {
+    for _ in 0..8 {
         let packet: ServerPacket = replay.receive().unwrap();
         if let ServerPacket::Event(event) = packet
             && let HostEvent::StreamingDelta {
@@ -319,6 +367,9 @@ fn one_root_host_runs_distinct_agent_lineages_concurrently() {
             } = event.payload
         {
             lineages.insert(text);
+        }
+        if lineages.len() == 2 {
+            break;
         }
     }
     assert_eq!(

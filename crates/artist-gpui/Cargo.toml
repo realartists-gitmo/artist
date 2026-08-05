@@ -10,12 +10,10 @@ name = "artist-gui"
 path = "src/main.rs"
 
 [dependencies]
-# gpui has no usable crates.io release (the name holds a yanked 0.1.0 from 2022
-# and a 0.1.0-test placeholder), so this is a pinned git rev. Pinned rather than
-# floating on main because gpui carries no semver and its API tracks Zed's
-# needs: an unpinned bump is an unscheduled migration.
-# Keep these on the same locked Zed commit as gpui-component. Cargo.lock is the
-# compatibility pin because gpui-component itself follows Zed's git source.
+# GPUI has no usable crates.io release, so the source identity remains the
+# checksum-locked Zed commit used by gpui-component. The workspace root patches
+# the GPUI crates to the audited vendored fork that adds Linux DMA-BUF surfaces;
+# Cargo.lock still pins every other Zed crate to the same upstream revision.
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["wayland", "x11"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f0abdd9" }
@@ -25,6 +23,7 @@ artist-config = { path = "../artist-config" }
 artist-session-host = { path = "../artist-session-host" }
 dirs = "6"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 
@@ -42,3 +41,8 @@ optional = true
 [dependencies.flume]
 version = "0.11"
 optional = true
+[dev-dependencies]
+artist-computer = { path = "../artist-computer", default-features = false, features = ["stage-wayland"] }
+log = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }

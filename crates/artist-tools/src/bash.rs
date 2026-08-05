@@ -234,6 +234,31 @@ impl BashTool {
             .await
             .map(|output| clean_input_output(&output, Some(command)))
     }
+
+    /// Send text to a persistent PTY session owned by this bundle.
+    ///
+    /// Session hosts use this instead of reconstructing a model-facing tool call,
+    /// so terminal state remains attached to the root runtime across GUI turns.
+    pub async fn send_session_input(
+        &self,
+        session_id: &str,
+        input: &str,
+    ) -> Result<String, ToolError> {
+        self.send(BashArgs {
+            mode: Some("send".into()),
+            command: None,
+            session_id: Some(session_id.into()),
+            input: Some(input.into()),
+            timeout: None,
+            wait_ms: None,
+            max_bytes: None,
+            cwd: None,
+            env: None,
+            signal: None,
+            background: None,
+        })
+        .await
+    }
 }
 
 fn clean_input_output(output: &str, command: Option<&str>) -> String {
@@ -732,7 +757,7 @@ impl BashTool {
         for id in exited {
             self.sessions.remove(&id);
         }
-        lines
+        format!("sessions:\n{lines}")
     }
     fn cwd(&self, input: Option<&str>) -> Result<std::path::PathBuf, ToolError> {
         Ok(match input {
@@ -799,5 +824,17 @@ async fn pump(
             output.0.drain(..drain);
             output.1 = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_nonempty_session_listing_is_typed_as_listed() {
+        let parsed = BashResult::parse("sessions:\nt-red-wolf\trunning\tcargo test");
+        assert_eq!(parsed.status, BashStatus::Listed);
+        assert!(parsed.output.contains("t-red-wolf"));
     }
 }

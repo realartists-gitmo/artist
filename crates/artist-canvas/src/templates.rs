@@ -153,7 +153,7 @@ export default function App() {
       title="Dashboard"
       subtitle={busy ? "agent is working" : "idle"}
       actions={
-        <Button variant="primary" onClick={() => send("Refresh the dashboard data.")}>
+        <Button variant="primary" onClick={() => send("Refresh the dashboard data.", { mode: "queue" })}>
           Refresh
         </Button>
       }
@@ -603,6 +603,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dashboard_queues_refresh_with_an_explicit_agent_mode() {
+        let dashboard = find("dashboard").unwrap();
+        let app = dashboard
+            .files
+            .iter()
+            .find(|(path, _)| *path == "App.jsx")
+            .map(|(_, source)| *source)
+            .unwrap();
+        assert!(app.contains("send(\"Refresh the dashboard data.\", { mode: \"queue\" })"));
+    }
     #[test]
     fn blank_is_available_and_named_consistently() {
         assert!(find("blank").is_some());

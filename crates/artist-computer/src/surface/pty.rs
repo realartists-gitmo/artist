@@ -451,7 +451,20 @@ impl Surface for PtySurface {
     ) -> Result<Option<String>, StepError> {
         match step {
             Step::Key(press) => self.send(&key_bytes(press.chord())?),
-            Step::Type { text, .. } => self.send(text.as_bytes()),
+            Step::Type { text, .. } => {
+                // Typed character by character with a pause, not written whole.
+                // A terminal is a byte stream and would accept either, but the
+                // receiving program is not: a shell's line editor, an input
+                // field in `dialog`, and a `readline`-based REPL all treat a
+                // pasted run of characters differently from typing, and a burst
+                // of a hundred characters in one write reads as a paste.
+                for character in text.chars() {
+                    let mut buffer = [0u8; 4];
+                    self.send(character.encode_utf8(&mut buffer).as_bytes())?;
+                    tokio::time::sleep(crate::human::between_keys()).await;
+                }
+                Ok(())
+            }
             Step::Click { target, .. } => Err(StepError::Unsupported {
                 anchor: target.anchor.clone(),
                 role: node
@@ -475,7 +488,11 @@ impl Surface for PtySurface {
                 let repeats = amount.unsigned_abs().clamp(1, 20);
                 let bytes = key_bytes(key)?;
                 for _ in 0..repeats {
+                    // A pause between pages. A terminal scrolls a page per key
+                    // and a pager needs a beat to respond; hammering it with
+                    // the whole run at once races the pager's redraw.
                     self.send(&bytes)?;
+                    tokio::time::sleep(crate::human::between_keys()).await;
                 }
                 Ok(())
             }

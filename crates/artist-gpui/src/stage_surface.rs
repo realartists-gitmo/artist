@@ -1,45 +1,55 @@
 use artist_session_host::StageDescriptor;
-use std::{collections::HashMap, os::fd::OwnedFd};
+use gpui::{DmaBufPlane, DmaBufSurface};
+use std::{collections::HashMap, os::fd::OwnedFd, sync::Arc};
 
 /// Imported stage buffers are keyed for the lifetime of a host export. Frame
-/// presents only select a buffer and update damaged regions; they never resend
-/// descriptors or pixel data.
+/// presents select an already-imported image and attach a one-shot completion
+/// callback that releases the compositor buffer only after the displayed frame
+/// and every in-flight renderer reference have been dropped.
 #[derive(Default)]
 pub(crate) struct StageSurfaces {
-    surfaces: HashMap<(String, String), StageSurface>,
+    surfaces: HashMap<(String, String, String), StageSurface>,
 }
 
 pub(crate) struct StageSurface {
-    buffers: HashMap<u32, ExportedBuffer>,
+    buffers: HashMap<u32, DmaBufSurface>,
     pub width: u32,
     pub height: u32,
     pub pending: Option<PresentedFrame>,
 }
 
-pub(crate) struct ExportedBuffer {
-    pub descriptor: StageDescriptor,
-    pub descriptors: Vec<OwnedFd>,
-    pub submitted: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct PresentedFrame {
-    pub buffer_index: u32,
-    pub damage: Vec<[u32; 4]>,
+    pub surface: DmaBufSurface,
 }
 
 impl StageSurfaces {
     pub fn export(
         &mut self,
+        root_session: String,
         lineage: String,
         stage: String,
         descriptor: StageDescriptor,
         descriptors: Vec<OwnedFd>,
     ) -> Result<(), String> {
         validate_export(&descriptor, descriptors.len())?;
+        let planes = descriptors
+            .into_iter()
+            .zip(descriptor.offsets.iter().copied())
+            .zip(descriptor.strides.iter().copied())
+            .map(|((fd, offset), stride)| DmaBufPlane::new(fd, offset, stride))
+            .collect();
+        let image = DmaBufSurface::new(
+            descriptor.width,
+            descriptor.height,
+            descriptor.format,
+            descriptor.modifier,
+            planes,
+            None,
+        );
         let surface = self
             .surfaces
-            .entry((lineage, stage))
+            .entry((root_session, lineage, stage))
             .or_insert_with(|| StageSurface {
                 buffers: HashMap::new(),
                 width: descriptor.width,
@@ -52,75 +62,47 @@ impl StageSurfaces {
             surface.width = descriptor.width;
             surface.height = descriptor.height;
         }
-        surface.buffers.insert(
-            descriptor.buffer_index,
-            ExportedBuffer {
-                descriptor,
-                descriptors,
-                submitted: false,
-            },
-        );
+        surface.buffers.insert(descriptor.buffer_index, image);
         Ok(())
     }
 
     pub fn present(
         &mut self,
+        root_session: &str,
         lineage: &str,
         stage: &str,
         buffer_index: u32,
         damage: Vec<[u32; 4]>,
+        completion: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<(), String> {
         let surface = self
             .surfaces
-            .get_mut(&(lineage.to_owned(), stage.to_owned()))
+            .get_mut(&(
+                root_session.to_owned(),
+                lineage.to_owned(),
+                stage.to_owned(),
+            ))
             .ok_or_else(|| "stage presented before exporting buffers".to_owned())?;
-        let buffer = surface
+        let image = surface
             .buffers
-            .get_mut(&buffer_index)
-            .ok_or_else(|| format!("stage presented unknown buffer {buffer_index}"))?;
-        if buffer.submitted {
-            return Err(format!("stage reused in-flight buffer {buffer_index}"));
-        }
-        let bounds = [0, 0, surface.width, surface.height];
-        surface.pending = Some(PresentedFrame {
-            buffer_index,
-            damage: if damage.is_empty() {
-                vec![bounds]
-            } else {
-                damage
-            },
-        });
+            .get(&buffer_index)
+            .ok_or_else(|| format!("stage presented unknown buffer {buffer_index}"))?
+            .with_completion(completion);
+        let _damage = damage;
+        surface.pending = Some(PresentedFrame { surface: image });
         Ok(())
     }
 
-    pub fn mark_submitted(&mut self, lineage: &str, stage: &str) -> Option<u32> {
-        let surface = self
-            .surfaces
-            .get_mut(&(lineage.to_owned(), stage.to_owned()))?;
-        let frame = surface.pending.take()?;
-        surface.buffers.get_mut(&frame.buffer_index)?.submitted = true;
-        Some(frame.buffer_index)
-    }
-
-    /// Called only from the renderer's submission-completion callback. The
-    /// returned index is then safe to release to the compositor through the
-    /// session host.
-    pub fn submission_complete(
-        &mut self,
-        lineage: &str,
-        stage: &str,
-        buffer_index: u32,
-    ) -> Option<u32> {
-        let buffer = self
-            .surfaces
-            .get_mut(&(lineage.to_owned(), stage.to_owned()))?
-            .buffers
-            .get_mut(&buffer_index)?;
-        if !buffer.submitted {
-            return None;
-        }
-        buffer.submitted = false;
-        Some(buffer_index)
+    pub fn current(&self, root_session: &str, lineage: &str, stage: &str) -> Option<DmaBufSurface> {
+        self.surfaces
+            .get(&(
+                root_session.to_owned(),
+                lineage.to_owned(),
+                stage.to_owned(),
+            ))?
+            .pending
+            .as_ref()
+            .map(|frame| frame.surface.clone())
     }
 }
 
@@ -146,7 +128,14 @@ fn validate_export(descriptor: &StageDescriptor, received_fds: usize) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs::File, os::fd::OwnedFd};
+    use std::{
+        fs::File,
+        os::fd::OwnedFd,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     fn descriptor(index: u32) -> StageDescriptor {
         StageDescriptor {
@@ -166,18 +155,109 @@ mod tests {
     }
 
     #[test]
-    fn descriptors_are_imported_once_and_released_after_submission() {
+    fn descriptors_are_imported_once_and_presentations_get_fresh_completion_tokens() {
         let mut stages = StageSurfaces::default();
         stages
-            .export("main".into(), "desktop".into(), descriptor(2), vec![fd()])
+            .export(
+                "root".into(),
+                "main".into(),
+                "desktop".into(),
+                descriptor(2),
+                vec![fd()],
+            )
+            .unwrap();
+        let completed = Arc::new(AtomicBool::new(false));
+        let signal = completed.clone();
+        stages
+            .present(
+                "root",
+                "main",
+                "desktop",
+                2,
+                vec![[4, 5, 20, 30]],
+                Arc::new(move || signal.store(true, Ordering::Release)),
+            )
+            .unwrap();
+        let frame = stages.current("root", "main", "desktop").unwrap();
+        assert_eq!(
+            frame.id(),
+            stages.current("root", "main", "desktop").unwrap().id()
+        );
+        frame.complete();
+        assert!(completed.load(Ordering::Acquire));
+
+        let second = Arc::new(AtomicBool::new(false));
+        let signal = second.clone();
+        stages
+            .present(
+                "root",
+                "main",
+                "desktop",
+                2,
+                vec![],
+                Arc::new(move || signal.store(true, Ordering::Release)),
+            )
             .unwrap();
         stages
-            .present("main", "desktop", 2, vec![[4, 5, 20, 30]])
+            .current("root", "main", "desktop")
+            .unwrap()
+            .complete();
+        assert!(second.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn replacement_waits_for_in_flight_renderer_references_before_release() {
+        let mut stages = StageSurfaces::default();
+        for index in [1, 2] {
+            stages
+                .export(
+                    "root".into(),
+                    "main".into(),
+                    "desktop".into(),
+                    descriptor(index),
+                    vec![fd()],
+                )
+                .unwrap();
+        }
+
+        let first_released = Arc::new(AtomicBool::new(false));
+        let signal = first_released.clone();
+        stages
+            .present(
+                "root",
+                "main",
+                "desktop",
+                1,
+                vec![],
+                Arc::new(move || signal.store(true, Ordering::Release)),
+            )
             .unwrap();
-        assert_eq!(stages.mark_submitted("main", "desktop"), Some(2));
-        assert!(stages.present("main", "desktop", 2, vec![]).is_err());
-        assert_eq!(stages.submission_complete("main", "desktop", 2), Some(2));
-        stages.present("main", "desktop", 2, vec![]).unwrap();
+        let in_flight = stages.current("root", "main", "desktop").unwrap();
+
+        stages
+            .present("root", "main", "desktop", 2, vec![], Arc::new(|| {}))
+            .unwrap();
+        assert!(!first_released.load(Ordering::Acquire));
+
+        drop(in_flight);
+        assert!(first_released.load(Ordering::Acquire));
+    }
+    #[test]
+    fn root_sessions_do_not_collide() {
+        let mut stages = StageSurfaces::default();
+        for root in ["one", "two"] {
+            stages
+                .export(
+                    root.into(),
+                    "main".into(),
+                    "desktop".into(),
+                    descriptor(0),
+                    vec![fd()],
+                )
+                .unwrap();
+        }
+        assert!(stages.current("one", "main", "desktop").is_none());
+        assert!(stages.current("two", "main", "desktop").is_none());
     }
 
     #[test]
@@ -185,7 +265,13 @@ mod tests {
         let mut stages = StageSurfaces::default();
         assert!(
             stages
-                .export("main".into(), "desktop".into(), descriptor(0), vec![])
+                .export(
+                    "root".into(),
+                    "main".into(),
+                    "desktop".into(),
+                    descriptor(0),
+                    vec![],
+                )
                 .is_err()
         );
     }

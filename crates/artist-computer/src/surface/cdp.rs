@@ -369,6 +369,14 @@ impl CdpPage {
             eprintln!("artist: download tracking unavailable for this page: {error}");
         }
 
+        // Best-effort: masking that fails leaves the page drivable, just honest
+        // about being automated. A `navigator.webdriver` that answers true is
+        // how most bot-detection recognises a CDP-driven browser, and it is
+        // trivially avoidable without a second connection.
+        if let Err(error) = mask_automation(&page).await {
+            eprintln!("artist: automation masking unavailable for this page: {error}");
+        }
+
         Ok(Self {
             id: SurfaceId::new(id),
             page,
@@ -401,6 +409,49 @@ impl CdpPage {
     pub fn page(&self) -> &chromiumoxide::Page {
         &self.page
     }
+}
+
+/// Install the concealment a real browser does not carry.
+///
+/// A CDP-attached renderer reports `navigator.webdriver === true`, which is the
+/// single cheapest signal a bot-detection service tests for — every page that
+/// runs one reads it on load, and nearly every automation library leaves it on.
+/// The other automation markers are the ones Chromium itself sets from its own
+/// command line: `--enable-automation` flips `webdriver`, turns off
+/// autofill/preview infobars and adds the "Chrome is being controlled" banner.
+///
+/// Both are undone here rather than at launch, so the fix applies to the
+/// user's own browser too. Masking runs on every new document — main frame and
+/// iframe — before any page script, and the getter is defined on the prototype
+/// chain a page cannot redefine (the attributes are non-configurable, so an
+/// in-page `delete navigator.webdriver` would fail, but replacing the getter
+/// on `navigator` with one that shadows it needs the prototype to allow it).
+///
+/// Best-effort like the other attach-time setup: a page that refuses the
+/// script still works, it just stays honest about being automated.
+async fn mask_automation(page: &chromiumoxide::Page) -> Result<(), StepError> {
+    use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+
+    const MASK: &str = r#"(() => {
+        const descriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver');
+        if (descriptor && descriptor.configurable) {
+            Object.defineProperty(Navigator.prototype, 'webdriver', {
+                configurable: true, enumerable: true, get: () => false,
+            });
+        }
+        // The automation banner and its flags are launch-time concerns, but
+        // the runtime residue is this getter and the missing blink features.
+        // Re-assert the getter on `navigator` itself in case a framework
+        // re-reads it from there.
+        try { Object.defineProperty(navigator, 'webdriver', {
+            configurable: true, enumerable: true, get: () => false,
+        }); } catch (_) {}
+    })();"#;
+
+    page.execute(AddScriptToEvaluateOnNewDocumentParams::new(MASK))
+        .await
+        .map(|_| ())
+        .map_err(|error| StepError::Backend(format!("mask automation: {error}")))
 }
 
 /// Which CDP button a named one is.
@@ -1462,16 +1513,7 @@ impl Surface for CdpPage {
                 if *clear {
                     self.clear_backend_node(id).await?;
                 }
-                self.page
-                    .execute(
-                        chromiumoxide::cdp::browser_protocol::input::InsertTextParams::builder()
-                            .text(text)
-                            .build()
-                            .map_err(StepError::Backend)?,
-                    )
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| StepError::Backend(format!("type: {error}")))
+                self.type_chars(text).await
             }
             Step::Key(press) => self.press_key(press.chord()).await,
             // Scrolling the named container when there is one. A virtualized
@@ -1480,21 +1522,16 @@ impl Surface for CdpPage {
             // reported `ok`.
             Step::Scroll { amount, axis, .. } => match node {
                 None => {
+                    // Wheel events, not `window.scrollBy`. A programmatic scroll
+                    // emits no input events and leaves the compositor's scroll
+                    // position out of step with the page; a wheel leaves a trail
+                    // a detector can read and drives whatever the page bound to
+                    // `wheel`.
                     let (dx, dy) = match axis {
-                        crate::program::Axis::Vertical => (0, amount * 100),
-                        crate::program::Axis::Horizontal => (amount * 100, 0),
+                        crate::program::Axis::Vertical => (0.0, f64::from(*amount)),
+                        crate::program::Axis::Horizontal => (f64::from(*amount), 0.0),
                     };
-                    let expression = format!("window.scrollBy({dx}, {dy})");
-                    self.page
-                        .execute(
-                            EvaluateParams::builder()
-                                .expression(expression)
-                                .build()
-                                .map_err(StepError::Backend)?,
-                        )
-                        .await
-                        .map(|_| ())
-                        .map_err(|error| StepError::Backend(format!("scroll: {error}")))
+                    self.wheel_at_pointer(dx, dy).await
                 }
                 Some(_) => {
                     let id = backend_id(node)?;
@@ -1562,57 +1599,63 @@ impl Surface for CdpPage {
 impl CdpPage {
     /// Empty a form control before typing into it.
     ///
-    /// Set through the DOM rather than by sending `ctrl+a` then Delete: the
-    /// keyboard route needs a working modifier path, is at the mercy of the
-    /// page's own key handlers, and costs three extra round trips. Dispatching
-    /// `input` and `change` afterwards is what makes frameworks notice — React
-    /// in particular ignores a value assignment that fires no event.
-    async fn clear_backend_node(&self, backend_id: i64) -> Result<(), StepError> {
-        use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, ResolveNodeParams};
-        use chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnParams;
+    /// Done with real keystrokes — select-all, then delete — rather than by
+    /// running JavaScript in the page. A `CallFunctionOn` that sets `value`
+    /// and dispatches a synthetic `input` event runs in the page's main world,
+    /// where a script that hooks `input` or watches for main-world evaluation
+    /// can tell it apart from a keystroke the browser itself produced. Select-all
+    /// then delete is a real `keydown`/`input` pair the page would receive from
+    /// any user, which makes the replace indistinguishable from one.
+    async fn clear_backend_node(&self, _backend_id: i64) -> Result<(), StepError> {
+        // Focus is set by the caller before this runs. Select everything, then
+        // delete the selection.
+        self.key_event("ctrl+a", None).await?;
+        tokio::time::sleep(crate::human::between_keys()).await;
+        self.key_event("Backspace", None).await?;
+        tokio::time::sleep(crate::human::between_keys()).await;
+        Ok(())
+    }
 
-        let resolved = self
-            .page
-            .execute(
-                ResolveNodeParams::builder()
-                    .backend_node_id(BackendNodeId::new(backend_id))
-                    .build(),
-            )
-            .await
-            .map_err(|error| StepError::Backend(format!("resolve element: {error}")))?;
-        let Some(object_id) = resolved.result.object.object_id.clone() else {
-            return Err(StepError::Backend(
-                "the element could not be resolved to clear it".into(),
-            ));
-        };
+    /// Scroll one element by a pixel delta.
+    /// accessibility tree names the thing a person would point at — a row, a
+    /// message — while the element with the overflow is usually a container a
+    /// few levels up that has no accessible name at all and so no anchor the
+    /// model could ever cite.
+    /// Scroll the viewport with wheel events at the pointer.
+    ///
+    /// The pointer is left where it was so the page continues to settle under
+    /// the same element. `amount` is a per-`Step` multiple of a wheel click;
+    /// each click is a jittered `mouseWheel` dispatch at the pointer.
+    async fn wheel_at_pointer(&self, dx: f64, dy: f64) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventParams;
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
 
-        const CLEAR: &str = r#"function () {
-            if (this.isContentEditable) { this.textContent = ''; }
-            else if ('value' in this) { this.value = ''; }
-            this.dispatchEvent(new Event('input', { bubbles: true }));
-            this.dispatchEvent(new Event('change', { bubbles: true }));
-        }"#;
-
-        self.page
-            .execute(
-                CallFunctionOnParams::builder()
-                    .function_declaration(CLEAR)
-                    .object_id(object_id)
-                    .build()
-                    .map_err(StepError::Backend)?,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|error| StepError::Backend(format!("clear element: {error}")))
+        let (x, y) = self.pointer_at.lock().map(|at| *at).unwrap_or((0.0, 0.0));
+        // A whole wheel notch is ~120 CSS pixels; split each into a few ticks
+        // so the scroll has a body rather than arriving in one jump.
+        let ticks = 3.max(((dx.abs() + dy.abs()) / 120.0).ceil() as i64);
+        for _ in 0..ticks {
+            self.page
+                .execute(
+                    DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseWheel)
+                        .x(x)
+                        .y(y)
+                        .delta_x(dx / ticks as f64)
+                        .delta_y(dy / ticks as f64)
+                        .build()
+                        .map_err(StepError::Backend)?,
+                )
+                .await
+                .map_err(|error| StepError::Backend(format!("wheel: {error}")))?;
+            tokio::time::sleep(crate::human::wheel_ticks()).await;
+        }
+        Ok(())
     }
 
     /// Scroll one element by a pixel delta.
     ///
     /// Walks up to the nearest actually-scrollable ancestor first. The
-    /// accessibility tree names the thing a person would point at — a row, a
-    /// message — while the element with the overflow is usually a container a
-    /// few levels up that has no accessible name at all and so no anchor the
-    /// model could ever cite.
     async fn scroll_backend_node(
         &self,
         backend_id: i64,
@@ -1836,31 +1879,85 @@ impl CdpPage {
         let (x, y) = self.centre_of_backend_node(backend_id).await?;
         self.remember_point(x, y);
 
-        // A move first. A page that reveals its button on hover has not
-        // revealed it yet when the press arrives, and several menu systems
-        // dispatch on mouseover rather than on click.
-        self.mouse_event(
-            DispatchMouseEventType::MouseMoved,
-            x,
-            y,
-            crate::program::Button::Left,
-            0,
-            modifiers,
-        )
-        .await?;
+        // Approach in a few samples rather than teleporting. A page that
+        // reveals its button on hover has not revealed it yet when the press
+        // arrives, several menu systems dispatch on mouseover rather than on
+        // click, and a pointer that is already exactly where it means to be is
+        // unlike a person. The last step lands on the target.
+        self.approach(x, y, modifiers).await?;
+
+        // The linger between arriving and pressing: a human does not click the
+        // instant the cursor settles.
+        tokio::time::sleep(crate::human::pre_click_linger()).await;
 
         // `clickCount` is cumulative within a sequence, which is exactly how a
         // browser recognizes a double click: the second press must say 2, not
         // two presses that each say 1.
         for click in 1..=i64::from(count.clamp(1, 3)) {
-            for kind in [
+            let press = self.mouse_event(
                 DispatchMouseEventType::MousePressed,
+                x,
+                y,
+                button,
+                click,
+                modifiers,
+            );
+            // The dwell between press and release is what a click detector and
+            // a human reader both feel. No dwell reads as a machine.
+            tokio::time::sleep(crate::human::click_dwell()).await;
+            let release = self.mouse_event(
                 DispatchMouseEventType::MouseReleased,
-            ] {
-                self.mouse_event(kind, x, y, button, click, modifiers)
-                    .await?;
-            }
+                x + release_offset(),
+                y + release_offset(),
+                button,
+                click,
+                modifiers,
+            );
+            press.await?;
+            release.await?;
         }
+        Ok(())
+    }
+
+    /// Carry the pointer to a point in a few paced steps.
+    ///
+    /// A straight line from nowhere to the target, sampled at a human-ish
+    /// cadence. The linelessness is deliberate: a real path has overshoot and
+    /// is the artifact of the seat's `run_drag`, which this CDP surface cannot
+    /// see. A few paced intermediate moves are enough to stop the pointer being
+    /// a single teleport.
+    async fn approach(
+        &self,
+        x: f64,
+        y: f64,
+        modifiers: crate::keys::Modifiers,
+    ) -> Result<(), StepError> {
+        use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType;
+
+        // A tiny out-and-back so the arrival is not perfectly straight: humans
+        // undershoot and correct. Two extra points is all that takes.
+        let from = self.pointer_at.lock().map(|at| *at).unwrap_or((x, y));
+        let points = [
+            from,
+            (
+                from.0 + (x - from.0) * 0.5 - (y - from.1) * 0.06,
+                from.1 + (y - from.1) * 0.5 + (x - from.0) * 0.04,
+            ),
+            (x, y),
+        ];
+        for (px, py) in points {
+            self.mouse_event(
+                DispatchMouseEventType::MouseMoved,
+                px,
+                py,
+                crate::program::Button::Left,
+                0,
+                modifiers,
+            )
+            .await?;
+            tokio::time::sleep(crate::human::move_sample()).await;
+        }
+        self.remember_point(x, y);
         Ok(())
     }
 
@@ -2082,39 +2179,12 @@ impl CdpPage {
     /// movement control and a push-to-talk button both need and which a tap
     /// cannot express at all.
     async fn key_event(&self, key: &str, half: Option<bool>) -> Result<(), StepError> {
-        use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
         use chromiumoxide::cdp::browser_protocol::input::{
             DispatchKeyEventParams, DispatchKeyEventType,
         };
 
         let chord = crate::keys::parse(key)?;
-        let (dom_key, code) = chord.key.dom();
-        let modifiers = chord.modifiers.cdp_bits();
-
-        // An unmodified printable character is text, and `insertText` is the
-        // only way to get one into a contenteditable reliably. *With* a
-        // modifier it is a shortcut and must be dispatched as a key event —
-        // routing it to insertText is what made `ctrl+a` type a literal "a".
-        //
-        // Only for a whole keystroke: a held character key is being held for
-        // its keydown/keyup, not for the text it would insert, and inserting
-        // the text on the way down would type it once per hold.
-        if half.is_none()
-            && modifiers == 0
-            && let crate::keys::Key::Char(character) = chord.key
-        {
-            return self
-                .page
-                .execute(
-                    InsertTextParams::builder()
-                        .text(character.to_string())
-                        .build()
-                        .map_err(StepError::Backend)?,
-                )
-                .await
-                .map(|_| ())
-                .map_err(|error| StepError::Backend(format!("type: {error}")));
-        }
+        let (dom_key, code, physical_code, bits) = cdp_key(&chord);
 
         let kinds: &[DispatchKeyEventType] = match half {
             None => &[DispatchKeyEventType::KeyDown, DispatchKeyEventType::KeyUp],
@@ -2122,21 +2192,98 @@ impl CdpPage {
             Some(false) => &[DispatchKeyEventType::KeyUp],
         };
         for kind in kinds {
+            // On the way down, carry the composed text so the renderer emits a
+            // real `input` event. Without it a spell-checker, a form framework
+            // and a virtual keyboard all stay blind to the character, and the
+            // page's change handlers never run.
+            let mut event = DispatchKeyEventParams::builder()
+                .r#type(kind.clone())
+                .key(dom_key.clone())
+                .windows_virtual_key_code(code)
+                .modifiers(bits);
+            if let Some(code) = physical_code {
+                event = event.code(code);
+            }
+            if let Some(text) =
+                composed_text(&chord.key).filter(|_| matches!(kind, DispatchKeyEventType::KeyDown))
+            {
+                event = event.text(text);
+            }
             self.page
-                .execute(
-                    DispatchKeyEventParams::builder()
-                        .r#type(kind.clone())
-                        .key(dom_key.clone())
-                        .windows_virtual_key_code(code)
-                        .modifiers(modifiers)
-                        .build()
-                        .map_err(StepError::Backend)?,
-                )
+                .execute(event.build().map_err(StepError::Backend)?)
                 .await
                 .map_err(|error| StepError::Backend(format!("key: {error}")))?;
         }
         Ok(())
     }
+
+    /// Type a run of text as discrete key presses.
+    ///
+    /// Character by character, each rendered as a `keyDown` (carrying the
+    /// composed text) and a `keyUp`, with a pause between characters. This is
+    /// how the text arrives in the *contenteditable*-agnostic case as well as
+    /// ordinary inputs, and it is what `Step::Type` means — the alternative,
+    /// `Input.insertText`, writes the whole string in one synthetic shot with
+    /// no key events at all, which performs as a paste and is recognisable as
+    /// automation.
+    async fn type_chars(&self, text: &str) -> Result<(), StepError> {
+        for character in text.chars() {
+            let press = format!("{}", character);
+            self.key_event(&press, None).await?;
+            // A humanish inter-keystroke pause. Pacing lives in the caller's
+            // task (this one), not on the renderer, so it is a real clock
+            // delay rather than a CDP timestamp trick.
+            tokio::time::sleep(crate::human::between_keys()).await;
+        }
+        Ok(())
+    }
+}
+
+/// A release lands a hair away from the press, like a real finger that moved.
+fn release_offset() -> f64 {
+    // A sub-pixel drift that is never exactly zero and never large enough to
+    // leave the target's hit area.
+    match crate::human::ms(0, 3).as_millis() {
+        0 => 0.4,
+        other => 0.2 + 0.3 * f64::from(other as u32),
+    }
+}
+
+/// The text a key produces on the way down, for the CDP `text` field.
+///
+/// Only printable keys compose text; a named key like Enter or a chord like
+/// `ctrl+a` inserts nothing by itself, and claiming otherwise would make the
+/// page receive a character it was not asked for.
+fn composed_text(key: &crate::keys::Key) -> Option<String> {
+    match key {
+        crate::keys::Key::Char(character) => Some(character.to_string()),
+        crate::keys::Key::Space => Some(" ".to_owned()),
+        _ => None,
+    }
+}
+
+/// The CDP fields a chord dispatches as: DOM `key`, virtual key code, physical
+/// `code` string, and modifier bits.
+///
+/// A shifted character (`@`, `H`) is physically the base key with shift held,
+/// so its virtual key code and `code` come from the *base* key, the shift bit
+/// joins the modifiers, and the DOM `key` value is still the produced character
+/// — that is what a page's `event.key` should report.
+fn cdp_key(chord: &crate::keys::Chord) -> (String, i64, Option<&'static str>, i64) {
+    let (dom_key, base_code) = chord.key.dom();
+    let mut modifiers = chord.modifiers;
+    let (code, physical) = match chord.key {
+        crate::keys::Key::Char(character) => match crate::keys::shifted_char(character) {
+            Some(base) => {
+                modifiers.shift = true;
+                let (_, vk) = crate::keys::Key::Char(base).dom();
+                (vk, crate::keys::Key::Char(base).physical_code())
+            }
+            None => (base_code, chord.key.physical_code()),
+        },
+        _ => (base_code, None),
+    };
+    (dom_key, code, physical, modifiers.cdp_bits())
 }
 
 #[cfg(test)]

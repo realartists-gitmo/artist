@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use dashmap::{DashMap, DashSet};
-use rig_core::tool::{PortableTool, ToolOutput};
+use rig_core::tool::{PortableTool, ToolExecutionError, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -408,6 +408,16 @@ impl ComputerTool {
     pub fn registry(&self) -> &SurfaceRegistry {
         &self.registry
     }
+
+    /// Dispatch the same structured payload accepted by the model-facing tool.
+    /// Resident frontends use this for direct stage input without converting it
+    /// through prose or creating a second surface registry.
+    pub async fn dispatch_value(&self, value: Value) -> Result<(), StepError> {
+        let args: ComputerArgs = serde_json::from_value(value)
+            .map_err(|error| StepError::Backend(format!("invalid stage input: {error}")))?;
+        self.call(args).await?;
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -428,6 +438,10 @@ pub struct ComputerArgs {
     #[serde(default)]
     cwd: Option<String>,
     /// Source Chromium profile to clone into the isolated stage.
+    ///
+    /// Defaults to this family's real profile, so a logged-in site is reached
+    /// already logged in; pass the literal `fresh` for a one-session clean
+    /// profile. A launch's accumulated state is written back across sessions.
     #[serde(default)]
     browser_profile: Option<String>,
     /// Launch into the isolated display rather than onto a terminal.
@@ -477,6 +491,12 @@ impl PortableTool for ComputerTool {
     type Error = StepError;
     type Args = ComputerArgs;
     type Output = ToolOutput;
+
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        ToolExecutionError::other(error.to_string())
+            .with_code("computer_error")
+            .with_retryable(false)
+    }
 
     fn description(&self) -> String {
         // Every word of model-facing guidance lives here: the system prompt has
@@ -821,7 +841,7 @@ Example:
                     let launched = self
                         .registry
                         .host()
-                        .launch(&package, &[], None, None)
+                        .launch(&package, &[], None, crate::host::BrowserProfile::default())
                         .await?;
                     let id = self
                         .registry
@@ -845,6 +865,16 @@ Example:
                         return Err(StepError::Backend("`command` is empty".into()));
                     }
                     let program = words.remove(0);
+                    // The profile argument is a path to a real profile, or the
+                    // literal `fresh` to ask for a one-session clean profile;
+                    // the default is the family's real profile.
+                    let browser_profile = match args.browser_profile.as_deref() {
+                        Some("fresh") => crate::host::BrowserProfile::Fresh,
+                        Some(path) => {
+                            crate::host::BrowserProfile::From(std::path::PathBuf::from(path))
+                        }
+                        None => crate::host::BrowserProfile::Auto,
+                    };
                     let launched = self
                         .registry
                         .host()
@@ -852,7 +882,7 @@ Example:
                             &program,
                             &words,
                             args.cwd.as_deref().map(std::path::Path::new),
-                            args.browser_profile.as_deref().map(std::path::Path::new),
+                            browser_profile,
                         )
                         .await?;
                     let id = self
@@ -2507,6 +2537,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn computer_errors_reach_the_model() {
+        let tool = ComputerTool::new(SurfaceRegistry::new());
+        let mapped = tool.map_error(StepError::Backend("focus unavailable".into()));
+        assert_eq!(mapped.code(), Some("computer_error"));
+        assert!(
+            mapped
+                .model_feedback()
+                .is_some_and(|message| message.contains("focus unavailable"))
+        );
+    }
     #[test]
     fn cropping_keeps_the_pixels_it_was_given() {
         // Full resolution is the entire point; a crop that resampled would have

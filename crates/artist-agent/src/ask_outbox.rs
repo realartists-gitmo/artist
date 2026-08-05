@@ -266,6 +266,15 @@ fn ask_answer(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
                     .and_then(Value::as_str)
                     .ok_or_else(|| ToolExecutionError::invalid_args("questionId is required"))?
                     .to_owned();
+                if outbox.question(&question_id).is_none() && outbox.result(&question_id).is_none()
+                {
+                    return Err(ToolExecutionError::not_found(format!(
+                        "no pending or answered question with id {question_id}"
+                    ))
+                    .with_code("question_not_found")
+                    .with_retryable(false));
+                }
+
                 let selected = arguments
                     .get("selected")
                     .and_then(Value::as_array)
@@ -305,7 +314,7 @@ fn ask_answer(outbox: artist_session::AskOutbox) -> ArtistDynamicTool {
                 let qualifier = if recorded {
                     ""
                 } else {
-                    " (ignored: already answered or unknown question)"
+                    " (ignored: already answered)"
                 };
                 response(
                     &result,
@@ -435,6 +444,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ask_answer_rejects_an_unknown_question_id_explicitly() {
+        let all = outbox_tools();
+        let ask_answer = all.iter().find(|tool| tool.name() == "ask_answer").unwrap();
+        let error = ask_answer
+            .execute(json!({"questionId": "q-missing", "selected": []}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ToolErrorKind::NotFound);
+        assert_eq!(error.code(), Some("question_not_found"));
+        assert!(
+            error
+                .model_feedback()
+                .is_some_and(|message| message.contains("q-missing"))
+        );
+    }
     #[tokio::test]
     async fn ask_list_is_empty_then_round_trips() {
         let all = outbox_tools();

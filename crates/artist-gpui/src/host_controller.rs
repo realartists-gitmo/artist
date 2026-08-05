@@ -6,7 +6,7 @@ use std::{
     os::fd::OwnedFd,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -15,6 +15,7 @@ pub enum ControllerMessage {
     Error(String),
 }
 
+#[derive(Clone)]
 pub struct RootController {
     commands: mpsc::Sender<HostCommand>,
 }
@@ -60,6 +61,13 @@ impl RootController {
             .send(command)
             .map_err(|_| "session host disconnected".into())
     }
+
+    pub fn completion_callback(&self, command: HostCommand) -> Arc<dyn Fn() + Send + Sync> {
+        let commands = self.commands.clone();
+        Arc::new(move || {
+            let _ = commands.send(command.clone());
+        })
+    }
 }
 
 fn spawn_host(
@@ -70,11 +78,10 @@ fn spawn_host(
     let current = std::env::current_exe().map_err(|error| error.to_string())?;
     let directory = current.parent().unwrap_or_else(|| Path::new("."));
     let host = sibling_or_name(directory, "artist-session-host");
-    let artist = sibling_or_name(directory, "artist");
     Command::new(host)
         .arg(session)
         .env("ARTIST_HOST_PROJECT", project)
-        .env("ARTIST_EXECUTABLE", artist)
+        .env("ARTIST_EMBEDDED_FRONTEND", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -155,8 +162,12 @@ fn worker(
             continue;
         }
         'connected: loop {
-            while let Ok(command) = commands.try_recv() {
-                pending.push_back(command);
+            loop {
+                match commands.try_recv() {
+                    Ok(command) => pending.push_back(command),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                }
             }
             while let Some(command) = pending.pop_front() {
                 request_id += 1;

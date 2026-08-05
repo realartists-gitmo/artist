@@ -2,7 +2,7 @@ mod activity_indicator;
 mod args;
 mod ask_ui;
 mod canvas_host;
-mod canvas_window;
+pub use artist_canvas::window_ui as canvas_window;
 mod chat_ui;
 mod clipboard;
 mod command_ui;
@@ -69,9 +69,79 @@ pub struct EmbeddedRuntime {
     mcp: artist_agent::mcp::McpManager,
     extensions: Arc<artist_extensions::Manager>,
     extension_control: extension_control::ExtensionControl,
+    resources: EmbeddedResources,
+}
+
+#[derive(Clone)]
+pub struct EmbeddedController {
+    tools: ToolBundle,
+    computer: artist_computer::SurfaceRegistry,
+}
+
+impl EmbeddedController {
+    pub async fn task_input(&self, task: &str, data: &str) -> Result<()> {
+        self.tools.bash.send_session_input(task, data).await?;
+        Ok(())
+    }
+
+    pub async fn stage_input(&self, mut input: serde_json::Value, stage: &str) -> Result<()> {
+        if let Some(object) = input.as_object_mut() {
+            object
+                .entry("surface".to_owned())
+                .or_insert_with(|| serde_json::Value::String(stage.to_owned()));
+        }
+        artist_computer::ComputerTool::new(self.computer.clone())
+            .dispatch_value(input)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn accessibility_snapshot(
+        &self,
+    ) -> Result<Option<(String, artist_computer::Snapshot)>> {
+        for (id, _, rung) in self.computer.list() {
+            if rung != artist_computer::Rung::Accessibility.as_u8() {
+                continue;
+            }
+            let Some(attached) = self.computer.get(&id) else {
+                continue;
+            };
+            return Ok(Some((id, attached.surface.snapshot_full().await?)));
+        }
+        Ok(None)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn stage_export(&self) -> Result<artist_computer::stage::wayland::StageExport> {
+        self.computer
+            .host()
+            .wayland_stage()
+            .await?
+            .export()
+            .await
+            .map_err(anyhow::Error::from)
+    }
+}
+
+struct EmbeddedResources {
+    tools: ToolBundle,
+    canvas_control: canvas_host::CanvasControl,
+    canvas: Arc<artist_canvas::server::Lazy>,
+    tool_registry: artist_agent::ToolRegistryHandle,
+    computer: artist_computer::SurfaceRegistry,
+    prefix: artist_agent::prefix::PrefixFreezer,
+    chain: artist_session::ChainState,
+    capabilities: artist_session::ProviderCapabilities,
 }
 
 impl EmbeddedRuntime {
+    pub fn controller(&self) -> EmbeddedController {
+        EmbeddedController {
+            tools: self.resources.tools.clone(),
+            computer: self.resources.computer.clone(),
+        }
+    }
+
     pub async fn open(project: &std::path::Path) -> Result<Self> {
         std::env::set_current_dir(project)
             .with_context(|| format!("enter project {}", project.display()))?;
@@ -83,12 +153,42 @@ impl EmbeddedRuntime {
         let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
         let extension_control = extension_control::ExtensionControl::default();
         let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;
+        let effective = settings::load_effective(
+            config_root,
+            project,
+            &settings::Overrides::default(),
+            &store.disabled_tools,
+        )?;
+        let tools = tool_bundle(config_root, project)?;
+        let canvas_control = canvas_host::CanvasControl::default();
+        let tool_registry = artist_agent::ToolRegistryHandle::new();
+        canvas_control.attach(
+            extension_control.clone(),
+            artist_session::AskRegistry::new(),
+            tool_registry.clone(),
+        );
+        let canvas =
+            artist_canvas::server::Lazy::new(project.to_owned(), Arc::new(canvas_control.clone()));
+        let resources = EmbeddedResources {
+            tools,
+            canvas_control,
+            canvas,
+            tool_registry,
+            computer: artist_computer::SurfaceRegistry::for_project(
+                project,
+                effective.computer.screen,
+            ),
+            prefix: artist_agent::prefix::PrefixFreezer::for_session(),
+            chain: artist_session::ChainState::new(),
+            capabilities: artist_session::ProviderCapabilities::for_session(),
+        };
         Ok(Self {
             store,
             provider_path,
             mcp,
             extensions,
             extension_control,
+            resources,
         })
     }
 
@@ -116,6 +216,7 @@ impl EmbeddedRuntime {
             &self.mcp,
             &self.extensions,
             &self.extension_control,
+            Some(&self.resources),
             Some(&events),
             Some(controls),
         )
@@ -177,6 +278,7 @@ async fn run() -> Result<()> {
             &mcp,
             &extensions,
             &extension_control,
+            None,
             None,
             None,
         )
@@ -451,6 +553,7 @@ async fn execute_prompt(
     mcp: &artist_agent::mcp::McpManager,
     extensions: &Arc<artist_extensions::Manager>,
     extension_control: &extension_control::ExtensionControl,
+    embedded_resources: Option<&EmbeddedResources>,
     embedded_events: Option<&tokio::sync::mpsc::UnboundedSender<EmbeddedEvent>>,
     mut embedded_controls: Option<&mut tokio::sync::mpsc::UnboundedReceiver<FrontendControl>>,
 ) -> Result<()> {
@@ -485,7 +588,14 @@ async fn execute_prompt(
         }
         session_provider.model = Some(model.to_owned());
     }
-    let tools = tool_bundle(config_root, &project)?;
+    let standalone_tools = embedded_resources
+        .is_none()
+        .then(|| tool_bundle(config_root, &project))
+        .transpose()?;
+    let tools = embedded_resources
+        .map(|resources| &resources.tools)
+        .or(standalone_tools.as_ref())
+        .expect("one-shot or embedded tools exist");
     let (active, resumed_events) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
@@ -529,6 +639,13 @@ async fn execute_prompt(
         || embedded_controls.is_some();
     let ask = frontend_control
         .then(|| artist_session::AskRegistry::with_recorder(active.recorder.clone()));
+    if let Some(resources) = embedded_resources {
+        resources.canvas_control.attach(
+            extension_control.clone(),
+            ask.clone().unwrap_or_else(artist_session::AskRegistry::new),
+            resources.tool_registry.clone(),
+        );
+    }
     let (control_send, mut control_receive) = tokio::sync::mpsc::unbounded_channel();
     if frontend_control {
         std::thread::spawn(move || {
@@ -623,14 +740,19 @@ async fn execute_prompt(
         handoff_depth: artist_session::handoff_depth(&resumed_events),
         // No stage in a one-shot run: bringing a display up costs more than the
         // run is worth, so the tool is simply not offered.
-        computer: None,
-        // No canvas in a one-shot run, so nothing reads this registry.
-        tools: artist_agent::ToolRegistryHandle::new(),
-        // A one-shot run is one session, and these handles are built once for
-        // it — so constructing the freezer here is the session scope.
-        prefix: artist_agent::prefix::PrefixFreezer::for_session(),
-        chain: artist_session::ChainState::new(),
-        capabilities: artist_session::ProviderCapabilities::for_session(),
+        computer: embedded_resources.map(|resources| resources.computer.clone()),
+        tools: embedded_resources
+            .map(|resources| resources.tool_registry.clone())
+            .unwrap_or_else(artist_agent::ToolRegistryHandle::new),
+        prefix: embedded_resources
+            .map(|resources| resources.prefix.clone())
+            .unwrap_or_else(artist_agent::prefix::PrefixFreezer::for_session),
+        chain: embedded_resources
+            .map(|resources| resources.chain.clone())
+            .unwrap_or_else(artist_session::ChainState::new),
+        capabilities: embedded_resources
+            .map(|resources| resources.capabilities.clone())
+            .unwrap_or_else(artist_session::ProviderCapabilities::for_session),
         statefulness: effective.statefulness,
     };
     extension_control.set_steering(Some(steering.clone()));
@@ -669,8 +791,8 @@ async fn execute_prompt(
             &agent_input,
             artist_agent::ToolContext {
                 // One-shot runs exit before anyone could open a page.
-                canvas: None,
-                native: &tools,
+                canvas: embedded_resources.map(|resources| &resources.canvas),
+                native: tools,
                 mcp,
                 extensions: Some(extensions),
                 disabled: &effective.denied_tools,
@@ -814,6 +936,7 @@ async fn execute_prompt(
             mcp,
             extensions,
             extension_control,
+            embedded_resources,
             embedded_events,
             embedded_controls.as_deref_mut(),
         ))
@@ -1346,7 +1469,7 @@ async fn computer_replay(file: &std::path::Path, launch: Option<&str>, heal: boo
         );
         let launched = registry
             .host()
-            .launch(&program, &args, None, None)
+            .launch(&program, &args, None, Default::default())
             .await
             .map_err(|error| anyhow::anyhow!("launch {program}: {error}"))?;
         let id = registry.attach_with_declines(launched.surface, launched.declined);

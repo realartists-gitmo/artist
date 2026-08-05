@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow = "1"
 artist-session = { path = "../artist-session" }
 artist-cli = { path = "../artist-cli", default-features = false }
+artist-computer = { path = "../artist-computer" }
 artist-ui-core = { path = "../artist-ui-core" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

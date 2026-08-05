@@ -127,6 +127,20 @@ impl SessionStore {
 
     /// Creates and opens a session for an existing project directory.
     pub fn create(&self, project: impl AsRef<Path>, label: Option<&str>) -> Result<ActiveSession> {
+        open_session_dir(self.create_snapshot(project, label)?)
+    }
+
+    /// Creates a durable session without retaining its writer lock.
+    ///
+    /// Frontends use this on the first submitted prompt: the session receives an
+    /// id and a committed `session.created` event, then its resident session host
+    /// opens the writer. This keeps new conversations ephemeral until they are
+    /// actually sent while avoiding a one-turn subprocess compatibility path.
+    pub fn create_snapshot(
+        &self,
+        project: impl AsRef<Path>,
+        label: Option<&str>,
+    ) -> Result<Session> {
         let project = fs::canonicalize(project).context("canonicalize project directory")?;
         if !project.is_dir() {
             bail!("project is not a directory")
@@ -139,10 +153,25 @@ impl SessionStore {
         let id = format!("{:x}-{:x}", duration.as_nanos(), std::process::id());
         let dir = self.root.join(project_key(&project)).join(&id);
         fs::create_dir_all(&dir)?;
+        {
+            let mut writer = EventLogWriter::open(&dir, &id)?;
+            writer.append(
+                None,
+                crate::MAIN_LINEAGE,
+                &SessionEvent::SessionCreated(SessionCreated {
+                    project: project.display().to_string(),
+                    label: label.clone(),
+                    artist_version: env!("CARGO_PKG_VERSION").to_owned(),
+                    parent_session: None,
+                }),
+            )?;
+        }
+        let events = EventLogReader::new(&dir).read_all()?;
+        fs::write(dir.join("transcript.md"), crate::render_markdown(&events))?;
         let session = Session {
-            id: id.clone(),
+            id,
             created_at_ms: now,
-            label: label.clone(),
+            label,
             project: project.clone(),
             transcript: dir.join("transcript.md"),
             parent: None,
@@ -150,22 +179,19 @@ impl SessionStore {
             pinned: false,
         };
         let mut index = self.read_index()?;
-        match index.projects.iter_mut().find(|p| p.path == project) {
-            Some(p) => p.sessions.push(session.clone()),
+        match index
+            .projects
+            .iter_mut()
+            .find(|entry| entry.path == project)
+        {
+            Some(entry) => entry.sessions.push(session.clone()),
             None => index.projects.push(Project {
-                path: project.clone(),
+                path: project,
                 sessions: vec![session.clone()],
             }),
         }
         self.write_index(&index)?;
-        let active = open_session_dir(session)?;
-        active.recorder.record(SessionCreated {
-            project: project.display().to_string(),
-            label,
-            artist_version: env!("CARGO_PKG_VERSION").to_owned(),
-            parent_session: None,
-        });
-        Ok(active)
+        Ok(session)
     }
 
     /// Opens a session for writing, migrating legacy markdown-only sessions
@@ -734,6 +760,27 @@ mod tests {
         assert_eq!(events.len(), 2);
         opened.close().await?;
         active.close().await?;
+        Ok(())
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_snapshot_commits_and_releases_the_writer_for_a_host() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let project = temp.path().join("proj");
+        fs::create_dir(&project)?;
+        let store = SessionStore::new(temp.path().join("config"));
+
+        let snapshot = store.create_snapshot(&project, Some("first prompt"))?;
+        let id = snapshot.id.clone();
+        let (opened, events) = store.open(&id)?;
+
+        assert_eq!(opened.session.label.as_deref(), Some("first prompt"));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].event(),
+            SessionEvent::SessionCreated(SessionCreated { label: Some(ref label), .. })
+                if label == "first prompt"
+        ));
+        opened.close().await?;
         Ok(())
     }
 

@@ -37,18 +37,20 @@ pub struct Allow {
     pub comms: bool,
 }
 
-/// A running artist MCP process: one surface, any number of connections.
+/// Builds one MCP server per logical transport session.
+type ServerFactory = Arc<dyn Fn(&str) -> anyhow::Result<McpServer> + Send + Sync>;
+
+/// A running artist MCP process: shared resources, session-specific identities.
 pub struct McpDaemon {
-    server: McpServer,
+    factory: ServerFactory,
+    actor: String,
     /// Held so the recorder's writer task stays alive for the daemon's life.
     _writer: Option<artist_session::WriterTask>,
 }
 
 impl McpDaemon {
-    /// Build the full surface and the server over it, opening every subsystem
-    /// `allow` asks for. Subsystems degrade rather than fail the daemon — a
-    /// locked memory store or an in-use session log costs recall and recording,
-    /// not the ability to work.
+    /// Build the shared process resources. A concrete server is created when a
+    /// transport session starts, so two web sessions never share an identity.
     pub async fn build(
         project: &Path,
         state_dir: &Path,
@@ -57,19 +59,16 @@ impl McpDaemon {
         allow: Allow,
     ) -> anyhow::Result<Self> {
         let project = std::fs::canonicalize(project).context("canonicalize project root")?;
-        let workspace = Workspace::open(&project, state_dir, actor)?;
         let profiles = Profiles::discover(&project);
         let profile = profiles.get(profile_name).map_err(|error| anyhow!(error))?;
         let outbox = artist_session::AskOutbox::open(Some(state_dir))?;
         let config_root = config_root()?;
         let settings = FileSettings::load(&config_root, &project);
 
-        // The session log everything records into. Degrades to a noop recorder
-        // when another process holds the same session dir's writer lock, which
-        // for stdio mode means the previous connection is still flushing.
         let conversation_id = format!("mcp:{actor}");
         let session_dir = state_dir.join("sessions").join(actor);
-        let attachments = artist_session::AttachmentStore::new(session_dir.join("attachments"));
+        let delegation_attachments =
+            artist_session::AttachmentStore::new(session_dir.join("attachments"));
         let (recorder, writer) =
             match artist_session::EventLogWriter::open(&session_dir, &conversation_id) {
                 Ok(writer) => {
@@ -85,47 +84,20 @@ impl McpDaemon {
                 }
             };
 
-        // Computer: drives the machine this daemon runs on. Cheap to construct;
-        // binding a surface is only the model reaching for the tool.
         let computer = allow.computer.then(|| {
             artist_computer::SurfaceRegistry::for_project(&project, screen(&settings.computer))
         });
-
-        // Memory: one undivided store, exclusive lock. `None` (off, or locked
-        // by another artist) also gates code_search/code_related.
         let memory_config = settings.memory();
         let memory = match allow.memory {
             true => open_memory(&config_root, &memory_config).await,
             false => None,
         };
-        let memory_writer = memory
-            .as_ref()
-            .map(|handle| handle.writer(recorder.clone(), conversation_id.clone()));
-
-        // Canvas: lazy — the page only comes up when the model reaches for it.
-        let canvas_host = allow.canvas.then(|| {
-            Arc::new(McpCanvasHost::new(
-                outbox.clone(),
-                actor,
-                &project,
-                profile_name,
-            ))
-        });
-        let canvas = canvas_host.as_ref().map(|host| {
-            Lazy::new(
-                project.clone(),
-                Arc::clone(host) as Arc<dyn artist_canvas::bridge::CanvasHost>,
-            )
-        });
-
-        // Delegation: subagent needs a configured account. None of them, no
-        // tool — the honest availability answer.
         let delegation = if allow.subagent {
             build_delegation(
                 &config_root,
                 &conversation_id,
                 &recorder,
-                attachments.clone(),
+                delegation_attachments,
                 computer.clone(),
                 memory.clone(),
                 &profiles,
@@ -134,93 +106,132 @@ impl McpDaemon {
             None
         };
 
-        // Claim once before serving. Identity is always available to MCP
-        // initialization; messaging is exposed only when the registry claim
-        // succeeded and communications were enabled.
         let project_text = project.display().to_string();
-        let claimed = artist_registry::names().claim(&artist_registry::Registration {
-            session: actor.to_owned(),
-            actor: actor.to_owned(),
-            project: Some(project_text.clone()),
-            profile: Some(profile_name.to_owned()),
-            parent: None,
-        });
-        let identity = match claimed {
-            Ok(name) => McpIdentity {
-                actor: actor.to_owned(),
-                profile: profile_name.to_owned(),
-                project: project_text,
-                name: name.name,
-                registered: true,
-            },
-            Err(error) => {
-                tracing::warn!("could not claim MCP identity: {error}; using actor fallback");
-                McpIdentity {
-                    actor: actor.to_owned(),
-                    profile: profile_name.to_owned(),
-                    project: project_text,
-                    name: actor.to_owned(),
-                    registered: false,
+        let state_dir = state_dir.to_path_buf();
+        let profile_name = profile_name.to_owned();
+        let factory_project = project.clone();
+        let factory_config_root = config_root.clone();
+        let factory_profile = profile.clone();
+        let factory_recorder = recorder.clone();
+        let factory_outbox = outbox.clone();
+        let factory_computer = computer.clone();
+        let factory_memory = memory.clone();
+        let factory_delegation = delegation.clone();
+        let factory: ServerFactory = Arc::new(move |session_actor: &str| {
+            let workspace = Workspace::open(&factory_project, &state_dir, session_actor)?;
+            let session_conversation = format!("mcp:{session_actor}");
+            let session_attachments = artist_session::AttachmentStore::new(
+                state_dir
+                    .join("sessions")
+                    .join(session_actor)
+                    .join("attachments"),
+            );
+            let memory_writer = factory_memory.as_ref().map(|handle| {
+                handle.writer(factory_recorder.clone(), session_conversation.clone())
+            });
+
+            let canvas_host = allow.canvas.then(|| {
+                Arc::new(McpCanvasHost::new(
+                    factory_outbox.clone(),
+                    session_actor,
+                    &factory_project,
+                    &profile_name,
+                ))
+            });
+            let canvas = canvas_host.as_ref().map(|host| {
+                Lazy::new(
+                    factory_project.clone(),
+                    Arc::clone(host) as Arc<dyn artist_canvas::bridge::CanvasHost>,
+                )
+            });
+
+            let claimed = artist_registry::names().claim(&artist_registry::Registration {
+                session: session_actor.to_owned(),
+                actor: session_actor.to_owned(),
+                project: Some(project_text.clone()),
+                profile: Some(profile_name.clone()),
+                parent: None,
+            });
+            let identity = match claimed {
+                Ok(name) => McpIdentity {
+                    actor: session_actor.to_owned(),
+                    profile: profile_name.clone(),
+                    project: project_text.clone(),
+                    name: name.name,
+                    registered: true,
+                },
+                Err(error) => {
+                    tracing::warn!("could not claim MCP identity: {error}; using actor fallback");
+                    McpIdentity {
+                        actor: session_actor.to_owned(),
+                        profile: profile_name.clone(),
+                        project: project_text.clone(),
+                        name: session_actor.to_owned(),
+                        registered: false,
+                    }
                 }
-            }
-        };
-        let messaging_identity = (allow.comms && identity.registered).then(|| identity.clone());
-
-        let mut tools = artist_agent::tool_set::mcp_surface(McpSurface {
-            workspace,
-            profile,
-            recorder: Some(recorder),
-            outbox: Some(outbox),
-            attachments: Some(attachments),
-            computer,
-            canvas,
-            memory: memory_writer,
-            delegation,
-            identity: messaging_identity,
-        });
-        tools.push(crate::admin::workspace_tool(
-            crate::admin::WorkspaceStore::new(&config_root, &project),
-        ));
-        if tools.is_empty() {
-            return Err(anyhow!(
-                "profile {profile_name:?} permits no tools in this environment"
+            };
+            let messaging_identity = (allow.comms && identity.registered).then(|| identity.clone());
+            let mut tools = artist_agent::tool_set::mcp_surface(McpSurface {
+                workspace,
+                profile: factory_profile.clone(),
+                recorder: Some(factory_recorder.clone()),
+                outbox: Some(factory_outbox.clone()),
+                attachments: Some(session_attachments),
+                computer: factory_computer.clone(),
+                canvas,
+                memory: memory_writer,
+                delegation: factory_delegation.clone(),
+                identity: messaging_identity,
+            });
+            tools.push(crate::admin::workspace_tool(
+                crate::admin::WorkspaceStore::new(&factory_config_root, &factory_project),
             ));
-        }
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-        tracing::info!(tools = ?names, "built tool surface");
+            if tools.is_empty() {
+                return Err(anyhow!(
+                    "profile {profile_name:?} permits no tools in this environment"
+                ));
+            }
+            let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+            tracing::info!(actor = session_actor, tools = ?names, "built tool surface");
+            let server = McpServer::with_identity(tools, Some(&state_dir), identity)?;
+            if let Some(host) = &canvas_host {
+                host.attach(server.clone());
+            }
+            Ok(server)
+        });
 
-        let server = McpServer::with_identity(tools, Some(state_dir), identity)?;
-        if let Some(host) = &canvas_host {
-            host.attach(server.clone());
-        }
         Ok(Self {
-            server,
+            factory,
+            actor: actor.to_owned(),
             _writer: writer,
         })
     }
 
-    /// The server, cloned for whichever connection needs it.
-    pub fn server(&self) -> McpServer {
-        self.server.clone()
+    /// Build the server for the durable stdio actor.
+    pub fn server(&self) -> anyhow::Result<McpServer> {
+        (self.factory)(&self.actor)
     }
 
-    /// Serve one stdio connection against this surface and exit. The durable
-    /// state (outbox, envelope, session log) is on disk, so a respawned
-    /// connection picks up where the last one left off.
+    /// Serve one stdio connection against its durable actor and exit.
     pub async fn serve_stdio(self) -> anyhow::Result<()> {
-        self.server.serve_stdio().await
+        self.server()?.serve_stdio().await
     }
 
-    /// Serve Streamable HTTP on a loopback port. Each MCP session gets its own
-    /// [`McpServer`] clone over the one shared surface, so a reconnect to the
-    /// daemon keeps the recorder, computer registry, canvas, memory, and
-    /// identity alive across it.
+    /// Serve Streamable HTTP on a loopback port. Each newly initialized MCP
+    /// session receives a distinct actor and registry claim. Requests carrying
+    /// that MCP session id continue to use the same server and identity.
     pub async fn serve_http(self, addr: std::net::SocketAddr) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind {addr}"))?;
+        let factory = Arc::clone(&self.factory);
+        let actor = self.actor.clone();
         let service = StreamableHttpService::new(
-            move || Ok(self.server()),
+            move || {
+                let session_actor = format!("{actor}-{}", artist_tools::short_id("web"));
+                factory(&session_actor).map_err(std::io::Error::other)
+            },
             Arc::new(LocalSessionManager::default()),
             // Loopback-only hosts by default, which also blocks DNS-rebinding
             // attacks against a daemon running on the user's machine.
@@ -569,4 +580,34 @@ fn build_delegation(
         events,
         profiles: profiles.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn separate_http_sessions_receive_separate_identities() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let base = artist_tools::short_id("daemon-test");
+        let daemon = McpDaemon::build(
+            project.path(),
+            state.path(),
+            "default",
+            &base,
+            Allow::default(),
+        )
+        .await
+        .unwrap();
+        let first_actor = format!("{base}-first");
+        let second_actor = format!("{base}-second");
+        let first = (daemon.factory)(&first_actor).unwrap();
+        let second = (daemon.factory)(&second_actor).unwrap();
+
+        assert_eq!(first.identity().actor, first_actor);
+        assert_eq!(second.identity().actor, second_actor);
+        assert_ne!(first.identity().actor, second.identity().actor);
+        assert_ne!(first.identity().name, second.identity().name);
+    }
 }

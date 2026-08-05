@@ -6,6 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 description = "Agent-authored, hot-reloading local React apps for Artist"
 
+[features]
+default = []
+# WebKitGTK (Linux) and WebView2 (Windows) are system libraries. Building
+# without this feature drops native canvas windows, not canvases.
+webview = ["dep:wry", "dep:tao"]
 [dependencies]
 # JSX/TSX -> JS in-process. The umbrella crate keeps the oxc sub-crates on one
 # version; they release in lockstep and mixing them is a build hazard.
@@ -41,6 +46,8 @@ syntect = { version = "5.3", default-features = false, features = ["default-fanc
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tao = { version = "0.36", optional = true }
+wry = { version = "0.56", optional = true }
 toml = "1.1"
 
 [dev-dependencies]

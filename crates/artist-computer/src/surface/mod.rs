@@ -212,6 +212,13 @@ pub async fn run_program(
         if let Some(watch) = watch {
             settled = Some(watch.wait().await);
         }
+
+        // A beat before the next step. A person does not dispatch step after
+        // step with machine cadence: they observe, decide, act. The surface
+        // already pauses *inside* a step (typing, a drag, hover), but a run of
+        // steps with zero latency between them is the cadence of a script, so
+        // each step is given a jittered interlude before the next begins.
+        tokio::time::sleep(crate::human::between_steps()).await;
     }
 
     // Let go of anything the program was holding, before the surface is read.

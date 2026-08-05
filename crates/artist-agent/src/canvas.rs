@@ -359,6 +359,12 @@ impl CanvasTool {
             .filter(|title| !title.trim().is_empty())
             .unwrap_or_else(|| slug.to_owned());
 
+        if std::env::var_os("ARTIST_EMBEDDED_FRONTEND").is_some() {
+            return Ok(format!(
+                "Opened `{slug}` inside Artist. It reloads in place whenever you edit the canvas.\n\n{url}"
+            ));
+        }
+
         // A window artist owns beats a tab the user has to find. Falling back
         // to the URL matters more than it sounds: over SSH, or in a build
         // without a webview, that is the only way in.

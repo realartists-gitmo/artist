@@ -6,7 +6,7 @@
 //! regression we can catch on every platform.
 
 const APP: &str = include_str!("../src/app.rs");
-
+const HOST_CONTROLLER: &str = include_str!("../src/host_controller.rs");
 #[test]
 fn interactive_controls_come_from_gpui_component() {
     for required in [
@@ -43,7 +43,7 @@ fn conversation_exposes_a_semantic_accessibility_tree() {
         "Role::Article",
         "Role::Alert",
         "Role::Navigation",
-        "Role::Complementary",
+        "Role::TreeItem",
         "aria_label(\"Conversation transcript\")",
         "aria_label(\"Message composer\")",
         "\"Artist context {}\"",
@@ -108,20 +108,51 @@ fn shell_uses_component_theme_tokens() {
 }
 
 #[test]
-fn harness_completion_always_restores_the_composer() {
+fn every_prompt_uses_the_resident_session_host() {
     for required in [
-        "ARTIST_EVENT_STREAM_DONE=1",
-        "Ready · compatibility mode",
-        "harness bridge disconnected",
-        "child.try_wait()",
+        "create_snapshot(&self.project, None)",
+        "fn start_host_prompt(",
+        "HostCommand::Message",
+        "HostCommand::QueueNextTurn",
+        "HostCommand::Stop",
+        "Session host unavailable",
     ] {
         assert!(
             APP.contains(required),
-            "missing completion guard: {required}"
+            "missing resident-host guard: {required}"
+        );
+    }
+    for removed in [
+        "fn run_harness(",
+        "ARTIST_EVENT_STREAM_DONE=1",
+        "Ready · compatibility mode",
+        "child.try_wait()",
+        "ARTIST_CONTROL_STREAM",
+    ] {
+        assert!(
+            !APP.contains(removed),
+            "obsolete subprocess path remains: {removed}"
         );
     }
 }
 
+#[test]
+fn resident_host_event_pump_never_consumes_an_unhandled_message() {
+    assert!(APP.contains("match receive.try_recv()"));
+    assert!(APP.contains("Err(mpsc::TryRecvError::Empty) => break"));
+    assert!(APP.contains("Err(mpsc::TryRecvError::Disconnected) => return"));
+    assert_eq!(
+        APP.matches("receive.try_recv()").count(),
+        1,
+        "a second probe can consume and discard a host event"
+    );
+}
+
+#[test]
+fn dropping_a_root_controller_stops_its_worker() {
+    assert!(HOST_CONTROLLER.contains("match commands.try_recv()"));
+    assert!(HOST_CONTROLLER.contains("Err(mpsc::TryRecvError::Disconnected) => return"));
+}
 #[test]
 fn conversation_has_streaming_and_recovery_affordances() {
     for required in [
@@ -131,8 +162,8 @@ fn conversation_has_streaming_and_recovery_affordances() {
         "if self.running { \"Steer\" } else { \"Send\" }",
         "Button::new(\"send\")",
         "Button::new(\"stop\")",
-        "cancellation.store(true, Ordering::Release)",
-        "cancellation.load(Ordering::Acquire)",
+        "HostCommand::Steer",
+        "HostCommand::Answer",
         "window_min_size: Some(size(px(680.), px(480.)))",
         "viewport.width >= px(760.)",
         "fn new_conversation(",
@@ -140,19 +171,13 @@ fn conversation_has_streaming_and_recovery_affordances() {
         assert!(APP.contains(required), "missing GUI affordance: {required}");
     }
 }
-
 #[test]
-fn workspace_supports_project_session_and_inspector_flows() {
+fn workspace_supports_project_session_and_focus_stack_flows() {
     for required in [
         "prompt_for_paths",
         "fn select_project(",
         "fn select_session(",
         "fn delete_session(",
-        "fn changes_view(",
-        "fn activity_view(",
-        "fn agents_view(",
-        "git_diff(&self.project",
-        "command.current_dir(project)",
         "fn rename_session(",
         "fn toggle_session_archived(",
         "fn toggle_session_pinned(",
@@ -161,19 +186,35 @@ fn workspace_supports_project_session_and_inspector_flows() {
         "fn session_group_rank(",
         "searchable_text",
         "DismissOverlay",
-        "ARTIST_CONTROL_STREAM",
         "HarnessMessage::Question",
         "fn question_view(",
+        "fn promote_object(",
+        "fn pop_focus(",
+        "fn focused_object_view(",
+        "fn ensure_canvas_view(",
         "Input::new(&self.session_search)",
         "Input::new(&self.session_name)",
         "Input::new(&self.model_override)",
-        "--provider",
-        "--model",
-        "--profile",
+        "HostEvent::AccessibilityPatch",
+        "stage_accessibility",
+        "fn activate_stage_accessibility(",
+        "fn stage_accessibility_role(",
     ] {
         assert!(
             APP.contains(required),
             "missing workspace affordance: {required}"
+        );
+    }
+    for removed in [
+        "fn inspector(",
+        "fn changes_view(",
+        "fn activity_view(",
+        "fn agents_view(",
+        "InspectorTab",
+    ] {
+        assert!(
+            !APP.contains(removed),
+            "removed inspector path remains: {removed}"
         );
     }
 }

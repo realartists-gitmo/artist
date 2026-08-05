@@ -84,7 +84,7 @@ async fn a_real_gtk_application_exposes_a_usable_tree() {
                 "--cancel-label=Keep".into(),
             ],
             None,
-            None,
+            Default::default(),
         ),
     )
     .await;
@@ -208,7 +208,7 @@ async fn two_applications_on_one_stage_do_not_get_confused() {
                 "--text=FirstWindowMarker".into(),
             ],
             None,
-            None,
+            Default::default(),
         ),
     )
     .await;
@@ -227,7 +227,7 @@ async fn two_applications_on_one_stage_do_not_get_confused() {
                 "--text=SecondWindowMarker".into(),
             ],
             None,
-            None,
+            Default::default(),
         ),
     )
     .await;

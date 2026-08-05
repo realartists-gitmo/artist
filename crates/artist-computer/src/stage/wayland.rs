@@ -50,9 +50,12 @@
 //! do not service would be worse than not advertising it, so feedback is
 //! answered on every render.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    os::fd::OwnedFd,
+    sync::{Arc, Mutex},
+};
 
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::{Buffer as _, Fourcc};
 use smithay::backend::allocator::dmabuf::{AsDmabuf, Dmabuf};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::Kind;
@@ -160,6 +163,53 @@ type RenderTargets = (
     Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]>,
 );
 type RenderTargetReply = tokio::sync::oneshot::Sender<RenderTargets>;
+pub struct ExportedPlane {
+    pub fd: OwnedFd,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+pub struct ExportedBuffer {
+    pub index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub modifier: u64,
+    pub planes: Vec<ExportedPlane>,
+}
+
+#[derive(Clone)]
+pub struct StageLease {
+    pub stage: String,
+    pub front: Arc<std::sync::atomic::AtomicUsize>,
+    held: Arc<[std::sync::atomic::AtomicBool; RENDER_BUFFERS]>,
+}
+
+impl StageLease {
+    pub fn current_buffer(&self) -> u32 {
+        self.front.load(std::sync::atomic::Ordering::Acquire) as u32
+    }
+
+    pub fn hold(&self, buffer_index: u32) -> bool {
+        let Some(held) = self.held.get(buffer_index as usize) else {
+            return false;
+        };
+        !held.swap(true, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    pub fn release(&self, buffer_index: u32) -> bool {
+        let Some(held) = self.held.get(buffer_index as usize) else {
+            return false;
+        };
+        held.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+pub struct StageExport {
+    pub lease: StageLease,
+    pub buffers: Vec<ExportedBuffer>,
+    pub damage: tokio::sync::broadcast::Receiver<Damage>,
+}
 
 /// Commands the proxy sends to the compositor thread.
 enum StageCommand {
@@ -173,11 +223,6 @@ enum StageCommand {
     Text(
         WindowKey,
         String,
-        tokio::sync::oneshot::Sender<Result<(), String>>,
-    ),
-    Pointer(
-        WindowKey,
-        crate::stage::Pointing,
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
     /// One primitive of a pointer sequence.
@@ -1106,7 +1151,12 @@ impl StageWayland {
             // may not have them, and `Caps` has to report the truth rather than
             // this backend's assumption.
             has_tablet: true,
-            has_gamepad: true,
+            // Not advertised until it can be driven. A gamepad that reports
+            // present but never delivers an input is a fingerprint: real
+            // hardware produces continuous stick and button traffic, and a
+            // `navigator.getGamepads()` that returns a live-looking controller
+            // that never moves is indistinguishable from a lie.
+            has_gamepad: false,
         })
     }
 
@@ -1132,6 +1182,46 @@ impl StageWayland {
     /// which is the same signal the settle predicates use.
     pub async fn render_target(&self) -> Option<RenderTargets> {
         self.ask(StageCommand::RenderTarget).await.ok()
+    }
+
+    /// Duplicate this stage's DMA-BUF descriptors for transfer to a resident GUI.
+    pub async fn export(&self) -> Result<StageExport, StepError> {
+        let (targets, front, held) = self.render_target().await.ok_or_else(|| {
+            StepError::Backend("this stage cannot export its render targets".into())
+        })?;
+        let mut buffers = Vec::with_capacity(RENDER_BUFFERS);
+        for (index, target) in targets.iter().enumerate() {
+            let planes = target
+                .handles()
+                .zip(target.offsets())
+                .zip(target.strides())
+                .map(|((fd, offset), stride)| {
+                    Ok(ExportedPlane {
+                        fd: fd.try_clone_to_owned()?,
+                        offset,
+                        stride,
+                    })
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|error| StepError::Backend(format!("duplicate stage DMA-BUF: {error}")))?;
+            buffers.push(ExportedBuffer {
+                index: index as u32,
+                width: target.width(),
+                height: target.height(),
+                format: target.format().code as u32,
+                modifier: target.format().modifier.into(),
+                planes,
+            });
+        }
+        Ok(StageExport {
+            lease: StageLease {
+                stage: self.id.as_str().to_owned(),
+                front,
+                held,
+            },
+            buffers,
+            damage: self.damage(),
+        })
     }
 
     /// Merge in the bus environment (and anything else) before launching apps.
@@ -1237,7 +1327,7 @@ impl StageWayland {
         // line the application draws.
         for step in 1..=steps {
             tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
-            let (x, y) = lerp(start, end, step, steps);
+            let (x, y) = human_path(start, end, step, steps);
             self.stylus_step(StylusStep::Motion {
                 window,
                 at: point(x, y),
@@ -1290,7 +1380,7 @@ impl StageWayland {
 
         for step in 1..=steps {
             tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
-            let (x, y) = lerp(start, end, step, steps);
+            let (x, y) = human_path(start, end, step, steps);
             self.pointing(PointerStep::Motion {
                 window,
                 at: Rect {
@@ -1357,7 +1447,7 @@ impl StageWayland {
                     tokio::time::sleep(std::time::Duration::from_millis(GESTURE_STEP_MS)).await;
                     self.touch_step(TouchStep::Motion {
                         window,
-                        at: lerp(start, end, step, steps),
+                        at: human_path(start, end, step, steps),
                         slot: 0,
                     })
                     .await?;
@@ -1425,12 +1515,66 @@ fn centre_i32(rect: Rect) -> (i32, i32) {
     )
 }
 
-fn lerp(from: (i32, i32), to: (i32, i32), step: i32, steps: i32) -> (i32, i32) {
-    let fraction = f64::from(step) / f64::from(steps);
+/// A point along a human-like path from `from` to `to`.
+///
+/// Three differences from linear interpolation, which is what a script draws:
+///
+/// * **Easing.** A hand starts slow, peaks mid-flight, and slows to settle. The
+///   smoothstep shape makes the velocity curve bell-shaped instead of flat,
+///   which is the difference between "moved there" and "moved there".
+/// * **An arc.** The path bows perpendicular to the straight line — a real arm
+///   pivots, it does not translate. The bow is tiny (a few percent of the
+///   distance, and never more than a few pixels) and its direction is derived
+///   deterministically from the endpoints, so a retry of the same drag draws
+///   the same arc rather than a new random one.
+/// * **Overshoot near the end.** The eased fraction is pushed past 1.0 briefly
+///   so the pointer passes the target and corrects, which is how a hand actually
+///   arrives. The correction is bounded and always returns to exactly `to`.
+fn human_path(from: (i32, i32), to: (i32, i32), step: i32, steps: i32) -> (i32, i32) {
+    let (fx, fy) = (f64::from(from.0), f64::from(from.1));
+    let (tx, ty) = (f64::from(to.0), f64::from(to.1));
+    let dx = tx - fx;
+    let dy = ty - fy;
+    let distance = dx.hypot(dy);
+
+    // Smoothstep with a mild overshoot: the second-to-last step goes slightly
+    // past the target, the last step lands on it exactly. The overshoot only
+    // shows when there is enough travel to make it readable.
+    let progress = f64::from(step) / f64::from(steps);
+    let overshoot = if distance > 40.0 && progress > 0.5 && progress < 0.9 {
+        (progress - 0.5) * 0.06
+    } else {
+        0.0
+    };
+    let eased = smoothstep(progress) + overshoot;
+
+    // A perpendicular bow, signed by the endpoints so the arc is stable across
+    // a retry. `bow_scale` is derived from a hash of the coordinates so two
+    // different paths are not all identically-signed copies of one another.
+    let mix = (fx * 7.0 + fy * 13.0 + tx * 3.0 + ty * 11.0).abs().fract();
+    let bow = if distance > 20.0 {
+        let amount = 0.03 * mix * distance.min(60.0);
+        let (nx, ny) = if distance == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (-dy / distance, dx / distance)
+        };
+        let peak = 4.0 * eased * (1.0 - eased);
+        (nx * peak * amount, ny * peak * amount)
+    } else {
+        (0.0, 0.0)
+    };
+
     (
-        from.0 + ((f64::from(to.0 - from.0)) * fraction).round() as i32,
-        from.1 + ((f64::from(to.1 - from.1)) * fraction).round() as i32,
+        (fx + dx * eased + bow.0).round() as i32,
+        (fy + dy * eased + bow.1).round() as i32,
     )
+}
+
+/// The smoothstep easing curve, in `[0, 1]`.
+fn smoothstep(value: f64) -> f64 {
+    let clamped = value.clamp(0.0, 1.0);
+    clamped * clamped * (3.0 - 2.0 * clamped)
 }
 
 fn lerp_u32(from: u32, to: u32, step: i32, steps: i32) -> u32 {
@@ -1534,10 +1678,21 @@ impl Stage for StageWayland {
     }
 
     async fn text(&self, window: WindowKey, text: &str) -> Result<(), StepError> {
-        let text = text.to_owned();
-        self.ask(|tx| StageCommand::Text(window, text, tx))
-            .await?
-            .map_err(StepError::Backend)
+        // Paced one character per command, not handed to the compositor as a
+        // burst. The compositor thread types instantly, and a whole paragraph
+        // in one millisecond reads as a paste; a keystroke per command with a
+        // jittered pause gives the composition its shape while keeping the
+        // wait on *this* task rather than the compositor thread. Short handfuls
+        // of characters (a password) get a near-instant start instead of a
+        // metronomic lockstep.
+        for character in text.chars() {
+            let character = character.to_string();
+            self.ask(|tx| StageCommand::Text(window, character, tx))
+                .await?
+                .map_err(StepError::Backend)?;
+            tokio::time::sleep(crate::human::between_keys()).await;
+        }
+        Ok(())
     }
 
     async fn pointer(
@@ -1545,9 +1700,63 @@ impl Stage for StageWayland {
         window: WindowKey,
         pointing: crate::stage::Pointing,
     ) -> Result<(), StepError> {
-        self.ask(|tx| StageCommand::Pointer(window, pointing, tx))
-            .await?
-            .map_err(StepError::Backend)
+        // Motion, dwell, press, dwell, release — split into separate commands
+        // so the compositor thread never sleeps, with the humanish timing on
+        // this task. `deliver_click` used to drive the whole sequence in one
+        // command, which made a click a press and a release in the same
+        // millisecond: fine for latency, but a fingertip does not land and lift
+        // at zero distance in zero time, and that is a machine signature.
+        let crate::stage::Pointing {
+            at,
+            button,
+            count,
+            modifiers,
+        } = pointing;
+
+        self.pointing(PointerStep::Motion { window, at }).await?;
+        // A brief hover before pressing. A person does not click the instant
+        // the cursor arrives; a page that reveals its control on hover has had
+        // time to by the time the press lands.
+        tokio::time::sleep(crate::human::pre_click_linger()).await;
+
+        if modifiers.any() {
+            self.pointing(PointerStep::Modifiers {
+                window,
+                modifiers,
+                pressed: true,
+            })
+            .await?;
+        }
+
+        let count = count.clamp(1, 3);
+        for click in 0..count {
+            if click > 0 {
+                // The gap that makes it a double click rather than two taps in
+                // different shells: it stays inside the toolkit's window.
+                tokio::time::sleep(crate::human::click_dwell()).await;
+            }
+            self.pointing(PointerStep::Button {
+                button,
+                pressed: true,
+            })
+            .await?;
+            tokio::time::sleep(crate::human::click_dwell()).await;
+            self.pointing(PointerStep::Button {
+                button,
+                pressed: false,
+            })
+            .await?;
+        }
+
+        if modifiers.any() {
+            self.pointing(PointerStep::Modifiers {
+                window,
+                modifiers,
+                pressed: false,
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     async fn hover(&self, window: WindowKey, at: Rect) -> Result<(), StepError> {
@@ -2293,9 +2502,6 @@ fn handle_command(
         StageCommand::Text(key, text, reply) => {
             let _ = reply.send(deliver_text(state, keyboard, key, &text));
         }
-        StageCommand::Pointer(key, pointing, reply) => {
-            let _ = reply.send(deliver_click(state, pointer, keyboard, key, pointing));
-        }
         StageCommand::Pointing(step, reply) => {
             let result = match step {
                 PointerStep::Motion { window, at } => {
@@ -2583,40 +2789,6 @@ fn deliver_button(
     } else {
         state.held_buttons.retain(|held| *held != button);
     }
-}
-
-/// A click: move there, then press and release `count` times.
-///
-/// The repeats are deliberately *not* spaced out. A double click is two presses
-/// inside the toolkit's double-click window — typically 400 ms — and delivering
-/// them as fast as the seat allows is the only way to be reliably inside it.
-/// The single-click case is unchanged from what it always was.
-fn deliver_click(
-    state: &mut StageState,
-    pointer: &smithay::input::pointer::PointerHandle<StageState>,
-    keyboard: &smithay::input::keyboard::KeyboardHandle<StageState>,
-    key: WindowKey,
-    pointing: crate::stage::Pointing,
-) -> Result<(), String> {
-    deliver_motion(state, pointer, key, pointing.at)?;
-
-    // Modifiers are held across the whole click, the way a hand holds them:
-    // ctrl+click extends a selection only if ctrl is down when the button goes
-    // down, so pressing it afterwards would be an ordinary click.
-    let modifiers = pointing.modifiers;
-    if modifiers.any() {
-        deliver_modifiers(state, keyboard, key, modifiers, true)?;
-    }
-    // A press with no matching release leaves the client believing the button
-    // is still held, which breaks the very next interaction.
-    for _ in 0..pointing.count.clamp(1, 3) {
-        deliver_button(state, pointer, pointing.button, true);
-        deliver_button(state, pointer, pointing.button, false);
-    }
-    if modifiers.any() {
-        deliver_modifiers(state, keyboard, key, modifiers, false)?;
-    }
-    Ok(())
 }
 
 /// Hold or release the modifier keys of a chord.
@@ -3383,5 +3555,30 @@ mod tests {
         // The isolation property is the product, so it is asserted directly.
         assert_eq!(std::env::var("WAYLAND_DISPLAY").ok(), user_display);
         assert!(stage.windows().await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stage_export_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    fn lease(front: usize) -> StageLease {
+        StageLease {
+            stage: "stage-test".into(),
+            front: Arc::new(AtomicUsize::new(front)),
+            held: Arc::new(std::array::from_fn(|_| AtomicBool::new(false))),
+        }
+    }
+
+    #[test]
+    fn exported_stage_buffers_are_held_and_released_once() {
+        let lease = lease(1);
+        assert_eq!(lease.current_buffer(), 1);
+        assert!(lease.hold(1));
+        assert!(!lease.hold(1));
+        assert!(lease.release(1));
+        assert!(!lease.release(1));
+        assert!(!lease.hold(RENDER_BUFFERS as u32));
     }
 }

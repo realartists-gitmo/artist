@@ -355,6 +355,7 @@ impl ToolEnv {
 /// What a web session may delegate to: the ingredients a `subagent` child is
 /// built from, carried in a form the MCP server can assemble without reaching
 /// into artist-agent's crate-private [`DelegationEnv`].
+#[derive(Clone)]
 pub struct McpDelegation {
     /// The parent account a candidate that names no provider inherits.
     pub provider: llm_provider::SavedProvider,

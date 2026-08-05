@@ -6,4 +6,4 @@
 
 /target
 /.pi-subagents/*
-/.pi/*
+/.cache/

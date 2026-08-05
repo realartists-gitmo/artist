@@ -1,7 +1,9 @@
+#[cfg(feature = "embedded-canvas")]
 use url::Url;
 
 /// Canvas URLs carry the unguessable server key in `/c/<key>/<slug>/` and are
 /// only valid on a loopback listener owned by the session host.
+#[cfg(feature = "embedded-canvas")]
 pub(crate) fn is_authenticated_local_canvas_origin(value: &str) -> bool {
     let Ok(url) = Url::parse(value) else {
         return false;
@@ -25,6 +27,7 @@ pub(crate) fn is_authenticated_local_canvas_origin(value: &str) -> bool {
         && !segments[2].is_empty()
 }
 
+#[cfg(feature = "embedded-canvas")]
 pub(crate) fn same_origin(allowed: &str, candidate: &str) -> bool {
     let (Ok(allowed), Ok(candidate)) = (Url::parse(allowed), Url::parse(candidate)) else {
         return false;
@@ -34,7 +37,7 @@ pub(crate) fn same_origin(allowed: &str, candidate: &str) -> bool {
         && allowed.port_or_known_default() == candidate.port_or_known_default()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "embedded-canvas"))]
 mod tests {
     use super::*;
 

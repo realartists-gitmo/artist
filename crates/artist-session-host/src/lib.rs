@@ -11,7 +11,10 @@ pub mod transport;
 
 pub use core::{HostCore, HostReply, RuntimeAction};
 #[cfg(target_os = "linux")]
-pub use daemon::{DaemonOptions, SessionHostDaemon};
+pub use daemon::{
+    DaemonOptions, EmbeddedRuntimeFactory, RuntimeDriver, RuntimeEmission, RuntimeFactory,
+    RuntimeTurn, SessionHostDaemon,
+};
 pub use protocol::{
     AttentionKind, HostCommand, HostEvent, HostRequest, HostResponse, PROTOCOL_VERSION,
     RuntimePhase, RuntimeState, SequencedHostEvent, ServerPacket, StageDescriptor,

@@ -127,6 +127,10 @@ impl McpServer {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn identity(&self) -> &artist_agent::tool_set::McpIdentity {
+        &self.identity
+    }
     /// The published tool names, in surface order.
     pub fn names(&self) -> Vec<String> {
         self.tools

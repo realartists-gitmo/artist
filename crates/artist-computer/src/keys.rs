@@ -252,8 +252,44 @@ impl Key {
                 MediaKey::VolumeDown => ("AudioVolumeDown".into(), 174),
                 MediaKey::Mute => ("AudioVolumeMute".into(), 173),
             },
-            Self::Char(character) => (character.to_string(), character.to_ascii_uppercase() as i64),
+            Self::Char(character) => (
+                character.to_string(),
+                // The Windows virtual key code of the physical key that
+                // produces this character on a US layout. This is *not* the
+                // character's ASCII value — `.` is 190, not 46, and 46 is the
+                // Delete key, so using ASCII here made a period delete the
+                // character before it. Only reachable for the characters the
+                // US layout produces unshifted or shifted.
+                vk_for_char(*character),
+            ),
         }
+    }
+
+    /// The CDP `code` string for a printable character: the physical key, which
+    /// the renderer needs to tell `a` from `A` (same key, different modifier).
+    pub fn physical_code(&self) -> Option<&'static str> {
+        let Self::Char(character) = self else {
+            return None;
+        };
+        Some(match character.to_ascii_lowercase() {
+            'a'..='z' => {
+                return Some(code_for_alpha(*character));
+            }
+            '0'..='9' => return Some(code_for_digit(*character)),
+            ' ' => "Space",
+            '-' => "Minus",
+            '=' => "Equal",
+            '[' => "BracketLeft",
+            ']' => "BracketRight",
+            '\\' => "Backslash",
+            ';' => "Semicolon",
+            '\'' => "Quote",
+            '`' => "Backquote",
+            ',' => "Comma",
+            '.' => "Period",
+            '/' => "Slash",
+            _ => return None,
+        })
     }
 
     /// The evdev keycode for a US layout, for the Wayland seat.
@@ -303,6 +339,83 @@ impl Key {
             Self::Char(character) => return evdev_for_char(*character),
         };
         Some(code)
+    }
+}
+
+/// The Windows virtual key code of the physical key producing `character` on a
+/// US layout. A character outside that layout gets its ASCII value, which the
+/// stage only ever sends for characters it cannot type anyway.
+fn vk_for_char(character: char) -> i64 {
+    if character.is_ascii_alphabetic() {
+        return i64::from(character.to_ascii_uppercase() as u8);
+    }
+    if character.is_ascii_digit() {
+        return i64::from(character as u8);
+    }
+    match character {
+        ' ' => 32,
+        '-' => 189,
+        '=' => 187,
+        '[' => 219,
+        ']' => 221,
+        '\\' => 220,
+        ';' => 186,
+        '\'' => 222,
+        '`' => 192,
+        ',' => 188,
+        '.' => 190,
+        '/' => 191,
+        _ => i64::from(character as u8),
+    }
+}
+
+/// The CDP `code` for a letter key. Letters share their base key whatever the
+/// shift state, so the code is the lowercased letter's own key.
+fn code_for_alpha(character: char) -> &'static str {
+    match character.to_ascii_lowercase() {
+        'a' => "KeyA",
+        'b' => "KeyB",
+        'c' => "KeyC",
+        'd' => "KeyD",
+        'e' => "KeyE",
+        'f' => "KeyF",
+        'g' => "KeyG",
+        'h' => "KeyH",
+        'i' => "KeyI",
+        'j' => "KeyJ",
+        'k' => "KeyK",
+        'l' => "KeyL",
+        'm' => "KeyM",
+        'n' => "KeyN",
+        'o' => "KeyO",
+        'p' => "KeyP",
+        'q' => "KeyQ",
+        'r' => "KeyR",
+        's' => "KeyS",
+        't' => "KeyT",
+        'u' => "KeyU",
+        'v' => "KeyV",
+        'w' => "KeyW",
+        'x' => "KeyX",
+        'y' => "KeyY",
+        'z' => "KeyZ",
+        _ => "",
+    }
+}
+
+fn code_for_digit(character: char) -> &'static str {
+    match character {
+        '0' => "Digit0",
+        '1' => "Digit1",
+        '2' => "Digit2",
+        '3' => "Digit3",
+        '4' => "Digit4",
+        '5' => "Digit5",
+        '6' => "Digit6",
+        '7' => "Digit7",
+        '8' => "Digit8",
+        '9' => "Digit9",
+        _ => "",
     }
 }
 

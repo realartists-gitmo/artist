@@ -10,23 +10,18 @@ use gpui::{
     Window, WindowBounds, WindowOptions, actions, div, img, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Root, Sizable, StyledExt,
+    ActiveTheme, Disableable, Root, StyledExt,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
     text::TextView,
 };
 use gpui_platform::application;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    io::{BufRead, BufReader, Read, Write},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
-    time::{Duration, Instant},
+    process::Command,
+    sync::mpsc,
+    time::Duration,
 };
 
 pub fn run() {
@@ -109,14 +104,6 @@ actions!(
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InspectorTab {
-    Changes,
-    Activity,
-    Agents,
-    Session,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidebarTab {
     Sessions,
 }
@@ -125,6 +112,43 @@ enum SidebarTab {
 struct ChangedFile {
     status: String,
     path: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct StageAccessibilityTree {
+    surface: String,
+    #[serde(default)]
+    nodes: Vec<StageAccessibilityNode>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct StageAccessibilityNode {
+    binding: String,
+    role: serde_json::Value,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    state: StageAccessibilityState,
+    #[serde(default)]
+    actions: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize)]
+struct StageAccessibilityState {
+    #[serde(default)]
+    focused: bool,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    checked: bool,
+    #[serde(default)]
+    expanded: bool,
+    #[serde(default)]
+    selected: bool,
+    #[serde(default)]
+    offscreen: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -149,9 +173,6 @@ struct ArtistApp {
     session_id: Option<String>,
     session_events: Vec<artist_session::Envelope>,
     running: bool,
-    queued_prompts: VecDeque<String>,
-    cancellation: Option<Arc<AtomicBool>>,
-    run_control: Option<mpsc::Sender<RunControl>>,
     #[cfg(target_os = "linux")]
     host_controllers: HashMap<String, crate::host_controller::RootController>,
     #[cfg(target_os = "linux")]
@@ -160,6 +181,7 @@ struct ArtistApp {
     host_active_lineage: Option<String>,
     #[cfg(target_os = "linux")]
     stage_surfaces: crate::stage_surface::StageSurfaces,
+    stage_accessibility: HashMap<(String, String, String), StageAccessibilityTree>,
     pending_questions: Vec<Question>,
     question_choices: HashMap<String, HashSet<String>>,
     transcript_scroll: ScrollHandle,
@@ -172,7 +194,7 @@ struct ArtistApp {
     focus_stack: FocusStack,
     focused_object: Option<FocusableObject>,
     #[cfg(feature = "embedded-canvas")]
-    canvas_endpoints: HashMap<(String, String), String>,
+    canvas_endpoints: HashMap<(String, String, String), String>,
     #[cfg(feature = "embedded-canvas")]
     canvas_views: HashMap<artist_ui_core::FocusableObjectId, Entity<gpui_webview::WebView>>,
     #[cfg(feature = "embedded-canvas")]
@@ -181,11 +203,7 @@ struct ArtistApp {
         crate::canvas_accessibility::CanvasAccessibilityTree,
     >,
     project: PathBuf,
-    inspector_tab: InspectorTab,
     sidebar_tab: SidebarTab,
-    changes: Vec<ChangedFile>,
-    selected_change: Option<String>,
-    diff: String,
     run_baseline: HashMap<String, String>,
     session_changed_files: HashSet<String>,
     sidebar_visible: bool,
@@ -259,9 +277,6 @@ impl ArtistApp {
             session_id: None,
             session_events: Vec::new(),
             running: false,
-            queued_prompts: VecDeque::new(),
-            cancellation: None,
-            run_control: None,
             #[cfg(target_os = "linux")]
             host_controllers: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -270,6 +285,7 @@ impl ArtistApp {
             host_active_lineage: None,
             #[cfg(target_os = "linux")]
             stage_surfaces: crate::stage_surface::StageSurfaces::default(),
+            stage_accessibility: HashMap::new(),
             pending_questions: Vec::new(),
             question_choices: HashMap::new(),
             transcript_scroll: ScrollHandle::new(),
@@ -288,11 +304,7 @@ impl ArtistApp {
             #[cfg(feature = "embedded-canvas")]
             canvas_accessibility: HashMap::new(),
             project,
-            inspector_tab: InspectorTab::Changes,
             sidebar_tab: SidebarTab::Sessions,
-            changes: Vec::new(),
-            selected_change: None,
-            diff: String::new(),
             run_baseline: HashMap::new(),
             session_changed_files: HashSet::new(),
             sidebar_visible: true,
@@ -404,22 +416,13 @@ impl ArtistApp {
     }
 
     fn refresh_changes(&mut self) {
-        self.changes = git_changes(&self.project);
         if self.running || !self.run_baseline.is_empty() {
-            for change in &self.changes {
+            for change in git_changes(&self.project) {
                 let current = git_diff(&self.project, &change.path);
                 if self.run_baseline.get(&change.path) != Some(&current) {
-                    self.session_changed_files.insert(change.path.clone());
+                    self.session_changed_files.insert(change.path);
                 }
             }
-        }
-        if self
-            .selected_change
-            .as_ref()
-            .is_some_and(|selected| !self.changes.iter().any(|change| &change.path == selected))
-        {
-            self.selected_change = None;
-            self.diff.clear();
         }
     }
 
@@ -443,12 +446,6 @@ impl ArtistApp {
             .map(|(provider, model)| (Some(provider), Some(model)))
             .unwrap_or_default();
         self.session_events = events;
-    }
-
-    fn select_change(&mut self, path: String) {
-        self.diff = git_diff(&self.project, &path);
-        self.selected_change = Some(path);
-        self.inspector_tab = InspectorTab::Changes;
     }
 
     fn select_project(&mut self, project: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -568,19 +565,7 @@ impl ArtistApp {
                     .update(cx, |state, cx| state.set_value("", window, cx));
                 return;
             }
-            let sent = self
-                .run_control
-                .as_ref()
-                .is_some_and(|control| control.send(RunControl::Steer(input.clone())).is_ok());
-            if sent {
-                self.transcript.push_user(&input);
-                self.status = "Steering will be delivered at the next safe boundary".into();
-            } else {
-                self.status = "Control channel unavailable".into();
-                return;
-            }
-            self.composer
-                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.status = "Session host control channel unavailable".into();
             return;
         }
         self.composer
@@ -617,13 +602,7 @@ impl ArtistApp {
             self.status = "Queued for next turn in session host".into();
             return;
         }
-        self.queued_prompts.push_back(input);
-        self.composer
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        self.status = format!(
-            "Working · {} queued for next turn",
-            self.queued_prompts.len()
-        );
+        self.status = "Session host queue unavailable".into();
     }
 
     fn start_prompt(&mut self, input: String, cx: &mut Context<Self>) {
@@ -641,78 +620,41 @@ impl ArtistApp {
         self.transcript_scroll.scroll_to_bottom();
 
         #[cfg(target_os = "linux")]
-        if let Some(session) = self.session_id.clone()
-            && self.start_host_prompt(session, input.clone(), cx)
         {
-            return;
+            let session = match self.session_id.clone() {
+                Some(session) => session,
+                None => match self.session_store.create_snapshot(&self.project, None) {
+                    Ok(session) => {
+                        let id = session.id.clone();
+                        self.session_id = Some(id.clone());
+                        self.refresh_workspace();
+                        id
+                    }
+                    Err(error) => {
+                        self.receive(
+                            HarnessMessage::Done(Err(format!("create session: {error:#}"))),
+                            cx,
+                        );
+                        return;
+                    }
+                },
+            };
+            if self.start_host_prompt(session, input, cx) {
+                return;
+            }
+            self.receive(
+                HarnessMessage::Done(Err("session host unavailable".into())),
+                cx,
+            );
         }
 
-        let session_id = self.session_id.clone();
-        let project = self.project.clone();
-        let provider = self.selected_provider.clone();
-        let model = self.model_override.read(cx).value().trim().to_owned();
-        let model = (!model.is_empty()).then_some(model);
-        let profile = Some(self.selected_profile.clone());
-        let cancellation = Arc::new(AtomicBool::new(false));
-        self.cancellation = Some(cancellation.clone());
-        let (control_send, control_receive) = mpsc::channel();
-        self.run_control = Some(control_send);
-        let (send, receive) = mpsc::channel();
-        std::thread::spawn(move || {
-            run_harness(
-                input,
-                session_id,
-                project,
-                provider,
-                model,
-                profile,
-                cancellation,
-                control_receive,
-                send,
-            )
-        });
-        cx.spawn(async move |this, cx| {
-            loop {
-                let mut finished = false;
-                loop {
-                    let message = match receive.try_recv() {
-                        Ok(message) => message,
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            finished = true;
-                            this.update(cx, |app, cx| {
-                                if app.running {
-                                    app.receive(
-                                        HarnessMessage::Done(Err(
-                                            "harness bridge disconnected".to_owned()
-                                        )),
-                                        cx,
-                                    );
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                            break;
-                        }
-                    };
-                    if matches!(message, HarnessMessage::Done(_)) {
-                        finished = true;
-                    }
-                    this.update(cx, |app, cx| {
-                        app.receive(message, cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                if finished {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(25))
-                    .await;
-            }
-        })
-        .detach();
+        #[cfg(not(target_os = "linux"))]
+        self.receive(
+            HarnessMessage::Done(Err(
+                "the resident Artist session host currently requires Linux".into(),
+            )),
+            cx,
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -745,7 +687,7 @@ impl ArtistApp {
         ) {
             Ok(value) => value,
             Err(error) => {
-                self.status = format!("Host unavailable, using compatibility mode: {error}");
+                self.status = format!("Session host unavailable: {error}");
                 return false;
             }
         };
@@ -758,24 +700,24 @@ impl ArtistApp {
         {
             return false;
         }
+        let source_session = session.clone();
         self.host_controllers.insert(session.clone(), controller);
         self.host_active_session = Some(session);
         self.host_active_lineage = Some(lineage);
         cx.spawn(async move |this, cx| {
             loop {
-                let mut disconnected = false;
-                while let Ok(message) = receive.try_recv() {
-                    this.update(cx, |app, cx| {
-                        app.receive_host(message, cx);
-                        cx.notify();
-                    })
-                    .ok();
-                }
-                if matches!(receive.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
-                    disconnected = true;
-                }
-                if disconnected {
-                    break;
+                loop {
+                    match receive.try_recv() {
+                        Ok(message) => {
+                            this.update(cx, |app, cx| {
+                                app.receive_host(&source_session, message, cx);
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => return,
+                    }
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(20))
@@ -799,32 +741,44 @@ impl ArtistApp {
     #[cfg(target_os = "linux")]
     fn receive_host(
         &mut self,
+        source_session: &str,
         message: crate::host_controller::ControllerMessage,
         cx: &mut Context<Self>,
     ) {
-        use artist_session_host::{AttentionKind, HostEvent, RuntimePhase};
+        use artist_session_host::{AttentionKind, HostCommand, HostEvent, RuntimePhase};
+        let active = self.session_id.as_deref() == Some(source_session);
         match message {
             crate::host_controller::ControllerMessage::Event(
                 HostEvent::StreamingDelta { event, .. },
                 _,
-            ) => self.receive(HarnessMessage::Event(event), cx),
+            ) => {
+                if active {
+                    self.receive(HarnessMessage::Event(event), cx);
+                } else {
+                    self.refresh_workspace();
+                }
+            }
             crate::host_controller::ControllerMessage::Event(HostEvent::RuntimeState(state), _) => {
-                match state.state {
-                    RuntimePhase::Idle => {
-                        self.receive(HarnessMessage::Done(Ok("Ready".into())), cx)
+                if active {
+                    match state.state {
+                        RuntimePhase::Idle => {
+                            self.receive(HarnessMessage::Done(Ok("Ready".into())), cx)
+                        }
+                        RuntimePhase::Failed | RuntimePhase::Interrupted => self.receive(
+                            HarnessMessage::Done(Err(format!("session host {:?}", state.state))),
+                            cx,
+                        ),
+                        RuntimePhase::WaitingForAnswer => {
+                            self.status = "Artist needs your input".into()
+                        }
+                        RuntimePhase::Running => {
+                            self.running = true;
+                            self.status = "Thinking… · session host".into();
+                        }
+                        RuntimePhase::Stopping => self.status = "Stopping…".into(),
                     }
-                    RuntimePhase::Failed | RuntimePhase::Interrupted => self.receive(
-                        HarnessMessage::Done(Err(format!("session host {:?}", state.state))),
-                        cx,
-                    ),
-                    RuntimePhase::WaitingForAnswer => {
-                        self.status = "Artist needs your input".into()
-                    }
-                    RuntimePhase::Running => {
-                        self.running = true;
-                        self.status = "Thinking… · session host".into();
-                    }
-                    RuntimePhase::Stopping => self.status = "Stopping…".into(),
+                } else {
+                    self.refresh_workspace();
                 }
             }
             crate::host_controller::ControllerMessage::Event(
@@ -835,8 +789,12 @@ impl ArtistApp {
                 },
                 _,
             ) => {
-                if let Ok(question) = serde_json::from_str::<Question>(&message) {
-                    self.receive(HarnessMessage::Question(question), cx);
+                if active {
+                    if let Ok(question) = serde_json::from_str::<Question>(&message) {
+                        self.receive(HarnessMessage::Question(question), cx);
+                    }
+                } else {
+                    self.status = format!("Background session {source_session} needs input");
                 }
             }
             crate::host_controller::ControllerMessage::Event(
@@ -844,7 +802,11 @@ impl ArtistApp {
                 _,
             )
             | crate::host_controller::ControllerMessage::Error(message) => {
-                self.receive(HarnessMessage::Done(Err(message)), cx)
+                if active {
+                    self.receive(HarnessMessage::Done(Err(message)), cx);
+                } else {
+                    self.status = format!("Background session {source_session}: {message}");
+                }
             }
             crate::host_controller::ControllerMessage::Event(
                 HostEvent::CanvasEndpoint {
@@ -855,7 +817,10 @@ impl ArtistApp {
                 _,
             ) => {
                 #[cfg(feature = "embedded-canvas")]
-                self.canvas_endpoints.insert((lineage, slug), origin);
+                self.canvas_endpoints
+                    .insert((source_session.to_owned(), lineage, slug), origin);
+                #[cfg(not(feature = "embedded-canvas"))]
+                let _ = (lineage, slug, origin);
             }
             crate::host_controller::ControllerMessage::Event(
                 HostEvent::StageExport {
@@ -865,10 +830,13 @@ impl ArtistApp {
                 },
                 descriptors,
             ) => {
-                if let Err(error) =
-                    self.stage_surfaces
-                        .export(lineage, stage, descriptor, descriptors)
-                {
+                if let Err(error) = self.stage_surfaces.export(
+                    source_session.to_owned(),
+                    lineage,
+                    stage,
+                    descriptor,
+                    descriptors,
+                ) {
                     self.status = format!("Stage unavailable: {error}");
                 }
             }
@@ -881,19 +849,53 @@ impl ArtistApp {
                 },
                 _,
             ) => {
-                if let Err(error) =
-                    self.stage_surfaces
-                        .present(&lineage, &stage, buffer_index, damage)
-                {
+                let release = HostCommand::FrameRelease {
+                    lineage: lineage.clone(),
+                    stage: stage.clone(),
+                    buffer_index,
+                };
+                let Some(controller) = self.host_controllers.get(source_session) else {
+                    self.status = "Stage host disconnected before presentation".into();
+                    return;
+                };
+                let completion = controller.completion_callback(release.clone());
+                if let Err(error) = self.stage_surfaces.present(
+                    source_session,
+                    &lineage,
+                    &stage,
+                    buffer_index,
+                    damage,
+                    completion,
+                ) {
+                    let _ = controller.send(release);
                     self.status = format!("Stage unavailable: {error}");
+                } else if active {
+                    self.status = "Stage connected · zero-copy Vulkan DMA-BUF".into();
                 }
                 cx.notify();
             }
+            crate::host_controller::ControllerMessage::Event(
+                HostEvent::AccessibilityPatch {
+                    lineage,
+                    object,
+                    patch,
+                },
+                _,
+            ) => match serde_json::from_value::<StageAccessibilityTree>(patch) {
+                Ok(tree) => {
+                    self.stage_accessibility
+                        .insert((source_session.to_owned(), lineage, object), tree);
+                    cx.notify();
+                }
+                Err(error) => {
+                    self.status = format!("Stage accessibility unavailable: {error}");
+                }
+            },
             crate::host_controller::ControllerMessage::Event(_, _) => {}
         }
     }
 
-    fn receive(&mut self, message: HarnessMessage, cx: &mut Context<Self>) {
+    fn receive(&mut self, message: HarnessMessage, _cx: &mut Context<Self>) {
         match message {
             HarnessMessage::Event(event) => {
                 let changed_files = matches!(&event, PromptEvent::ToolResult { .. });
@@ -906,11 +908,6 @@ impl ArtistApp {
                     self.transcript_scroll.scroll_to_bottom();
                 }
             }
-            HarnessMessage::Session(id) => {
-                self.session_id = Some(id);
-                self.refresh_workspace();
-            }
-            HarnessMessage::Progress(progress) => self.status = progress,
             HarnessMessage::Question(question) => {
                 if !self
                     .pending_questions
@@ -924,8 +921,6 @@ impl ArtistApp {
             HarnessMessage::Done(result) => {
                 self.transcript.close_turn();
                 self.running = false;
-                self.cancellation = None;
-                self.run_control = None;
                 #[cfg(target_os = "linux")]
                 {
                     self.host_active_session = None;
@@ -939,89 +934,98 @@ impl ArtistApp {
                 }
                 self.refresh_workspace();
                 self.refresh_session_metadata();
-                if let Some(prompt) = self.queued_prompts.pop_front() {
-                    self.start_prompt(prompt, cx);
-                    self.status = if self.queued_prompts.is_empty() {
-                        "Starting queued message…".into()
-                    } else {
-                        format!(
-                            "Starting queued message · {} remaining",
-                            self.queued_prompts.len()
-                        )
-                    };
-                }
             }
         }
     }
 
     fn stop(&mut self) {
         #[cfg(target_os = "linux")]
-        let active_lineage = self
-            .host_active_lineage
-            .clone()
-            .unwrap_or_else(|| "main".into());
-        #[cfg(target_os = "linux")]
-        if let Some(session) = self.host_active_session.as_ref()
-            && self
-                .host_controllers
-                .get(session)
-                .is_some_and(|controller| {
-                    controller
-                        .send(artist_session_host::HostCommand::Stop {
-                            lineage: active_lineage.clone(),
-                        })
-                        .is_ok()
-                })
         {
-            self.status = "Stopping…".into();
-            return;
-        }
-        if self
-            .run_control
-            .as_ref()
-            .is_some_and(|control| control.send(RunControl::Stop).is_ok())
-        {
-            self.status = "Stopping…".into();
-        } else if let Some(cancellation) = &self.cancellation {
-            cancellation.store(true, Ordering::Release);
-            self.status = "Stopping…".into();
-        }
-    }
-
-    fn clear_queue(&mut self) {
-        self.queued_prompts.clear();
-        self.status = if self.running {
-            "Working · queue cleared".into()
-        } else {
-            "Ready".into()
-        };
-    }
-
-    fn steer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.running {
-            self.submit(window, cx);
-            return;
-        }
-        let message = self.composer.read(cx).value().trim().to_owned();
-        if message.is_empty() {
-            return;
-        }
-        let sent = self
-            .run_control
-            .as_ref()
-            .is_some_and(|control| control.send(RunControl::Steer(message.clone())).is_ok());
-        if sent {
-            self.transcript.push_user(&message);
-            self.composer
-                .update(cx, |state, cx| state.set_value("", window, cx));
-            self.status = "Steering will be delivered at the next tool boundary".into();
-            if self.follow_output {
-                self.transcript_scroll.scroll_to_bottom();
+            let active_lineage = self
+                .host_active_lineage
+                .clone()
+                .unwrap_or_else(|| "main".into());
+            if let Some(session) = self.host_active_session.as_ref()
+                && self
+                    .host_controllers
+                    .get(session)
+                    .is_some_and(|controller| {
+                        controller
+                            .send(artist_session_host::HostCommand::Stop {
+                                lineage: active_lineage.clone(),
+                            })
+                            .is_ok()
+                    })
+            {
+                self.status = "Stopping…".into();
+                return;
             }
-        } else {
-            self.queued_prompts.push_back(message);
-            self.status = "Control channel unavailable · message queued".into();
         }
+        self.status = "Session host control channel unavailable".into();
+    }
+
+    fn open_stage_viewer(&mut self, root_session: String, lineage: String, stage: String) {
+        #[cfg(target_os = "linux")]
+        if let Some(controller) = self.host_controllers.get(&root_session)
+            && controller
+                .send(artist_session_host::HostCommand::StageInput {
+                    lineage,
+                    stage,
+                    input: serde_json::json!({ "mode": "watch" }),
+                })
+                .is_ok()
+        {
+            self.status = "Opening standalone stage viewer…".into();
+            return;
+        }
+        self.status = "Stage viewer is unavailable because its session host is disconnected".into();
+    }
+
+    fn activate_stage_accessibility(
+        &mut self,
+        root_session: String,
+        lineage: String,
+        stage: String,
+        surface: String,
+        binding: String,
+        label: String,
+        action: Option<String>,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Some(controller) = self.host_controllers.get(&root_session) {
+            let step = match action {
+                Some(action) => serde_json::json!({
+                    "invoke": {
+                        "anchor": binding.clone(),
+                        "label": label.clone(),
+                        "action": action
+                    }
+                }),
+                None => serde_json::json!({
+                    "click": { "anchor": binding.clone(), "label": label.clone() }
+                }),
+            };
+            let input = serde_json::json!({
+                "mode": "do",
+                "surface": surface,
+                "steps": [step],
+                "settle": { "until": "quiet", "timeoutMs": 3000 },
+                "expect": { "still": { "anchor": binding, "label": label } }
+            });
+            if controller
+                .send(artist_session_host::HostCommand::StageInput {
+                    lineage,
+                    stage,
+                    input,
+                })
+                .is_ok()
+            {
+                self.status = "Stage accessibility action sent".into();
+                return;
+            }
+        }
+        self.status =
+            "Stage accessibility action is unavailable because its host is disconnected".into();
     }
 
     fn toggle_question_choice(&mut self, question_id: &str, label: &str, multi_select: bool) {
@@ -1080,12 +1084,7 @@ impl ArtistApp {
         });
         #[cfg(not(target_os = "linux"))]
         let host_sent = false;
-        if host_sent
-            || self
-                .run_control
-                .as_ref()
-                .is_some_and(|control| control.send(RunControl::Answer(answer)).is_ok())
-        {
+        if host_sent {
             self.pending_questions
                 .retain(|question| question.id != question_id);
             self.question_notes
@@ -1104,8 +1103,10 @@ impl ArtistApp {
     fn promote_object(
         &mut self,
         object: FocusableObject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        #[cfg_attr(not(feature = "embedded-canvas"), allow(unused_variables))] window: &mut Window,
+        #[cfg_attr(not(feature = "embedded-canvas"), allow(unused_variables))] cx: &mut Context<
+            Self,
+        >,
     ) {
         if self.focus_stack.current() == Some(&object.id) {
             return;
@@ -1142,7 +1143,11 @@ impl ArtistApp {
         }
         let Some(origin) = self
             .canvas_endpoints
-            .get(&(object.lineage.clone(), object.durable_id.clone()))
+            .get(&(
+                object.root_session.clone(),
+                object.lineage.clone(),
+                object.durable_id.clone(),
+            ))
             .cloned()
         else {
             return;
@@ -1381,6 +1386,12 @@ impl ArtistApp {
             .unwrap_or_default();
         self.model_override
             .update(cx, |state, cx| state.set_value(model, window, cx));
+    }
+
+    fn select_profile(&mut self, profile: String) {
+        self.selected_profile = profile;
+        self.command_palette_open = false;
+        self.status = "Routing updated".into();
     }
 
     fn toggle_sidebar(&mut self, window: &Window) {
@@ -1812,6 +1823,21 @@ impl ArtistApp {
                                                     .flex_wrap()
                                                     .gap_1()
                                                     .child(
+                                                        Input::new(&self.session_name).w(px(150.)),
+                                                    )
+                                                    .child(
+                                                        Button::new(("session-rename", index))
+                                                            .label("Rename")
+                                                            .ghost()
+                                                            .disabled(self.running)
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    this.rename_session(cx);
+                                                                    cx.notify();
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child(
                                                         Button::new(("session-pin", index))
                                                             .label(if session.pinned {
                                                                 "Unpin"
@@ -2004,6 +2030,14 @@ impl ArtistApp {
                     .child(Input::new(&self.command_search).w_full())
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_xs().child("Model"))
+                            .child(Input::new(&self.model_override).w_full()),
+                    )
+                    .child(
+                        div()
                             .id("command-list")
                             .flex_1()
                             .min_h_0()
@@ -2065,6 +2099,48 @@ impl ArtistApp {
                                         })),
                                 )
                             })
+                            .children(self.providers.iter().enumerate().filter_map(
+                                |(index, provider)| {
+                                    if !matches(&format!(
+                                        "provider {} {}",
+                                        provider.name, provider.id
+                                    )) {
+                                        return None;
+                                    }
+                                    let id = provider.id.clone();
+                                    Some(
+                                        Button::new(("palette-provider", index))
+                                            .label(format!("Provider · {}", provider.name))
+                                            .w_full()
+                                            .ghost()
+                                            .disabled(self.running)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.select_provider(id.clone(), window, cx);
+                                                this.command_palette_open = false;
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
+                            ))
+                            .children(self.profiles.iter().enumerate().filter_map(
+                                |(index, profile)| {
+                                    if !matches(&format!("profile {profile}")) {
+                                        return None;
+                                    }
+                                    let profile = profile.clone();
+                                    Some(
+                                        Button::new(("palette-profile", index))
+                                            .label(format!("Profile · {profile}"))
+                                            .w_full()
+                                            .ghost()
+                                            .disabled(self.running)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select_profile(profile.clone());
+                                                cx.notify();
+                                            })),
+                                    )
+                                },
+                            ))
                             .children(self.projects.iter().enumerate().filter_map(
                                 |(index, project)| {
                                     let text = project.display().to_string();
@@ -2111,275 +2187,6 @@ impl ArtistApp {
                                 },
                             )),
                     ),
-            )
-    }
-
-    fn inspector(&self, cx: &Context<Self>) -> impl IntoElement {
-        let selected_session = self
-            .session_id
-            .as_deref()
-            .and_then(|id| self.sessions.iter().find(|session| session.id == id));
-        let selected_archived = selected_session.is_some_and(|session| session.archived);
-        let selected_pinned = selected_session.is_some_and(|session| session.pinned);
-        div()
-            .id("workspace-inspector")
-            .role(Role::Complementary)
-            .aria_label("Workspace inspector")
-            .w(px(384.))
-            .h_full()
-            .flex_none()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .child(
-                div()
-                    .flex_none()
-                    .flex()
-                    .gap_1()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .children(
-                        [
-                            (InspectorTab::Changes, "Changes"),
-                            (InspectorTab::Activity, "Timeline"),
-                            (InspectorTab::Agents, "Agents"),
-                            (InspectorTab::Session, "Session"),
-                        ]
-                        .into_iter()
-                        .map(|(tab, label)| {
-                            Button::new(("inspector-tab", tab as usize))
-                                .label(label)
-                                .small()
-                                .compact()
-                                .flex_1()
-                                .when(self.inspector_tab == tab, |button| button.primary())
-                                .when(self.inspector_tab != tab, |button| button.ghost())
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.inspector_tab = tab;
-                                    cx.notify();
-                                }))
-                        }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("inspector-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_3()
-                    .when(self.inspector_tab == InspectorTab::Changes, |view| {
-                        view.child(self.changes_view(cx))
-                    })
-                    .when(self.inspector_tab == InspectorTab::Activity, |view| {
-                        view.child(self.activity_view(cx))
-                    })
-                    .when(self.inspector_tab == InspectorTab::Agents, |view| {
-                        view.child(self.agents_view(cx))
-                    })
-                    .when(self.inspector_tab == InspectorTab::Session, |view| {
-                        view.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(detail_row(
-                                    "Project",
-                                    self.project.display().to_string(),
-                                    cx,
-                                ))
-                                .child(detail_row(
-                                    "Session",
-                                    selected_session
-                                        .map(|session| session.id.clone())
-                                        .unwrap_or_else(|| "New session".to_owned()),
-                                    cx,
-                                ))
-                                .child(detail_row(
-                                    "Parent",
-                                    selected_session
-                                        .and_then(|session| session.parent.clone())
-                                        .unwrap_or_else(|| "None".to_owned()),
-                                    cx,
-                                ))
-                                .child(detail_row("Profile", self.active_profile.clone(), cx))
-                                .child(detail_row(
-                                    "Provider",
-                                    self.run_provider
-                                        .clone()
-                                        .unwrap_or_else(|| "Not run yet".into()),
-                                    cx,
-                                ))
-                                .child(detail_row(
-                                    "Model",
-                                    self.run_model
-                                        .clone()
-                                        .unwrap_or_else(|| "Not run yet".into()),
-                                    cx,
-                                ))
-                                .child(detail_row(
-                                    "Tokens",
-                                    self.transcript.usage().total_tokens.to_string(),
-                                    cx,
-                                ))
-                                .child(self.routing_view(cx))
-                                .when(self.session_id.is_some(), |view| {
-                                    view.child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_2()
-                                            .child(
-                                                div().text_xs().font_bold().child("SESSION NAME"),
-                                            )
-                                            .child(Input::new(&self.session_name).w_full())
-                                            .child(
-                                                Button::new("rename-session")
-                                                    .label("Save name")
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.rename_session(cx);
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("pin-session")
-                                                    .label(if selected_pinned {
-                                                        "Unpin session"
-                                                    } else {
-                                                        "Pin session"
-                                                    })
-                                                    .ghost()
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.toggle_session_pinned();
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("fork-session")
-                                                    .label("Fork session")
-                                                    .ghost()
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.fork_session(window, cx);
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("archive-session")
-                                                    .label(if selected_archived {
-                                                        "Restore session"
-                                                    } else {
-                                                        "Archive session"
-                                                    })
-                                                    .ghost()
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.toggle_session_archived();
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
-                                                Button::new("delete-session")
-                                                    .label("Delete session…")
-                                                    .danger()
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.delete_session(window, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                }),
-                        )
-                    }),
-            )
-    }
-
-    fn routing_view(&self, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .pt_3()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(div().text_xs().font_bold().child("NEXT RUN ROUTING"))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Provider account"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .when(self.providers.is_empty(), |view| {
-                        view.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().danger)
-                                .child("No configured providers"),
-                        )
-                    })
-                    .children(self.providers.iter().enumerate().map(|(index, provider)| {
-                        let id = provider.id.clone();
-                        let selected = self.selected_provider.as_deref() == Some(id.as_str());
-                        Button::new(("provider-choice", index))
-                            .label(provider.name.clone())
-                            .when(selected, |button| button.primary())
-                            .when(!selected, |button| button.ghost())
-                            .disabled(self.running)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_provider(id.clone(), window, cx);
-                                cx.notify();
-                            }))
-                    })),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Model override"),
-            )
-            .child(
-                Input::new(&self.model_override)
-                    .disabled(self.running)
-                    .w_full(),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Profile"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(self.profiles.iter().enumerate().map(|(index, profile)| {
-                        let value = profile.clone();
-                        let selected = self.selected_profile == *profile;
-                        Button::new(("profile-choice", index))
-                            .label(profile.clone())
-                            .when(selected, |button| button.primary())
-                            .when(!selected, |button| button.ghost())
-                            .disabled(self.running)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.selected_profile = value.clone();
-                                cx.notify();
-                            }))
-                    })),
             )
     }
 
@@ -2503,363 +2310,6 @@ impl ArtistApp {
                     ),
             )
             .into_any_element()
-    }
-
-    fn changes_view(&self, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(div().text_sm().font_bold().child("Working tree"))
-                    .child(
-                        Button::new("refresh-changes")
-                            .label("Refresh")
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_changes();
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .when(self.changes.is_empty(), |view| {
-                view.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Working tree clean"),
-                )
-            })
-            .children(self.changes.iter().enumerate().map(|(index, change)| {
-                let path = change.path.clone();
-                let file_name = Path::new(&change.path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(&change.path)
-                    .to_owned();
-                let label = if self.session_changed_files.contains(&change.path) {
-                    format!("{}  {} · this session", change.status, file_name)
-                } else {
-                    format!("{}  {}", change.status, file_name)
-                };
-                Button::new(("change", index))
-                    .label(label)
-                    .tooltip(change.path.clone())
-                    .w_full()
-                    .justify_start()
-                    .when(
-                        self.selected_change.as_deref() == Some(path.as_str()),
-                        |button| button.primary(),
-                    )
-                    .when(
-                        self.selected_change.as_deref() != Some(path.as_str()),
-                        |button| button.ghost(),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_change(path.clone());
-                        cx.notify();
-                    }))
-            }))
-            .when_some(self.selected_change.as_ref(), |view, path| {
-                view.child(
-                    div()
-                        .mt_3()
-                        .pt_3()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(div().font_bold().text_sm().child(path.clone()))
-                        .child(
-                            div()
-                                .mt_2()
-                                .min_w_0()
-                                .font_family("monospace")
-                                .text_xs()
-                                .children(self.diff.lines().enumerate().map(|(index, line)| {
-                                    let addition =
-                                        line.starts_with('+') && !line.starts_with("+++");
-                                    let deletion =
-                                        line.starts_with('-') && !line.starts_with("---");
-                                    div()
-                                        .id(("diff-line", index))
-                                        .min_w_0()
-                                        .whitespace_normal()
-                                        .px_1()
-                                        .when(addition, |row| {
-                                            row.bg(cx.theme().success.opacity(0.12))
-                                                .text_color(cx.theme().success)
-                                        })
-                                        .when(deletion, |row| {
-                                            row.bg(cx.theme().danger.opacity(0.12))
-                                                .text_color(cx.theme().danger)
-                                        })
-                                        .when(line.starts_with("@@"), |row| {
-                                            row.text_color(cx.theme().primary)
-                                        })
-                                        .child(if line.is_empty() { " " } else { line }.to_owned())
-                                })),
-                        ),
-                )
-            })
-    }
-
-    fn activity_view(&self, cx: &Context<Self>) -> impl IntoElement {
-        let activities: Vec<_> = self
-            .session_events
-            .iter()
-            .rev()
-            .filter(|event| event.kind != "provider.context")
-            .take(200)
-            .map(|event| {
-                (
-                    event.kind.replace('.', " "),
-                    relative_time(event.ts),
-                    event.lineage.clone(),
-                )
-            })
-            .collect();
-        let todos = self
-            .session_events
-            .iter()
-            .filter_map(|event| match event.event() {
-                SessionEvent::TodoUpdated(update) => Some(update),
-                _ => None,
-            })
-            .next_back();
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .when_some(todos, |view, update| {
-                view.child(
-                    div()
-                        .mb_2()
-                        .p_3()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(div().font_bold().text_sm().child("Current plan"))
-                        .children(update.items.into_iter().map(|item| {
-                            div()
-                                .mt_1()
-                                .text_sm()
-                                .whitespace_normal()
-                                .text_color(match item.status {
-                                    artist_session::TodoStatus::Done => cx.theme().success,
-                                    artist_session::TodoStatus::InProgress => cx.theme().warning,
-                                    artist_session::TodoStatus::Pending => {
-                                        cx.theme().muted_foreground
-                                    }
-                                })
-                                .child(format!("{:?} · {}", item.status, item.text))
-                        })),
-                )
-            })
-            .when(activities.is_empty(), |view| {
-                view.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No activity yet"),
-                )
-            })
-            .children(
-                activities
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (activity, at, lineage))| {
-                        div()
-                            .id(("activity", index))
-                            .role(Role::ListItem)
-                            .p_2()
-                            .rounded_md()
-                            .bg(cx.theme().group_box)
-                            .flex()
-                            .justify_between()
-                            .gap_2()
-                            .child(
-                                div().min_w_0().flex().flex_col().child(activity).child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(lineage),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(at),
-                            )
-                    }),
-            )
-    }
-
-    fn agents_view(&self, cx: &Context<Self>) -> impl IntoElement {
-        let agents: Vec<_> = self
-            .transcript
-            .blocks()
-            .iter()
-            .filter_map(|block| match block {
-                Block::Subagent(agent) => Some(agent),
-                _ => None,
-            })
-            .collect();
-        let live_ids: HashSet<_> = agents.iter().map(|agent| agent.id.clone()).collect();
-        let mut historical: BTreeMap<String, (String, Option<String>, usize)> = BTreeMap::new();
-        for event in &self.session_events {
-            if event.lineage == artist_session::MAIN_LINEAGE {
-                continue;
-            }
-            let entry = historical
-                .entry(event.lineage.clone())
-                .or_insert_with(|| ("Delegated task".into(), None, 0));
-            entry.2 += 1;
-            match event.event() {
-                SessionEvent::DelegateStarted(started) => entry.0 = started.prompt,
-                SessionEvent::DelegateFinished(finished) => entry.1 = Some(finished.outcome),
-                _ => {}
-            }
-        }
-        historical.retain(|lineage, _| {
-            !live_ids
-                .iter()
-                .any(|id| lineage.ends_with(id) || lineage.contains(id.as_str()))
-        });
-        let historical: Vec<_> = historical.into_iter().collect();
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .when(agents.is_empty() && historical.is_empty(), |view| {
-                view.child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No delegated agents in this session"),
-                )
-            })
-            .children(agents.into_iter().enumerate().map(|(index, agent)| {
-                let outcome = agent.outcome.as_deref().unwrap_or("Running");
-                div()
-                    .id(("agent-detail", index))
-                    .role(Role::Article)
-                    .aria_label(format!("Agent {}: {outcome}", agent.role))
-                    .p_3()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .child(agent.role.clone())
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(outcome.to_owned()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .whitespace_normal()
-                            .child(agent.prompt.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} activity items", agent.blocks.len())),
-                    )
-                    .children(agent.blocks.iter().enumerate().map(|(block_index, block)| {
-                        Self::agent_block_summary(
-                            block,
-                            format!("agent-{index}-block-{block_index}"),
-                            cx,
-                        )
-                    }))
-            }))
-            .children(historical.into_iter().enumerate().map(
-                |(index, (lineage, (prompt, outcome, event_count)))| {
-                    let status = outcome.unwrap_or_else(|| "Running".into());
-                    div()
-                        .id(("historical-agent", index))
-                        .role(Role::Article)
-                        .aria_label(format!("Agent {lineage}: {status}"))
-                        .p_3()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div().flex().justify_between().gap_2().child(lineage).child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(status),
-                            ),
-                        )
-                        .child(div().text_sm().whitespace_normal().child(prompt))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{event_count} recorded events")),
-                        )
-                },
-            ))
-    }
-
-    fn agent_block_summary(block: &Block, id: String, cx: &App) -> AnyElement {
-        let base = div()
-            .id(id.clone())
-            .ml_2()
-            .pl_2()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .text_xs()
-            .whitespace_normal();
-        match block {
-            Block::Message { role, source, .. } => base
-                .child(format!("{:?}: {}", role, excerpt(source, 180)))
-                .into_any_element(),
-            Block::Reasoning { lines } => base
-                .text_color(cx.theme().muted_foreground)
-                .child(format!("Reasoning · {} lines", lines.len()))
-                .into_any_element(),
-            Block::Tool(tool) => base
-                .child(format!("{:?} · {}", tool.status, tool.name))
-                .into_any_element(),
-            Block::Notice(notice) => base
-                .text_color(cx.theme().warning)
-                .child(format!("{} · {}", notice.title, notice.detail))
-                .into_any_element(),
-            Block::Subagent(agent) => base
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(format!(
-                    "Agent {} · {}",
-                    agent.role,
-                    agent.outcome.as_deref().unwrap_or("running")
-                ))
-                .child(excerpt(&agent.prompt, 180))
-                .children(agent.blocks.iter().enumerate().map(|(index, block)| {
-                    Self::agent_block_summary(block, format!("{id}-nested-{index}"), cx)
-                }))
-                .into_any_element(),
-        }
     }
 
     fn block_view(&self, block: &Block, index: usize, cx: &Context<Self>) -> AnyElement {
@@ -3162,6 +2612,75 @@ impl ArtistApp {
             }))
     }
 
+    fn stage_accessibility_nodes(
+        &self,
+        object: &FocusableObject,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        self.stage_accessibility
+            .get(&(
+                object.root_session.clone(),
+                object.lineage.clone(),
+                object.durable_id.clone(),
+            ))
+            .into_iter()
+            .flat_map(|tree| {
+                tree.nodes.iter().enumerate().map(|(index, node)| {
+                    let root_session = object.root_session.clone();
+                    let lineage = object.lineage.clone();
+                    let stage = object.durable_id.clone();
+                    let surface = tree.surface.clone();
+                    let binding = node.binding.clone();
+                    let action = node.actions.first().cloned();
+                    let mut label = node.value.as_ref().map_or_else(
+                        || node.name.clone(),
+                        |value| format!("{}: {value}", node.name),
+                    );
+                    let mut states = Vec::new();
+                    for (set, name) in [
+                        (node.state.focused, "focused"),
+                        (node.state.disabled, "disabled"),
+                        (node.state.checked, "checked"),
+                        (node.state.expanded, "expanded"),
+                        (node.state.selected, "selected"),
+                        (node.state.offscreen, "offscreen"),
+                    ] {
+                        if set {
+                            states.push(name);
+                        }
+                    }
+                    if !states.is_empty() {
+                        label.push_str(&format!(" ({})", states.join(", ")));
+                    }
+                    let action_label = label.clone();
+                    div()
+                        .id(format!("stage-ax-{}-{index}", node.binding))
+                        .role(stage_accessibility_role(&node.role))
+                        .aria_label(label)
+                        .absolute()
+                        .w(px(1.))
+                        .h(px(1.))
+                        .overflow_hidden()
+                        .when(!node.state.disabled, |view| {
+                            view.on_click(cx.listener(move |this, _, _, cx| {
+                                this.activate_stage_accessibility(
+                                    root_session.clone(),
+                                    lineage.clone(),
+                                    stage.clone(),
+                                    surface.clone(),
+                                    binding.clone(),
+                                    action_label.clone(),
+                                    action.clone(),
+                                );
+                                cx.notify();
+                            }))
+                        })
+                        .into_any_element()
+                })
+            })
+            .collect()
+    }
+
     fn focused_object_view(&self, object: &FocusableObject, cx: &Context<Self>) -> AnyElement {
         #[cfg(feature = "embedded-canvas")]
         if object.kind == artist_ui_core::ObjectKind::Canvas
@@ -3201,11 +2720,58 @@ impl ArtistApp {
                 )
                 .into_any_element();
         }
+        #[cfg(target_os = "linux")]
+        if object.kind == artist_ui_core::ObjectKind::Stage
+            && let Some(stage_surface) = self.stage_surfaces.current(
+                &object.root_session,
+                &object.lineage,
+                &object.durable_id,
+            )
+        {
+            let root_session = object.root_session.clone();
+            let lineage = object.lineage.clone();
+            let stage = object.durable_id.clone();
+            return div()
+                .id("focused-stage")
+                .role(Role::Region)
+                .aria_label(format!("Stage {}", object.title))
+                .relative()
+                .size_full()
+                .min_h(px(480.))
+                .overflow_hidden()
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().group_box)
+                .child(
+                    gpui::surface(stage_surface)
+                        .object_fit(gpui::ObjectFit::Contain)
+                        .size_full(),
+                )
+                .children(self.stage_accessibility_nodes(object, cx))
+                .child(
+                    div().absolute().top_3().right_3().child(
+                        Button::new("open-stage-viewer")
+                            .label("Open standalone viewer")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_stage_viewer(
+                                    root_session.clone(),
+                                    lineage.clone(),
+                                    stage.clone(),
+                                );
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .into_any_element();
+        }
         let kind = object_kind_label(object.kind);
         let detail = object.detail.as_deref().unwrap_or(match object.kind {
-            artist_ui_core::ObjectKind::Agent => "This agent's causal transcript is recorded in the parent session.",
+            artist_ui_core::ObjectKind::Agent => {
+                "This agent's causal transcript is recorded in the parent session."
+            }
             artist_ui_core::ObjectKind::Task => "No task output has been recorded yet.",
-            artist_ui_core::ObjectKind::Stage => "The stage is available as a standalone viewer until embedded DMA-BUF support is active.",
+            artist_ui_core::ObjectKind::Stage => "No live stage frame has been presented yet.",
             artist_ui_core::ObjectKind::Canvas => "The canvas endpoint is not currently connected.",
             artist_ui_core::ObjectKind::Change => "No inline diff was recorded.",
             _ => "No structured detail was recorded.",
@@ -3265,6 +2831,24 @@ impl ArtistApp {
                     .whitespace_normal()
                     .child(detail.to_owned()),
             )
+            .children(self.stage_accessibility_nodes(object, cx))
+            .when(object.kind == artist_ui_core::ObjectKind::Stage, |view| {
+                let root_session = object.root_session.clone();
+                let lineage = object.lineage.clone();
+                let stage = object.durable_id.clone();
+                view.child(
+                    Button::new("open-stage-viewer")
+                        .label("Open standalone viewer")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_stage_viewer(
+                                root_session.clone(),
+                                lineage.clone(),
+                                stage.clone(),
+                            );
+                            cx.notify();
+                        })),
+                )
+            })
             .into_any_element()
     }
 }
@@ -3594,20 +3178,6 @@ impl Render for ArtistApp {
                                             )
                                             .child(Input::new(&self.composer).w_full()),
                                     )
-                                    .when(!self.queued_prompts.is_empty(), |view| {
-                                        view.child(
-                                            Button::new("clear-queue")
-                                                .label(format!(
-                                                    "{} queued · Clear",
-                                                    self.queued_prompts.len()
-                                                ))
-                                                .ghost()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.clear_queue();
-                                                    cx.notify();
-                                                })),
-                                        )
-                                    })
                                     .child(
                                         Button::new("send")
                                             .label(if self.running { "Steer" } else { "Send" })
@@ -3656,204 +3226,8 @@ impl Render for ArtistApp {
 
 enum HarnessMessage {
     Event(PromptEvent),
-    Session(String),
-    Progress(String),
     Question(Question),
     Done(Result<String, String>),
-}
-
-enum RunControl {
-    Steer(String),
-    Answer(Answer),
-    Stop,
-}
-
-fn run_harness(
-    input: String,
-    session_id: Option<String>,
-    project: PathBuf,
-    provider: Option<String>,
-    model: Option<String>,
-    profile: Option<String>,
-    cancellation: Arc<AtomicBool>,
-    control_receive: mpsc::Receiver<RunControl>,
-    send: mpsc::Sender<HarnessMessage>,
-) {
-    let executable = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("artist")))
-        .filter(|path| path.is_file())
-        .unwrap_or_else(|| "artist".into());
-    let mut command = Command::new(executable);
-    command.current_dir(project);
-    command.arg("-p").arg(input);
-    if let Some(id) = session_id {
-        command.arg("--resume").arg(id);
-    }
-    if let Some(provider) = provider {
-        command.arg("--provider").arg(provider);
-    }
-    if let Some(model) = model {
-        command.arg("--model").arg(model);
-    }
-    if let Some(profile) = profile {
-        command.arg("--profile").arg(profile);
-    }
-    command
-        .env("ARTIST_EMIT_SESSION_ID", "1")
-        .env("ARTIST_EVENT_STREAM", "jsonl")
-        .env("ARTIST_CONTROL_STREAM", "jsonl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = send.send(HarnessMessage::Done(Err(format!("start harness: {error}"))));
-            return;
-        }
-    };
-    let (pipe_send, pipe_receive) = mpsc::channel();
-    let stderr = child.stderr.take();
-    let stderr_send = pipe_send.clone();
-    let stderr_thread = std::thread::spawn(move || {
-        let Some(stderr) = stderr else { return };
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let _ = stderr_send.send(PipeMessage::Stderr(line));
-        }
-    });
-    let stdout = child.stdout.take();
-    let stdout_thread = std::thread::spawn(move || {
-        let Some(mut stdout) = stdout else { return };
-        let mut buffer = [0_u8; 4096];
-        loop {
-            match stdout.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => {
-                    let text = String::from_utf8_lossy(&buffer[..count]).into_owned();
-                    let _ = pipe_send.send(PipeMessage::Stdout(text));
-                }
-                Err(error) => {
-                    let _ = pipe_send.send(PipeMessage::ReadError(error.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-
-    let mut protocol_ready = false;
-    let mut completion_observed = false;
-    let mut last_protocol_event = None;
-    let mut fallback_output = String::new();
-    let mut last_stdout = None;
-    let mut stop_sent = None;
-    let result = loop {
-        if cancellation.load(Ordering::Acquire) {
-            let _ = child.kill();
-            break Ok("Stopped".to_owned());
-        }
-        while let Ok(control) = control_receive.try_recv() {
-            let payload = match control {
-                RunControl::Steer(message) => serde_json::json!({
-                    "type": "steer",
-                    "message": message,
-                }),
-                RunControl::Answer(answer) => serde_json::json!({
-                    "type": "answer",
-                    "answer": answer,
-                }),
-                RunControl::Stop => {
-                    stop_sent = Some(Instant::now());
-                    serde_json::json!({ "type": "stop" })
-                }
-            };
-            let Some(stdin) = child.stdin.as_mut() else {
-                break;
-            };
-            if serde_json::to_writer(&mut *stdin, &payload).is_err()
-                || stdin.write_all(b"\n").is_err()
-                || stdin.flush().is_err()
-            {
-                break;
-            }
-        }
-        if stop_sent.is_some_and(|sent| sent.elapsed() >= Duration::from_secs(2)) {
-            let _ = child.kill();
-            break Ok("Stopped".to_owned());
-        }
-        match pipe_receive.recv_timeout(Duration::from_millis(50)) {
-            Ok(PipeMessage::Stderr(line)) => {
-                if line == "ARTIST_EVENT_STREAM_READY=1" {
-                    protocol_ready = true;
-                } else if line == "ARTIST_EVENT_STREAM_DONE=1" {
-                    let _ = child.kill();
-                    break Ok("Ready".to_owned());
-                } else if let Some(id) = line.strip_prefix("ARTIST_SESSION_ID=") {
-                    let _ = send.send(HarnessMessage::Session(id.to_owned()));
-                } else if let Some(question) = line.strip_prefix("ARTIST_QUESTION=") {
-                    if let Ok(question) = serde_json::from_str::<Question>(question) {
-                        let _ = send.send(HarnessMessage::Question(question));
-                    }
-                } else if let Ok(event) = serde_json::from_str::<PromptEvent>(&line) {
-                    protocol_ready = true;
-                    last_protocol_event = Some(Instant::now());
-                    match &event {
-                        PromptEvent::CompletionUsage { .. } => completion_observed = true,
-                        PromptEvent::ToolCall { .. } | PromptEvent::ToolExecutionStart { .. } => {
-                            completion_observed = false;
-                        }
-                        _ => {}
-                    }
-                    let _ = send.send(HarnessMessage::Event(event));
-                } else if !line.trim().is_empty() {
-                    let _ = send.send(HarnessMessage::Progress(line));
-                }
-            }
-            Ok(PipeMessage::Stdout(text)) => {
-                if !text.trim().is_empty() {
-                    fallback_output.push_str(&text);
-                    last_stdout = Some(Instant::now());
-                }
-            }
-            Ok(PipeMessage::ReadError(error)) => break Err(format!("read response: {error}")),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-
-        if !protocol_ready
-            && !fallback_output.trim().is_empty()
-            && last_stdout.is_some_and(|at| at.elapsed() >= Duration::from_millis(500))
-        {
-            let response = fallback_output.trim().to_owned();
-            let _ = send.send(HarnessMessage::Event(PromptEvent::TextDelta(response)));
-            let _ = child.kill();
-            break Ok("Ready · compatibility mode".to_owned());
-        }
-        if protocol_ready
-            && completion_observed
-            && last_protocol_event.is_some_and(|at| at.elapsed() >= Duration::from_millis(750))
-        {
-            let _ = child.kill();
-            break Ok("Ready".to_owned());
-        }
-
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => break Ok("Ready".to_owned()),
-            Ok(Some(status)) => break Err(format!("harness exited with {status}")),
-            Ok(None) => {}
-            Err(error) => break Err(format!("wait for harness: {error}")),
-        }
-    };
-    let _ = child.wait();
-    let _ = stderr_thread.join();
-    let _ = stdout_thread.join();
-    let _ = send.send(HarnessMessage::Done(result));
-}
-
-enum PipeMessage {
-    Stderr(String),
-    Stdout(String),
-    ReadError(String),
 }
 
 fn workspace_rows(
@@ -3901,6 +3275,25 @@ fn object_kind_label(kind: artist_ui_core::ObjectKind) -> &'static str {
         artist_ui_core::ObjectKind::Tool => "Tool",
         artist_ui_core::ObjectKind::Change => "Change",
         artist_ui_core::ObjectKind::Ask => "Ask",
+    }
+}
+
+fn stage_accessibility_role(role: &serde_json::Value) -> Role {
+    let name = role
+        .as_str()
+        .or_else(|| {
+            role.as_object()
+                .and_then(|object| object.keys().next().map(String::as_str))
+        })
+        .unwrap_or("region");
+    match name {
+        "button" | "radiobutton" | "menuitem" | "tab" => Role::Button,
+        "link" => Role::Link,
+        "checkbox" => Role::CheckBox,
+        "textbox" | "combobox" => Role::TextInput,
+        "image" => Role::Image,
+        "heading" => Role::Heading,
+        _ => Role::Region,
     }
 }
 
@@ -4160,21 +3553,6 @@ fn git_diff(project: &Path, path: &str) -> String {
     } else {
         diff
     }
-}
-
-fn detail_row(label: &str, value: String, cx: &App) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_xs()
-                .font_bold()
-                .text_color(cx.theme().muted_foreground)
-                .child(label.to_owned()),
-        )
-        .child(div().min_w_0().whitespace_normal().text_sm().child(value))
 }
 
 fn turn_ranges(blocks: &[Block]) -> Vec<(usize, usize)> {

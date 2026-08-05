@@ -72,6 +72,17 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
+    let raw: Vec<String> = std::env::args().collect();
+    if raw
+        .get(1)
+        .is_some_and(|arg| arg == artist_canvas::window::WINDOW_SUBCOMMAND)
+    {
+        let url = std::env::var(artist_canvas::window::URL_VAR)
+            .context("canvas window needs ARTIST_CANVAS_URL")?;
+        let title = raw.get(2).map(String::as_str).unwrap_or("Canvas");
+        return artist_canvas::window_ui::run(&url, title);
+    }
+
     let cli = Cli::parse();
     let (common, http) = match cli.command {
         Command::Serve(common) => (common, None),
