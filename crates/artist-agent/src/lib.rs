@@ -16,6 +16,7 @@ mod fallback;
 pub mod gemini_cache;
 pub mod handoff;
 mod identity;
+mod lifecycle;
 pub mod mcp;
 pub mod memory;
 mod message_tools;
@@ -31,6 +32,7 @@ mod ttsr;
 #[cfg(test)]
 mod ttsr_tests;
 
+pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use resources::AvailableSkill;
 mod statefulness;
 mod steering;
@@ -182,6 +184,8 @@ pub struct SessionHandles {
     pub effective_context_window: Option<u64>,
     /// Request OpenAI priority processing for this session.
     pub fast_mode: bool,
+    /// Non-display lifecycle notifications remain live for background delegates.
+    pub lifecycle: LifecycleEmitter,
     pub cancel: CancellationToken,
     /// Blob store for tool-result image payloads. `None` for inert handles,
     /// where nothing is recorded and so nothing needs storing.
@@ -247,6 +251,7 @@ impl Default for SessionHandles {
             // Inert handles have no user attached, so there is nobody to ask
             // and the tool is correctly absent.
             ask: None,
+            lifecycle: LifecycleEmitter::default(),
             cancel: CancellationToken::new(),
             attachments: None,
             providers: llm_provider::ProviderSet::default(),
@@ -1320,10 +1325,15 @@ where
                 Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                     tool_call,
                     internal_call_id,
-                }) => emit!(PromptEvent::ToolExecutionStart {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                }),
+                }) => {
+                    handles.lifecycle.emit(LifecycleEvent::ToolStarted(format!(
+                        "main:{internal_call_id}"
+                    )));
+                    emit!(PromptEvent::ToolExecutionStart {
+                        id: internal_call_id,
+                        name: tool_call.function.name,
+                    });
+                }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
                     // Recorded per call, not per run: fallback can move a run
                     // onto a different candidate mid-flight, and caches are
@@ -1364,6 +1374,9 @@ where
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
+                    handles.lifecycle.emit(LifecycleEvent::ToolFinished(format!(
+                        "main:{internal_call_id}"
+                    )));
                     on_event(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,

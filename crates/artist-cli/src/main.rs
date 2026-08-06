@@ -9,6 +9,7 @@ mod command_ui;
 mod compaction;
 mod custom_commands;
 mod extension_control;
+mod herdr;
 mod input_atoms;
 mod input_border;
 mod input_images;
@@ -25,6 +26,7 @@ mod startup_splash;
 mod status_bar;
 mod store;
 mod subagent_ui;
+mod termination;
 mod test_provider;
 mod text_wrap;
 mod theme;
@@ -204,6 +206,7 @@ impl EmbeddedRuntime {
         events: tokio::sync::mpsc::UnboundedSender<EmbeddedEvent>,
         controls: &mut tokio::sync::mpsc::UnboundedReceiver<FrontendControl>,
     ) -> Result<()> {
+        let herdr = herdr::Lifecycle::default();
         execute_prompt(
             &mut self.store,
             &self.provider_path,
@@ -219,6 +222,7 @@ impl EmbeddedRuntime {
             Some(&self.resources),
             Some(&events),
             Some(controls),
+            &herdr,
         )
         .await
     }
@@ -227,13 +231,19 @@ use store::{ProviderStore, config_path};
 
 #[tokio::main]
 pub async fn main() {
-    if let Err(error) = run().await {
+    let herdr_runtime = herdr::Runtime::detect();
+    let result = tokio::select! {
+        result = run(herdr_runtime.lifecycle()) => result,
+        _ = termination::requested() => Err(anyhow::anyhow!("interrupted")),
+    };
+    herdr_runtime.shutdown().await;
+    if let Err(error) = result {
         eprintln!("Error: {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
+async fn run(herdr: herdr::Lifecycle) -> Result<()> {
     // Dispatched before clap, and before anything touches the terminal: this
     // process exists only to own a webview's event loop, and it is spawned by
     // artist itself rather than typed by a user.
@@ -255,6 +265,9 @@ async fn run() -> Result<()> {
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
+    if cli.command.is_none() {
+        enter_resume_project(&SessionStore::new(config_root), cli.resume.as_deref())?;
+    }
 
     if let Some(prompt) = cli.print_prompt {
         if cli.command.is_some() {
@@ -281,6 +294,7 @@ async fn run() -> Result<()> {
             None,
             None,
             None,
+            &herdr,
         )
         .await;
         if std::env::var("ARTIST_EVENT_STREAM").as_deref() == Ok("jsonl") {
@@ -466,6 +480,7 @@ async fn run() -> Result<()> {
                     canvas: Some(&canvas),
                     canvas_control: &canvas_control,
                     tool_registry: &tool_registry,
+                    herdr: &herdr,
                 },
                 resumed,
                 cli.prompt,
@@ -490,6 +505,25 @@ fn enter_positional_project(cli: &mut Cli) -> Result<()> {
     Ok(())
 }
 
+fn enter_resume_project(sessions: &SessionStore, resume: Option<&str>) -> Result<()> {
+    let Some(id) = resume.filter(|id| !id.is_empty()) else {
+        return Ok(());
+    };
+    let session = sessions.find(id)?;
+    if !session.project.is_dir() {
+        bail!(
+            "session '{id}' project no longer exists: {}",
+            session.project.display()
+        );
+    }
+    std::env::set_current_dir(&session.project).with_context(|| {
+        format!(
+            "restore project directory for session '{id}': {}",
+            session.project.display()
+        )
+    })
+}
+
 fn load_resumed(
     sessions: &SessionStore,
     project: &std::path::Path,
@@ -498,18 +532,12 @@ fn load_resumed(
     let Some(requested) = resume else {
         return Ok(None);
     };
+    if !requested.is_empty() {
+        return sessions.open(requested).map(Some);
+    }
     let mut available = sessions.list_project(project)?;
     available.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
-    // An unknown id shouldn't abort the launch — a typo or stale id falls back
-    // to the interactive picker instead of killing the process.
-    let requested_missing =
-        !requested.is_empty() && !available.iter().any(|session| session.id == requested);
-    if requested_missing {
-        eprintln!(
-            "session '{requested}' was not found in this project — pick one to resume instead"
-        );
-    }
-    let id = if requested.is_empty() || requested_missing {
+    let id = {
         if available.is_empty() {
             bail!("no sessions found for {}", project.display());
         }
@@ -535,8 +563,6 @@ fn load_resumed(
         available[prompt::select_paged("Session to resume", &items, 0, 10)?]
             .id
             .clone()
-    } else {
-        requested.to_owned()
     };
     Ok(Some(sessions.open(&id)?))
 }
@@ -556,6 +582,7 @@ async fn execute_prompt(
     embedded_resources: Option<&EmbeddedResources>,
     embedded_events: Option<&tokio::sync::mpsc::UnboundedSender<EmbeddedEvent>>,
     mut embedded_controls: Option<&mut tokio::sync::mpsc::UnboundedReceiver<FrontendControl>>,
+    herdr: &herdr::Lifecycle,
 ) -> Result<()> {
     let selected = match provider_override {
         Some(reference) => store
@@ -600,6 +627,8 @@ async fn execute_prompt(
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
+    herdr.report_session(&active.session.id);
+    let turn_lifecycle = herdr.start_turn();
     let target_lineage = lineage_override.unwrap_or(artist_session::MAIN_LINEAGE);
     anyhow::ensure!(
         target_lineage == artist_session::MAIN_LINEAGE
@@ -727,6 +756,7 @@ async fn execute_prompt(
         // interactive without borrowing the terminal. Plain `artist -p`
         // remains non-interactive and therefore does not advertise `ask`.
         ask: ask.clone(),
+        lifecycle: turn_lifecycle.emitter(),
         cancel: cancel.clone(),
         attachments: Some(active.attachments.clone()),
         providers: llm_provider::ProviderSet::new(store.providers.clone()),
@@ -913,6 +943,10 @@ async fn execute_prompt(
         }
     };
     extension_control.set_steering(None);
+    turn_lifecycle.finish(matches!(
+        outcome.as_ref().ok(),
+        Some(artist_agent::RunOutcome::Cancelled)
+    ));
     extensions.update_context(|context| context.agent_state = serde_json::json!({"state":"idle"}));
     let _ = extensions.publish(artist_extensions::Event {
         kind: "state_transition".into(),
@@ -939,6 +973,7 @@ async fn execute_prompt(
             embedded_resources,
             embedded_events,
             embedded_controls.as_deref_mut(),
+            herdr,
         ))
         .await?;
     }
@@ -2144,5 +2179,23 @@ mod frontend_control_tests {
 
         let stop: FrontendControl = serde_json::from_str(r#"{"type":"stop"}"#).unwrap();
         assert!(matches!(stop, FrontendControl::Stop));
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_unknown_resume_is_a_clear_error() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let sessions = SessionStore::new(root.path());
+        let error = load_resumed(&sessions, &project, Some("missing-session"))
+            .err()
+            .expect("unknown resume should fail");
+        assert!(error.to_string().contains("missing-session"));
+        assert!(error.to_string().contains("not found"));
     }
 }

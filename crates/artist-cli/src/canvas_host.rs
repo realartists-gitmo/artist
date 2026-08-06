@@ -244,14 +244,20 @@ impl CanvasControl {
 mod tests {
     use super::*;
 
-    fn echo(name: &str) -> rig_core::tool::PortableDynamicTool {
-        rig_core::tool::PortableDynamicTool::new(
+    fn echo(name: &str) -> artist_tool_api::ArtistDynamicTool {
+        let portable = rig_core::tool::PortableDynamicTool::new(
             name,
             "echo",
             serde_json::json!({"type": "object"}),
             |arguments: serde_json::Value| {
                 Box::pin(async move { Ok(rig_core::tool::ToolOutput::text(arguments.to_string())) })
             },
+        );
+        artist_tool_api::ArtistDynamicTool::from_portable(
+            portable,
+            artist_tool_api::text_output_schema(name, "Echoed text."),
+            artist_tool_api::ToolCategory::Administration,
+            artist_tool_api::ArtistToolAnnotations::read_only(),
         )
     }
 

@@ -25,11 +25,17 @@ Later, a Codex-app-like desktop app developed in native-Rust via **GPUI** will b
 - [x] Skills
 - [x] Extensions, with customizable tools
 - [x] AGENTS.md, and .agents/skills protocol support
-- [ ] First class Herdr support
+- [x] First class Herdr support
 - [ ] ACP support
 - [ ] Customizable system prompt
 - [ ] Customizable TUI
 - [ ] GPUI-based desktop app.
+
+## Herdr integration
+
+Artist automatically reports its session and lifecycle when launched in a Herdr-managed pane (`HERDR_ENV=1`). It remains a silent no-op elsewhere. Inside Herdr it reports prompt-ready, working, authentication-blocked, cancellation, background-subagent, and shutdown transitions without putting Herdr on the model or rendering hot paths.
+
+`HERDR_PANE_ID` selects the pane and `HERDR_BIN_PATH` overrides the `herdr` executable. Reports are ordered, coalesced, time-bounded, retried after transient failures, and released on exit. Artist's persisted session IDs can be resumed with `artist --resume <id>`; resume also restores the session's project directory.
 
 ## Contributing
 Bug fix PRs are welcome. For new features, create an issue discussion first.

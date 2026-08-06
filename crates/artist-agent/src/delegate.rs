@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    PromptEvent, SessionHandles,
+    LifecycleEvent, PromptEvent, SessionHandles,
     capture::{CaptureHook, ToolMeta},
     delegate_jobs::DelegateJobs,
     resources::Resources,
@@ -157,6 +157,26 @@ struct DelegateRun {
     permit: PermitSlot,
 }
 
+struct SubagentActivityGuard {
+    lifecycle: crate::LifecycleEmitter,
+    id: String,
+}
+
+impl Drop for SubagentActivityGuard {
+    fn drop(&mut self) {
+        self.lifecycle
+            .emit(LifecycleEvent::SubagentFinished(self.id.clone()));
+    }
+}
+
+fn start_background_activity(
+    lifecycle: crate::LifecycleEmitter,
+    id: String,
+) -> SubagentActivityGuard {
+    lifecycle.emit(LifecycleEvent::SubagentStarted(id.clone()));
+    SubagentActivityGuard { lifecycle, id }
+}
+
 impl DelegateRun {
     fn new(task_id: Option<String>, permit: PermitSlot) -> Self {
         let background = task_id.is_some();
@@ -203,6 +223,17 @@ impl Delegate {
     }
 
     fn emit_child(&self, id: &str, event: PromptEvent) {
+        match &event {
+            PromptEvent::ToolExecutionStart { id: tool_id, .. } => self
+                .handles
+                .lifecycle
+                .emit(LifecycleEvent::ToolStarted(format!("{id}:{tool_id}"))),
+            PromptEvent::ToolResult { id: tool_id, .. } => self
+                .handles
+                .lifecycle
+                .emit(LifecycleEvent::ToolFinished(format!("{id}:{tool_id}"))),
+            _ => {}
+        }
         self.emit(PromptEvent::SubagentEvent {
             id: id.to_owned(),
             event: Box::new(event),
@@ -210,6 +241,9 @@ impl Delegate {
     }
 
     fn finish_child(&self, id: &str, outcome: &str) {
+        self.handles
+            .lifecycle
+            .emit(LifecycleEvent::SubagentFinished(id.to_owned()));
         self.emit(PromptEvent::SubagentFinished {
             id: id.to_owned(),
             outcome: outcome.to_owned(),
@@ -316,16 +350,23 @@ impl Delegate {
                 let task_role = role.clone();
                 Ok(self
                     .jobs
-                    .start(prompt, role, move |task_id| async move {
-                        delegate
-                            .run_agent(
-                                task_prompt,
-                                &task_role,
-                                args.fork.unwrap_or(false),
-                                Some(task_id),
-                            )
-                            .await
-                            .map_err(|error| error.to_string())
+                    .start(prompt, role, move |task_id| {
+                        let activity = start_background_activity(
+                            delegate.handles.lifecycle.clone(),
+                            task_id.clone(),
+                        );
+                        async move {
+                            let _activity = activity;
+                            delegate
+                                .run_agent(
+                                    task_prompt,
+                                    &task_role,
+                                    args.fork.unwrap_or(false),
+                                    Some(task_id),
+                                )
+                                .await
+                                .map_err(|error| error.to_string())
+                        }
                     })
                     .await)
             }
@@ -589,6 +630,11 @@ impl Delegate {
             .tools
             .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        if !run.background {
+            self.handles
+                .lifecycle
+                .emit(LifecycleEvent::SubagentStarted(actor.clone()));
+        }
         self.emit(PromptEvent::SubagentStarted {
             id: actor.clone(),
             role: role.name.clone(),
@@ -1081,7 +1127,9 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::{DelegateRun, PermitSlot, delegate_context_window};
+    use super::{DelegateRun, PermitSlot, delegate_context_window, start_background_activity};
+    use crate::{LifecycleEmitter, LifecycleEvent};
+    use std::sync::{Arc, Mutex};
 
     /// A seat from a pool of this test's own, so identity allocation is tested
     /// without also standing up the project-wide concurrency limit.
@@ -1142,5 +1190,22 @@ mod identity_tests {
 
         held.yield_seat().await;
         assert!(contender.try_acquire("other-process").unwrap().is_some());
+    }
+
+    #[test]
+    fn background_activity_spans_future_polling_and_drop() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let lifecycle = LifecycleEmitter::new(move |event| captured.lock().unwrap().push(event));
+        let guard = start_background_activity(lifecycle, "a-task".into());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![LifecycleEvent::SubagentStarted("a-task".into())]
+        );
+        drop(guard);
+        assert_eq!(
+            events.lock().unwrap().last(),
+            Some(&LifecycleEvent::SubagentFinished("a-task".into()))
+        );
     }
 }

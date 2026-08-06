@@ -24,6 +24,7 @@ artist-agent = { path = "../artist-agent" }
 artist-canvas = { path = "../artist-canvas" }
 artist-computer = { path = "../artist-computer" }
 artist-extensions = { path = "../artist-extensions" }
+artist-herdr = { path = "../artist-herdr" }
 artist-rules = { path = "../artist-rules", features = ["wasm"] }
 artist-memory = { path = "../artist-memory" }
 artist-session = { path = "../artist-session" }
@@ -45,13 +46,15 @@ serde_json = "1"
 serde_yaml = "0.9"
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 textwrap = { version = "0.16", features = ["unicode-linebreak", "unicode-width"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 rig-core = "0.41.0"
 toml = "1.1"
 unicode-width = "0.2"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+artist-tool-api = { path = "../artist-tool-api" }
 proptest = "1"
 tempfile = "3"

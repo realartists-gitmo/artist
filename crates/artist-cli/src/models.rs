@@ -2,7 +2,7 @@ use crate::prompt;
 use anyhow::{Context, Result, bail};
 use llm_provider::{ProviderKind, SavedProvider};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::time::Duration;
 
 const CODEX_PROTOCOL_VERSION: &str = "0.144.1";
@@ -38,7 +38,10 @@ pub(crate) struct SelectableModel {
     pub supported_reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     pub context_window: Option<u64>,
-    #[serde(default = "default_context_percent")]
+    #[serde(
+        default = "default_context_percent",
+        deserialize_with = "deserialize_context_percent"
+    )]
     pub effective_context_window_percent: u64,
 }
 
@@ -50,6 +53,13 @@ pub(crate) struct ReasoningLevel {
 
 fn default_context_percent() -> u64 {
     100
+}
+
+fn deserialize_context_percent<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_else(default_context_percent))
 }
 
 impl SelectableModel {
@@ -291,6 +301,11 @@ mod tests {
         assert_eq!(response.models[0].effective_context_window(), Some(800));
         let response: ModelsResponse = serde_json::from_str(
             r#"{"models":[{"slug":"gpt","display_name":"GPT","context_window":1000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(response.models[0].effective_context_window(), Some(1000));
+        let response: ModelsResponse = serde_json::from_str(
+            r#"{"models":[{"slug":"gpt","display_name":"GPT","context_window":1000,"effective_context_window_percent":null}]}"#,
         )
         .unwrap();
         assert_eq!(response.models[0].effective_context_window(), Some(1000));

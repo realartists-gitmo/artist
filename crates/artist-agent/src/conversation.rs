@@ -4,10 +4,13 @@
 //! Artist carries Rig's committed messages into the retry and this adapter
 //! appends that accepted prefix together with the eventual successful delta.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use rig_core::OneOrMany;
-use rig_core::completion::message::{AssistantContent, Message, ReasoningContent};
+use rig_core::completion::message::{AssistantContent, Message, ReasoningContent, UserContent};
 use rig_core::memory::{ConversationMemory, MemoryError};
 
 const USER_INTERRUPTION: &str =
@@ -16,15 +19,79 @@ const USER_INTERRUPTION: &str =
 pub(crate) async fn retain_interrupted_turn(
     memory: &dyn ConversationMemory,
     conversation_id: &str,
-    mut turn_messages: Vec<Message>,
+    turn_messages: Vec<Message>,
     assistant_text: String,
     interruption: &str,
 ) -> Result<(), MemoryError> {
+    let mut turn_messages = sanitize_interrupted_history(turn_messages);
     if !assistant_text.is_empty() {
         turn_messages.push(Message::assistant(assistant_text));
     }
     turn_messages.push(Message::user(interruption));
     memory.append(conversation_id, turn_messages).await
+}
+
+/// Provider APIs reject replayed function calls without corresponding outputs.
+/// Interrupted streams can leave either half orphaned, so retain only complete,
+/// correctly ordered tool round trips while preserving all other content.
+fn sanitize_interrupted_history(messages: Vec<Message>) -> Vec<Message> {
+    let mut calls = HashMap::<String, usize>::new();
+    let mut results = HashMap::<String, usize>::new();
+    for (position, message) in messages.iter().enumerate() {
+        match message {
+            Message::Assistant { content, .. } => {
+                for item in content.iter() {
+                    if let AssistantContent::ToolCall(call) = item {
+                        calls
+                            .entry(call.call_id.as_ref().unwrap_or(&call.id).clone())
+                            .or_insert(position);
+                    }
+                }
+            }
+            Message::User { content } => {
+                for item in content.iter() {
+                    if let UserContent::ToolResult(result) = item {
+                        results
+                            .entry(result.call_id.as_ref().unwrap_or(&result.id).clone())
+                            .or_insert(position);
+                    }
+                }
+            }
+            Message::System { .. } => {}
+        }
+    }
+    let complete = calls
+        .into_iter()
+        .filter_map(|(id, call_position)| {
+            results
+                .get(&id)
+                .is_some_and(|result_position| *result_position > call_position)
+                .then_some(id)
+        })
+        .collect::<HashSet<_>>();
+
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Assistant { id, content } => {
+                let content = content.into_iter().filter(|item| {
+                    !matches!(item, AssistantContent::ToolCall(call) if !complete.contains(call.call_id.as_ref().unwrap_or(&call.id)))
+                });
+                OneOrMany::many(content.collect::<Vec<_>>())
+                    .ok()
+                    .map(|content| Message::Assistant { id, content })
+            }
+            Message::User { content } => {
+                let content = content.into_iter().filter(|item| {
+                    !matches!(item, UserContent::ToolResult(result) if !complete.contains(result.call_id.as_ref().unwrap_or(&result.id)))
+                });
+                OneOrMany::many(content.collect::<Vec<_>>())
+                    .ok()
+                    .map(|content| Message::User { content })
+            }
+            system @ Message::System { .. } => Some(system),
+        })
+        .collect()
 }
 
 pub(crate) async fn retain_provider_interrupted_turn(
@@ -172,7 +239,9 @@ impl ConversationMemory for AttemptMemory {
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<Vec<Message>, MemoryError>> {
         Box::pin(async move {
             self.check_id(conversation_id)?;
-            Ok(without_display_summaries(self.history.clone()))
+            Ok(without_display_summaries(sanitize_interrupted_history(
+                self.history.clone(),
+            )))
         })
     }
 
@@ -208,8 +277,57 @@ impl ConversationMemory for AttemptMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{Reasoning, Text};
+    use rig_core::completion::message::{
+        Reasoning, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent,
+    };
     use rig_core::memory::InMemoryConversationMemory;
+
+    fn tool_call(id: &str) -> AssistantContent {
+        AssistantContent::ToolCall(
+            ToolCall::new(
+                format!("fc-{id}"),
+                ToolFunction::new("lookup".into(), serde_json::json!({})),
+            )
+            .with_call_id(id.into()),
+        )
+    }
+
+    fn tool_result(id: &str) -> UserContent {
+        UserContent::ToolResult(ToolResult {
+            id: format!("result-{id}"),
+            call_id: Some(id.into()),
+            content: OneOrMany::one(ToolResultContent::text("ok")),
+        })
+    }
+
+    #[test]
+    fn interrupted_history_drops_orphan_tool_calls_but_keeps_completed_pairs() {
+        let completed_call = Message::Assistant {
+            id: None,
+            content: OneOrMany::one(tool_call("complete")),
+        };
+        let completed_result = Message::User {
+            content: OneOrMany::one(tool_result("complete")),
+        };
+        let orphan = Message::Assistant {
+            id: None,
+            content: OneOrMany::many([
+                AssistantContent::Text(Text::new("still useful")),
+                tool_call("orphan"),
+            ])
+            .unwrap(),
+        };
+
+        let sanitized = sanitize_interrupted_history(vec![
+            completed_call.clone(),
+            completed_result.clone(),
+            orphan,
+        ]);
+
+        assert_eq!(sanitized[0], completed_call);
+        assert_eq!(sanitized[1], completed_result);
+        assert_eq!(sanitized[2], Message::assistant("still useful"));
+    }
 
     #[tokio::test]
     async fn cancelled_turn_retains_user_and_streamed_assistant_text() {

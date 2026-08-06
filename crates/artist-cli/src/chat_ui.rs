@@ -301,6 +301,7 @@ struct SubmitContext<'a> {
     mcp: &'a artist_agent::mcp::McpManager,
     extensions: &'a std::sync::Arc<artist_extensions::Manager>,
     extension_control: &'a crate::extension_control::ExtensionControl,
+    herdr: &'a crate::herdr::Lifecycle,
     disabled_tools: &'a [String],
     compaction: crate::settings::CompactionConfig,
     computer_settings: crate::settings::ComputerConfig,
@@ -478,6 +479,7 @@ struct ChatContext<'a> {
     /// anything it should remember between turns has to be held out here.
     chain: artist_session::ChainState,
     capabilities: artist_session::ProviderCapabilities,
+    herdr: &'a crate::herdr::Lifecycle,
 }
 
 pub struct ChatResources<'a> {
@@ -495,6 +497,7 @@ pub struct ChatResources<'a> {
     pub canvas: Option<&'a std::sync::Arc<artist_canvas::server::Lazy>>,
     pub canvas_control: &'a crate::canvas_host::CanvasControl,
     pub tool_registry: &'a artist_agent::ToolRegistryHandle,
+    pub herdr: &'a crate::herdr::Lifecycle,
 }
 
 /// Compact inline viewport height: input(1) + borders(2) + status(2). The
@@ -636,6 +639,7 @@ pub async fn run(
                         project,
                         resources.settings.computer.screen,
                     ),
+                    herdr: resources.herdr,
                 },
                 resumed,
                 initial_prompt,
@@ -991,6 +995,13 @@ async fn run_loop(
             .settings
             .apply_to(context.store.providers[index].clone())
     });
+    if let Some(active) = &active {
+        context.herdr.report_session(&active.session.id);
+    }
+    context.herdr.claim_idle();
+    context
+        .herdr
+        .set_auth_blocked(context.provider_index.is_none());
     if resumed_session {
         let footer = footer_view(
             &context.store.status_bar,
@@ -1147,6 +1158,7 @@ async fn run_loop(
                         context.rules_handle,
                         target,
                         fork,
+                        context.herdr,
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
@@ -1272,28 +1284,35 @@ async fn run_loop(
                         status.fast_mode = false;
                         vec!["Started a fresh session — your next message begins it.".to_owned()]
                     }
-                    Ok(slash_commands::ParsedCommand::Login) => match handle_login(
-                        &mut terminal,
-                        context.store,
-                        context.store_path,
-                        viewport_height,
-                        &footer,
-                    )
-                    .await
-                    {
-                        Ok((lines, Some(index))) => {
-                            context.provider_index = Some(index);
-                            status.fast_mode = false;
-                            session_provider = Some(
-                                context
-                                    .settings
-                                    .apply_to(context.store.providers[index].clone()),
-                            );
-                            lines
-                        }
-                        Ok((lines, None)) => lines,
-                        Err(error) => vec![format!("Login failed: {error:#}")],
-                    },
+                    Ok(slash_commands::ParsedCommand::Login) => {
+                        context.herdr.set_auth_blocked(true);
+                        let result = match handle_login(
+                            &mut terminal,
+                            context.store,
+                            context.store_path,
+                            viewport_height,
+                            &footer,
+                        )
+                        .await
+                        {
+                            Ok((lines, Some(index))) => {
+                                context.provider_index = Some(index);
+                                status.fast_mode = false;
+                                session_provider = Some(
+                                    context
+                                        .settings
+                                        .apply_to(context.store.providers[index].clone()),
+                                );
+                                lines
+                            }
+                            Ok((lines, None)) => lines,
+                            Err(error) => vec![format!("Login failed: {error:#}")],
+                        };
+                        context
+                            .herdr
+                            .set_auth_blocked(context.provider_index.is_none());
+                        result
+                    }
                     Ok(slash_commands::ParsedCommand::Resume { id }) => handle_resume(
                         context.sessions,
                         context.project,
@@ -1301,6 +1320,7 @@ async fn run_loop(
                         &mut history,
                         context.rules_handle,
                         id,
+                        context.herdr,
                     )
                     .await
                     .unwrap_or_else(|error| vec![format!("Error: {error:#}")]),
@@ -1402,6 +1422,7 @@ async fn run_loop(
                         .save(context.store_path)
                         .context("save refreshed ChatGPT login")?;
                 }
+                context.herdr.set_auth_blocked(false);
                 // Carry refreshed account credentials into the request without
                 // clobbering a model/reasoning choice made via `/model`.
                 session_provider = Some(provider_with_session_selection(
@@ -1427,6 +1448,7 @@ async fn run_loop(
                         mcp: context.mcp,
                         extensions: context.extensions,
                         extension_control: context.extension_control,
+                        herdr: context.herdr,
                         disabled_tools: &denied_tools,
                         compaction: context.settings.compaction,
                         computer_settings: context.settings.computer.clone(),
@@ -1458,17 +1480,27 @@ async fn run_loop(
                 // rest of the loop's state) so the user's resend succeeds.
                 if result.auth_expired {
                     match crate::force_refresh(&mut context.store.providers[provider_index]).await {
-                        Ok(()) => match context.store.save(context.store_path) {
-                            Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
-                            Err(error) => insert_status(
+                        Ok(()) => {
+                            context.herdr.set_auth_blocked(false);
+                            match context.store.save(context.store_path) {
+                                Ok(()) => insert_status(&mut terminal, "  ✓ login refreshed")?,
+                                Err(error) => insert_status(
+                                    &mut terminal,
+                                    &format!(
+                                        "  ⚠ login refreshed but couldn't be saved: {error:#}"
+                                    ),
+                                )?,
+                            }
+                        }
+                        Err(error) => {
+                            context.herdr.set_auth_blocked(true);
+                            insert_status(
                                 &mut terminal,
-                                &format!("  ⚠ login refreshed but couldn't be saved: {error:#}"),
-                            )?,
-                        },
-                        Err(error) => insert_status(
-                            &mut terminal,
-                            &format!("  ⚠ couldn't refresh login: {error:#} — run `artist login`"),
-                        )?,
+                                &format!(
+                                    "  ⚠ couldn't refresh login: {error:#} — run `artist login`"
+                                ),
+                            )?
+                        }
                     }
                 }
                 // Restore anything typed into the box mid-stream but not sent,
@@ -1779,6 +1811,7 @@ async fn handle_rewind(
     rules_handle: &RulesHandle,
     target: Option<usize>,
     fork: bool,
+    herdr: &crate::herdr::Lifecycle,
 ) -> Result<Vec<String>> {
     let Some(current) = active.as_ref() else {
         return Ok(vec!["No session yet — nothing to rewind.".to_owned()]);
@@ -1832,7 +1865,11 @@ async fn handle_rewind(
         // Rebuild rule state from the fork's prefix so once-per-session fires
         // and injections match the new history (mirrors /resume).
         rules_handle.restore_from_log(&events);
-        if let Some(old) = active.replace(forked) {
+        let old = active.replace(forked);
+        if let Some(active) = active.as_ref() {
+            herdr.report_session(&active.session.id);
+        }
+        if let Some(old) = old {
             old.close().await?;
         }
     } else {
@@ -1907,6 +1944,7 @@ async fn handle_resume(
     history: &mut Vec<Message>,
     rules_handle: &RulesHandle,
     id: Option<&str>,
+    herdr: &crate::herdr::Lifecycle,
 ) -> Result<Vec<String>> {
     let Some(id) = id else {
         return handle_sessions(sessions, project, active);
@@ -1914,9 +1952,13 @@ async fn handle_resume(
     if active.as_ref().map(|active| active.session.id.as_str()) == Some(id) {
         return Ok(vec![format!("Already on session {id}.")]);
     }
-    let (opened, events) = sessions
-        .open(id)
+    let target = sessions
+        .find(id)
         .with_context(|| format!("no such session: {id}"))?;
+    if target.project != std::fs::canonicalize(project)? {
+        anyhow::bail!("session {id} belongs to a different project");
+    }
+    let (opened, events) = sessions.open(id)?;
     rules_handle.restore_from_log(&events);
     *history = artist_session::build_history(
         &events,
@@ -1924,7 +1966,9 @@ async fn handle_resume(
         &artist_session::HistoryOptions::default(),
     )?;
     let label = opened.session.label.clone();
-    if let Some(old) = active.replace(opened) {
+    let old = active.replace(opened);
+    herdr.report_session(id);
+    if let Some(old) = old {
         old.close().await?;
     }
     Ok(vec![format!(
@@ -2273,6 +2317,8 @@ async fn submit(
                 .create(context.project, Some(&prompt.display))?,
         ),
     };
+    context.herdr.report_session(&active.session.id);
+    let turn_lifecycle = context.herdr.start_turn();
     // Rules hot-reload between turns; the run holds the snapshot.
     context.rules_engine.reload_if_changed();
     let rule_set = context.rules_engine.snapshot();
@@ -2447,6 +2493,7 @@ async fn submit(
         provider_context: active.provider_context.clone(),
         effective_context_window: status.context_capacity,
         fast_mode: status.fast_mode,
+        lifecycle: turn_lifecycle.emitter(),
         cancel: cancel.clone(),
         // One registry for the session, shared with every surface that can
         // render or answer a question — a second one would mean an answer given
@@ -2975,6 +3022,7 @@ async fn submit(
         Some(task.await.context("join Artist agent"))
     };
     let unfinished_subagents = subagents.finish_turn(cancelled);
+    turn_lifecycle.finish(cancelled);
     lifecycle_extensions
         .update_context(|value| value.agent_state = serde_json::json!({"state":"idle"}));
     let _ = lifecycle_extensions.publish(artist_extensions::Event {
@@ -4423,6 +4471,35 @@ mod tests {
         assert_ne!(buffer.cell((0, 4)).unwrap().symbol(), "└");
         assert_eq!(buffer.cell((0, 3)).unwrap().symbol(), "");
         assert_eq!(buffer.cell((1, 4)).unwrap().symbol(), "");
+    }
+
+    #[tokio::test]
+    async fn interactive_resume_rejects_other_project_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let sessions = SessionStore::new(root.path());
+        let other = sessions.create(&second, None).unwrap();
+        let id = other.session.id.clone();
+        other.close().await.unwrap();
+        let mut active = None;
+        let mut history = Vec::new();
+        let rules = RulesHandle::default();
+        let error = handle_resume(
+            &sessions,
+            &first,
+            &mut active,
+            &mut history,
+            &rules,
+            Some(&id),
+            &crate::herdr::Lifecycle::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("different project"));
+        assert!(active.is_none());
     }
 
     #[test]

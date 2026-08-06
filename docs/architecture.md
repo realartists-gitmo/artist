@@ -34,6 +34,7 @@ artist/                          # Cargo workspace
 ├── crates/
 │   ├── artist-cli/              # Binary: TUI, session UX, commands, provider config
 │   ├── artist-agent/            # Agent loop + TTSR driver, hooks, MCP, delegate
+│   ├── artist-herdr/            # Optional Herdr lifecycle/session reporter
 │   ├── artist-rules/            # Stream rules: parsing, matching, WASM host
 │   ├── artist-session/          # Event-sourced session store + projections
 │   ├── artist-memory/           # Durable memory: Mnestic store, local embeddings, code index
@@ -55,6 +56,7 @@ artist/                          # Cargo workspace
 |-------|----------------|
 | **artist-cli** | UX surface: CLI args, config I/O, chat UI, event recording/replay wiring, `/rules` `/rewind` and custom commands, session maintenance subcommands. |
 | **artist-agent** | The model loop: builds the Rig agent, drives the TTSR abort/inject/retry loop, owns the capture/steering/TTSR hooks, `delegate` subagents, MCP. |
+| **artist-herdr** | Environment-gated Herdr integration: aggregate lifecycle state, session association, ordered asynchronous CLI reports, timeout/retry behavior, and shutdown release. |
 | **artist-rules** | The rules engine: declarative rule files, discovery + hot reload, streaming matcher, per-session state, retro scanning, wasmtime plugin host (feature `wasm`). |
 | **artist-extensions** | Trusted WASM extensions: persistent component instances discovered from `<config>/extensions` manifests, with a powerful host interface (run/spawn commands, steer, queue prompts, stop the agent, live context, event bus). Distinct trust model from rule plugins — extensions are trusted and capable; rule plugins are untrusted and sandboxed. Both hosts share one wasmtime (46). |
 | **artist-session** | Rig `ConversationMemory` persistence in `events.jsonl`, operational events, legacy converters, and lossy display/rewind projections. |
@@ -432,6 +434,14 @@ conditionally generated only when the relevant tools are registered.
   UI metadata in their manifest (`icon = "🚀"` inside `[[tools]]`); icons must be
   a printable one- or two-column glyph. Missing or invalid icons fall back to
   `🛠` without affecting the model-facing tool schema.
+
+## Herdr lifecycle integration
+
+When `HERDR_ENV` is exactly `1` and `HERDR_PANE_ID` is present, the CLI starts the optional `artist-herdr` reporter. Outside that environment no worker is started and no `herdr` command is attempted. The reporter prefers `HERDR_BIN_PATH`, reads the optional socket path for forward compatibility, and currently uses the CLI API.
+
+One aggregate reducer owns Herdr state (`blocked > working > idle`). Turn, tool, and foreground/background delegate activity feed that reducer; generation checks prevent late completion events from reviving a cancelled turn. Persisted Artist session IDs are reported on creation, startup resume, `/resume`, and fork. A single coalescing worker assigns monotonically increasing sequence numbers, applies short command timeouts, retries transient failures with a cooldown, and never propagates reporting failures into Artist. Normal shutdown awaits `pane release-agent`; an RAII fallback spawns a best-effort release for unwinding/early-drop paths.
+
+Authentication is the current explicit user-blocking surface and reports `blocked`. Artist has no approval or structured question request API today, so ordinary completed responses remain prompt-ready (`idle`) rather than being guessed from terminal text.
 
 ## Configuration
 
