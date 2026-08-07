@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <iostream>
 
 #include "app_callbacks.h"
@@ -40,6 +41,14 @@ class WefApp : public CefApp, public CefBrowserProcessHandler {
       const CefString& process_type,
       CefRefPtr<CefCommandLine> command_line) override {
     if (process_type.empty()) {
+#if defined(__linux__)
+      const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+      const char* session_type = std::getenv("XDG_SESSION_TYPE");
+      if (wayland_display && *wayland_display && session_type &&
+          std::string(session_type) == "wayland") {
+        command_line->AppendSwitchWithValue("ozone-platform", "wayland");
+      }
+#endif
       // Use software rendering and compositing (disable GPU) for increased FPS
       // and decreased CPU usage. This will also disable WebGL so remove these
       // switches if you need that capability.

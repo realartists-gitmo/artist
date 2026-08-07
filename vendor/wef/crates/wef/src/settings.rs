@@ -9,6 +9,8 @@ pub struct Settings<T> {
     pub(crate) cache_path: Option<CString>,
     pub(crate) root_cache_path: Option<CString>,
     pub(crate) browser_subprocess_path: Option<CString>,
+    pub(crate) resources_dir_path: Option<CString>,
+    pub(crate) locales_dir_path: Option<CString>,
     pub(crate) external_message_pump: bool,
     pub(crate) handler: T,
 }
@@ -22,6 +24,24 @@ impl Settings<()> {
             cache_path: None,
             root_cache_path: None,
             browser_subprocess_path: None,
+            resources_dir_path: option_env!("WEF_CEF_ROOT").map(|root| {
+                CString::new(
+                    std::path::Path::new(root)
+                        .join("Resources")
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                )
+                .expect("invalid CEF resources path")
+            }),
+            locales_dir_path: option_env!("WEF_CEF_ROOT").map(|root| {
+                CString::new(
+                    std::path::Path::new(root)
+                        .join("Resources/locales")
+                        .as_os_str()
+                        .as_encoded_bytes(),
+                )
+                .expect("invalid CEF locales path")
+            }),
             external_message_pump: false,
             handler: (),
         }
@@ -86,6 +106,18 @@ impl<T> Settings<T> {
         self
     }
 
+    /// Override the directory containing CEF resource packs and `icudtl.dat`.
+    pub fn resources_dir_path(mut self, path: impl Into<Vec<u8>>) -> Self {
+        self.resources_dir_path = Some(CString::new(path).expect("invalid resources path"));
+        self
+    }
+
+    /// Override the directory containing CEF locale packs.
+    pub fn locales_dir_path(mut self, path: impl Into<Vec<u8>>) -> Self {
+        self.locales_dir_path = Some(CString::new(path).expect("invalid locales path"));
+        self
+    }
+
     /// Enable to control browser process main (UI) thread message pump
     /// scheduling via the
     /// [`crate::ApplicationHandler::on_schedule_message_pump_work`]
@@ -110,6 +142,8 @@ impl<T> Settings<T> {
             cache_path: self.cache_path,
             root_cache_path: self.root_cache_path,
             browser_subprocess_path: self.browser_subprocess_path,
+            resources_dir_path: self.resources_dir_path,
+            locales_dir_path: self.locales_dir_path,
             external_message_pump: self.external_message_pump,
             handler,
         }

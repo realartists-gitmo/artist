@@ -89,6 +89,8 @@ pub(crate) struct ToolEnv {
     /// need exactly this, so they stand or fall together — a subset would leave
     /// an agent able to send and unable to be answered.
     pub inbox: Option<crate::messaging::Inbox>,
+    /// Universal durable lifecycle/addressing substrate for this artist identity.
+    pub sessions: crate::session_tools::SessionHub,
     /// MCP and extension tools. Not enumerable at compile time, but subject to
     /// exactly the same policy pass as everything else.
     pub dynamic: Vec<ArtistDynamicTool>,
@@ -156,10 +158,10 @@ pub(crate) enum Tool {
     Canvas,
     Handoff,
     Subagent,
-    Tell,
-    Query,
-    Reply,
-    GroupChat,
+    Poll,
+    Abort,
+    Send,
+    List,
     Ask,
 }
 
@@ -191,10 +193,10 @@ impl Tool {
         Tool::Canvas,
         Tool::Handoff,
         Tool::Subagent,
-        Tool::Tell,
-        Tool::Query,
-        Tool::Reply,
-        Tool::GroupChat,
+        Tool::Poll,
+        Tool::Abort,
+        Tool::Send,
+        Tool::List,
         Tool::Ask,
     ];
 
@@ -231,10 +233,10 @@ impl Tool {
             Tool::Canvas => "canvas",
             Tool::Handoff => "handoff",
             Tool::Subagent => "subagent",
-            Tool::Tell => "tell",
-            Tool::Query => "query",
-            Tool::Reply => "reply",
-            Tool::GroupChat => "gc",
+            Tool::Poll => "poll",
+            Tool::Abort => "abort",
+            Tool::Send => "send",
+            Tool::List => "list",
             Tool::Ask => "ask",
         }
     }
@@ -306,19 +308,10 @@ impl Tool {
                 env,
                 env.delegation.as_ref()?,
             )),
-            // The message tools all need the same thing — this agent's mailbox
-            // — so they stand or fall together, and an environment with no
-            // identity has none of them rather than a confusing subset.
-            Tool::Tell => tool_prompt::dynamic(env.message_tools()?),
-            Tool::Query => {
-                tool_prompt::dynamic(crate::message_tools::QueryTool(env.message_tools()?))
-            }
-            Tool::Reply => {
-                tool_prompt::dynamic(crate::message_tools::ReplyTool(env.message_tools()?))
-            }
-            Tool::GroupChat => {
-                tool_prompt::dynamic(crate::message_tools::GroupTool(env.message_tools()?))
-            }
+            Tool::Poll => tool_prompt::dynamic(crate::session_tools::PollTool(env.sessions.clone())),
+            Tool::Abort => tool_prompt::dynamic(crate::session_tools::AbortTool(env.sessions.clone())),
+            Tool::Send => tool_prompt::dynamic(crate::session_tools::SendTool(env.sessions.clone())),
+            Tool::List => tool_prompt::dynamic(crate::session_tools::ListTool(env.sessions.clone())),
             Tool::Ask => tool_prompt::dynamic(crate::ask_tool::AskTool::new(
                 env.ask.clone()?,
                 env.cancel.clone(),
@@ -335,21 +328,7 @@ impl ToolEnv {
         self.bundle.project_root().to_path_buf()
     }
 
-    /// The shared half of every message tool.
-    ///
-    /// Carries the delegation seat so a blocking `query` can release it: an
-    /// agent parked waiting on another agent is not working, and N of them
-    /// holding seats fills the project's pool. Same reasoning as a parent
-    /// yielding while it awaits a child.
-    fn message_tools(&self) -> Option<crate::message_tools::MessageTools> {
-        Some(crate::message_tools::MessageTools::new(
-            self.inbox.clone()?,
-            self.project_root().display().to_string(),
-            self.delegation
-                .as_ref()
-                .and_then(|delegation| delegation.parent_permit.clone()),
-        ))
-    }
+
 }
 
 /// What a web session may delegate to: the ingredients a `subagent` child is
@@ -416,18 +395,15 @@ pub struct McpSurface {
 /// environment, so the "one place a tool becomes available" invariant holds
 /// for the MCP surface too.
 pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
-    let mut dynamic = Vec::new();
-    if let Some(outbox) = &surface.outbox {
-        // The blocking in-process ask tool is deliberately not available over
-        // MCP (nobody in the MCP process answers it, and a blocked call
-        // outlives the short-lived connection); the durable ask tools replace
-        // it. `ask` in `Tool::ALL` stays absent because `env.ask` is None.
-        dynamic.extend(crate::ask_outbox::tools(outbox.clone()));
-    }
     let inbox = surface
         .identity
         .as_ref()
         .map(|identity| crate::messaging::Inbox::new(identity.name.clone()));
+    let artist_name = surface
+        .identity
+        .as_ref()
+        .map(|identity| identity.name.clone())
+        .unwrap_or_else(|| "anonymous".into());
     let env = ToolEnv {
         bundle: ToolBundle::new(surface.workspace.clone()),
         recorder: surface
@@ -436,7 +412,7 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             .unwrap_or_else(artist_session::Recorder::noop),
         resources: Resources::discover(surface.workspace.root()),
         todos: crate::todo::TodoStore::default(),
-        todo_owner: "mcp".into(),
+        todo_owner: artist_name.clone(),
         todo_parent: None,
         attachments: surface.attachments.clone(),
         computer: surface.computer.clone(),
@@ -451,23 +427,25 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             profiles: delegation.profiles.clone(),
             parent_permit: None,
         }),
+        // MCP ask is migrated to the same durable session surface as native ask;
+        // the transport supplies a registry when a human UI is attached.
         ask: None,
         cancel: tokio_util::sync::CancellationToken::new(),
         inbox,
-        dynamic,
+        sessions: crate::session_tools::SessionHub::standard(
+            surface.workspace.root(),
+            artist_name,
+            None,
+        ),
+        dynamic: Vec::new(),
         disabled: Vec::new(),
     };
     build(&surface.profile, &env)
 }
 
+
+
 /// Build the tools a profile may use in this environment.
-///
-/// Order of operations, and why: construct everything the environment can
-/// provide, fold in MCP and extension tools, then apply profile policy **once**
-/// over all of them — which is what lets a profile trim a bloated MCP server
-/// down to the handful it needs, in a subagent as much as at the root. Session
-/// tool toggles come last because they are the user's live override rather than
-/// the profile author's intent.
 pub(crate) fn build(profile: &Profile, env: &ToolEnv) -> Vec<ArtistDynamicTool> {
     let mut tools: Vec<ArtistDynamicTool> = Tool::ALL
         .into_iter()
@@ -516,6 +494,7 @@ pub(crate) mod tests {
             ask: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             inbox: None,
+            sessions: crate::session_tools::SessionHub::standard(root, actor, None),
             dynamic: Vec::new(),
             disabled: Vec::new(),
         }
@@ -527,7 +506,6 @@ pub(crate) mod tests {
             .map(|tool| tool.name().to_owned())
             .collect()
     }
-
     /// The bug this module exists to make impossible: `reviewer` was widened to
     /// allow every structural navigation tool, the widening was pinned by a
     /// test asserting `permits`, and the subagent path constructed none of

@@ -14,6 +14,9 @@ fn cef_root() -> PathBuf {
 fn main() {
     let cef_root = cef_root();
     println!("cargo::rerun-if-changed={}", cef_root.display());
+    println!("cargo:rustc-env=WEF_CEF_ROOT={}", cef_root.display());
+    #[cfg(target_os = "linux")]
+    package_linux_runtime(&cef_root);
 
     let profile = match std::env::var("DEBUG") {
         Ok(s) if s != "false" => "Debug",
@@ -302,4 +305,73 @@ fn build_wef_sys(cef_root: &Path) {
         .include(cef_root)
         .define("NOMINMAX", None)
         .compile("wef-sys");
+}
+
+#[cfg(target_os = "linux")]
+fn package_linux_runtime(cef_root: &Path) {
+    let profile = match std::env::var("DEBUG") {
+        Ok(value) if value != "false" => "Debug",
+        _ => "Release",
+    };
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let target_profile = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("target profile directory")
+        .to_owned();
+    std::fs::create_dir_all(&target_profile).expect("create target profile directory");
+
+    for name in [
+        "libcef.so",
+        "libEGL.so",
+        "libGLESv2.so",
+        "libvk_swiftshader.so",
+        "libvulkan.so.1",
+        "v8_context_snapshot.bin",
+        "vk_swiftshader_icd.json",
+    ] {
+        copy_if_changed(
+            &cef_root.join(profile).join(name),
+            &target_profile.join(name),
+        );
+    }
+    for name in [
+        "chrome_100_percent.pak",
+        "chrome_200_percent.pak",
+        "icudtl.dat",
+        "resources.pak",
+    ] {
+        copy_if_changed(
+            &cef_root.join("Resources").join(name),
+            &target_profile.join(name),
+        );
+    }
+    let locales_source = cef_root.join("Resources/locales");
+    let locales_target = target_profile.join("locales");
+    std::fs::create_dir_all(&locales_target).expect("create CEF locales directory");
+    for entry in std::fs::read_dir(locales_source).expect("read CEF locales") {
+        let entry = entry.expect("read CEF locale entry");
+        if entry.file_type().expect("CEF locale type").is_file() {
+            copy_if_changed(&entry.path(), &locales_target.join(entry.file_name()));
+        }
+    }
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+}
+
+#[cfg(target_os = "linux")]
+fn copy_if_changed(source: &Path, destination: &Path) {
+    let source_meta = std::fs::metadata(source)
+        .unwrap_or_else(|error| panic!("missing CEF runtime asset {}: {error}", source.display()));
+    let unchanged = std::fs::metadata(destination)
+        .map(|metadata| metadata.len() == source_meta.len())
+        .unwrap_or(false);
+    if !unchanged {
+        std::fs::copy(source, destination).unwrap_or_else(|error| {
+            panic!(
+                "copy CEF runtime asset {} to {}: {error}",
+                source.display(),
+                destination.display()
+            )
+        });
+    }
 }

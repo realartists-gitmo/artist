@@ -124,3 +124,37 @@ artist_tool_api::impl_text_tool_contract!(
     },
     "The durable todo list and completion summary."
 );
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::PollTool,
+    C::Agents,
+    A::read_only(),
+    "The current durable session snapshot or ordered snapshots."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::AbortTool,
+    C::Agents,
+    A {
+        read_only: false,
+        destructive: true,
+        idempotent: true,
+        open_world: true
+    },
+    "The durable cancellation-request state for the targeted sessions."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::SendTool,
+    C::Agents,
+    A {
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        open_world: true
+    },
+    "Durable delivery acknowledgements for the targeted sessions or artists."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::ListTool,
+    C::Agents,
+    A::read_only(),
+    "Live session summaries from the durable registry."
+);

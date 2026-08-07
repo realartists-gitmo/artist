@@ -189,6 +189,7 @@ impl StageBus {
 
         let address = self.await_a11y_address().await?;
         self.a11y_address = Some(address);
+        self.enable_screen_reader().await?;
 
         let registryd = [
             "/usr/lib/at-spi2-registryd",
@@ -209,6 +210,36 @@ impl StageBus {
                 .map_err(|error| StepError::Backend(format!("spawn {registryd}: {error}")))?,
         );
         Ok(())
+    }
+
+    /// Tell AccessKit and other lazy toolkit bridges that an accessibility
+    /// consumer is present. Merely setting toolkit environment variables is
+    /// insufficient: accesskit_unix watches org.a11y.Status.ScreenReaderEnabled
+    /// on the session bus and remains inactive while it is false.
+    async fn enable_screen_reader(&self) -> Result<(), StepError> {
+        let output = tokio::process::Command::new("busctl")
+            .args([
+                "--address",
+                &self.session_address,
+                "set-property",
+                "org.a11y.Bus",
+                "/org/a11y/bus",
+                "org.a11y.Status",
+                "ScreenReaderEnabled",
+                "b",
+                "true",
+            ])
+            .output()
+            .await
+            .map_err(|error| StepError::Backend(format!("busctl: {error}")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(StepError::Backend(format!(
+                "enable stage screen reader: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
     }
 
     /// Poll `org.a11y.Bus.GetAddress` until the launcher has claimed the name.
@@ -370,6 +401,41 @@ mod tests {
              attached to somebody else's a11y bus",
             dir.path().display()
         );
+    }
+
+    #[tokio::test]
+    async fn stage_enables_screen_reader_status() {
+        if !dbus_available() {
+            eprintln!("skipping: dbus-daemon is not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let bus = match StageBus::start(dir.path()).await {
+            Ok(bus) if bus.a11y_address().is_some() => bus,
+            Ok(_) => {
+                eprintln!("skipping: at-spi is unavailable");
+                return;
+            }
+            Err(error) => {
+                eprintln!("skipping: no stage bus here ({error})");
+                return;
+            }
+        };
+        let output = tokio::process::Command::new("busctl")
+            .args([
+                "--address",
+                bus.session_address(),
+                "get-property",
+                "org.a11y.Bus",
+                "/org/a11y/bus",
+                "org.a11y.Status",
+                "ScreenReaderEnabled",
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "b true");
     }
 
     #[tokio::test]

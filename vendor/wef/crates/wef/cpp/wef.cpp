@@ -23,10 +23,15 @@
 const uint32_t ALL_MOUSE_BUTTONS = EVENTFLAG_LEFT_MOUSE_BUTTON;
 
 struct WefSettings {
+  int argc;
+  const char* const* argv;
   const char* locale;
   const char* cache_path;
   const char* root_cache_path;
   const char* browser_subprocess_path;
+  const char* resources_dir_path;
+  const char* locales_dir_path;
+  bool external_message_pump;
   AppCallbacks callbacks;
   void* userdata;
   DestroyFn destroy_userdata;
@@ -68,7 +73,7 @@ extern "C" {
 bool wef_init(const WefSettings* wef_settings) {
   CefSettings settings;
   settings.windowless_rendering_enabled = true;
-  settings.external_message_pump = true;
+  settings.external_message_pump = wef_settings->external_message_pump;
 
 #ifdef __APPLE__
   settings.no_sandbox = false;
@@ -93,10 +98,24 @@ bool wef_init(const WefSettings* wef_settings) {
         wef_settings->browser_subprocess_path;
   }
 
+  if (wef_settings->resources_dir_path) {
+    CefString(&settings.resources_dir_path) = wef_settings->resources_dir_path;
+  }
+
+  if (wef_settings->locales_dir_path) {
+    CefString(&settings.locales_dir_path) = wef_settings->locales_dir_path;
+  }
+
   CefRefPtr<WefApp> app(new WefApp(wef_settings->callbacks,
                                    wef_settings->userdata,
                                    wef_settings->destroy_userdata));
-  return CefInitialize(CefMainArgs(), settings, app, nullptr);
+#ifdef WIN32
+  CefMainArgs main_args(GetModuleHandle(NULL));
+#else
+  CefMainArgs main_args(wef_settings->argc,
+                        const_cast<char**>(wef_settings->argv));
+#endif
+  return CefInitialize(main_args, settings, app, nullptr);
 }
 
 bool wef_exec_process(char* argv[], int argc) {

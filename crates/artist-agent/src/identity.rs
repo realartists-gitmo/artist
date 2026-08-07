@@ -13,7 +13,6 @@
 //! therefore goes last, after every byte that is shared, so only the tail is
 //! reprocessed. See [`Identity::prompt_block`].
 
-use std::sync::Arc;
 
 /// A resolved agent identity.
 #[derive(Clone, Debug)]
@@ -37,24 +36,15 @@ impl Identity {
     }
 }
 
-/// Claim the name for a session, which keeps it across resumes and handoffs.
-///
-/// Idempotent, so calling it per attempt costs a lookup rather than a name. A
-/// registry that cannot be reached degrades to the actor id: an unnameable
-/// agent would be a worse failure than an unaesthetic one, and every downstream
-/// use — addressing included — works on the id.
-pub(crate) fn for_session(registration: artist_registry::Registration) -> Identity {
-    let actor = registration.actor.clone();
-    match artist_registry::names().claim(&registration) {
-        Ok(name) => Identity {
-            name: name.name,
-            actor: name.actor,
-        },
-        Err(_) => Identity {
-            name: actor.clone(),
-            actor,
-        },
-    }
+/// Claim the roster name for a durable Artist identity.
+pub(crate) fn for_session(
+    registration: artist_registry::Registration,
+) -> Result<Identity, artist_registry::Error> {
+    let name = artist_registry::names().claim(&registration)?;
+    Ok(Identity {
+        name: name.name,
+        actor: name.actor,
+    })
 }
 
 /// What a session records about itself in the directory.
@@ -68,7 +58,7 @@ pub(crate) fn session(
     actor: &str,
     project: &std::path::Path,
     profile: &str,
-) -> Identity {
+) -> Result<Identity, artist_registry::Error> {
     for_session(artist_registry::Registration {
         session: session.to_owned(),
         actor: actor.to_owned(),
@@ -88,40 +78,32 @@ pub(crate) fn recorded(name: &str, actor: &str) -> Identity {
     }
 }
 
-/// Claim a name for a subagent run, released when the run ends.
-///
-/// A subagent is not a resumable session — when its run is over there is
-/// nothing to return to — so unlike a session name this one is given back
-/// immediately. Without that a fan-out would consume the roster permanently at
-/// the rate it spawns children.
+/// Claim a durable name for a subagent identity. The lease is deliberately not
+/// released when the child process/run ends; registry retention owns release.
 pub(crate) fn for_run(
     actor: &str,
     project: &std::path::Path,
     profile: &str,
     parent: Option<&str>,
-) -> RunIdentity {
-    RunIdentity {
+) -> Result<RunIdentity, artist_registry::Error> {
+    Ok(RunIdentity {
         identity: for_session(artist_registry::Registration {
             session: actor.to_owned(),
             actor: actor.to_owned(),
             project: Some(project.display().to_string()),
             profile: Some(profile.to_owned()),
-            // The spawner's *name*, so descendants are walkable by the same
-            // identifier a person addresses them with.
             parent: parent.map(str::to_owned),
-        }),
-        released: Arc::new(ReleaseOnDrop(actor.to_owned())),
-    }
+        })?,
+        lease_key: actor.to_owned(),
+    })
 }
 
 #[derive(Clone)]
 pub(crate) struct RunIdentity {
     identity: Identity,
-    /// Held for its `Drop`, never read — the name is released when the last
-    /// copy of this goes out of scope. Refcounted so cloning the identity into
-    /// a child environment cannot release the name early.
-    #[allow(dead_code)]
-    released: Arc<ReleaseOnDrop>,
+    /// Internal roster lease key; never model-facing. The session registry keeps
+    /// this key until its retained record is pruned.
+    pub(crate) lease_key: String,
 }
 
 impl std::ops::Deref for RunIdentity {
@@ -132,16 +114,7 @@ impl std::ops::Deref for RunIdentity {
     }
 }
 
-struct ReleaseOnDrop(String);
 
-impl Drop for ReleaseOnDrop {
-    fn drop(&mut self) {
-        // Best-effort. A name that is not released here is reclaimed by the
-        // roster sweep, so a failure costs a name until then rather than
-        // permanently.
-        let _ = artist_registry::names().release(&self.0);
-    }
-}
 
 #[cfg(test)]
 mod tests {

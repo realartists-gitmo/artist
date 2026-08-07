@@ -663,19 +663,17 @@ impl Delegate {
             .map(artist_computer::SurfaceRegistry::for_delegate);
 
         let (base, _) = crate::prompt_config::base_prompt();
-        // Held for the life of the run: a subagent is not a resumable session,
-        // so its name goes back to the roster the moment the run ends. Without
-        // that a fan-out would drain the roster at the rate it spawns children.
-        // Placed last in the prompt for the same reason as at the root — every
-        // byte above it is shared between siblings and can cache across them.
+        // The subagent's bare artist name is a durable session id and remains
+        // leased while that retained session record is addressable.
         let identity = crate::identity::for_run(
             &run.actor,
             self.tools.project_root(),
             &role.name,
-            // The spawner's display name, so `descendantOf` walks the same
-            // identifiers a person addresses agents with.
             self.spawner_name.as_deref(),
-        );
+        )
+        .map_err(|error| DelegateError::Unavailable(format!(
+            "artist identity allocation failed: {error}"
+        )))?;
         let policy = format!(
             "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}{}",
             role.name,
@@ -798,6 +796,11 @@ impl Delegate {
                 ask: None,
                 cancel: self.handles.cancel.clone(),
                 inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
+                sessions: crate::session_tools::SessionHub::standard(
+                    child_tools.project_root(),
+                    identity.name.clone(),
+                    Some(run.permit.clone()),
+                ),
                 dynamic: self.dynamic.clone(),
                 disabled: self.disabled_tools.clone(),
             };

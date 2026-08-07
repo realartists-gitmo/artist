@@ -29,12 +29,14 @@ mod names;
 mod permits;
 mod process;
 mod roster;
+mod sessions;
 
 pub use jobs::{Job, JobState, Jobs, Outcome};
 pub use messages::{Audience, Group, Message, Messages, now};
 pub use names::{Name, Names, Registration, Selector};
 pub use permits::{Permits, Seat};
-pub use process::Owner;
+pub use process::{Owner, take_wake};
+pub use sessions::{CancelDisposition, Reactivate, SessionInput, SessionLifecycle, SessionRecord, SessionStatus, Sessions, content_slug};
 pub use roster::ROSTER;
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +84,11 @@ impl Registry {
     /// The background job table for this project.
     pub fn jobs(&self) -> Jobs {
         Jobs::new(self.root.join("jobs"))
+    }
+
+    /// The universal durable session registry for this project.
+    pub fn sessions(&self) -> Sessions {
+        Sessions::new(self.root.join("sessions"))
     }
 
     /// A message store rooted here rather than machine-wide.

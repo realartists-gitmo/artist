@@ -7,14 +7,25 @@ use artist_ui_core::{
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, Entity, Focusable, KeyBinding,
     PathPromptOptions, PromptLevel, Render, Role, ScrollHandle, Subscription, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, img, prelude::*, px, size,
+    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable, Root, StyledExt,
-    button::{Button, ButtonVariants},
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, StyledExt,
+    alert::Alert,
+    breadcrumb::{Breadcrumb, BreadcrumbItem},
+    button::{Button, ButtonGroup, ButtonVariants},
+    collapsible::Collapsible,
     input::{Input, InputEvent, InputState},
+    list::ListItem,
+    resizable::{h_resizable, resizable_panel},
+    scroll::ScrollableElement,
+    separator::Separator,
+    spinner::Spinner,
+    tab::{Tab, TabBar},
     text::TextView,
+    tree::{TreeItem, TreeState, tree},
 };
+use gpui_component_assets::Assets;
 use gpui_platform::application;
 use std::{
     collections::{HashMap, HashSet},
@@ -27,14 +38,30 @@ use std::{
 pub fn run() {
     #[cfg(feature = "embedded-canvas")]
     {
-        gpui_webview::wef::launch(gpui_webview::wef::Settings::new(), run_application);
+        let cef_runtime = std::env::current_exe()
+            .expect("resolve executable")
+            .parent()
+            .expect("executable has no parent")
+            .to_owned();
+        let cache_root = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("artist/cef");
+        std::fs::create_dir_all(&cache_root).expect("create CEF cache root");
+        gpui_webview::wef::launch(
+            gpui_webview::wef::Settings::new()
+                .resources_dir_path(cef_runtime.as_os_str().as_encoded_bytes())
+                .locales_dir_path(cef_runtime.join("locales").as_os_str().as_encoded_bytes())
+                .root_cache_path(cache_root.as_os_str().as_encoded_bytes())
+                .external_message_pump(true),
+            run_application,
+        );
     }
     #[cfg(not(feature = "embedded-canvas"))]
     run_application();
 }
 
 fn run_application() {
-    application().run(|cx: &mut App| {
+    application().with_assets(Assets).run(|cx: &mut App| {
         #[cfg(all(feature = "embedded-canvas", target_os = "linux"))]
         start_cef_message_pump(cx);
         gpui_component::init(cx);
@@ -43,12 +70,11 @@ fn run_application() {
             KeyBinding::new("ctrl-o", OpenProject, None),
             KeyBinding::new("ctrl-b", ToggleSidebar, None),
             KeyBinding::new("ctrl-p", QuickOpen, None),
-            KeyBinding::new("ctrl-shift-p", ShowCommandPalette, None),
             KeyBinding::new("ctrl-l", FocusComposer, None),
             KeyBinding::new("ctrl-period", StopRun, None),
             KeyBinding::new("escape", DismissOverlay, None),
         ]);
-        let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
+        let bounds = Bounds::centered(None, size(px(1080.), px(980.)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -96,17 +122,11 @@ actions!(
         OpenProject,
         ToggleSidebar,
         QuickOpen,
-        ShowCommandPalette,
         FocusComposer,
         StopRun,
         DismissOverlay
     ]
 );
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidebarTab {
-    Sessions,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChangedFile {
@@ -165,10 +185,10 @@ struct ArtistApp {
     transcript: Transcript,
     composer: Entity<InputState>,
     session_search: Entity<InputState>,
+    workspace_tree: Entity<TreeState>,
     session_name: Entity<InputState>,
     model_override: Entity<InputState>,
     question_notes: Entity<InputState>,
-    command_search: Entity<InputState>,
     status: String,
     session_id: Option<String>,
     session_events: Vec<artist_session::Envelope>,
@@ -203,12 +223,10 @@ struct ArtistApp {
         crate::canvas_accessibility::CanvasAccessibilityTree,
     >,
     project: PathBuf,
-    sidebar_tab: SidebarTab,
     run_baseline: HashMap<String, String>,
     session_changed_files: HashSet<String>,
     sidebar_visible: bool,
     compact_sidebar_open: bool,
-    command_palette_open: bool,
     collapsed_blocks: HashSet<usize>,
     active_profile: String,
     run_provider: Option<String>,
@@ -217,7 +235,7 @@ struct ArtistApp {
     profiles: Vec<String>,
     selected_provider: Option<String>,
     selected_profile: String,
-    show_archived: bool,
+    tree_signature: String,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -227,13 +245,14 @@ impl ArtistApp {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
                 .submit_on_enter(true)
-                .placeholder("Message Artist…")
+                .placeholder("Enter an instruction…")
         });
         let session_search = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search sessions…")
+                .placeholder("Filter project tree…")
                 .clean_on_escape()
         });
+        let workspace_tree = cx.new(|cx| TreeState::new(cx));
         let session_name = cx.new(|cx| InputState::new(window, cx).placeholder("Session name"));
         let model_override =
             cx.new(|cx| InputState::new(window, cx).placeholder("Provider default"));
@@ -241,11 +260,6 @@ impl ArtistApp {
             InputState::new(window, cx)
                 .placeholder("Add context (optional)")
                 .auto_grow(1, 4)
-        });
-        let command_search = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Type a command, project, or session…")
-                .clean_on_escape()
         });
         window.focus(&composer.read(cx).focus_handle(cx), cx);
         let subscriptions = vec![
@@ -258,7 +272,6 @@ impl ArtistApp {
             cx.subscribe(&session_name, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&model_override, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&question_notes, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe(&command_search, |_, _, _: &InputEvent, cx| cx.notify()),
         ];
         let project = std::env::current_dir()
             .ok()
@@ -269,10 +282,10 @@ impl ArtistApp {
             transcript: Transcript::new(),
             composer,
             session_search,
+            workspace_tree,
             session_name,
             model_override,
             question_notes,
-            command_search,
             status: "Ready".into(),
             session_id: None,
             session_events: Vec::new(),
@@ -304,12 +317,10 @@ impl ArtistApp {
             #[cfg(feature = "embedded-canvas")]
             canvas_accessibility: HashMap::new(),
             project,
-            sidebar_tab: SidebarTab::Sessions,
             run_baseline: HashMap::new(),
             session_changed_files: HashSet::new(),
             sidebar_visible: true,
             compact_sidebar_open: false,
-            command_palette_open: false,
             collapsed_blocks: HashSet::new(),
             active_profile: "default".into(),
             run_provider: None,
@@ -318,7 +329,7 @@ impl ArtistApp {
             profiles: Vec::new(),
             selected_provider: None,
             selected_profile: "default".into(),
-            show_archived: false,
+            tree_signature: String::new(),
             _subscriptions: subscriptions,
         };
         app.refresh_workspace();
@@ -397,21 +408,7 @@ impl ArtistApp {
                     })
             })
             .collect();
-        self.sessions.sort_by_key(|session| {
-            (
-                session_group_rank(
-                    session,
-                    self.session_summaries.get(&session.id),
-                    self.session_id.as_deref(),
-                    self.running,
-                ),
-                std::cmp::Reverse(
-                    self.session_summaries
-                        .get(&session.id)
-                        .map_or(session.created_at_ms, |summary| summary.updated_at_ms),
-                ),
-            )
-        });
+        sort_sessions_by_activity(&mut self.sessions, &self.session_summaries);
         self.refresh_changes();
     }
 
@@ -502,7 +499,7 @@ impl ArtistApp {
                 self.session_events = events.clone();
                 self.transcript = transcript_from_replay(artist_session::replay_for_ui(&events));
                 self.follow_output = true;
-                self.status = "Ready · resumed".into();
+                self.status = "Resumed".into();
                 self.refresh_workspace();
                 if self.follow_output {
                     self.transcript_scroll.scroll_to_bottom();
@@ -1238,6 +1235,7 @@ impl ArtistApp {
         self.refresh_workspace();
     }
 
+    #[allow(dead_code)]
     fn delete_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.running {
             return;
@@ -1283,6 +1281,7 @@ impl ArtistApp {
         .detach();
     }
 
+    #[allow(dead_code)]
     fn rename_session(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.session_id.as_deref() else {
             return;
@@ -1297,36 +1296,7 @@ impl ArtistApp {
         }
     }
 
-    fn toggle_session_archived(&mut self) {
-        let Some(id) = self.session_id.clone() else {
-            return;
-        };
-        let archived = self
-            .sessions
-            .iter()
-            .find(|session| session.id == id)
-            .is_some_and(|session| session.archived);
-        match self.session_store.set_archived(&id, !archived) {
-            Ok(_) => {
-                self.status = if archived {
-                    "Session restored".into()
-                } else {
-                    "Session archived".into()
-                };
-                if !archived && !self.show_archived {
-                    self.transcript = Transcript::new();
-                    self.session_id = None;
-                    self.session_events.clear();
-                    self.active_profile = "default".into();
-                    self.run_provider = None;
-                    self.run_model = None;
-                }
-                self.refresh_workspace();
-            }
-            Err(error) => self.status = format!("Could not update session: {error}"),
-        }
-    }
-
+    #[allow(dead_code)]
     fn toggle_session_pinned(&mut self) {
         let Some(id) = self.session_id.clone() else {
             return;
@@ -1349,6 +1319,7 @@ impl ArtistApp {
         }
     }
 
+    #[allow(dead_code)]
     fn fork_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.running {
             return;
@@ -1376,26 +1347,8 @@ impl ArtistApp {
         }
     }
 
-    fn select_provider(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_provider = Some(id.clone());
-        let model = self
-            .providers
-            .iter()
-            .find(|provider| provider.id == id)
-            .and_then(|provider| provider.model.clone())
-            .unwrap_or_default();
-        self.model_override
-            .update(cx, |state, cx| state.set_value(model, window, cx));
-    }
-
-    fn select_profile(&mut self, profile: String) {
-        self.selected_profile = profile;
-        self.command_palette_open = false;
-        self.status = "Routing updated".into();
-    }
-
     fn toggle_sidebar(&mut self, window: &Window) {
-        if window.viewport_size().width < px(760.) {
+        if window.viewport_size().width < px(980.) {
             self.compact_sidebar_open = !self.compact_sidebar_open;
         } else {
             self.sidebar_visible = !self.sidebar_visible;
@@ -1432,25 +1385,9 @@ impl ArtistApp {
     }
 
     fn action_quick_open(&mut self, _: &QuickOpen, window: &mut Window, cx: &mut Context<Self>) {
-        self.command_palette_open = true;
-        window.focus(&self.command_search.read(cx).focus_handle(cx), cx);
-        cx.notify();
-    }
-
-    fn action_show_command_palette(
-        &mut self,
-        _: &ShowCommandPalette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.command_palette_open = !self.command_palette_open;
-        if self.command_palette_open {
-            self.command_search
-                .update(cx, |state, cx| state.set_value("", window, cx));
-            window.focus(&self.command_search.read(cx).focus_handle(cx), cx);
-        } else {
-            window.focus(&self.composer.read(cx).focus_handle(cx), cx);
-        }
+        self.sidebar_visible = true;
+        self.compact_sidebar_open = window.viewport_size().width < px(980.);
+        window.focus(&self.session_search.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
@@ -1476,8 +1413,7 @@ impl ArtistApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.command_palette_open || self.compact_sidebar_open {
-            self.command_palette_open = false;
+        if self.compact_sidebar_open {
             self.compact_sidebar_open = false;
             window.focus(&self.composer.read(cx).focus_handle(cx), cx);
             cx.notify();
@@ -1486,707 +1422,321 @@ impl ArtistApp {
         }
     }
 
-    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let active_session = self.session_id.as_deref();
+    fn sync_workspace_tree(&mut self, cx: &mut Context<Self>) {
         let query = self.session_search.read(cx).value().trim().to_lowercase();
-        let has_visible_sessions = self.sessions.iter().any(|session| {
-            session_matches(
-                session,
-                self.session_summaries.get(&session.id),
-                &query,
-                self.show_archived,
-            )
+        let signature = workspace_tree_signature(
+            &self.project,
+            &self.sessions,
+            &self.session_summaries,
+            &self.session_trees,
+            self.session_id.as_deref(),
+            self.running,
+            !self.pending_questions.is_empty(),
+            &query,
+        );
+        if signature == self.tree_signature {
+            return;
+        }
+        self.tree_signature = signature;
+        let items = workspace_tree_items(
+            &self.project,
+            &self.sessions,
+            &self.session_summaries,
+            &self.session_trees,
+            &query,
+        );
+        let selected = self
+            .focused_object
+            .as_ref()
+            .map(|object| format!("object|{}|{}", object.root_session, object.id.as_str()))
+            .or_else(|| self.session_id.as_ref().map(|id| format!("session|{id}")));
+        self.workspace_tree.update(cx, |state, cx| {
+            state.set_items(items, cx);
+            if let Some(selected) = selected {
+                state.set_selected_item(Some(&TreeItem::new(selected, "")), cx);
+            }
         });
+    }
+
+    fn sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let app = cx.entity().downgrade();
+        let tree_view = tree(
+            &self.workspace_tree,
+            move |ix, entry, _selected, _window, cx| {
+                let item = entry.item();
+                let id = item.id.to_string();
+                let depth = entry.depth();
+                let expanded = entry.is_expanded();
+                let folder = entry.is_folder();
+                let project_row = id.starts_with("project|");
+                let session_row = id.starts_with("session|");
+                let mut title = item.label.to_string();
+                let mut preview = None;
+                let mut state = None;
+                let mut active = false;
+                if let Some(app) = app.upgrade() {
+                    let this = app.read(cx);
+                    if let Some(session_id) = id.strip_prefix("session|") {
+                        if let Some(session) = this
+                            .sessions
+                            .iter()
+                            .find(|session| session.id == session_id)
+                        {
+                            let roots = this
+                                .session_trees
+                                .get(session_id)
+                                .map(Vec::as_slice)
+                                .unwrap_or_default();
+                            title = session_identity(session, roots);
+                            preview = this
+                                .session_summaries
+                                .get(session_id)
+                                .map(|summary| summary.preview.clone())
+                                .filter(|preview| !preview.trim().is_empty());
+                            active = this.session_id.as_deref() == Some(session_id)
+                                && this.focused_object.is_none();
+                            state = Some(if active && !this.pending_questions.is_empty() {
+                                "needs_input"
+                            } else if active && this.running {
+                                "running"
+                            } else if this
+                                .session_summaries
+                                .get(session_id)
+                                .is_some_and(|summary| summary.failed)
+                            {
+                                "failed"
+                            } else {
+                                "completed"
+                            });
+                        }
+                    } else if let Some(rest) = id.strip_prefix("object|") {
+                        if let Some((session_id, object_id)) = rest.split_once('|') {
+                            if let Some(object) = this
+                                .session_trees
+                                .get(session_id)
+                                .and_then(|roots| find_workspace_object_by_str(roots, object_id))
+                            {
+                                title = object.title.clone();
+                                active = this
+                                    .focused_object
+                                    .as_ref()
+                                    .is_some_and(|focused| focused.id == object.id);
+                                state = Some(match object.state {
+                                    artist_ui_core::ObjectState::Active => "running",
+                                    artist_ui_core::ObjectState::Failed => "failed",
+                                    artist_ui_core::ObjectState::Completed => "completed",
+                                    artist_ui_core::ObjectState::Interrupted => "failed",
+                                    artist_ui_core::ObjectState::Dormant => "ready",
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let disclosure = if folder {
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_3()
+                    .text_color(cx.theme().sidebar_foreground.opacity(0.68))
+                    .into_any_element()
+                } else {
+                    div().w(px(12.)).flex_none().into_any_element()
+                };
+                let status = state.map(|state| match state {
+                    "running" => Spinner::new()
+                        .xsmall()
+                        .color(cx.theme().success)
+                        .into_any_element(),
+                    "needs_input" => div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .font_medium()
+                        .text_color(cx.theme().warning)
+                        .child(Icon::new(IconName::TriangleAlert).size_3())
+                        .child("Needs input")
+                        .into_any_element(),
+                    "failed" => Icon::new(IconName::Close)
+                        .text_color(cx.theme().danger)
+                        .size_3p5()
+                        .into_any_element(),
+                    "completed" => Icon::new(IconName::Check)
+                        .text_color(cx.theme().success)
+                        .size_3p5()
+                        .into_any_element(),
+                    _ => Icon::new(IconName::CircleCheck)
+                        .text_color(cx.theme().sidebar_foreground.opacity(0.45))
+                        .size_3p5()
+                        .into_any_element(),
+                });
+                let has_preview = preview.is_some();
+                let mut row_label = preview
+                    .as_deref()
+                    .map(|preview| format!("{title}. {preview}"))
+                    .unwrap_or_else(|| title.clone());
+                if state == Some("needs_input") {
+                    row_label.push_str(". Needs input");
+                }
+                let click_id = id.clone();
+                let app_click = app.clone();
+                // gpui-component's Tree is backed by a uniform list. Keep one
+                // fixed row extent while reserving a second line for dialogue
+                // previews on root-agent rows.
+                ListItem::new(ix)
+                    .h(px(48.))
+                    .min_h(px(48.))
+                    .px_1()
+                    .when(project_row, |item| {
+                        item.bg(cx.theme().list_head)
+                            .border_b_1()
+                            .border_color(cx.theme().sidebar_border)
+                    })
+                    .when(active, |item| {
+                        item.bg(cx.theme().sidebar_accent)
+                            .text_color(cx.theme().sidebar_accent_foreground)
+                            .border_l_2()
+                            .border_color(cx.theme().list_active_border)
+                    })
+                    .child(
+                        div()
+                            .id(("workspace-tree-row", ix))
+                            .role(Role::ListItem)
+                            .aria_label(row_label)
+                            .w_full()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_stretch()
+                            .child(tree_parenthood_guides(depth, cx))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .h_full()
+                                    .px_1()
+                                    .py_1()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(disclosure)
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .text_ellipsis()
+                                                    .when(project_row, |label| label.font_bold())
+                                                    .when(session_row, |label| {
+                                                        label.font_semibold()
+                                                    })
+                                                    .child(title),
+                                            )
+                                            .when_some(status, |row, status| row.child(status)),
+                                    )
+                                    .when_some(preview, |column, preview| {
+                                        column.child(
+                                            div()
+                                                .min_w_0()
+                                                .pl(px(18.))
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_xs()
+                                                .text_color(if active {
+                                                    cx.theme()
+                                                        .sidebar_accent_foreground
+                                                        .opacity(0.68)
+                                                } else {
+                                                    cx.theme().sidebar_foreground.opacity(0.56)
+                                                })
+                                                .child(preview),
+                                        )
+                                    })
+                                    .when(!has_preview && !project_row, |column| column.text_sm()),
+                            ),
+                    )
+                    .on_click(move |_, window, cx| {
+                        let Some(app) = app_click.upgrade() else {
+                            return;
+                        };
+                        app.update(cx, |this, cx| {
+                            if let Some(session_id) = click_id.strip_prefix("session|") {
+                                this.select_session(session_id, window, cx);
+                            } else if let Some(rest) = click_id.strip_prefix("object|") {
+                                if let Some((session_id, object_id)) = rest.split_once('|') {
+                                    if let Some(object) =
+                                        this.session_trees.get(session_id).and_then(|roots| {
+                                            find_workspace_object_by_str(roots, object_id)
+                                        })
+                                    {
+                                        this.promote_object(object, window, cx);
+                                    }
+                                }
+                            }
+                            cx.notify();
+                        });
+                    })
+            },
+        );
+
         div()
             .id("workspace-sidebar")
             .role(Role::Navigation)
-            .aria_label("Projects and sessions")
-            .w(px(304.))
-            .h_full()
-            .flex_none()
+            .aria_label("Project and object tree")
+            .size_full()
             .overflow_hidden()
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().sidebar_border)
             .bg(cx.theme().sidebar)
+            .text_color(cx.theme().sidebar_foreground)
             .child(
                 div()
-                    .p_3()
+                    .h(px(40.))
+                    .px_2()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .child(div().text_xs().font_bold().child("PROJECTS"))
+                    .gap_2()
+                    .bg(cx.theme().sidebar)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.session_search).w_full()),
+                    )
                     .child(
                         Button::new("open-project")
-                            .label("Open…")
+                            .icon(IconName::FolderOpen)
+                            .compact()
                             .ghost()
+                            .tooltip("Open project")
                             .disabled(self.running)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.choose_project(window, cx);
                             })),
                     ),
             )
+            .child(Separator::horizontal())
             .child(
                 div()
-                    .id("project-list")
-                    .flex_none()
-                    .max_h(px(210.))
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .px_2()
-                    .children(self.projects.iter().enumerate().map(|(index, path)| {
-                        let selected = path == &self.project;
-                        let project = path.clone();
-                        Button::new(("project", index))
-                            .w_full()
-                            .h_auto()
-                            .min_h(px(48.))
-                            .px_2()
-                            .py_2()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(div().font_bold().child(project_name(path)))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(path.display().to_string()),
-                                    ),
-                            )
-                            .when(selected, |button| button.primary())
-                            .when(!selected, |button| button.ghost())
-                            .disabled(self.running)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_project(project.clone(), window, cx);
-                                cx.notify();
-                            }))
-                    })),
-            )
-            .child(
-                div().px_2().pt_3().flex().gap_1().child(
-                    Button::new("sidebar-sessions")
-                        .label("Sessions")
-                        .when(self.sidebar_tab == SidebarTab::Sessions, |button| {
-                            button.primary()
-                        })
-                        .when(self.sidebar_tab != SidebarTab::Sessions, |button| {
-                            button.ghost()
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar_tab = SidebarTab::Sessions;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .when(self.sidebar_tab == SidebarTab::Sessions, |sidebar| {
-                sidebar.child(
-                    div()
-                        .px_3()
-                        .pt_4()
-                        .pb_2()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().text_xs().font_bold().child("SESSIONS"))
-                        .child(
-                            Button::new("toggle-archived")
-                                .label(if self.show_archived {
-                                    "Hide archived"
-                                } else {
-                                    "Archived"
-                                })
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_archived = !this.show_archived;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-            })
-            .when(self.sidebar_tab == SidebarTab::Sessions, |sidebar| {
-                sidebar.child(
-                    div()
-                        .px_2()
-                        .pb_2()
-                        .child(Input::new(&self.session_search).w_full()),
-                )
-            })
-            .when(self.sidebar_tab == SidebarTab::Sessions, |sidebar| {
-                sidebar.child(
-                    div()
-                        .id("session-list")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .px_2()
-                        .when(!has_visible_sessions, |view| {
-                            view.child(
-                                div()
-                                    .p_3()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("No matching sessions"),
-                            )
-                        })
-                        .children(self.sessions.iter().enumerate().filter_map(
-                            |(index, session)| {
-                                let matches = session_matches(
-                                    session,
-                                    self.session_summaries.get(&session.id),
-                                    &query,
-                                    self.show_archived,
-                                );
-                                if !matches {
-                                    return None;
-                                }
-                                let id = session.id.clone();
-                                let select_id = id.clone();
-                                let selected = active_session == Some(id.as_str());
-                                let label = session
-                                    .label
-                                    .as_deref()
-                                    .and_then(|label| label.lines().next())
-                                    .unwrap_or("Untitled")
-                                    .to_owned();
-                                let summary = self
-                                    .session_summaries
-                                    .get(&session.id)
-                                    .cloned()
-                                    .unwrap_or_else(|| SessionSummary {
-                                        updated_at_ms: session.created_at_ms,
-                                        preview: "Session unavailable".into(),
-                                        ..SessionSummary::default()
-                                    });
-                                let state = if active_session == Some(id.as_str()) && self.running {
-                                    "Running"
-                                } else if summary.failed {
-                                    "Failed"
-                                } else if session.archived {
-                                    "Archived"
-                                } else if session.pinned {
-                                    "Pinned"
-                                } else {
-                                    "Recent"
-                                };
-                                let group = session_group(
-                                    session,
-                                    Some(&summary),
-                                    active_session,
-                                    self.running,
-                                );
-                                let first_in_group =
-                                    !self.sessions[..index].iter().any(|earlier| {
-                                        session_matches(
-                                            earlier,
-                                            self.session_summaries.get(&earlier.id),
-                                            &query,
-                                            self.show_archived,
-                                        ) && session_group(
-                                            earlier,
-                                            self.session_summaries.get(&earlier.id),
-                                            active_session,
-                                            self.running,
-                                        ) == group
-                                    });
-                                let route = match (&summary.provider, &summary.model) {
-                                    (Some(provider), Some(model)) => {
-                                        format!("{provider} · {model}")
-                                    }
-                                    (Some(provider), None) => provider.clone(),
-                                    _ => "Not run yet".into(),
-                                };
-                                let object_rows = self
-                                    .session_trees
-                                    .get(&session.id)
-                                    .map(|roots| workspace_rows(roots))
-                                    .unwrap_or_default();
-                                Some(
-                                    div()
-                                        .when(first_in_group, |view| {
-                                            view.child(
-                                                div()
-                                                    .px_2()
-                                                    .pt_3()
-                                                    .pb_1()
-                                                    .text_xs()
-                                                    .font_bold()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(group),
-                                            )
-                                        })
-                                        .child(
-                                            Button::new(("session", index))
-                                                .w_full()
-                                                .h_auto()
-                                                .min_h(px(76.))
-                                                .px_2()
-                                                .py_2()
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .flex()
-                                                        .flex_col()
-                                                        .gap_1()
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .justify_between()
-                                                                .gap_2()
-                                                                .child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .font_bold()
-                                                                        .child(label),
-                                                                )
-                                                                .child(
-                                                                    div()
-                                                                        .flex_none()
-                                                                        .text_xs()
-                                                                        .text_color(
-                                                                            cx.theme()
-                                                                                .muted_foreground,
-                                                                        )
-                                                                        .child(relative_time(
-                                                                            summary.updated_at_ms,
-                                                                        )),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .min_w_0()
-                                                                .overflow_hidden()
-                                                                .whitespace_nowrap()
-                                                                .text_ellipsis()
-                                                                .text_xs()
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                )
-                                                                .child(summary.preview),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .justify_between()
-                                                                .gap_2()
-                                                                .text_xs()
-                                                                .text_color(if summary.failed {
-                                                                    cx.theme().danger
-                                                                } else {
-                                                                    cx.theme().muted_foreground
-                                                                })
-                                                                .child(state)
-                                                                .child(
-                                                                    div()
-                                                                        .min_w_0()
-                                                                        .overflow_hidden()
-                                                                        .whitespace_nowrap()
-                                                                        .text_ellipsis()
-                                                                        .child(route),
-                                                                ),
-                                                        ),
-                                                )
-                                                .when(selected, |button| button.primary())
-                                                .when(!selected, |button| button.ghost())
-                                                .disabled(self.running)
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.select_session(&select_id, window, cx);
-                                                        cx.notify();
-                                                    },
-                                                )),
-                                        )
-                                        .when(selected, |row| {
-                                            row.child(
-                                                div()
-                                                    .px_2()
-                                                    .pb_1()
-                                                    .flex()
-                                                    .flex_wrap()
-                                                    .gap_1()
-                                                    .child(
-                                                        Input::new(&self.session_name).w(px(150.)),
-                                                    )
-                                                    .child(
-                                                        Button::new(("session-rename", index))
-                                                            .label("Rename")
-                                                            .ghost()
-                                                            .disabled(self.running)
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.rename_session(cx);
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new(("session-pin", index))
-                                                            .label(if session.pinned {
-                                                                "Unpin"
-                                                            } else {
-                                                                "Pin"
-                                                            })
-                                                            .ghost()
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.toggle_session_pinned();
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new(("session-fork", index))
-                                                            .label("Fork")
-                                                            .ghost()
-                                                            .disabled(self.running)
-                                                            .on_click(cx.listener(
-                                                                |this, _, window, cx| {
-                                                                    this.fork_session(window, cx);
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new(("session-archive", index))
-                                                            .label(if session.archived {
-                                                                "Restore"
-                                                            } else {
-                                                                "Archive"
-                                                            })
-                                                            .ghost()
-                                                            .disabled(self.running)
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.toggle_session_archived();
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new(("session-delete", index))
-                                                            .label("Delete")
-                                                            .danger()
-                                                            .disabled(self.running)
-                                                            .on_click(cx.listener(
-                                                                |this, _, window, cx| {
-                                                                    this.delete_session(window, cx);
-                                                                    cx.notify();
-                                                                },
-                                                            )),
-                                                    )
-                                                    .when(self.running, |actions| {
-                                                        actions.child(
-                                                            Button::new(("session-stop", index))
-                                                                .label("Stop")
-                                                                .danger()
-                                                                .on_click(cx.listener(
-                                                                    |this, _, _, cx| {
-                                                                        this.stop();
-                                                                        cx.notify();
-                                                                    },
-                                                                )),
-                                                        )
-                                                    }),
-                                            )
-                                        })
-                                        .children(object_rows.into_iter().enumerate().map(
-                                            |(row_index, (depth, object))| {
-                                                let state =
-                                                    format!("{:?}", object.state).to_lowercase();
-                                                let promoted = object.clone();
-                                                let row = div()
-                                                    .id((
-                                                        "session-object",
-                                                        index * 1000 + row_index,
-                                                    ))
-                                                    .role(Role::TreeItem)
-                                                    .aria_label(format!(
-                                                        "{} {} {}",
-                                                        object.title,
-                                                        object_kind_label(object.kind),
-                                                        state
-                                                    ))
-                                                    .ml(px(12. + depth as f32 * 14.))
-                                                    .mr_2()
-                                                    .px_2()
-                                                    .py_1()
-                                                    .border_l_1()
-                                                    .border_color(cx.theme().border)
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .gap_2()
-                                                    .text_xs()
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.promote_object(
-                                                                promoted.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                            cx.notify();
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .min_w_0()
-                                                            .overflow_hidden()
-                                                            .whitespace_nowrap()
-                                                            .text_ellipsis()
-                                                            .child(format!(
-                                                                "{}  {}",
-                                                                object_kind_label(object.kind),
-                                                                object.title
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex_none()
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .child(state),
-                                                    );
-                                                #[cfg(feature = "embedded-canvas")]
-                                                if object.kind == artist_ui_core::ObjectKind::Canvas
-                                                    && self
-                                                        .focused_object
-                                                        .as_ref()
-                                                        .map(|focused| &focused.id)
-                                                        != Some(&object.id)
-                                                    && let Some(webview) =
-                                                        self.canvas_views.get(&object.id)
-                                                {
-                                                    return row.child(
-                                                        div()
-                                                            .w_full()
-                                                            .h(px(110.))
-                                                            .overflow_hidden()
-                                                            .rounded_md()
-                                                            .border_1()
-                                                            .border_color(cx.theme().border)
-                                                            .child(webview.clone()),
-                                                    );
-                                                }
-                                                row
-                                            },
-                                        )),
-                                )
-                            },
-                        )),
-                )
-            })
-    }
-
-    fn command_palette(&self, cx: &Context<Self>) -> impl IntoElement {
-        let query = self.command_search.read(cx).value().trim().to_lowercase();
-        let matches = |value: &str| query.is_empty() || value.to_lowercase().contains(&query);
-        div()
-            .id("command-palette-overlay")
-            .role(Role::Dialog)
-            .aria_label("Command palette")
-            .absolute()
-            .left_0()
-            .right_0()
-            .top_0()
-            .bottom_0()
-            .bg(cx.theme().background.opacity(0.72))
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt_16()
-            .child(
-                div()
-                    .w(px(560.))
-                    .max_w_full()
-                    .max_h(px(560.))
-                    .mx_4()
-                    .p_3()
-                    .rounded_lg()
-                    .shadow_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(Input::new(&self.command_search).w_full())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(div().text_xs().child("Model"))
-                            .child(Input::new(&self.model_override).w_full()),
-                    )
-                    .child(
-                        div()
-                            .id("command-list")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .when(matches("new conversation"), |view| {
-                                view.child(
-                                    Button::new("palette-new")
-                                        .label("New conversation                         Ctrl+N")
-                                        .w_full()
-                                        .ghost()
-                                        .disabled(self.running)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.command_palette_open = false;
-                                            this.new_conversation(window, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(matches("open project folder"), |view| {
-                                view.child(
-                                    Button::new("palette-open")
-                                        .label("Open project…                              Ctrl+O")
-                                        .w_full()
-                                        .ghost()
-                                        .disabled(self.running)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.command_palette_open = false;
-                                            this.choose_project(window, cx);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(matches("toggle projects sidebar"), |view| {
-                                view.child(
-                                    Button::new("palette-sidebar")
-                                        .label("Toggle projects sidebar                  Ctrl+B")
-                                        .w_full()
-                                        .ghost()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.command_palette_open = false;
-                                            this.toggle_sidebar(window);
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(self.running && matches("stop current run"), |view| {
-                                view.child(
-                                    Button::new("palette-stop")
-                                        .label("Stop current run                         Ctrl+.")
-                                        .w_full()
-                                        .danger()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.command_palette_open = false;
-                                            this.stop();
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .children(self.providers.iter().enumerate().filter_map(
-                                |(index, provider)| {
-                                    if !matches(&format!(
-                                        "provider {} {}",
-                                        provider.name, provider.id
-                                    )) {
-                                        return None;
-                                    }
-                                    let id = provider.id.clone();
-                                    Some(
-                                        Button::new(("palette-provider", index))
-                                            .label(format!("Provider · {}", provider.name))
-                                            .w_full()
-                                            .ghost()
-                                            .disabled(self.running)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.select_provider(id.clone(), window, cx);
-                                                this.command_palette_open = false;
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            ))
-                            .children(self.profiles.iter().enumerate().filter_map(
-                                |(index, profile)| {
-                                    if !matches(&format!("profile {profile}")) {
-                                        return None;
-                                    }
-                                    let profile = profile.clone();
-                                    Some(
-                                        Button::new(("palette-profile", index))
-                                            .label(format!("Profile · {profile}"))
-                                            .w_full()
-                                            .ghost()
-                                            .disabled(self.running)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.select_profile(profile.clone());
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            ))
-                            .children(self.projects.iter().enumerate().filter_map(
-                                |(index, project)| {
-                                    let text = project.display().to_string();
-                                    if !matches(&format!(
-                                        "project {} {text}",
-                                        project_name(project)
-                                    )) {
-                                        return None;
-                                    }
-                                    let value = project.clone();
-                                    Some(
-                                        Button::new(("palette-project", index))
-                                            .label(format!("Project · {}", project.display()))
-                                            .w_full()
-                                            .ghost()
-                                            .disabled(self.running)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.command_palette_open = false;
-                                                this.select_project(value.clone(), window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            ))
-                            .children(self.sessions.iter().enumerate().filter_map(
-                                |(index, session)| {
-                                    let label = session.label.as_deref().unwrap_or("Untitled");
-                                    if !matches(&format!("session {label} {}", session.id)) {
-                                        return None;
-                                    }
-                                    let id = session.id.clone();
-                                    Some(
-                                        Button::new(("palette-session", index))
-                                            .label(format!("Session · {label}"))
-                                            .w_full()
-                                            .ghost()
-                                            .disabled(self.running)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.command_palette_open = false;
-                                                this.select_session(&id, window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                },
-                            )),
-                    ),
+                    .id("workspace-tree")
+                    .flex_1()
+                    .min_h_0()
+                    .child(tree_view),
             )
     }
 
@@ -2216,21 +1766,13 @@ impl ArtistApp {
             .flex_col()
             .gap_3()
             .child(
-                div()
-                    .text_xs()
-                    .font_bold()
-                    .text_color(cx.theme().warning)
-                    .child(if question.header.is_empty() {
-                        "ARTIST NEEDS YOUR INPUT".to_owned()
+                Alert::warning("pending-question-alert", question.question.clone()).title(
+                    if question.header.is_empty() {
+                        "Artist needs your input".to_owned()
                     } else {
-                        question.header.to_uppercase()
-                    }),
-            )
-            .child(
-                div()
-                    .whitespace_normal()
-                    .font_bold()
-                    .child(question.question.clone()),
+                        question.header.clone()
+                    },
+                ),
             )
             .children(question.options.iter().enumerate().map(|(index, option)| {
                 let id = question.id.clone();
@@ -2320,7 +1862,8 @@ impl ArtistApp {
                 lines: _,
             } => {
                 let user = *role == TranscriptRole::User;
-                let copy_source = source.clone();
+                let user_copy = source.clone();
+                let assistant_copy = source.clone();
                 div()
                     .id(("message", index))
                     .role(Role::Article)
@@ -2333,67 +1876,85 @@ impl ArtistApp {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .p_4()
-                    .rounded_lg()
-                    .bg(if user {
-                        cx.theme().accent
-                    } else {
-                        cx.theme().group_box
+                    .when(user, |view| {
+                        view.p_3()
+                            .rounded_md()
+                            .bg(cx.theme().accent.opacity(0.12))
+                            .border_l_2()
+                            .border_color(cx.theme().accent)
                     })
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .text_xs()
-                            .text_color(if user {
-                                cx.theme().accent_foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(if user { "YOU" } else { "ARTIST" })
-                            .child(
-                                Button::new(("copy-message", index))
-                                    .label("Copy")
-                                    .ghost()
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_source.clone(),
-                                        ));
-                                    }),
-                            ),
-                    )
+                    .when(!user, |view| view.px_1().py_2())
+                    .when(user, |view| {
+                        view.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(cx.theme().accent)
+                                .child("YOU")
+                                .child(
+                                    Button::new(("copy-user-message", index))
+                                        .icon(IconName::Copy)
+                                        .compact()
+                                        .ghost()
+                                        .tooltip("Copy message")
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                user_copy.clone(),
+                                            ));
+                                        }),
+                                ),
+                        )
+                    })
                     .child(
                         TextView::markdown(("message-markdown", index), source.clone())
                             .selectable(true)
                             .w_full(),
                     )
+                    .when(!user, |view| {
+                        view.child(
+                            div().flex().justify_end().child(
+                                Button::new(("copy-assistant-message", index))
+                                    .icon(IconName::Copy)
+                                    .compact()
+                                    .ghost()
+                                    .tooltip("Copy response")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            assistant_copy.clone(),
+                                        ));
+                                    }),
+                            ),
+                        )
+                    })
                     .into_any_element()
             }
             Block::Reasoning { lines } => {
                 let collapsed = self.collapsed_blocks.contains(&index);
-                div()
-                    .id(("reasoning", index))
-                    .role(Role::Article)
-                    .aria_label("Artist reasoning")
+                Collapsible::new()
+                    .open(!collapsed)
                     .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .pl_4()
+                    .pl_3()
                     .border_l_2()
-                    .border_color(cx.theme().accent)
+                    .border_color(cx.theme().info)
                     .text_color(cx.theme().muted_foreground)
                     .child(
                         Button::new(("reasoning-toggle", index))
-                            .label(if collapsed {
+                            .icon(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label("Reasoning")
+                            .compact()
+                            .ghost()
+                            .tooltip(if collapsed {
                                 "Show reasoning"
                             } else {
                                 "Hide reasoning"
                             })
-                            .ghost()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_blocks.remove(&index) {
                                     this.collapsed_blocks.insert(index);
@@ -2401,127 +1962,233 @@ impl ArtistApp {
                                 cx.notify();
                             })),
                     )
-                    .when(!collapsed, |view| {
-                        view.children(
+                    .content(
+                        div().pt_1().flex().flex_col().gap_1().children(
                             lines.iter().enumerate().map(|(line_index, line)| {
                                 Self::line_view(line, index, line_index, cx)
                             }),
-                        )
-                    })
+                        ),
+                    )
                     .into_any_element()
             }
             Block::Tool(tool) => {
-                let (label, color) = match tool.status {
-                    ToolStatus::Requested => ("REQUESTED", cx.theme().muted_foreground),
-                    ToolStatus::Running => ("RUNNING", cx.theme().warning),
-                    ToolStatus::Done => ("DONE", cx.theme().success),
-                    ToolStatus::Failed => ("FAILED", cx.theme().danger),
-                };
-                let collapsed = self.collapsed_blocks.contains(&index);
-                let copy_text = tool
-                    .result
-                    .clone()
-                    .unwrap_or_else(|| tool.arguments.clone());
-                let images: Vec<PathBuf> = self
+                let destination = self
                     .session_id
                     .as_deref()
-                    .and_then(|id| self.sessions.iter().find(|session| session.id == id))
-                    .map(|session| {
-                        tool.images
-                            .iter()
-                            .map(|digest| session.dir().join("attachments").join(digest))
-                            .filter(|path| path.is_file())
-                            .collect()
-                    })
+                    .and_then(|session_id| self.session_trees.get(session_id))
+                    .and_then(|roots| {
+                        workspace_rows(roots)
+                            .into_iter()
+                            .map(|(_, object)| object)
+                            .find(|object| object.durable_id == tool.id)
+                            .or_else(|| {
+                                let expected_kind = tool_destination_kind(&tool.name);
+                                workspace_rows(roots)
+                                    .into_iter()
+                                    .map(|(_, object)| object)
+                                    .filter(|object| {
+                                        expected_kind.is_none_or(|kind| object.kind == kind)
+                                    })
+                                    .find(|object| {
+                                        tool.arguments.contains(&object.title)
+                                            || tool.arguments.contains(&object.durable_id)
+                                            || object.title.contains(&tool.name)
+                                    })
+                            })
+                    });
+                let state = match tool.status {
+                    ToolStatus::Requested => "requested",
+                    ToolStatus::Running => "running",
+                    ToolStatus::Done => "completed",
+                    ToolStatus::Failed => "failed",
+                };
+                let line_count = tool
+                    .result
+                    .as_deref()
+                    .map(|result| result.lines().count())
                     .unwrap_or_default();
-                div()
-                    .id(("tool", index))
-                    .role(Role::Article)
-                    .aria_label(format!("Tool {}: {label}", tool.name))
+                let command = tool_portal_hint(&tool.name, &tool.arguments);
+                let destination_title = destination
+                    .as_ref()
+                    .map(|object| object.title.clone())
+                    .unwrap_or_else(|| tool.name.clone());
+                let promoted = destination.clone();
+                let portal_accent = match destination.as_ref().map(|object| object.kind) {
+                    Some(artist_ui_core::ObjectKind::Task) => cx.theme().secondary_active,
+                    Some(artist_ui_core::ObjectKind::Canvas) => cx.theme().info,
+                    Some(artist_ui_core::ObjectKind::Stage) => cx.theme().primary,
+                    _ => cx.theme().border,
+                };
+                let state_label = match state {
+                    "requested" => "Requested",
+                    "running" => "Running",
+                    "failed" => "Failed",
+                    _ => "Completed",
+                };
+                let result_hint = match line_count {
+                    0 => state_label.to_owned(),
+                    1 => format!("{state_label} · 1 line"),
+                    lines => format!("{state_label} · {lines} lines"),
+                };
+                Button::new(("tool-portal", index))
                     .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .bg(cx.theme().group_box)
-                    .border_1()
-                    .border_color(cx.theme().border)
+                    .h_auto()
+                    .min_h(px(58.))
+                    .px_3()
+                    .py_2()
+                    .ghost()
+                    .disabled(destination.is_none())
+                    .border_l_2()
+                    .border_color(portal_accent)
+                    .rounded_sm()
+                    .bg(cx.theme().group_box.opacity(0.58))
+                    .text_color(cx.theme().group_box_foreground)
                     .child(
-                        Button::new(("tool-toggle", index))
-                            .label(format!("{} · {label}", tool.name))
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_blocks.remove(&index) {
-                                    this.collapsed_blocks.insert(index);
-                                }
-                                cx.notify();
-                            })),
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_semibold()
+                                            .child(destination_title),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_family("monospace")
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(command),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(result_hint)
+                                    .child(
+                                        Icon::new(IconName::ChevronRight)
+                                            .size_3p5()
+                                            .text_color(cx.theme().link),
+                                    ),
+                            ),
                     )
-                    .when(!collapsed, |view| {
-                        view.child(
-                            div()
-                                .min_w_0()
-                                .whitespace_normal()
-                                .font_family("monospace")
-                                .text_sm()
-                                .text_color(color)
-                                .child(tool.arguments.clone()),
-                        )
-                        .children(tool.result.iter().map(|result| {
-                            div()
-                                .min_w_0()
-                                .max_w_full()
-                                .whitespace_normal()
-                                .text_sm()
-                                .child(result.clone())
+                    .when_some(promoted, |button, object| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.promote_object(object.clone(), window, cx);
+                            cx.notify();
                         }))
-                        .children(images.into_iter().enumerate().map(|(image_index, path)| {
-                            img(path)
-                                .id(format!("tool-image-{index}-{image_index}"))
-                                .max_w_full()
-                                .max_h(px(420.))
-                                .rounded_md()
-                        }))
-                        .child(
-                            Button::new(("copy-tool", index))
-                                .label("Copy details")
-                                .ghost()
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        copy_text.clone(),
-                                    ));
-                                }),
-                        )
                     })
                     .into_any_element()
             }
-            Block::Notice(notice) => div()
-                .id(("notice", index))
-                .role(Role::Alert)
-                .aria_label(format!("{}: {}", notice.title, notice.detail))
+            Block::Notice(notice) => Alert::warning(("notice", index), notice.detail.clone())
+                .title(notice.title.clone())
                 .w_full()
-                .min_w_0()
-                .whitespace_normal()
-                .p_3()
-                .rounded_md()
-                .bg(cx.theme().warning.opacity(0.12))
-                .text_color(cx.theme().warning)
-                .child(format!("{}  {}", notice.title, notice.detail))
                 .into_any_element(),
-            Block::Subagent(agent) => div()
-                .id(("subagent", index))
-                .role(Role::Article)
-                .aria_label(format!("Subagent {}: {}", agent.role, agent.prompt))
-                .w_full()
-                .min_w_0()
-                .whitespace_normal()
-                .p_3()
-                .rounded_md()
-                .border_1()
-                .border_color(cx.theme().accent)
-                .child(format!("{} · {}", agent.role, agent.prompt))
-                .into_any_element(),
+            Block::Subagent(agent) => {
+                let destination = self
+                    .session_id
+                    .as_deref()
+                    .and_then(|session_id| self.session_trees.get(session_id))
+                    .and_then(|roots| {
+                        workspace_rows(roots)
+                            .into_iter()
+                            .map(|(_, object)| object)
+                            .filter(|object| object.kind == artist_ui_core::ObjectKind::Agent)
+                            .find(|object| {
+                                object.durable_id.contains(&agent.id)
+                                    || object.lineage.contains(&agent.id)
+                                    || object.detail.as_deref() == Some(agent.prompt.as_str())
+                                    || object.title.eq_ignore_ascii_case(&agent.role)
+                                    || object.lineage.contains(&agent.role)
+                            })
+                    });
+                let promoted = destination.clone();
+                let title = destination
+                    .as_ref()
+                    .map(|object| object.title.clone())
+                    .unwrap_or_else(|| agent.role.clone());
+                Button::new(("subagent-portal", index))
+                    .w_full()
+                    .h_auto()
+                    .min_h(px(58.))
+                    .px_3()
+                    .py_2()
+                    .ghost()
+                    .disabled(destination.is_none())
+                    .border_l_2()
+                    .border_color(cx.theme().info)
+                    .rounded_sm()
+                    .bg(cx.theme().group_box.opacity(0.58))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(div().font_semibold().child(title))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(agent.prompt.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(cx.theme().info)
+                                    .child("Conversation")
+                                    .child(Icon::new(IconName::ChevronRight).size_3p5()),
+                            ),
+                    )
+                    .when_some(promoted, |button, object| {
+                        button.on_click(cx.listener(move |this, _, window, cx| {
+                            this.promote_object(object.clone(), window, cx);
+                            cx.notify();
+                        }))
+                    })
+                    .into_any_element()
+            }
         }
     }
 
@@ -2677,6 +2344,94 @@ impl ArtistApp {
                         })
                         .into_any_element()
                 })
+            })
+            .collect()
+    }
+
+    fn inline_object_previews(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return Vec::new();
+        };
+        self.session_trees
+            .get(session_id)
+            .map(|roots| workspace_rows(roots))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, object)| {
+                if !matches!(
+                    object.kind,
+                    artist_ui_core::ObjectKind::Canvas | artist_ui_core::ObjectKind::Stage
+                ) {
+                    return None;
+                }
+                let promoted = object.clone();
+                let kind = object_kind_label(object.kind);
+                let state = format!("{:?}", object.state).to_lowercase();
+                let (preview_bg, preview_border) = match object.kind {
+                    artist_ui_core::ObjectKind::Canvas => {
+                        (cx.theme().info.opacity(0.14), cx.theme().info)
+                    }
+                    artist_ui_core::ObjectKind::Stage => {
+                        (cx.theme().primary.opacity(0.12), cx.theme().primary)
+                    }
+                    _ => (cx.theme().group_box, cx.theme().border),
+                };
+                Some(
+                    Button::new(format!("inline-object-preview-{}", object.durable_id))
+                        .w_full()
+                        .h_auto()
+                        .min_h(px(68.))
+                        .px_3()
+                        .py_2()
+                        .ghost()
+                        .border_1()
+                        .border_color(preview_border)
+                        .rounded_md()
+                        .bg(preview_bg)
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .font_bold()
+                                                .child(object.title.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("{kind} · {state}")),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_lg()
+                                        .text_color(cx.theme().link)
+                                        .child(Icon::new(IconName::ArrowRight).size_4()),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.promote_object(promoted.clone(), window, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
             })
             .collect()
     }
@@ -2858,38 +2613,359 @@ impl Render for ArtistApp {
         let empty = self.transcript.is_empty();
         let turns = turn_ranges(self.transcript.blocks());
         let viewport = window.viewport_size();
-        let show_sidebar = self.sidebar_visible && viewport.width >= px(760.);
-        let compact_sidebar = viewport.width < px(760.) && self.compact_sidebar_open;
-        let usage = self.transcript.usage();
-        let status = if usage.total_tokens > 0 {
-            format!("{} · {} tokens", self.status, usage.total_tokens)
-        } else {
-            self.status.clone()
-        };
-        let routing_model = {
-            let model = self.model_override.read(cx).value().to_string();
-            if model.trim().is_empty() {
-                "provider default".to_owned()
-            } else {
-                model
-            }
-        };
-        let routing_label = format!(
-            "{} · {} · {}",
-            self.selected_provider
-                .as_deref()
-                .and_then(|id| self.providers.iter().find(|provider| provider.id == id))
-                .map(|provider| provider.name.as_str())
-                .unwrap_or("No provider"),
-            routing_model,
-            self.selected_profile
-        );
+        let narrow_workspace = viewport.width < px(1100.);
+        self.sync_workspace_tree(cx);
+        let show_sidebar = self.sidebar_visible && viewport.width >= px(980.);
+        let compact_sidebar = viewport.width < px(980.) && self.compact_sidebar_open;
         let focused_object = self.focused_object.clone();
         let showing_focus = focused_object.is_some();
+        let conversation_title = self
+            .session_id
+            .as_ref()
+            .and_then(|session_id| {
+                self.sessions
+                    .iter()
+                    .find(|session| &session.id == session_id)
+                    .map(|session| {
+                        let roots = self
+                            .session_trees
+                            .get(session_id)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default();
+                        session_identity(session, roots)
+                    })
+            })
+            .unwrap_or_else(|| "New conversation".to_owned());
         let contextual_title = focused_object
             .as_ref()
             .map(|object| format!("{} / {}", project_name(&self.project), object.title))
             .unwrap_or_else(|| project_name(&self.project));
+        let breadcrumb_app = cx.entity().downgrade();
+        let mut breadcrumb = Breadcrumb::new().child(
+            BreadcrumbItem::new(project_name(&self.project)).on_click(move |_, window, cx| {
+                let Some(app) = breadcrumb_app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |this, cx| {
+                    if this.focused_object.is_some() {
+                        this.pop_focus(window, cx);
+                        cx.notify();
+                    }
+                });
+            }),
+        );
+        if let Some(object) = &focused_object {
+            breadcrumb = breadcrumb.child(BreadcrumbItem::new(object.title.clone()));
+        }
+        let tabs_app = cx.entity().downgrade();
+        let mut workspace_tabs = vec![Tab::new().label("Conversation").aria_label("Conversation")];
+        if let Some(object) = &focused_object {
+            workspace_tabs.push(
+                Tab::new()
+                    .label(object.title.clone())
+                    .aria_label(format!("Focused {}", object.title)),
+            );
+        }
+        let workspace_tabs = TabBar::new("workspace-tabs")
+            .underline()
+            .small()
+            .selected_index(if showing_focus { 1 } else { 0 })
+            .children(workspace_tabs)
+            .on_click(move |index, window, cx| {
+                if *index != 0 {
+                    return;
+                }
+                let Some(app) = tabs_app.upgrade() else {
+                    return;
+                };
+                app.update(cx, |this, cx| {
+                    if this.focused_object.is_some() {
+                        this.pop_focus(window, cx);
+                    }
+                    window.focus(&this.composer.read(cx).focus_handle(cx), cx);
+                    cx.notify();
+                });
+            });
+
+        let workspace_main = div()
+            .id("workspace-main")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("application-header")
+                    .role(Role::Group)
+                    .aria_label("Conversation breadcrumb")
+                    .h(px(36.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .bg(cx.theme().background)
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("toggle-sidebar")
+                                    .icon(IconName::GalleryVerticalEnd)
+                                    .compact()
+                                    .ghost()
+                                    .tooltip("Toggle object tree · Ctrl+B")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_sidebar(window);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("application-title")
+                                    .role(Role::Heading)
+                                    .aria_label(format!("Current context: {contextual_title}"))
+                                    .aria_level(1)
+                                    .min_w_0()
+                                    .child(breadcrumb),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(showing_focus, |view| {
+                                view.child(
+                                    Button::new("close-focus")
+                                        .icon(IconName::ArrowLeft)
+                                        .compact()
+                                        .ghost()
+                                        .tooltip("Back one level")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.pop_focus(window, cx);
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("new-conversation")
+                                    .icon(IconName::Plus)
+                                    .compact()
+                                    .ghost()
+                                    .tooltip("New conversation · Ctrl+N")
+                                    .disabled(self.running)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_conversation(window, cx);
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(Separator::horizontal())
+            .child(
+                div()
+                    .id("workspace-switcher")
+                    .role(Role::Navigation)
+                    .aria_label("Open views")
+                    .h(px(32.))
+                    .flex_none()
+                    .px_4()
+                    .bg(cx.theme().muted.opacity(0.34))
+                    .child(workspace_tabs),
+            )
+            .child(Separator::horizontal())
+            .child(
+                div()
+                    .id("transcript")
+                    .role(Role::Log)
+                    .aria_label("Conversation transcript")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.transcript_scroll)
+                    .vertical_scrollbar(&self.transcript_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                        this.follow_output = false;
+                        cx.notify();
+                    }))
+                    .when(!showing_focus && narrow_workspace, |view| {
+                        view.px_3().py_4()
+                    })
+                    .when(!showing_focus && !narrow_workspace, |view| {
+                        view.px_6().py_6()
+                    })
+                    .when(showing_focus, |view| view.p_2())
+                    .child(
+                        div()
+                            .w_full()
+                            .when(!showing_focus, |view| view.max_w(px(820.)).mx_auto())
+                            .when(showing_focus, |view| view.h_full())
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .when_some(focused_object.clone(), |view, object| {
+                                view.child(self.focused_object_view(&object, cx))
+                            })
+                            .when(empty && !showing_focus, |view| {
+                                view.child(
+                                    div()
+                                        .id("empty-transcript")
+                                        .role(Role::Status)
+                                        .aria_label("No dialogue yet")
+                                        .mt_12()
+                                        .max_w(px(620.))
+                                        .pl_4()
+                                        .border_l_2()
+                                        .border_color(cx.theme().primary)
+                                        .flex()
+                                        .flex_col()
+                                        .items_start()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_medium()
+                                                .text_color(cx.theme().primary)
+                                                .child("NEW CONVERSATION"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("empty-heading")
+                                                .role(Role::Heading)
+                                                .aria_level(2)
+                                                .text_2xl()
+                                                .font_semibold()
+                                                .child(conversation_title.clone()),
+                                        )
+                                        .child(
+                                            div().text_color(cx.theme().muted_foreground).child(
+                                                "No dialogue yet. Send an instruction below.",
+                                            ),
+                                        ),
+                                )
+                            })
+                            .when(!showing_focus, |view| {
+                                view.children(turns.into_iter().enumerate().map(
+                                    |(turn_index, (start, end))| {
+                                        self.turn_view(turn_index, start, end, cx)
+                                    },
+                                ))
+                                .children(self.inline_object_previews(cx))
+                            }),
+                    ),
+            )
+            .when(
+                !showing_focus && !self.pending_questions.is_empty(),
+                |view| {
+                    view.child(
+                        div().flex_none().px_5().pb_2().child(
+                            div()
+                                .w_full()
+                                .max_w(px(820.))
+                                .mx_auto()
+                                .child(self.question_view(cx)),
+                        ),
+                    )
+                },
+            )
+            .when(!showing_focus, |view| {
+                view.child(
+                    div()
+                        .id("composer-region")
+                        .role(Role::Group)
+                        .aria_label("Message composer")
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .when(narrow_workspace, |view| view.px_3())
+                        .when(!narrow_workspace, |view| view.px_6())
+                        .py_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().muted.opacity(0.22))
+                        .when(!self.follow_output && !empty, |view| {
+                            view.child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(900.))
+                                    .mx_auto()
+                                    .mb_1()
+                                    .flex()
+                                    .justify_end()
+                                    .child(
+                                        Button::new("jump-latest")
+                                            .label("Latest")
+                                            .secondary()
+                                            .compact()
+                                            .tooltip("Return to the newest message")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.jump_to_latest();
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                        })
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(900.))
+                                .mx_auto()
+                                .p_1()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().group_box)
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().child(Input::new(&self.composer).w_full()))
+                                .child(
+                                    ButtonGroup::new("composer-actions")
+                                        .compact()
+                                        .child(
+                                            Button::new("send")
+                                                .label(if self.running { "Steer" } else { "Send" })
+                                                .when(!self.running, |button| button.primary())
+                                                .when(self.running, |button| button.ghost())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.submit(window, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .when(self.running, |group| {
+                                            group
+                                                .child(
+                                                    Button::new("queue-next")
+                                                        .label("Queue")
+                                                        .ghost()
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.queue_next_turn(window, cx);
+                                                                cx.notify();
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("stop")
+                                                        .label("Stop")
+                                                        .danger()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.stop();
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                        }),
+                                ),
+                        ),
+                )
+            });
+
         div()
             .id("artist-document")
             .role(Role::Application)
@@ -2904,312 +2980,28 @@ impl Render for ArtistApp {
             .on_action(cx.listener(Self::action_open_project))
             .on_action(cx.listener(Self::action_toggle_sidebar))
             .on_action(cx.listener(Self::action_quick_open))
-            .on_action(cx.listener(Self::action_show_command_palette))
             .on_action(cx.listener(Self::action_focus_composer))
             .on_action(cx.listener(Self::action_stop_run))
             .on_action(cx.listener(Self::action_dismiss_overlay))
-            .when(show_sidebar, |view| view.child(self.sidebar(cx)))
-            .child(
-                div()
-                    .id("workspace-main")
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
+            .child(if show_sidebar {
+                h_resizable("artist-workspace-layout")
                     .child(
-                        div()
-                            .id("application-header")
-                            .role(Role::Group)
-                            .aria_label("Application header")
-                            .h(px(52.))
+                        resizable_panel()
+                            .size(px(300.))
+                            .size_range(px(240.)..px(440.))
                             .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px_5()
-                            .border_b_1()
-                            .border_color(cx.theme().border)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("toggle-sidebar")
-                                            .label("Projects")
-                                            .ghost()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.toggle_sidebar(window);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("application-title")
-                                            .role(Role::Heading)
-                                            .aria_label(format!(
-                                                "Artist context {}",
-                                                contextual_title
-                                            ))
-                                            .aria_level(1)
-                                            .text_lg()
-                                            .child(contextual_title),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .when(viewport.width >= px(900.), |view| {
-                                        view.child(
-                                            div()
-                                                .id("run-status")
-                                                .role(Role::Status)
-                                                .aria_label(status.clone())
-                                                .min_w_0()
-                                                .max_w(px(520.))
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .text_xs()
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(status),
-                                        )
-                                    })
-                                    .when(showing_focus, |view| {
-                                        view.child(
-                                            Button::new("close-focus")
-                                                .label("Back")
-                                                .ghost()
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.pop_focus(window, cx);
-                                                    cx.notify();
-                                                })),
-                                        )
-                                    })
-                                    .when(viewport.width >= px(900.), |view| {
-                                        view.child(
-                                            Button::new("show-commands")
-                                                .label("Commands")
-                                                .ghost()
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.action_show_command_palette(
-                                                        &ShowCommandPalette,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })),
-                                        )
-                                    })
-                                    .child(
-                                        Button::new("new-conversation")
-                                            .label("New")
-                                            .ghost()
-                                            .disabled(self.running)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.new_conversation(window, cx);
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
+                            .child(self.sidebar(cx)),
                     )
-                    .child(
-                        div()
-                            .id("transcript")
-                            .role(Role::Log)
-                            .aria_label("Conversation transcript")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.transcript_scroll)
-                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                                this.follow_output = false;
-                                cx.notify();
-                            }))
-                            .px_6()
-                            .py_5()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(820.))
-                                    .mx_auto()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_4()
-                                    .when_some(focused_object.clone(), |view, object| {
-                                        view.child(self.focused_object_view(&object, cx))
-                                    })
-                                    .when(empty && !showing_focus, |view| {
-                                        view.child(
-                                            div()
-                                                .id("empty-transcript")
-                                                .role(Role::Status)
-                                                .aria_label("No messages yet")
-                                                .mt_16()
-                                                .flex()
-                                                .flex_col()
-                                                .items_center()
-                                                .gap_3()
-                                                .text_center()
-                                                .child(
-                                                    div()
-                                                        .id("empty-heading")
-                                                        .role(Role::Heading)
-                                                        .aria_level(2)
-                                                        .text_xl()
-                                                        .text_color(cx.theme().foreground)
-                                                        .child("Start a conversation"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .max_w(px(520.))
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(format!(
-                                                            "Working in {}. Send a message below or resume a session from the tree.",
-                                                            self.project.display()
-                                                        )),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .gap_2()
-                                                        .child(
-                                                            Button::new("empty-project")
-                                                                .label("Open project…")
-                                                                .ghost()
-                                                                .disabled(self.running)
-                                                                .on_click(cx.listener(
-                                                                    |this, _, window, cx| {
-                                                                        this.choose_project(
-                                                                            window, cx,
-                                                                        );
-                                                                    },
-                                                                )),
-                                                        ),
-                                                ),
-                                        )
-                                    })
-                                    .when(!showing_focus, |view| {
-                                        view.children(turns.into_iter().enumerate().map(
-                                            |(turn_index, (start, end))| {
-                                                self.turn_view(turn_index, start, end, cx)
-                                            },
-                                        ))
-                                    }),
-                            ),
-                    )
-                    .when(!self.pending_questions.is_empty(), |view| {
-                        view.child(
-                            div()
-                                .flex_none()
-                                .px_6()
-                                .pb_3()
-                                .child(self.question_view(cx)),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("composer-region")
-                            .role(Role::Group)
-                            .aria_label("Message composer")
-                            .flex_none()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .px_6()
-                            .pb_5()
-                            .when(!self.follow_output && !empty, |view| {
-                                view.child(
-                                    div()
-                                        .w_full()
-                                        .max_w(px(820.))
-                                        .mx_auto()
-                                        .flex()
-                                        .justify_end()
-                                        .child(
-                                            Button::new("jump-latest")
-                                                .label("Jump to latest")
-                                                .ghost()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.jump_to_latest();
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(820.))
-                                    .mx_auto()
-                                    .flex()
-                                    .items_end()
-                                    .gap_3()
-                                    .p_3()
-                                    .rounded_lg()
-                                    .bg(cx.theme().group_box)
-                                    .border_1()
-                                    .border_color(cx.theme().border)
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                Button::new("composer-routing")
-                                                    .label(routing_label)
-                                                    .ghost()
-                                                    .disabled(self.running)
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.action_show_command_palette(&ShowCommandPalette, window, cx);
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id("composer-label")
-                                                    .role(Role::Label)
-                                                    .aria_label("Message")
-                                                    .text_xs()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Message"),
-                                            )
-                                            .child(Input::new(&self.composer).w_full()),
-                                    )
-                                    .child(
-                                        Button::new("send")
-                                            .label(if self.running { "Steer" } else { "Send" })
-                                            .when(!self.running, |button| button.primary())
-                                            .when(self.running, |button| button.ghost())
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.submit(window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .when(self.running, |view| {
-                                        view.child(
-                                            Button::new("queue-next").label("Queue next turn").ghost().on_click(
-                                                cx.listener(|this, _, window, cx| { this.queue_next_turn(window, cx); cx.notify(); }),
-                                            ),
-                                        )
-                                        .child(
-                                            Button::new("stop").label("Stop").danger().on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.stop();
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        )
-                                    }),
-                            ),
-                    ),
-            )
+                    .child(resizable_panel().child(workspace_main))
+                    .into_any_element()
+            } else {
+                workspace_main.into_any_element()
+            })
             .when(compact_sidebar, |view| {
                 view.child(
                     div()
                         .id("compact-sidebar-drawer")
+                        .w(px(300.))
                         .absolute()
                         .left_0()
                         .top_0()
@@ -3218,16 +3010,145 @@ impl Render for ArtistApp {
                         .child(self.sidebar(cx)),
                 )
             })
-            .when(self.command_palette_open, |view| {
-                view.child(self.command_palette(cx))
-            })
     }
+}
+
+fn tree_parenthood_guides(depth: usize, cx: &App) -> AnyElement {
+    if depth == 0 {
+        return div().w(px(4.)).flex_none().into_any_element();
+    }
+    let guide = cx.theme().sidebar_foreground.opacity(0.26);
+    div()
+        .w(px(depth as f32 * 18.))
+        .flex_none()
+        .relative()
+        .children((0..depth).map(|level| {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(level as f32 * 18. + 8.))
+                .border_l_1()
+                .border_color(guide)
+        }))
+        .child(
+            div()
+                .absolute()
+                .top_1_2()
+                .right_0()
+                .w(px(10.))
+                .border_t_1()
+                .border_color(guide),
+        )
+        .into_any_element()
 }
 
 enum HarnessMessage {
     Event(PromptEvent),
     Question(Question),
     Done(Result<String, String>),
+}
+
+fn workspace_tree_signature(
+    project: &Path,
+    sessions: &[Session],
+    summaries: &HashMap<String, SessionSummary>,
+    trees: &HashMap<String, Vec<artist_ui_core::SessionNode>>,
+    active_session: Option<&str>,
+    running: bool,
+    needs_input: bool,
+    query: &str,
+) -> String {
+    let mut signature = format!(
+        "{}|{:?}|{running}|{needs_input}|{query}",
+        project.display(),
+        active_session
+    );
+    for session in sessions {
+        let summary = summaries.get(&session.id);
+        signature.push_str(&format!(
+            "|{}:{}:{}:{}",
+            session.id,
+            summary.map_or(0, |summary| summary.updated_at_ms),
+            summary.is_some_and(|summary| summary.failed),
+            trees.get(&session.id).map_or(0, Vec::len),
+        ));
+        if let Some(roots) = trees.get(&session.id) {
+            for (_, object) in workspace_rows(roots) {
+                signature.push_str(&format!(
+                    ":{}:{:?}:{}",
+                    object.id.as_str(),
+                    object.state,
+                    object.updated_seq
+                ));
+            }
+        }
+    }
+    signature
+}
+
+fn workspace_tree_items(
+    project: &Path,
+    sessions: &[Session],
+    summaries: &HashMap<String, SessionSummary>,
+    trees: &HashMap<String, Vec<artist_ui_core::SessionNode>>,
+    query: &str,
+) -> Vec<TreeItem> {
+    fn object_item(session_id: &str, node: &artist_ui_core::SessionNode) -> TreeItem {
+        TreeItem::new(
+            format!("object|{session_id}|{}", node.object.id.as_str()),
+            node.object.title.clone(),
+        )
+        .expanded(true)
+        .children(
+            node.children
+                .iter()
+                .map(|child| object_item(session_id, child)),
+        )
+    }
+
+    let children = sessions.iter().filter_map(|session| {
+        let summary = summaries.get(&session.id);
+        if !session_matches(session, summary, query, true) {
+            return None;
+        }
+        let roots = trees
+            .get(&session.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let name = session_identity(session, roots);
+        let object_children = roots
+            .iter()
+            .flat_map(|root| root.children.iter())
+            .map(|child| object_item(&session.id, child));
+        Some(
+            TreeItem::new(format!("session|{}", session.id), name)
+                .expanded(true)
+                .children(object_children),
+        )
+    });
+
+    vec![
+        TreeItem::new(
+            format!("project|{}", project.display()),
+            project_name(project),
+        )
+        .expanded(true)
+        .children(children),
+    ]
+}
+
+fn find_workspace_object_by_str(
+    roots: &[artist_ui_core::SessionNode],
+    id: &str,
+) -> Option<FocusableObject> {
+    fn visit(node: &artist_ui_core::SessionNode, id: &str) -> Option<FocusableObject> {
+        if node.object.id.as_str() == id {
+            return Some(node.object.clone());
+        }
+        node.children.iter().find_map(|child| visit(child, id))
+    }
+    roots.iter().find_map(|root| visit(root, id))
 }
 
 fn workspace_rows(
@@ -3264,6 +3185,68 @@ fn find_workspace_object(
     node.children
         .iter()
         .find_map(|child| find_workspace_object(child, id))
+}
+
+fn session_identity(session: &Session, roots: &[artist_ui_core::SessionNode]) -> String {
+    roots
+        .iter()
+        .find(|root| root.object.kind == artist_ui_core::ObjectKind::Agent)
+        .map(|root| root.object.title.trim())
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("Conversation {}", excerpt(&session.id, 12)))
+}
+
+fn tool_portal_hint(name: &str, arguments: &str) -> String {
+    fn first_useful_string(value: &serde_json::Value) -> Option<&str> {
+        match value {
+            serde_json::Value::String(value) if !value.trim().is_empty() => Some(value),
+            serde_json::Value::Object(values) => [
+                "command", "cmd", "script", "query", "path", "url", "prompt", "input", "text",
+            ]
+            .into_iter()
+            .find_map(|key| values.get(key).and_then(first_useful_string)),
+            serde_json::Value::Array(values) => values.iter().find_map(first_useful_string),
+            _ => None,
+        }
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) {
+        if let Some(value) = first_useful_string(&value) {
+            return value.lines().next().unwrap_or(value).trim().to_owned();
+        }
+    }
+
+    let raw = arguments.trim();
+    if !raw.is_empty() && !matches!(raw, "null" | "{}" | "[]") {
+        return raw.lines().next().unwrap_or(raw).trim().to_owned();
+    }
+
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("bash") || lower.contains("shell") || lower.contains("terminal") {
+        "Shell session".to_owned()
+    } else if lower.contains("canvas") {
+        "Canvas workspace".to_owned()
+    } else if lower.contains("stage") || lower.contains("computer") {
+        "Computer stage".to_owned()
+    } else if lower.contains("agent") || lower.contains("delegate") {
+        "Delegated conversation".to_owned()
+    } else {
+        "Tool invocation".to_owned()
+    }
+}
+
+fn tool_destination_kind(name: &str) -> Option<artist_ui_core::ObjectKind> {
+    let name = name.to_ascii_lowercase();
+    if name.contains("bash") || name.contains("shell") || name.contains("terminal") {
+        Some(artist_ui_core::ObjectKind::Task)
+    } else if name.contains("canvas") {
+        Some(artist_ui_core::ObjectKind::Canvas)
+    } else if name.contains("computer") || name.contains("stage") || name.contains("browser") {
+        Some(artist_ui_core::ObjectKind::Stage)
+    } else {
+        None
+    }
 }
 
 fn object_kind_label(kind: artist_ui_core::ObjectKind) -> &'static str {
@@ -3421,61 +3404,40 @@ fn summarize_session(session: &Session, events: &[artist_session::Envelope]) -> 
     summary
 }
 
+fn sort_sessions_by_activity(
+    sessions: &mut [Session],
+    summaries: &HashMap<String, SessionSummary>,
+) {
+    sessions.sort_by_key(|session| {
+        std::cmp::Reverse(
+            summaries
+                .get(&session.id)
+                .map_or(session.created_at_ms, |summary| summary.updated_at_ms),
+        )
+    });
+}
+
 fn session_matches(
     session: &Session,
     summary: Option<&SessionSummary>,
     query: &str,
-    show_archived: bool,
+    _show_archived: bool,
 ) -> bool {
-    (show_archived || !session.archived)
-        && (query.is_empty()
-            || session
-                .label
-                .as_deref()
-                .unwrap_or("Untitled")
-                .to_lowercase()
-                .contains(query)
-            || session.id.to_lowercase().contains(query)
-            || summary.is_some_and(|summary| {
-                summary.preview.to_lowercase().contains(query)
-                    || summary.searchable_text.contains(query)
-            }))
+    query.is_empty()
+        || session
+            .label
+            .as_deref()
+            .unwrap_or("Untitled")
+            .to_lowercase()
+            .contains(query)
+        || session.id.to_lowercase().contains(query)
+        || summary.is_some_and(|summary| {
+            summary.preview.to_lowercase().contains(query)
+                || summary.searchable_text.contains(query)
+        })
 }
 
-fn session_group(
-    session: &Session,
-    summary: Option<&SessionSummary>,
-    active_session: Option<&str>,
-    running: bool,
-) -> &'static str {
-    match session_group_rank(session, summary, active_session, running) {
-        0 => "RUNNING",
-        1 => "PINNED",
-        2 => "FAILED",
-        3 => "RECENT",
-        _ => "ARCHIVED",
-    }
-}
-
-fn session_group_rank(
-    session: &Session,
-    summary: Option<&SessionSummary>,
-    active_session: Option<&str>,
-    running: bool,
-) -> u8 {
-    if running && active_session == Some(session.id.as_str()) {
-        0
-    } else if session.archived {
-        4
-    } else if session.pinned {
-        1
-    } else if summary.is_some_and(|summary| summary.failed) {
-        2
-    } else {
-        3
-    }
-}
-
+#[allow(dead_code)]
 fn relative_time(timestamp_ms: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3642,7 +3604,7 @@ mod tests {
     }
 
     #[test]
-    fn session_search_includes_preview_but_still_hides_archived() {
+    fn session_search_includes_dialogue_preview_without_archive_filtering() {
         let session = Session {
             id: "s1".into(),
             created_at_ms: 1,
@@ -3657,7 +3619,7 @@ mod tests {
             preview: "fix the scrolling bug".into(),
             ..SessionSummary::default()
         };
-        assert!(!session_matches(
+        assert!(session_matches(
             &session,
             Some(&summary),
             "scrolling",
@@ -3667,21 +3629,43 @@ mod tests {
     }
 
     #[test]
-    fn session_groups_prioritize_live_and_pinned_work() {
-        let mut session = Session {
-            id: "s1".into(),
-            created_at_ms: 1,
-            label: None,
+    fn session_order_is_based_on_activity_not_selection() {
+        let make_session = |id: &str, created_at_ms| Session {
+            id: id.into(),
+            created_at_ms,
+            label: Some(id.into()),
             project: PathBuf::from("/tmp/project"),
-            transcript: PathBuf::from("/tmp/transcript"),
+            transcript: PathBuf::from(format!("/tmp/{id}.jsonl")),
             parent: None,
             archived: false,
             pinned: false,
         };
-        assert_eq!(session_group_rank(&session, None, Some("s1"), true), 0);
-        session.pinned = true;
-        assert_eq!(session_group_rank(&session, None, None, false), 1);
-        session.archived = true;
-        assert_eq!(session_group_rank(&session, None, None, false), 4);
+        let mut sessions = vec![make_session("older", 10), make_session("newer", 20)];
+        let summaries = HashMap::from([
+            (
+                "older".into(),
+                SessionSummary {
+                    updated_at_ms: 30,
+                    ..SessionSummary::default()
+                },
+            ),
+            (
+                "newer".into(),
+                SessionSummary {
+                    updated_at_ms: 40,
+                    ..SessionSummary::default()
+                },
+            ),
+        ]);
+
+        sort_sessions_by_activity(&mut sessions, &summaries);
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "older"]
+        );
     }
 }

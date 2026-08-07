@@ -35,6 +35,7 @@ mod ttsr_tests;
 pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use resources::AvailableSkill;
 mod statefulness;
+mod session_tools;
 mod steering;
 
 mod thinking;
@@ -824,18 +825,17 @@ where
     // a name placed any earlier gives each agent its own prefix and none of
     // them ever share a cached prompt. That costs most in exactly the case we
     // care about: a fan-out of subagents spawned together off one base prompt.
-    let identity = handles
-        .recorded_identity
-        .as_ref()
-        .map(|identity| identity::recorded(&identity.name, &identity.actor))
-        .unwrap_or_else(|| {
-            identity::session(
-                &handles.conversation_id,
-                &handles.conversation_id,
-                tools.project_root(),
-                &profile.name,
-            )
-        });
+    let identity = if let Some(recorded) = handles.recorded_identity.as_ref() {
+        identity::recorded(&recorded.name, &recorded.actor)
+    } else {
+        identity::session(
+            &handles.conversation_id,
+            &handles.conversation_id,
+            tools.project_root(),
+            &profile.name,
+        )
+        .map_err(|error| anyhow::anyhow!("artist identity allocation failed: {error}"))?
+    };
     let frozen_prompt = handles.prefix.freeze(
         &prefix::key(&handles.conversation_id, &profile.name),
         format!(
@@ -1096,6 +1096,11 @@ where
             ask: handles.ask.clone(),
             cancel: handles.cancel.clone(),
             inbox: Some(messaging::Inbox::new(identity.name.clone())),
+            sessions: session_tools::SessionHub::standard(
+                tools.project_root(),
+                identity.name.clone(),
+                None,
+            ),
             dynamic: mcp_tools
                 .iter()
                 .cloned()

@@ -1,5 +1,19 @@
 use std::ffi::{CString, c_char, c_void};
 
+fn process_args() -> Vec<CString> {
+    let mut args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
+        && !args.iter().any(|arg| arg.starts_with("--ozone-platform="))
+    {
+        args.push("--ozone-platform=wayland".to_owned());
+    }
+    args.into_iter()
+        .filter_map(|arg| CString::new(arg).ok())
+        .collect()
+}
+
 use crate::{ApplicationHandler, Error, app_handler::ApplicationState, ffi::*, settings::Settings};
 
 /// Initialize the CEF browser process.
@@ -11,6 +25,8 @@ where
     T: ApplicationHandler,
 {
     unsafe {
+        let args = process_args();
+        let argv: Vec<*const c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
         let callbacks = CAppCallbacks {
             on_schedule_message_pump_work: crate::app_handler::on_schedule_message_pump_work::<T>,
         };
@@ -24,10 +40,15 @@ where
         }
 
         let c_settings = CSettings {
+            argc: argv.len() as i32,
+            argv: argv.as_ptr(),
             locale: to_cstr_ptr_opt(settings.locale.as_deref()),
             cache_path: to_cstr_ptr_opt(settings.cache_path.as_deref()),
             root_cache_path: to_cstr_ptr_opt(settings.root_cache_path.as_deref()),
             browser_subprocess_path: to_cstr_ptr_opt(settings.browser_subprocess_path.as_deref()),
+            resources_dir_path: to_cstr_ptr_opt(settings.resources_dir_path.as_deref()),
+            locales_dir_path: to_cstr_ptr_opt(settings.locales_dir_path.as_deref()),
+            external_message_pump: settings.external_message_pump,
             callbacks,
             userdata: handler as *mut c_void,
             destroy_userdata: destroy_handler::<T>,
@@ -70,9 +91,7 @@ where
 /// }
 /// ```
 pub fn exec_process() -> Result<bool, Error> {
-    let args: Vec<CString> = std::env::args()
-        .filter_map(|arg| CString::new(arg).ok())
-        .collect();
+    let args = process_args();
     let c_args: Vec<*const c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
     Ok(unsafe { wef_exec_process(c_args.as_ptr(), args.len() as i32) })
 }

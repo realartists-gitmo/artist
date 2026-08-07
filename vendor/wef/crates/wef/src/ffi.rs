@@ -20,10 +20,15 @@ pub(crate) struct CAppCallbacks {
 
 #[repr(C)]
 pub(crate) struct CSettings {
+    pub(crate) argc: i32,
+    pub(crate) argv: *const *const c_char,
     pub(crate) locale: *const c_char,
     pub(crate) cache_path: *const c_char,
     pub(crate) root_cache_path: *const c_char,
     pub(crate) browser_subprocess_path: *const c_char,
+    pub(crate) resources_dir_path: *const c_char,
+    pub(crate) locales_dir_path: *const c_char,
+    pub(crate) external_message_pump: bool,
     pub(crate) callbacks: CAppCallbacks,
     pub(crate) userdata: *mut c_void,
     pub(crate) destroy_userdata: DestroyFn,

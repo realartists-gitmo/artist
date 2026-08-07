@@ -44,6 +44,10 @@ type ServerFactory = Arc<dyn Fn(&str) -> anyhow::Result<McpServer> + Send + Sync
 pub struct McpDaemon {
     factory: ServerFactory,
     actor: String,
+    /// Project root, kept for the discovery reply and HTTP server metadata.
+    project: String,
+    /// Profile name, kept for the discovery reply and HTTP server metadata.
+    profile: String,
     /// Held so the recorder's writer task stays alive for the daemon's life.
     _writer: Option<artist_session::WriterTask>,
 }
@@ -107,9 +111,12 @@ impl McpDaemon {
         };
 
         let project_text = project.display().to_string();
+        let daemon_project = project_text.clone();
         let state_dir = state_dir.to_path_buf();
         let profile_name = profile_name.to_owned();
+        let daemon_profile = profile_name.clone();
         let factory_project = project.clone();
+        let factory_workspace = Workspace::open(&factory_project, &state_dir, actor)?;
         let factory_config_root = config_root.clone();
         let factory_profile = profile.clone();
         let factory_recorder = recorder.clone();
@@ -118,7 +125,7 @@ impl McpDaemon {
         let factory_memory = memory.clone();
         let factory_delegation = delegation.clone();
         let factory: ServerFactory = Arc::new(move |session_actor: &str| {
-            let workspace = Workspace::open(&factory_project, &state_dir, session_actor)?;
+            let workspace = factory_workspace.with_actor(session_actor)?;
             let session_conversation = format!("mcp:{session_actor}");
             let session_attachments = artist_session::AttachmentStore::new(
                 state_dir
@@ -204,6 +211,8 @@ impl McpDaemon {
         Ok(Self {
             factory,
             actor: actor.to_owned(),
+            project: daemon_project,
+            profile: daemon_profile,
             _writer: writer,
         })
     }
@@ -227,16 +236,49 @@ impl McpDaemon {
             .with_context(|| format!("bind {addr}"))?;
         let factory = Arc::clone(&self.factory);
         let actor = self.actor.clone();
-        let service = StreamableHttpService::new(
+        let session_manager = Arc::new(LocalSessionManager::default());
+        let legacy_factory = {
+            let factory = Arc::clone(&factory);
+            let actor = actor.clone();
             move || {
                 let session_actor = format!("{actor}-{}", artist_tools::short_id("web"));
                 factory(&session_actor).map_err(std::io::Error::other)
-            },
-            Arc::new(LocalSessionManager::default()),
-            // Loopback-only hosts by default, which also blocks DNS-rebinding
-            // attacks against a daemon running on the user's machine.
+            }
+        };
+        let modern_factory = {
+            let factory = Arc::clone(&factory);
+            let actor = actor.clone();
+            move || {
+                let session_actor = format!("{actor}-{}", artist_tools::short_id("web"));
+                factory(&session_actor).map_err(std::io::Error::other)
+            }
+        };
+        // Stateful instance: the proven initialize-based (legacy) era, one
+        // actor per initialized session, used by the tunnel probe and existing
+        // connector sessions.
+        let legacy = StreamableHttpService::new(
+            legacy_factory,
+            Arc::clone(&session_manager),
             StreamableHttpServerConfig::default(),
         );
+        // Stateless instance: the modern (2026-07-28) era, where each request
+        // is served against a freshly built server with a JSON response.
+        let modern = StreamableHttpService::new(
+            modern_factory,
+            session_manager,
+            StreamableHttpServerConfig::default()
+                .with_stateful_mode(false)
+                .with_json_response(true),
+        );
+        let discover = crate::discover::DiscoverReply::new(
+            format!("Artist — {}", self.actor),
+            format!(
+                "Artist MCP harness for {} using profile {}",
+                self.project, self.profile
+            ),
+            crate::server::INSTRUCTIONS.to_owned(),
+        );
+        let service = crate::discover::McpGatewayService::new(legacy, modern, discover);
         let router = axum::Router::new()
             .route(
                 "/.well-known/oauth-protected-resource/mcp",
@@ -609,5 +651,57 @@ mod tests {
         assert_eq!(second.identity().actor, second_actor);
         assert_ne!(first.identity().actor, second.identity().actor);
         assert_ne!(first.identity().name, second.identity().name);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn hashline_descriptor_count(state: &Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|target| {
+                target.starts_with(state)
+                    && target
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with("hashlines.sqlite3"))
+            })
+            .count()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn http_sessions_share_the_project_workspace() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let base = artist_tools::short_id("daemon-workspace-test");
+        let daemon = McpDaemon::build(
+            project.path(),
+            state.path(),
+            "default",
+            &base,
+            Allow::default(),
+        )
+        .await
+        .unwrap();
+        let baseline = hashline_descriptor_count(state.path());
+        assert!(
+            baseline > 0,
+            "the shared workspace must own the hashline database"
+        );
+
+        let servers: Vec<_> = (0..32)
+            .map(|index| {
+                let actor = format!("{base}-{index}");
+                (daemon.factory)(&actor).unwrap()
+            })
+            .collect();
+
+        assert_eq!(
+            hashline_descriptor_count(state.path()),
+            baseline,
+            "per-session servers must derive actor views from one shared workspace"
+        );
+        drop(servers);
     }
 }

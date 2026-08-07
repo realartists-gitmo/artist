@@ -809,3 +809,131 @@ async fn streamable_http_daemon_serves_the_same_tools() -> Result<(), Box<dyn st
     child.kill().await?;
     Ok(())
 }
+
+async fn raw_http_post(port: u16, path: &str, body: &str) -> Result<String, std::io::Error> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await?;
+    stream
+        .write_all(
+            format!(
+                "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        )
+        .await?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).await?;
+    Ok(response)
+}
+
+/// The 2026-07-28 MCP revision makes `server/discover` mandatory, and OpenAI's
+/// tunnel control plane probes it when a connector is created. rmcp 2.2 has no
+/// handler for it, so the daemon must answer it at the HTTP boundary or
+/// connector creation fails. This guards that the wire still advertises the
+/// legacy revisions the server genuinely speaks.
+#[tokio::test]
+async fn streamable_http_daemon_answers_server_discover() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = socket.local_addr()?.port();
+    drop(socket);
+
+    let mut command = base_command("daemon", project.path(), state.path());
+    command
+        .env("ARTIST_MCP_HOST", "127.0.0.1")
+        .env("ARTIST_MCP_PORT", port.to_string())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+
+    let request = r#"{"jsonrpc":"2.0","id":"openai-mcp-discover","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#;
+    let mut response = None;
+    for _ in 0..100 {
+        let raw = raw_http_post(port, "/mcp", request).await;
+        match raw {
+            Ok(body) if body.starts_with("HTTP/1.1 200") => {
+                response = Some(body);
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+        }
+    }
+    let response = response.ok_or("daemon never answered server/discover")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let body = response.split("\r\n\r\n").nth(1).ok_or("no body")?;
+    let value: Value = serde_json::from_str(body)?;
+    assert_eq!(value["jsonrpc"], "2.0");
+    assert_eq!(value["id"], "openai-mcp-discover");
+    assert_eq!(value["result"]["resultType"], "complete");
+    let versions = value["result"]["supportedVersions"]
+        .as_array()
+        .ok_or("supportedVersions must be a list")?;
+    assert!(
+        versions.iter().any(|version| version == "2025-06-18"),
+        "server must advertise the legacy revision it negotiates: {versions:?}"
+    );
+    assert!(
+        versions.iter().any(|version| version == "2026-07-28"),
+        "the server is a dual-era gateway and must advertise modern 2026-07-28: {versions:?}"
+    );
+
+    child.kill().await?;
+    Ok(())
+}
+
+/// The modern (2026-07-28) revision is served statelessly: a request naming it
+/// must be answered with a JSON tool list built from a fresh server, not routed
+/// into the stateful initialize handshake.
+#[tokio::test]
+async fn streamable_http_daemon_serves_modern_tools_list() -> Result<(), Box<dyn std::error::Error>>
+{
+    if !binary_available() {
+        return Ok(());
+    }
+    let project = tempfile::tempdir()?;
+    let state = tempfile::tempdir()?;
+    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = socket.local_addr()?.port();
+    drop(socket);
+
+    let mut command = base_command("daemon", project.path(), state.path());
+    command
+        .env("ARTIST_MCP_HOST", "127.0.0.1")
+        .env("ARTIST_MCP_PORT", port.to_string())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#;
+    let mut response = None;
+    for _ in 0..100 {
+        let raw = raw_http_post(port, "/mcp", request).await;
+        match raw {
+            Ok(body) if body.starts_with("HTTP/1.1 200") => {
+                response = Some(body);
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+        }
+    }
+    let response = response.ok_or("daemon never answered modern tools/list")?;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let body = response.split("\r\n\r\n").nth(1).ok_or("no body")?;
+    let value: Value = serde_json::from_str(body)?;
+    assert_eq!(value["jsonrpc"], "2.0");
+    assert_eq!(value["id"], 1);
+    let tools = value["result"]["tools"]
+        .as_array()
+        .ok_or("modern tools/list must return a tool array")?;
+    assert!(
+        tools.iter().any(|tool| tool["name"] == "bash"),
+        "modern tools/list must expose the real tool surface"
+    );
+
+    child.kill().await?;
+    Ok(())
+}

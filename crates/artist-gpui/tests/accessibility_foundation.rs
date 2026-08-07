@@ -34,6 +34,37 @@ fn interactive_controls_come_from_gpui_component() {
 }
 
 #[test]
+fn icon_controls_register_and_use_component_assets() {
+    for required in [
+        "use gpui_component_assets::Assets;",
+        "application().with_assets(Assets).run",
+        ".icon(IconName::GalleryVerticalEnd)",
+        ".icon(IconName::Plus)",
+        ".icon(IconName::FolderOpen)",
+        ".icon(IconName::ArrowLeft)",
+        ".icon(IconName::Copy)",
+    ] {
+        assert!(
+            APP.contains(required),
+            "missing icon asset or icon control setup: {required}"
+        );
+    }
+
+    for obsolete_label in [
+        ".label(tree_toggle_label)",
+        ".label(\"New\")",
+        ".label(\"Open\")",
+        ".label(\"Back\")",
+        ".label(\"Copy\")",
+    ] {
+        assert!(
+            !APP.contains(obsolete_label),
+            "icon action regressed to visible text: {obsolete_label}"
+        );
+    }
+}
+
+#[test]
 fn conversation_exposes_a_semantic_accessibility_tree() {
     for required in [
         "Role::Application",
@@ -43,11 +74,11 @@ fn conversation_exposes_a_semantic_accessibility_tree() {
         "Role::Article",
         "Role::Alert",
         "Role::Navigation",
-        "Role::TreeItem",
+        "TreeState",
+        "ListItem::new(ix)",
         "aria_label(\"Conversation transcript\")",
         "aria_label(\"Message composer\")",
-        "\"Artist context {}\"",
-        "aria_label(\"Message\")",
+        "\"Current context: {contextual_title}\"",
         "aria_level(1)",
     ] {
         assert!(
@@ -79,22 +110,23 @@ fn transcript_runs_wrap_within_the_message_width() {
 }
 
 #[test]
-fn rich_navigation_rows_are_not_forced_into_component_button_height() {
-    for row in [
-        "Button::new((\"project\", index))",
-        "Button::new((\"session\", index))",
+fn rich_navigation_rows_use_component_tree_and_list_items() {
+    for required in [
+        "workspace_tree: Entity<TreeState>",
+        "let tree_view = tree(",
+        "&self.workspace_tree",
+        "TreeItem::new(",
+        "ListItem::new(ix)",
+        ".h(px(48.))",
+        ".min_h(px(48.))",
+        "cx.theme().sidebar_accent",
+        "cx.theme().list_active_border",
+        "tree_parenthood_guides(depth, cx)",
+        "Spinner::new()",
     ] {
-        let body = APP
-            .split(row)
-            .nth(1)
-            .unwrap_or_else(|| panic!("missing navigation row: {row}"));
-        let before_click = body
-            .split(".on_click")
-            .next()
-            .expect("row must have a click handler");
         assert!(
-            before_click.contains(".h_auto()") && before_click.contains(".min_h(px("),
-            "rich row must override gpui-component's fixed button height: {row}"
+            APP.contains(required),
+            "missing component tree behavior: {required}"
         );
     }
 }
@@ -165,7 +197,7 @@ fn conversation_has_streaming_and_recovery_affordances() {
         "HostCommand::Steer",
         "HostCommand::Answer",
         "window_min_size: Some(size(px(680.), px(480.)))",
-        "viewport.width >= px(760.)",
+        "viewport.width >= px(980.)",
         "fn new_conversation(",
     ] {
         assert!(APP.contains(required), "missing GUI affordance: {required}");
@@ -179,11 +211,8 @@ fn workspace_supports_project_session_and_focus_stack_flows() {
         "fn select_session(",
         "fn delete_session(",
         "fn rename_session(",
-        "fn toggle_session_archived(",
         "fn toggle_session_pinned(",
         "fn fork_session(",
-        "fn command_palette(",
-        "fn session_group_rank(",
         "searchable_text",
         "DismissOverlay",
         "HarnessMessage::Question",
@@ -193,8 +222,6 @@ fn workspace_supports_project_session_and_focus_stack_flows() {
         "fn focused_object_view(",
         "fn ensure_canvas_view(",
         "Input::new(&self.session_search)",
-        "Input::new(&self.session_name)",
-        "Input::new(&self.model_override)",
         "HostEvent::AccessibilityPatch",
         "stage_accessibility",
         "fn activate_stage_accessibility(",
@@ -228,4 +255,78 @@ fn files_tab_and_permanent_inspector_are_not_rendered() {
         .nth(1)
         .expect("shell render must exist");
     assert!(!shell.contains("self.inspector(cx)"));
+}
+
+#[test]
+fn accepted_gui_architecture_is_preserved() {
+    for required in [
+        "aria_label(\"Project and object tree\")",
+        "workspace_tree: Entity<TreeState>",
+        "let tree_view = tree(",
+        "&self.workspace_tree",
+        "ListItem::new(ix)",
+        "\"needs_input\"",
+        "preview =",
+        ".session_summaries",
+        "id(\"workspace-switcher\")",
+        "TabBar::new(\"workspace-tabs\")",
+        ".underline()",
+        "Breadcrumb::new()",
+        "when(!showing_focus, |view| view.max_w(px(820.)).mx_auto())",
+        "when(showing_focus, |view| view.h_full())",
+        "Button::new((\"tool-portal\", index))",
+        "Button::new((\"subagent-portal\", index))",
+        "inline-object-preview-",
+        "this.promote_object(object.clone(), window, cx)",
+        "Button::new(\"queue-next\")",
+        "Button::new(\"jump-latest\")",
+        "h_resizable(\"artist-workspace-layout\")",
+        "Alert::warning(",
+        "Collapsible::new()",
+        "ButtonGroup::new(\"composer-actions\")",
+    ] {
+        assert!(
+            APP.contains(required),
+            "missing accepted GUI architecture: {required}"
+        );
+    }
+
+    for removed in [
+        "Type a command, project, or session",
+        "Button::new(\"show-commands\")",
+        "Button::new(\"composer-routing\")",
+        "fn command_palette(",
+        "WORKSPACE",
+        "Ready · resumed",
+        "Archived",
+        "Toggle archived",
+    ] {
+        assert!(!APP.contains(removed), "obsolete GUI remains: {removed}");
+    }
+
+    let message = APP
+        .split("Block::Message")
+        .nth(1)
+        .expect("message view must exist")
+        .split("Block::Reasoning")
+        .next()
+        .expect("message view must precede reasoning");
+    assert!(message.contains("when(user"));
+    assert!(!message.contains("else {\n                        cx.theme().group_box"));
+
+    let summary = APP
+        .split("fn summarize_session")
+        .nth(1)
+        .expect("session summary must exist");
+    assert!(summary.contains("ReplayItem::User(text) | ReplayItem::Assistant(text)"));
+    assert!(
+        !summary
+            .split("summary.preview =")
+            .nth(1)
+            .unwrap()
+            .split("summary\n}")
+            .next()
+            .unwrap()
+            .contains("ReplayItem::Tool")
+    );
 }

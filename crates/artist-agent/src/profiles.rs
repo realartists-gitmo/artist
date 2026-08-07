@@ -127,18 +127,15 @@ impl Profile {
     ///
     /// This is a bloat and steering control, not a security boundary.
     ///
-    /// `handoff` and `todo` are exempt from `allow`. They drive the harness
-    /// rather than the world — neither can read, write, or run anything — and
-    /// sweeping them up in a capability allow-list silently breaks the
-    /// plan-then-hand-off flow profiles exist for. `deny` still removes them.
+    /// Profile `permits` is the single model-facing tool visibility gate.
     pub fn permits(&self, tool: &str) -> bool {
-        let allowed = HARNESS_TOOLS.contains(&tool)
-            || self
-                .allow
-                .as_ref()
-                .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(tool)));
+        let allowed = self
+            .allow
+            .as_ref()
+            .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(tool)));
         allowed && !self.deny.iter().any(|pattern| pattern.is_match(tool))
     }
+
 }
 
 /// The resolved profile set for a project, plus the delegation concurrency
@@ -198,17 +195,7 @@ struct Raw {
 
 const DEFAULT_MAX_CONCURRENT: usize = 4;
 
-/// Session-control tools, governed by `deny` but never narrowed away by
-/// `allow`. `subagent` is deliberately not here: delegating expands the
-/// capability surface, so it stays something a profile opts into.
-///
-/// `ask` is here because asking the user a question is not a capability — it
-/// is the opposite, a way to *avoid* acting on a guess. A profile author who
-/// writes `allow: [read, grep]` is narrowing what the agent may do to the
-/// project, and almost certainly did not mean "and may never check an
-/// assumption with the person who asked". A profile that genuinely wants
-/// silence still has `deny`.
-const HARNESS_TOOLS: [&str; 3] = [Tool::Handoff.name(), Tool::Todo.name(), Tool::Ask.name()];
+
 
 impl Profiles {
     pub fn discover(project: &Path) -> Self {

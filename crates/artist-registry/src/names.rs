@@ -30,8 +30,7 @@ use crate::{Result, permits::write_atomic};
 /// A name bound to a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Name {
-    /// The display name: an entry from the roster, or the actor id itself when
-    /// the roster is exhausted.
+    /// The display name: always an entry from the artist roster.
     pub name: String,
     /// The identity this renders — the session's actor id.
     pub actor: String,
@@ -94,16 +93,6 @@ pub struct Selector {
     pub exclude: Vec<String>,
 }
 
-impl Name {
-    /// Whether this name is a roster entry or the fallback rendering.
-    ///
-    /// The fallback is not a failure: past a few hundred concurrent agents a
-    /// person has stopped addressing them individually, so only the aesthetic
-    /// degrades while addressing keeps working.
-    pub fn is_fallback(&self) -> bool {
-        self.name == self.actor
-    }
-}
 
 /// The machine-wide roster.
 #[derive(Clone, Debug)]
@@ -169,10 +158,7 @@ impl Names {
         let chosen = (0..self.roster.len())
             .map(|i| self.roster[(start + i) % self.roster.len()])
             .find(|candidate| !taken.contains(*candidate))
-            // Exhaustion degrades to the actor id rather than failing: the
-            // name is for human addressing, and an unnameable agent would be a
-            // worse outcome than an ugly one.
-            .unwrap_or(actor);
+            .ok_or_else(|| crate::Error::Corrupt("artist-name roster exhausted".into()))?;
 
         let name = Name {
             name: chosen.to_owned(),

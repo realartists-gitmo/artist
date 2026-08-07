@@ -7,6 +7,8 @@
 //! subagent genuinely is occupying one. Treating slowness as death would hand
 //! the same seat to two runs.
 
+use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
+
 use serde::{Deserialize, Serialize};
 
 /// A process identity that survives PID reuse.
@@ -53,6 +55,31 @@ impl Owner {
             _ => true,
         }
     }
+
+    /// Nudge this exact process identity after re-validating PID + start time.
+    /// The durable registry bit remains authoritative; the signal only reduces
+    /// latency for an owner that is blocked in its registry cadence.
+    #[cfg(unix)]
+    pub fn wake(self) -> std::io::Result<()> {
+        if !self.is_alive() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "session owner is no longer alive",
+            ));
+        }
+        let rc = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGUSR1) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn wake(self) -> std::io::Result<()> {
+        let _ = self;
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -86,6 +113,30 @@ fn start_time(_pid: u32) -> Option<u64> {
     None
 }
 
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+static WAKE_HANDLER: OnceLock<()> = OnceLock::new();
+
+#[cfg(unix)]
+extern "C" fn wake_signal(_signal: libc::c_int) {
+    WAKE_PENDING.store(true, Ordering::Release);
+}
+
+/// Install the one process-wide SIGUSR1 registry nudge handler. Repeated calls
+/// are harmless. The handler performs only an atomic store, which is
+/// async-signal-safe; registry-control loops consume the flag in normal code.
+pub fn install_wake_handler() {
+    WAKE_HANDLER.get_or_init(|| {
+        #[cfg(unix)]
+        unsafe {
+            libc::signal(libc::SIGUSR1, wake_signal as *const () as libc::sighandler_t);
+        }
+    });
+}
+
+/// Whether a registry nudge has arrived since the previous check.
+pub fn take_wake() -> bool {
+    WAKE_PENDING.swap(false, Ordering::AcqRel)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

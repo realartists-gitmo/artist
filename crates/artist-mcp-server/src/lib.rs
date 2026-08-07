@@ -9,6 +9,7 @@
 pub mod admin;
 pub mod canvas_host;
 pub mod daemon;
+pub mod discover;
 pub mod envelope;
 mod pagination;
 mod progress;

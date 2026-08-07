@@ -35,7 +35,7 @@ use crate::{envelope::Envelope, pagination::PageStore, progress::ProgressSession
 /// What ChatGPT's web agent is told about how these tools behave. The
 /// non-obvious parts are the handle-then-poll shape of long-running tools and
 /// the idempotency contract that makes a tunnel reconnect safe.
-const INSTRUCTIONS: &str = "\
+pub(crate) const INSTRUCTIONS: &str = "\
 You are driving the artist harness over MCP: a real project, real files, real \
 shells. It is a durable workbench, not a stateless API.
 
@@ -932,6 +932,33 @@ mod tests {
                 .starts_with("op_")
         );
         assert!(structured["meta"]["durationMs"].as_u64().is_some());
+    }
+
+    #[test]
+    fn every_advertised_tool_resolves_to_a_dispatcher() {
+        let server =
+            McpServer::new(vec![counter_tool(Arc::new(AtomicUsize::new(0)))], None).unwrap();
+        let advertised = server.names();
+        assert!(!advertised.is_empty());
+        for name in &advertised {
+            assert!(
+                server.by_name.contains_key(name),
+                "advertised tool {name} has no dispatcher"
+            );
+        }
+        for name in server.by_name.keys() {
+            assert!(
+                advertised.iter().any(|candidate| candidate == name),
+                "dispatcher {name} is not advertised"
+            );
+        }
+        // Identity is claimed at session start, not through an `init` tool, so
+        // no client or plugin metadata may expect one. Guard against the tool
+        // being advertised again (the historical "unknown tool: init" drift).
+        assert!(
+            !advertised.iter().any(|name| name == "init"),
+            "the init tool must not be advertised"
+        );
     }
 
     #[test]
