@@ -54,7 +54,6 @@ pub(crate) struct ToolEnv {
     /// A child owns its own and may read its parent's; concurrent siblings
     /// sharing one list would race with no obvious merge.
     pub todo_owner: String,
-    pub todo_parent: Option<String>,
     pub attachments: Option<artist_session::AttachmentStore>,
     pub computer: Option<artist_computer::SurfaceRegistry>,
     pub memory: Option<crate::memory::MemoryWriter>,
@@ -80,8 +79,6 @@ pub(crate) struct ToolEnv {
     /// watching is the worst version of this, and it has a better option in
     /// `query`, whose target is the parent that spawned it and is right there.
     pub ask: Option<artist_session::AskRegistry>,
-    /// Abandons any wait that outlives the turn.
-    pub cancel: tokio_util::sync::CancellationToken,
     /// This agent's mailbox, and the name other agents address it by.
     ///
     /// `None` where the agent has no identity to receive mail at, which is what
@@ -91,6 +88,8 @@ pub(crate) struct ToolEnv {
     pub inbox: Option<crate::messaging::Inbox>,
     /// Universal durable lifecycle/addressing substrate for this artist identity.
     pub sessions: crate::session_tools::SessionHub,
+    /// Ordinary bounded-result continuation shared by every tool in this environment.
+    pub pages: crate::pagination::PageStore,
     /// MCP and extension tools. Not enumerable at compile time, but subject to
     /// exactly the same policy pass as everything else.
     pub dynamic: Vec<ArtistDynamicTool>,
@@ -119,9 +118,6 @@ pub(crate) struct DelegationEnv {
     pub handles: SessionHandles,
     pub events: UnboundedSender<PromptEvent>,
     pub profiles: Profiles,
-    /// The spawning run's seat on the delegation semaphore, yielded while it
-    /// waits on a child. `None` at the session root, which holds no seat.
-    pub parent_permit: Option<crate::delegate::PermitSlot>,
 }
 
 /// Every tool built into the harness.
@@ -162,11 +158,12 @@ pub(crate) enum Tool {
     Abort,
     Send,
     List,
+    Page,
     Ask,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 31] = [
+    pub(crate) const ALL: [Tool; 32] = [
         Tool::Bash,
         Tool::Read,
         Tool::Find,
@@ -197,6 +194,7 @@ impl Tool {
         Tool::Abort,
         Tool::Send,
         Tool::List,
+        Tool::Page,
         Tool::Ask,
     ];
 
@@ -237,6 +235,7 @@ impl Tool {
             Tool::Abort => "abort",
             Tool::Send => "send",
             Tool::List => "list",
+            Tool::Page => "page",
             Tool::Ask => "ask",
         }
     }
@@ -245,21 +244,28 @@ impl Tool {
     ///
     /// This is the *only* definition of availability: there is no parallel
     /// table of what is gated on what that could disagree with it.
-    fn construct(self, env: &ToolEnv) -> Option<ArtistDynamicTool> {
+    fn construct(self, env: &ToolEnv, profile: &Profile) -> Option<ArtistDynamicTool> {
         let bundle = &env.bundle;
         Some(match self {
-            Tool::Bash => tool_prompt::dynamic(bundle.bash.clone()),
+            Tool::Bash => tool_prompt::dynamic(crate::bash_tool::BashTool::new(
+                bundle.bash.clone(),
+                env.sessions.clone(),
+            )),
             Tool::Read => tool_prompt::dynamic(bundle.read.clone()),
             Tool::Find => tool_prompt::dynamic(bundle.find.clone()),
             Tool::Grep => tool_prompt::dynamic(bundle.grep.clone()),
             Tool::Edit => tool_prompt::dynamic(bundle.edit.clone()),
             Tool::Write => tool_prompt::dynamic(bundle.write.clone()),
-            Tool::Skill => tool_prompt::dynamic(env.resources.skill_tool()),
+            Tool::Skill => tool_prompt::dynamic(crate::resources::SkillTool::new(
+                env.resources.clone(),
+                artist_registry::Registry::for_project(env.bundle.project_root()).artist_states(),
+                env.sessions.artist(),
+                profile.clone(),
+            )),
             Tool::Todo => tool_prompt::dynamic(crate::todo::TodoTool::new(
                 env.todos.clone(),
                 env.recorder.clone(),
                 env.todo_owner.clone(),
-                env.todo_parent.clone(),
             )),
             Tool::Memory => {
                 tool_prompt::dynamic(crate::memory::MemoryTool::new(env.memory.clone()?))
@@ -286,15 +292,18 @@ impl Tool {
             )),
             Tool::AstQuery => tool_prompt::dynamic(bundle.ast_query.clone()),
             Tool::AstRewrite => tool_prompt::dynamic(bundle.ast_rewrite.clone()),
-            Tool::Computer => tool_prompt::dynamic(artist_computer::ComputerTool::with_recorder(
+            Tool::Computer => tool_prompt::dynamic(crate::computer_tool::ComputerTool::new(
                 env.computer.clone()?,
                 env.recorder.clone(),
                 env.attachments.clone(),
+                env.sessions.clone(),
+                &env.project_root(),
             )),
             Tool::Canvas => tool_prompt::dynamic(crate::canvas::CanvasTool::new(
                 env.project_root(),
                 Arc::clone(env.canvas.as_ref()?),
                 env.recorder.clone(),
+                env.sessions.clone(),
             )),
             Tool::Handoff => {
                 let handoff = env.handoff.as_ref()?;
@@ -308,16 +317,23 @@ impl Tool {
                 env,
                 env.delegation.as_ref()?,
             )),
-            Tool::Poll => tool_prompt::dynamic(crate::session_tools::PollTool(env.sessions.clone())),
-            Tool::Abort => tool_prompt::dynamic(crate::session_tools::AbortTool(env.sessions.clone())),
-            Tool::Send => tool_prompt::dynamic(crate::session_tools::SendTool(env.sessions.clone())),
-            Tool::List => tool_prompt::dynamic(crate::session_tools::ListTool(env.sessions.clone())),
+            Tool::Poll => {
+                tool_prompt::dynamic(crate::session_tools::PollTool(env.sessions.clone()))
+            }
+            Tool::Abort => {
+                tool_prompt::dynamic(crate::session_tools::AbortTool(env.sessions.clone()))
+            }
+            Tool::Send => {
+                tool_prompt::dynamic(crate::session_tools::SendTool(env.sessions.clone()))
+            }
+            Tool::List => {
+                tool_prompt::dynamic(crate::session_tools::ListTool(env.sessions.clone()))
+            }
+            Tool::Page => crate::pagination::page_tool(env.pages.clone()),
             Tool::Ask => tool_prompt::dynamic(crate::ask_tool::AskTool::new(
                 env.ask.clone()?,
-                env.cancel.clone(),
-                env.delegation
-                    .as_ref()
-                    .and_then(|delegation| delegation.parent_permit.clone()),
+                env.sessions.clone(),
+                env.bundle.project_root().to_path_buf(),
             )),
         })
     }
@@ -327,8 +343,6 @@ impl ToolEnv {
     pub(crate) fn project_root(&self) -> PathBuf {
         self.bundle.project_root().to_path_buf()
     }
-
-
 }
 
 /// What a web session may delegate to: the ingredients a `subagent` child is
@@ -359,8 +373,6 @@ pub struct McpIdentity {
     pub profile: String,
     pub project: String,
     pub name: String,
-    /// False when the registry was unavailable and `name` fell back to actor.
-    pub registered: bool,
 }
 
 /// Everything the MCP surface is built from. An optional field means "the
@@ -370,13 +382,14 @@ pub struct McpSurface {
     pub workspace: artist_tools::Workspace,
     pub profile: Profile,
     pub recorder: Option<Recorder>,
-    pub outbox: Option<artist_session::AskOutbox>,
+    pub ask: Option<artist_session::AskRegistry>,
     pub attachments: Option<artist_session::AttachmentStore>,
     pub computer: Option<artist_computer::SurfaceRegistry>,
     pub canvas: Option<Arc<artist_canvas::server::Lazy>>,
     pub memory: Option<crate::memory::MemoryWriter>,
     pub delegation: Option<McpDelegation>,
     pub identity: Option<McpIdentity>,
+    pub pages: crate::pagination::PageStore,
 }
 
 /// Build the tool surface a headless MCP server should publish for a web user
@@ -411,9 +424,8 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             .clone()
             .unwrap_or_else(artist_session::Recorder::noop),
         resources: Resources::discover(surface.workspace.root()),
-        todos: crate::todo::TodoStore::default(),
+        todos: crate::todo::TodoStore::for_project(surface.workspace.root()),
         todo_owner: artist_name.clone(),
-        todo_parent: None,
         attachments: surface.attachments.clone(),
         computer: surface.computer.clone(),
         memory: surface.memory.clone(),
@@ -425,31 +437,26 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             handles: delegation.handles.clone(),
             events: delegation.events.clone(),
             profiles: delegation.profiles.clone(),
-            parent_permit: None,
         }),
-        // MCP ask is migrated to the same durable session surface as native ask;
-        // the transport supplies a registry when a human UI is attached.
-        ask: None,
-        cancel: tokio_util::sync::CancellationToken::new(),
+        ask: surface.ask.clone(),
         inbox,
         sessions: crate::session_tools::SessionHub::standard(
             surface.workspace.root(),
             artist_name,
             None,
         ),
+        pages: surface.pages.clone(),
         dynamic: Vec::new(),
         disabled: Vec::new(),
     };
     build(&surface.profile, &env)
 }
 
-
-
 /// Build the tools a profile may use in this environment.
 pub(crate) fn build(profile: &Profile, env: &ToolEnv) -> Vec<ArtistDynamicTool> {
     let mut tools: Vec<ArtistDynamicTool> = Tool::ALL
         .into_iter()
-        .filter_map(|tool| tool.construct(env))
+        .filter_map(|tool| tool.construct(env, profile))
         .collect();
     tools.extend(env.dynamic.iter().cloned());
     tools.retain(|tool| profile.permits(tool.name()));
@@ -462,7 +469,7 @@ pub(crate) fn build(profile: &Profile, env: &ToolEnv) -> Vec<ArtistDynamicTool> 
     let drift = Some(env.bundle.edit.0.drift_watch());
     tools
         .into_iter()
-        .map(|tool| tool_prompt::guard(tool, drift.clone()))
+        .map(|tool| tool_prompt::guard(tool, drift.clone(), env.pages.clone()))
         .collect()
 }
 
@@ -484,7 +491,6 @@ pub(crate) mod tests {
             resources: Resources::discover(root),
             todos: crate::todo::TodoStore::default(),
             todo_owner: actor.to_owned(),
-            todo_parent: None,
             attachments: None,
             computer: None,
             memory: None,
@@ -492,9 +498,9 @@ pub(crate) mod tests {
             handoff: None,
             delegation: None,
             ask: None,
-            cancel: tokio_util::sync::CancellationToken::new(),
             inbox: None,
             sessions: crate::session_tools::SessionHub::standard(root, actor, None),
+            pages: crate::pagination::PageStore::memory(),
             dynamic: Vec::new(),
             disabled: Vec::new(),
         }
@@ -550,7 +556,7 @@ pub(crate) mod tests {
             let profile = profiles.get(&name).unwrap();
             let registered = names(&profile, &env);
             for tool in Tool::ALL {
-                let available = tool.construct(&env).is_some();
+                let available = tool.construct(&env, &profile).is_some();
                 assert_eq!(
                     registered.contains(tool.name()),
                     available && profile.permits(tool.name()),

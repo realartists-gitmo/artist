@@ -11,6 +11,7 @@ pub mod canvas_host;
 pub mod daemon;
 pub mod discover;
 pub mod envelope;
+mod http_server;
 mod pagination;
 mod progress;
 pub mod server;

@@ -54,79 +54,53 @@ pub(super) fn title(name: &str, arguments: &Value) -> ToolTitle {
 /// identical to reading its status — and the slug, the one thing that lets the
 /// user find it again, was nowhere.
 fn canvas_title(arguments: &Value) -> ToolTitle {
-    let name = string(arguments, "name");
-    let mode = string(arguments, "mode");
-    let mode = if mode.is_empty() {
-        "status".to_owned()
+    let query = string(arguments, "query");
+    if query.is_empty() {
+        plain("Searched canvases")
     } else {
-        mode
-    };
-    match mode.as_str() {
-        "create" => composed([prose("Built canvas "), input(name)]),
-        "open" => composed([prose("Opened canvas "), input(name)]),
-        "status" => composed([prose("Checked canvas "), input(name)]),
-        "state" => composed([prose("Updated canvas "), input(name)]),
-        "eject" => composed([prose("Ejected canvas "), input(name)]),
-        "list" => plain("Listed canvases".to_owned()),
-        "docs" => {
-            let topic = string(arguments, "topic");
-            if topic.is_empty() {
-                plain("Read the canvas reference".to_owned())
-            } else {
-                composed([prose("Read canvas docs for "), input(topic)])
+        composed([prose("Canvas query “"), input(query), prose("”")])
+    }
+}
+
+fn computer_title(arguments: &Value) -> ToolTitle {
+    let action = string(arguments, "action");
+    if action.is_empty() {
+        return plain("Computer");
+    }
+    let session = string(arguments, "session");
+    let args = arguments.get("args").unwrap_or(&Value::Null);
+    match action.as_str() {
+        "launch" => composed([prose("Launched "), input(string(args, "command"))]),
+        "attach" => composed([prose("Attached to "), input(string(args, "endpoint"))]),
+        "observe" => composed([prose("Observed "), input(session)]),
+        "screenshot" => composed([prose("Captured "), input(session)]),
+        "watch" => composed([prose("Showed "), input(session)]),
+        "do" => {
+            let steps = args.get("steps").and_then(Value::as_array);
+            match steps.map(Vec::as_slice) {
+                Some(steps) if !steps.is_empty() => {
+                    let named: Vec<String> = steps.iter().filter_map(step_summary).collect();
+                    if named.is_empty() {
+                        composed([
+                            prose(format!("Ran {} steps on ", steps.len())),
+                            input(session),
+                        ])
+                    } else {
+                        composed([
+                            prose("Ran "),
+                            input(named.join(", ")),
+                            prose(" on "),
+                            input(session),
+                        ])
+                    }
+                }
+                _ => composed([prose("Used computer "), input(session)]),
             }
         }
-        other => composed([prose("Canvas "), input(other.to_owned())]),
+        other => composed([prose(format!("Computer {other} on ")), input(session)]),
     }
 }
 
-/// Name a computer action by what the model said it was touching.
-///
-/// The label, not the anchor: `kv7` means nothing to a reader watching the
-/// transcript, and the label is exactly the human-readable string the model was
-/// required to echo from the observation.
-fn computer_title(arguments: &Value) -> ToolTitle {
-    let surface = string(arguments, "surface");
-    let steps = arguments.get("steps").and_then(Value::as_array);
-    match string(arguments, "mode").as_str() {
-        "observe" => composed([prose("Observed "), input(surface)]),
-        "screenshot" => composed([prose("Captured "), input(surface)]),
-        // `command`, not `program`: `program` is what the *action* fields
-        // flatten under, so reading it here rendered every launch with an empty
-        // target — the one word that says what was started.
-        "launch" => composed([prose("Launched "), input(string(arguments, "command"))]),
-        "close" => composed([prose("Closed "), input(surface)]),
-        "surfaces" => plain("Listed computer surfaces"),
-        _ => match steps.map(Vec::as_slice) {
-            Some([]) | None => plain(humanize("computer")),
-            // Name what is being touched, however many steps there are. A bare
-            // "Ran 3 steps on tab:7" hides exactly what a watching human would
-            // want to interrupt — and the guardrail matches on labels the human
-            // was never shown.
-            Some(steps) => {
-                let named: Vec<String> = steps.iter().filter_map(step_summary).collect();
-                match named.as_slice() {
-                    [] => composed([
-                        prose(format!("Ran {} steps on ", steps.len())),
-                        input(surface),
-                    ]),
-                    [only] => composed([prose("Ran "), input(only.clone())]),
-                    many => composed([
-                        prose("Ran "),
-                        input(many.join(", ")),
-                        prose(" on "),
-                        input(surface),
-                    ]),
-                }
-            }
-        },
-    }
-}
-
-/// One step as a few words: the verb, and what it names.
-///
-/// Truncated per step rather than by total, so a long label cannot crowd the
-/// later steps out of a row the user is reading to decide whether to intervene.
 fn step_summary(step: &Value) -> Option<String> {
     let (action, body) = step.as_object()?.iter().next()?;
     let verb = action.as_str();
@@ -157,35 +131,16 @@ fn step_summary(step: &Value) -> Option<String> {
 }
 
 fn skill_title(arguments: &Value) -> ToolTitle {
-    match string(arguments, "mode").as_str() {
-        "" | "list" => plain("Listed Agent Skills"),
-        "activate" => composed([
-            prose("Loaded "),
-            input(string(arguments, "name")),
-            prose(" skill"),
-        ]),
-        "readResource" => composed([
-            prose("Read "),
-            input(string(arguments, "name")),
-            prose(" skill resource "),
-            input(string(arguments, "path")),
-        ]),
-        _ => plain("Skill"),
+    let query = string(arguments, "query");
+    if query.is_empty() {
+        plain("Listed Agent Skills")
+    } else {
+        composed([prose("Skill query “"), input(query), prose("”")])
     }
 }
 
 fn bash_title(arguments: &Value) -> ToolTitle {
-    match string(arguments, "mode").as_str() {
-        "exec" if arguments.get("background").and_then(Value::as_bool) == Some(true) => {
-            shell_command_title("Started shell: ", arguments)
-        }
-        "start" => shell_command_title("Started shell: ", arguments),
-        "send" => plain("Sent input to shell"),
-        "read" => plain("Checked shell output"),
-        "stop" => plain("Stopped shell"),
-        "list" => plain("Listed shell sessions"),
-        _ => shell_command_title("Ran: ", arguments),
-    }
+    shell_command_title("Started shell: ", arguments)
 }
 
 fn shell_command_title(prefix: &str, arguments: &Value) -> ToolTitle {
@@ -196,27 +151,8 @@ fn shell_command_title(prefix: &str, arguments: &Value) -> ToolTitle {
 }
 
 fn subagent_title(arguments: &Value) -> ToolTitle {
-    match string(arguments, "mode").as_str() {
-        "status" | "read" => subagent_task_title("Checked subagent ", arguments),
-        "wait" => subagent_task_title("Waited for subagent ", arguments),
-        "cancel" => subagent_task_title("Cancelled subagent ", arguments),
-        "list" => plain("Listed subagent tasks"),
-        _ if arguments.get("background").and_then(Value::as_bool) == Some(true)
-            || string(arguments, "mode") == "start" =>
-        {
-            subagent_launch_title("Started ", arguments)
-        }
-        _ => subagent_launch_title("", arguments),
-    }
-}
-
-fn subagent_task_title(prefix: &str, arguments: &Value) -> ToolTitle {
-    composed([prose(prefix), input(string(arguments, "taskId"))])
-}
-
-fn subagent_launch_title(prefix: &str, arguments: &Value) -> ToolTitle {
     composed([
-        prose(prefix),
+        prose("Started "),
         input(subagent_role(arguments)),
         prose(" subagent: "),
         input(shortened(&string(arguments, "prompt"), 80)),
@@ -224,11 +160,11 @@ fn subagent_launch_title(prefix: &str, arguments: &Value) -> ToolTitle {
 }
 
 fn subagent_role(arguments: &Value) -> String {
-    let role = string(arguments, "agent");
-    if role.is_empty() {
+    let profile = string(arguments, "profile");
+    if profile.is_empty() {
         "default".into()
     } else {
-        role
+        profile
     }
 }
 
@@ -299,62 +235,27 @@ mod tests {
             .collect()
     }
 
-    /// Every mode rendered as a bare `Canvas`, so building an app looked like
-    /// reading its status, and the slug — the only way back to it — was absent.
     #[test]
-    fn canvas_titles_name_the_mode_and_the_canvas() {
+    fn canvas_title_reflects_the_query_only_surface() {
         assert_eq!(
-            title(
-                "canvas",
-                &serde_json::json!({"mode":"create","name":"test-dashboard"})
-            )
-            .plain_text(),
-            "Built canvas test-dashboard"
+            title("canvas", &serde_json::json!({"query":"test-dashboard"})).plain_text(),
+            "Canvas query “test-dashboard”"
         );
         assert_eq!(
-            title(
-                "canvas",
-                &serde_json::json!({"mode":"open","name":"test-dashboard"})
-            )
-            .plain_text(),
-            "Opened canvas test-dashboard"
-        );
-        // status is the default, and the commonest call.
-        assert_eq!(
-            title("canvas", &serde_json::json!({"name":"test-dashboard"})).plain_text(),
-            "Checked canvas test-dashboard"
-        );
-        assert_eq!(
-            title("canvas", &serde_json::json!({"mode":"list"})).plain_text(),
-            "Listed canvases"
+            title("canvas", &serde_json::json!({"query":""})).plain_text(),
+            "Searched canvases"
         );
     }
 
     #[test]
-    fn describes_each_skill_operation() {
+    fn skill_title_reflects_the_query_only_surface() {
         assert_eq!(
-            title("skill", &serde_json::json!({})).plain_text(),
+            title("skill", &serde_json::json!({"query":"pdf"})).plain_text(),
+            "Skill query “pdf”"
+        );
+        assert_eq!(
+            title("skill", &serde_json::json!({"query":""})).plain_text(),
             "Listed Agent Skills"
-        );
-        assert_eq!(
-            title(
-                "skill",
-                &serde_json::json!({"mode":"activate","name":"pdf"})
-            )
-            .plain_text(),
-            "Loaded pdf skill"
-        );
-        assert_eq!(
-            title(
-                "skill",
-                &serde_json::json!({
-                    "mode":"readResource",
-                    "name":"pdf",
-                    "path":"references/forms.md"
-                })
-            )
-            .plain_text(),
-            "Read pdf skill resource references/forms.md"
         );
     }
 
@@ -388,25 +289,11 @@ mod tests {
                 serde_json::json!({"command":"cargo test"}),
                 vec!["cargo test"],
             ),
-            (
-                "skill",
-                serde_json::json!({"mode":"activate","name":"pdf"}),
-                vec!["pdf"],
-            ),
-            (
-                "skill",
-                serde_json::json!({"mode":"readResource","name":"pdf","path":"forms.md"}),
-                vec!["pdf", "forms.md"],
-            ),
+            ("skill", serde_json::json!({"query":"pdf"}), vec!["pdf"]),
             (
                 "subagent",
-                serde_json::json!({"agent":"explorer","prompt":"inspect"}),
+                serde_json::json!({"profile":"explorer","prompt":"inspect"}),
                 vec!["explorer", "inspect"],
-            ),
-            (
-                "subagent",
-                serde_json::json!({"mode":"status","taskId":"a-blue-fox"}),
-                vec!["a-blue-fox"],
             ),
         ] {
             assert_eq!(inputs(&title(name, &arguments)), expected, "{name}");

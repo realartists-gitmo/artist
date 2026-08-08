@@ -22,24 +22,17 @@ use crate::{
     FileToolManager, HashlineError, HashlineErrorCode, ReadFileRequest, ReadFileResult, StateStore,
 };
 
-/// How long a conversation's anchor state outlives its last use.
-///
-/// Resuming a month-old session should still find the anchors it was given.
-/// Past that the state is almost certainly dead, and losing it costs a re-read
-/// rather than anything worse.
-pub const ANCHOR_RETENTION_DAYS: u64 = 30;
+/// How long an idle conversation registration is retained for coordination.
+pub const AGENT_RETENTION_DAYS: u64 = 30;
 
 /// How long a write stays attributable.
 ///
-/// Far shorter than the anchor state it accompanies, because attribution is
-/// only actionable while the change is recent — "another session edited this
+/// Attribution is only actionable while the change is recent — "another session edited this
 /// last month" is not a coordination signal, it is trivia.
 pub const WRITER_RETENTION_DAYS: u64 = 7;
 
-/// The most conversations whose anchor state is kept, whatever their age.
-///
-/// A backstop for the case the age rule cannot reach: thousands of short-lived
-/// sessions inside the retention window. Set high enough that reaching it is
+/// The most conversation registration rows retained, whatever their age.
+/// A backstop for thousands of short-lived sessions inside the retention window; set high enough that reaching it is
 /// itself the signal something is wrong.
 pub const MAX_RETAINED_AGENTS: usize = 2_000;
 
@@ -69,9 +62,9 @@ pub struct CoordinatedEditResult {
 
 /// Coordinates concurrent multi-agent file access.
 ///
-/// - One in-memory [`FileToolManager`] per agent (lazy, restored from SQLite).
+/// - One in-memory [`FileToolManager`] per agent for read/drift tracking.
 /// - Cross-process exclusive locks per normalized path under `lock_directory`.
-/// - Persists issued mnemonic bindings after every successful read/write/edit.
+/// - Anchor identity/addressing is stateless; SQLite is coordination-only.
 #[derive(Clone)]
 pub struct FileCoordinator {
     config: FileToolConfig,
@@ -79,10 +72,7 @@ pub struct FileCoordinator {
     managers: Arc<Mutex<HashMap<String, Arc<Mutex<FileToolManager>>>>>,
     path_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     lock_directory: Arc<PathBuf>,
-    /// Whether the one-off tidy of pre-conversation anchor state has run.
-    ///
-    /// Once per coordinator rather than per session: the rows it removes are
-    /// inert, so repeating the sweep would be work for nothing.
+    /// Whether the one-off coordination-retention sweep has run.
     tidied: Arc<Mutex<bool>>,
 }
 
@@ -144,12 +134,7 @@ impl FileCoordinator {
             .await
             .with_context(|| format!("failed to read {normalized}"))?;
         let content_hash = content_hash(&bytes);
-        let state = manager.export_anchor_state();
         drop(manager);
-        self.state
-            .replace_anchor_state(&actor.id, &state)
-            .await
-            .map_err(anyhow::Error::msg)?;
         Ok(CoordinatedReadResult {
             result,
             content_hash,
@@ -221,14 +206,9 @@ impl FileCoordinator {
                 max_lines: None,
             })
             .await?;
-        let state = manager.export_anchor_state();
         drop(manager);
         let hash = content_hash(content.as_bytes());
         self.note_writer(&normalized, actor, &hash).await;
-        self.state
-            .replace_anchor_state(&actor.id, &state)
-            .await
-            .map_err(anyhow::Error::msg)?;
         Ok(CoordinatedReadResult {
             result,
             content_hash: hash,
@@ -276,11 +256,7 @@ impl FileCoordinator {
 
         let mut manager = manager.lock().await;
         manager.forget_path(&path)?;
-        let state = manager.export_anchor_state();
         drop(manager);
-        if let Err(error) = self.state.replace_anchor_state(&actor.id, &state).await {
-            eprintln!("failed to persist anchor cleanup after deleting {path}: {error}");
-        }
         Ok(Some(actual))
     }
 
@@ -301,14 +277,9 @@ impl FileCoordinator {
         let bytes = fs::read(&normalized)
             .await
             .with_context(|| format!("failed to read {normalized} after edit"))?;
-        let state = manager.export_anchor_state();
         drop(manager);
         let hash = content_hash(&bytes);
         self.note_writer(&normalized, actor, &hash).await;
-        self.state
-            .replace_anchor_state(&actor.id, &state)
-            .await
-            .map_err(anyhow::Error::msg)?;
         Ok(CoordinatedEditResult {
             result,
             content_hash: hash,
@@ -417,27 +388,15 @@ impl FileCoordinator {
         let _ = self.state.record_writer(path, &actor.id, hash).await;
     }
 
-    /// Retire state nobody needs any more.
-    ///
-    /// Runs once, lazily, on the first manager a coordinator hands out — rather
-    /// than at construction, which would put database writes in the path of
-    /// every `Workspace::open` including those that never touch a file.
-    ///
-    /// Every rule here is safe to lose. Retiring anchor state costs a re-read;
-    /// retiring an attribution costs a change reported as unattributed. Neither
-    /// can cost a wrong edit, which is what makes the thresholds a matter of
-    /// taste rather than an argument about correctness.
+    /// Retire old coordination metadata nobody needs any more.
     async fn tidy_once(&self) {
         let mut tidied = self.tidied.lock().await;
         if *tidied {
             return;
         }
         *tidied = true;
-        // Identities that cannot be a conversation: their rows are unreachable.
-        let _ = self.state.forget_unowned_anchor_state().await;
-        // Conversations nobody has touched in a month. Long enough that
-        // resuming one still finds its anchors, short enough to bound growth.
-        let _ = self.state.retire_idle_agents(ANCHOR_RETENTION_DAYS).await;
+        // Conversations nobody has touched in a month.
+        let _ = self.state.retire_idle_agents(AGENT_RETENTION_DAYS).await;
         // A smoke alarm for the above.
         let _ = self.state.cap_agents(MAX_RETAINED_AGENTS).await;
         // Attribution ages out far faster: nobody needs telling that another
@@ -450,14 +409,9 @@ impl FileCoordinator {
             return Ok(manager);
         }
         self.tidy_once().await;
-        let persisted = self
-            .state
-            .load_anchor_state(&actor.id)
-            .await
-            .map_err(anyhow::Error::msg)?;
-        let mut manager = FileToolManager::with_config(self.config.clone());
-        manager.import_anchor_state(persisted);
-        let manager = Arc::new(Mutex::new(manager));
+        let manager = Arc::new(Mutex::new(FileToolManager::with_config(
+            self.config.clone(),
+        )));
         let mut managers = self.managers.lock().await;
         Ok(managers
             .entry(actor.id.0.clone())
@@ -563,7 +517,7 @@ pub fn content_hash(bytes: &[u8]) -> String {
 }
 
 /// How models should use anchors returned in `anchor: line` views.
-pub const ANCHOR_USAGE: &str = "Use only the bare mnemonic token before ': '. For the rendered line 'time: beta', pass anchor \"time\" (not \"time: beta\").";
+pub const ANCHOR_USAGE: &str = "Use the exact opaque anchor beginning with '#' exactly as returned. Do not trim, case-fold, Unicode-normalize, fuzzy-match, or include the following ': ' and line text.";
 
 #[cfg(test)]
 mod tests {
@@ -770,69 +724,14 @@ mod tests {
         );
     }
 
-    /// Anchor state written before conversation scoping belongs to nobody —
-    /// nothing loads it, and anchors reissue on read. Tidying it is safe, and
-    /// leaving it would keep a row around that looks like a session.
+    /// Deleting a session removes its writer attribution; anchors have no session state.
     #[tokio::test]
-    async fn anchor_state_from_before_conversation_scoping_is_forgotten() {
-        let (files, root) = coordinator("tidy");
-        let file = root.join("a.txt");
-        std::fs::write(&file, "one\n").expect("seed");
-        let path = file.to_string_lossy().into_owned();
-
-        // Stand in for a session from before the change.
-        read(&files, &agent("artist"), &path).await;
-        let state = files.state.clone();
-        assert!(
-            !state
-                .load_anchor_state(&agent("artist").id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "the fixture did not write any state to tidy"
-        );
-
-        // A fresh coordinator over the same store tidies on its first manager.
-        let config = FileToolConfig {
-            workspace_root: Some(root.clone()),
-            ..FileToolConfig::default()
-        };
-        let next = FileCoordinator::open(config, root.join("anchors.sqlite"), root.join("locks"))
-            .expect("next coordinator");
-        read(&next, &agent("session-01"), &path).await;
-
-        assert!(
-            state
-                .load_anchor_state(&agent("artist").id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "unowned anchor state survived"
-        );
-        // The real session's own state is untouched.
-        assert!(
-            !state
-                .load_anchor_state(&agent("session-01").id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "tidying took a real session's state with it"
-        );
-    }
-
-    /// Deleting a session has to actually delete it. Retention would collect
-    /// these eventually; leaving them until then means "delete" quietly meant
-    /// "delete most of".
-    #[tokio::test]
-    async fn forgetting_a_conversation_takes_its_anchors_and_attributions() {
+    async fn forgetting_a_conversation_takes_its_attribution() {
         let (files, root) = coordinator("forget-agent");
         let file = root.join("a.txt");
         std::fs::write(&file, "one\n").expect("seed");
         let path = file.to_string_lossy().into_owned();
-
         let doomed = agent("session-doomed");
-        let keeper = agent("session-keeper");
-        read(&files, &keeper, &path).await;
         files
             .write_file(
                 &doomed,
@@ -842,84 +741,22 @@ mod tests {
             )
             .await
             .expect("write");
-
         let state = files.state.clone();
-        assert!(
-            !state
-                .writers_for(&[path.clone()])
+        assert_eq!(
+            state
+                .writers_for(std::slice::from_ref(&path))
                 .await
                 .expect("writers")
-                .is_empty(),
-            "the fixture recorded no attribution to forget"
+                .get(&path)
+                .map(|(agent, _)| agent.as_str()),
+            Some("session-doomed")
         );
-
         state.forget_agent("session-doomed").await.expect("forget");
-
-        assert!(
-            state
-                .load_anchor_state(&doomed.id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "anchor state outlived its conversation"
-        );
-        assert!(
-            state
-                .writers_for(&[path.clone()])
-                .await
-                .expect("writers")
-                .is_empty(),
-            "attribution outlived its conversation"
-        );
-        // Path-keyed rows made it tempting to collect only by agent; the other
-        // session must be untouched either way.
-        assert!(
-            !state
-                .load_anchor_state(&keeper.id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "forgetting one conversation took another's state"
-        );
-    }
-
-    /// Retention is by agent, not by row. A half-retired session leaves some
-    /// anchors resolving and some not, and the model cannot tell which it
-    /// holds — a clean sweep gives it an honest "re-read" instead.
-    #[tokio::test]
-    async fn retiring_an_idle_conversation_takes_all_of_it() {
-        let (files, root) = coordinator("retire");
-        let file = root.join("a.txt");
-        std::fs::write(&file, "one\ntwo\nthree\n").expect("seed");
-        let path = file.to_string_lossy().into_owned();
-
-        let idle = agent("session-idle");
-        read(&files, &idle, &path).await;
-        let state = files.state.clone();
-
-        // Nothing is idle yet, so a sweep must leave it alone.
-        state.retire_idle_agents(30).await.expect("retire");
-        assert!(
-            !state
-                .load_anchor_state(&idle.id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "a live conversation was retired"
-        );
-
-        // Zero days makes everything already-idle, which is the same query the
-        // real threshold runs.
-        let removed = state.retire_idle_agents(0).await.expect("retire");
-        assert!(removed > 0, "nothing was retired");
-        assert!(
-            state
-                .load_anchor_state(&idle.id)
-                .await
-                .expect("load")
-                .is_empty(),
-            "an idle conversation kept its anchors"
-        );
+        assert!(state
+            .writers_for(&[path])
+            .await
+            .expect("writers")
+            .is_empty());
     }
 
     /// Each agent keeps its own view, so one reading a file must not make the

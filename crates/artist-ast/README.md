@@ -29,7 +29,7 @@ Two further differences:
   `pub struct LineRange` and `pub fn run()`; every module was private. Modules
   are now public and `parse_file` / `walk_paths` / `walk_and_parse` are exported.
 - **No renderer is part of the contract.** Upstream renders results against
-  line numbers. Artist addresses lines by content-derived mnemonic anchor
+  line numbers. Artist addresses lines by deterministic semantic occurrence anchor
   (`hashline-tools`), so callers take `ParseResult` / `Declaration` and render
   them themselves. The upstream renderers remain available but artist does not
   use them.

@@ -93,10 +93,6 @@ pub enum NextAction {
         arguments: Value,
         reason: String,
     },
-    StartBackground {
-        tool: String,
-        arguments: Value,
-    },
     RecoverOperation {
         key: String,
     },

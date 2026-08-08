@@ -4,7 +4,6 @@ pub enum HashlineErrorCode {
     StaleAnchor,
     ContentChanged,
     AmbiguousAnchor,
-    ConfirmationRequired,
     PathOutsideWorkspace,
     AlreadyExists,
     InvalidInput,
@@ -39,11 +38,7 @@ impl HashlineError {
         let lower = message.to_ascii_lowercase();
         let (code, retryable) = if lower.contains("content hash mismatch") {
             (HashlineErrorCode::ContentChanged, true)
-        } else if lower.contains("confirmation_required")
-            || lower.contains("stale hash")
-            || lower.contains("does not match any line")
-            || lower.contains("stale anchor")
-        {
+        } else if lower.contains("does not exactly resolve") || lower.contains("stale anchor") {
             (HashlineErrorCode::StaleAnchor, true)
         } else if lower.contains("ambiguous") {
             (HashlineErrorCode::AmbiguousAnchor, true)

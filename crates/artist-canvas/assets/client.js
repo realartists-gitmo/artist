@@ -162,6 +162,18 @@ function applyState(payload) {
 
 let pendingQuestions = [];
 
+// The latest registration wins. These live outside hot-swapped application
+// modules, so a replacement registration atomically becomes active without
+// creating a second harness channel.
+let pollHandler = null;
+let sendHandler = null;
+let sendChain = Promise.resolve();
+
+function publishHandlers() {
+  rpc("canvas.handlers", { poll: typeof pollHandler === "function", send: typeof sendHandler === "function" })
+    .catch((error) => report("error", `handler registration failed: ${error?.message ?? error}`));
+}
+
 // ---------------------------------------------------------------- hot reload
 
 let events;
@@ -173,6 +185,7 @@ function connect() {
   events.addEventListener("open", () => {
     backoff = 250;
     hideOverlay();
+    publishHandlers();
   });
 
   events.addEventListener("reload", () => location.reload());
@@ -191,6 +204,33 @@ function connect() {
     } catch (error) {
       rpc("canvas.digest", { error: String(error?.message ?? error) }).catch(() => {});
     }
+  });
+  events.addEventListener("poll", (event) => {
+    const request = JSON.parse(event.data);
+    const sequence = request.sequence;
+    Promise.resolve()
+      .then(async () => {
+        if (typeof pollHandler !== "function") throw new Error("no artist.onPoll handler registered");
+        const value = await pollHandler();
+        const encoded = JSON.stringify(value);
+        if (encoded === undefined) throw new Error("artist.onPoll returned a non-JSON-serializable value");
+        const serializable = JSON.parse(encoded);
+        await rpc("canvas.poll.result", { sequence, hasValue: true, value: serializable });
+      })
+      .catch((error) => rpc("canvas.poll.result", { sequence, error: String(error?.message ?? error) }).catch(() => {}));
+  });
+  events.addEventListener("input", (event) => {
+    const request = JSON.parse(event.data);
+    // Preserve universal send ordering even if one handler invocation is async.
+    sendChain = sendChain.then(async () => {
+      try {
+        if (typeof sendHandler !== "function") throw new Error("no artist.onSend handler registered");
+        await sendHandler(request.input);
+        await rpc("canvas.input.result", { sequence: request.sequence });
+      } catch (error) {
+        await rpc("canvas.input.result", { sequence: request.sequence, error: String(error?.message ?? error) });
+      }
+    });
   });
   events.addEventListener("build-error", (event) => showOverlay(JSON.parse(event.data)));
 
@@ -423,6 +463,20 @@ export const artist = {
       return Promise.reject(new Error('artist.send needs mode: "steer" or "queue"'));
     }
     return rpc("canvas.send", { text, mode });
+  },
+
+  /** Register the current idempotent model-facing canvas snapshot hook. */
+  onPoll(handler) {
+    if (typeof handler !== "function") throw new TypeError("artist.onPoll needs a function");
+    pollHandler = handler;
+    publishHandlers();
+  },
+
+  /** Register the current model-to-canvas input handler. Latest registration wins. */
+  onSend(handler) {
+    if (typeof handler !== "function") throw new TypeError("artist.onSend needs a function");
+    sendHandler = handler;
+    publishHandlers();
   },
 
   /** Invoke a tool this canvas declared in [permissions] allow. */

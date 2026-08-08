@@ -25,29 +25,28 @@ use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::Deserialize;
 
 use crate::canvas_host::McpCanvasHost;
-use crate::server::McpServer;
+use crate::{
+    http_server::{HttpMcpServer, SurfaceFactory},
+    server::McpServer,
+};
 
 /// Which subsystems a daemon may bring up, one field per command-line flag.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Allow {
-    pub computer: bool,
-    pub canvas: bool,
     pub memory: bool,
     pub subagent: bool,
-    pub comms: bool,
 }
 
 /// Builds one MCP server per logical transport session.
-type ServerFactory = Arc<dyn Fn(&str) -> anyhow::Result<McpServer> + Send + Sync>;
 
 /// A running artist MCP process: shared resources, session-specific identities.
 pub struct McpDaemon {
-    factory: ServerFactory,
+    factory: SurfaceFactory,
     actor: String,
-    /// Project root, kept for the discovery reply and HTTP server metadata.
     project: String,
-    /// Profile name, kept for the discovery reply and HTTP server metadata.
     profile: String,
+    profile_instructions: String,
+    identities: artist_registry::HttpIdentities,
     /// Held so the recorder's writer task stays alive for the daemon's life.
     _writer: Option<artist_session::WriterTask>,
 }
@@ -65,7 +64,6 @@ impl McpDaemon {
         let project = std::fs::canonicalize(project).context("canonicalize project root")?;
         let profiles = Profiles::discover(&project);
         let profile = profiles.get(profile_name).map_err(|error| anyhow!(error))?;
-        let outbox = artist_session::AskOutbox::open(Some(state_dir))?;
         let config_root = config_root()?;
         let settings = FileSettings::load(&config_root, &project);
 
@@ -88,9 +86,13 @@ impl McpDaemon {
                 }
             };
 
-        let computer = allow.computer.then(|| {
-            artist_computer::SurfaceRegistry::for_project(&project, screen(&settings.computer))
-        });
+        // Resource construction is not a visibility gate. The selected profile is the
+        // only authority deciding whether `computer`, `canvas`, `ask`, etc. are listed.
+        let computer = Some(artist_computer::SurfaceRegistry::for_project(
+            &project,
+            screen(&settings.computer),
+        ));
+        let ask = artist_session::AskRegistry::for_project(&project, Some(recorder.clone()));
         let memory_config = settings.memory();
         let memory = match allow.memory {
             true => open_memory(&config_root, &memory_config).await,
@@ -111,115 +113,115 @@ impl McpDaemon {
         };
 
         let project_text = project.display().to_string();
-        let daemon_project = project_text.clone();
         let state_dir = state_dir.to_path_buf();
         let profile_name = profile_name.to_owned();
-        let daemon_profile = profile_name.clone();
         let factory_project = project.clone();
         let factory_workspace = Workspace::open(&factory_project, &state_dir, actor)?;
+        let factory_pages = artist_agent::pagination::PageStore::open(Some(&state_dir))?;
         let factory_config_root = config_root.clone();
         let factory_profile = profile.clone();
+        let profile_instructions = profile.instructions.clone();
+        let factory_profile_instructions = profile_instructions.clone();
         let factory_recorder = recorder.clone();
-        let factory_outbox = outbox.clone();
+        let factory_ask = ask.clone();
         let factory_computer = computer.clone();
         let factory_memory = memory.clone();
         let factory_delegation = delegation.clone();
-        let factory: ServerFactory = Arc::new(move |session_actor: &str| {
-            let workspace = factory_workspace.with_actor(session_actor)?;
-            let session_conversation = format!("mcp:{session_actor}");
+        let factory_profile_name = profile_name.clone();
+        let factory: SurfaceFactory = Arc::new(move |identity: Option<McpIdentity>| {
+            let actor_key = identity
+                .as_ref()
+                .map(|identity| identity.actor.as_str())
+                .unwrap_or("mcp-http-discovery");
+            let artist_name = identity
+                .as_ref()
+                .map(|identity| identity.name.as_str())
+                .unwrap_or("anonymous");
+            let workspace = factory_workspace.with_actor(actor_key)?;
+            let session_conversation = format!("mcp:{actor_key}");
             let session_attachments = artist_session::AttachmentStore::new(
                 state_dir
                     .join("sessions")
-                    .join(session_actor)
+                    .join(actor_key)
                     .join("attachments"),
             );
             let memory_writer = factory_memory.as_ref().map(|handle| {
                 handle.writer(factory_recorder.clone(), session_conversation.clone())
             });
-
-            let canvas_host = allow.canvas.then(|| {
-                Arc::new(McpCanvasHost::new(
-                    factory_outbox.clone(),
-                    session_actor,
-                    &factory_project,
-                    &profile_name,
-                ))
-            });
-            let canvas = canvas_host.as_ref().map(|host| {
-                Lazy::new(
-                    factory_project.clone(),
-                    Arc::clone(host) as Arc<dyn artist_canvas::bridge::CanvasHost>,
-                )
-            });
-
-            let claimed = artist_registry::names().claim(&artist_registry::Registration {
-                session: session_actor.to_owned(),
-                actor: session_actor.to_owned(),
-                project: Some(project_text.clone()),
-                profile: Some(profile_name.clone()),
-                parent: None,
-            });
-            let identity = match claimed {
-                Ok(name) => McpIdentity {
-                    actor: session_actor.to_owned(),
-                    profile: profile_name.clone(),
-                    project: project_text.clone(),
-                    name: name.name,
-                    registered: true,
-                },
-                Err(error) => {
-                    tracing::warn!("could not claim MCP identity: {error}; using actor fallback");
-                    McpIdentity {
-                        actor: session_actor.to_owned(),
-                        profile: profile_name.clone(),
-                        project: project_text.clone(),
-                        name: session_actor.to_owned(),
-                        registered: false,
-                    }
-                }
-            };
-            let messaging_identity = (allow.comms && identity.registered).then(|| identity.clone());
+            let canvas_host = Arc::new(McpCanvasHost::new(
+                factory_ask.clone(),
+                artist_name,
+                &factory_project,
+                &factory_profile_name,
+            ));
+            let canvas = Some(Lazy::new(
+                factory_project.clone(),
+                Arc::clone(&canvas_host) as Arc<dyn artist_canvas::bridge::CanvasHost>,
+            ));
             let mut tools = artist_agent::tool_set::mcp_surface(McpSurface {
                 workspace,
                 profile: factory_profile.clone(),
                 recorder: Some(factory_recorder.clone()),
-                outbox: Some(factory_outbox.clone()),
+                ask: Some(factory_ask.clone()),
                 attachments: Some(session_attachments),
                 computer: factory_computer.clone(),
                 canvas,
                 memory: memory_writer,
                 delegation: factory_delegation.clone(),
-                identity: messaging_identity,
+                identity: identity.clone(),
+                pages: factory_pages.clone(),
             });
-            tools.push(crate::admin::workspace_tool(
-                crate::admin::WorkspaceStore::new(&factory_config_root, &factory_project),
-            ));
-            if tools.is_empty() {
-                return Err(anyhow!(
-                    "profile {profile_name:?} permits no tools in this environment"
+            if factory_profile.permits("workspace") {
+                tools.push(crate::admin::workspace_tool(
+                    crate::admin::WorkspaceStore::new(&factory_config_root, &factory_project),
                 ));
             }
-            let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-            tracing::info!(actor = session_actor, tools = ?names, "built tool surface");
-            let server = McpServer::with_identity(tools, Some(&state_dir), identity)?;
-            if let Some(host) = &canvas_host {
-                host.attach(server.clone());
-            }
+            let permit_operation = factory_profile.permits("operation");
+            let permit_page = factory_profile.permits("page");
+            let identity = identity.unwrap_or_else(|| McpIdentity {
+                actor: "mcp-http-discovery".into(),
+                profile: factory_profile_name.clone(),
+                project: factory_project.display().to_string(),
+                name: "anonymous".into(),
+            });
+            let server = McpServer::with_identity_profile_and_visibility(
+                tools,
+                Some(&state_dir),
+                identity,
+                factory_profile_instructions.clone(),
+                permit_operation,
+                permit_page,
+            )?;
+            canvas_host.attach(server.canvas_dispatcher());
             Ok(server)
         });
 
         Ok(Self {
             factory,
             actor: actor.to_owned(),
-            project: daemon_project,
-            profile: daemon_profile,
+            project: project_text.clone(),
+            profile: profile_name,
+            profile_instructions,
+            identities: artist_registry::Registry::for_project(&project).http_identities(),
             _writer: writer,
         })
     }
 
     /// Build the server for the durable stdio actor.
     pub fn server(&self) -> anyhow::Result<McpServer> {
-        (self.factory)(&self.actor)
+        let claimed = artist_registry::names().claim(&artist_registry::Registration {
+            session: self.actor.clone(),
+            actor: self.actor.clone(),
+            project: Some(self.project.clone()),
+            profile: Some(self.profile.clone()),
+            parent: None,
+        })?;
+        (self.factory)(Some(McpIdentity {
+            actor: self.actor.clone(),
+            profile: self.profile.clone(),
+            project: self.project.clone(),
+            name: claimed.name,
+        }))
     }
 
     /// Serve one stdio connection against its durable actor and exit.
@@ -227,56 +229,48 @@ impl McpDaemon {
         self.server()?.serve_stdio().await
     }
 
-    /// Serve Streamable HTTP on a loopback port. Each newly initialized MCP
-    /// session receives a distinct actor and registry claim. Requests carrying
-    /// that MCP session id continue to use the same server and identity.
+    /// Serve Streamable HTTP on a loopback port. Transport sessions are anonymous;
+    /// durable Artist identity is established only by the explicit `identity` tool.
     pub async fn serve_http(self, addr: std::net::SocketAddr) -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind {addr}"))?;
-        let factory = Arc::clone(&self.factory);
-        let actor = self.actor.clone();
+        let http = HttpMcpServer::new(
+            Arc::clone(&self.factory),
+            self.identities.clone(),
+            self.profile.clone(),
+            self.project.clone(),
+            self.profile_instructions.clone(),
+        )?;
         let session_manager = Arc::new(LocalSessionManager::default());
-        let legacy_factory = {
-            let factory = Arc::clone(&factory);
-            let actor = actor.clone();
-            move || {
-                let session_actor = format!("{actor}-{}", artist_tools::short_id("web"));
-                factory(&session_actor).map_err(std::io::Error::other)
-            }
-        };
-        let modern_factory = {
-            let factory = Arc::clone(&factory);
-            let actor = actor.clone();
-            move || {
-                let session_actor = format!("{actor}-{}", artist_tools::short_id("web"));
-                factory(&session_actor).map_err(std::io::Error::other)
-            }
-        };
-        // Stateful instance: the proven initialize-based (legacy) era, one
-        // actor per initialized session, used by the tunnel probe and existing
-        // connector sessions.
+        let legacy_server = http.clone();
         let legacy = StreamableHttpService::new(
-            legacy_factory,
+            move || Ok::<_, std::io::Error>(legacy_server.clone()),
             Arc::clone(&session_manager),
             StreamableHttpServerConfig::default(),
         );
-        // Stateless instance: the modern (2026-07-28) era, where each request
-        // is served against a freshly built server with a JSON response.
+        let modern_server = http.clone();
         let modern = StreamableHttpService::new(
-            modern_factory,
+            move || Ok::<_, std::io::Error>(modern_server.clone()),
             session_manager,
             StreamableHttpServerConfig::default()
                 .with_stateful_mode(false)
                 .with_json_response(true),
         );
+        let mut discovery_blocks = vec![
+            crate::server::INSTRUCTIONS.to_owned(),
+            crate::server::HTTP_INSTRUCTIONS.to_owned(),
+        ];
+        if !self.profile_instructions.trim().is_empty() {
+            discovery_blocks.push(self.profile_instructions.clone());
+        }
         let discover = crate::discover::DiscoverReply::new(
-            format!("Artist — {}", self.actor),
+            "Artist".to_owned(),
             format!(
                 "Artist MCP harness for {} using profile {}",
                 self.project, self.profile
             ),
-            crate::server::INSTRUCTIONS.to_owned(),
+            discovery_blocks.join("\n\n"),
         );
         let service = crate::discover::McpGatewayService::new(legacy, modern, discover);
         let router = axum::Router::new()
@@ -296,6 +290,7 @@ impl McpDaemon {
             .map_err(|error| anyhow!(error))
     }
 }
+
 async fn no_oauth_metadata() -> (axum::http::StatusCode, &'static str) {
     (
         axum::http::StatusCode::NOT_FOUND,
@@ -573,8 +568,10 @@ fn migrate_credentials(document: &mut toml::Value) {
             .get("type")
             .and_then(toml::Value::as_str)
             .is_none();
-        if is_legacy_chatgpt && let Some(auth) = credentials.as_table_mut() {
-            auth.insert("type".into(), toml::Value::String("chatgpt".into()));
+        if is_legacy_chatgpt {
+            if let Some(auth) = credentials.as_table_mut() {
+                auth.insert("type".into(), toml::Value::String("chatgpt".into()));
+            }
         }
         provider.insert("credentials".into(), credentials);
         provider.entry("provider").or_insert_with(|| {
@@ -628,8 +625,17 @@ fn build_delegation(
 mod tests {
     use super::*;
 
+    fn fake_identity(project: &str, index: usize) -> McpIdentity {
+        McpIdentity {
+            actor: format!("a-http-test-{index}"),
+            profile: "default".into(),
+            project: project.into(),
+            name: format!("ArtistTest{index}"),
+        }
+    }
+
     #[tokio::test]
-    async fn separate_http_sessions_receive_separate_identities() {
+    async fn anonymous_http_factory_claims_no_identity_and_explicit_identities_are_distinct() {
         let project = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let base = artist_tools::short_id("daemon-test");
@@ -642,15 +648,20 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_actor = format!("{base}-first");
-        let second_actor = format!("{base}-second");
-        let first = (daemon.factory)(&first_actor).unwrap();
-        let second = (daemon.factory)(&second_actor).unwrap();
 
-        assert_eq!(first.identity().actor, first_actor);
-        assert_eq!(second.identity().actor, second_actor);
-        assert_ne!(first.identity().actor, second.identity().actor);
-        assert_ne!(first.identity().name, second.identity().name);
+        let anonymous = (daemon.factory)(None).unwrap();
+        assert_eq!(anonymous.identity().name, "anonymous");
+
+        let first = fake_identity(&daemon.project, 1);
+        let second = fake_identity(&daemon.project, 2);
+        let first_server = (daemon.factory)(Some(first.clone())).unwrap();
+        let second_server = (daemon.factory)(Some(second.clone())).unwrap();
+        assert_eq!(first_server.identity().name, first.name);
+        assert_eq!(second_server.identity().name, second.name);
+        assert_ne!(
+            first_server.identity().actor,
+            second_server.identity().actor
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -671,7 +682,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn http_sessions_share_the_project_workspace() {
+    async fn http_identities_share_one_project_workspace() {
         let project = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
         let base = artist_tools::short_id("daemon-workspace-test");
@@ -691,16 +702,13 @@ mod tests {
         );
 
         let servers: Vec<_> = (0..32)
-            .map(|index| {
-                let actor = format!("{base}-{index}");
-                (daemon.factory)(&actor).unwrap()
-            })
+            .map(|index| (daemon.factory)(Some(fake_identity(&daemon.project, index))).unwrap())
             .collect();
 
         assert_eq!(
             hashline_descriptor_count(state.path()),
             baseline,
-            "per-session servers must derive actor views from one shared workspace"
+            "per-identity servers must derive actor views from one shared workspace"
         );
         drop(servers);
     }

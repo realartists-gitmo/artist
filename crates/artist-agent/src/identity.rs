@@ -13,7 +13,6 @@
 //! therefore goes last, after every byte that is shared, so only the tail is
 //! reprocessed. See [`Identity::prompt_block`].
 
-
 /// A resolved agent identity.
 #[derive(Clone, Debug)]
 pub(crate) struct Identity {
@@ -114,8 +113,6 @@ impl std::ops::Deref for RunIdentity {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,8 +132,8 @@ mod tests {
     #[test]
     fn a_session_keeps_its_name_across_repeated_resolution() {
         with_roster(|| {
-            let first = session("s-1", "s-1", std::path::Path::new("/p"), "default");
-            let again = session("s-1", "s-1", std::path::Path::new("/p"), "default");
+            let first = session("s-1", "s-1", std::path::Path::new("/p"), "default").unwrap();
+            let again = session("s-1", "s-1", std::path::Path::new("/p"), "default").unwrap();
             assert_eq!(first.name, again.name);
             assert_eq!(first.actor, "s-1");
         });
@@ -150,11 +147,15 @@ mod tests {
             let shared = "shared system prompt";
             let one = format!(
                 "{shared}{}",
-                session("s-1", "s-1", std::path::Path::new("/p"), "default").prompt_block()
+                session("s-1", "s-1", std::path::Path::new("/p"), "default")
+                    .unwrap()
+                    .prompt_block()
             );
             let two = format!(
                 "{shared}{}",
-                session("s-2", "s-2", std::path::Path::new("/p"), "default").prompt_block()
+                session("s-2", "s-2", std::path::Path::new("/p"), "default")
+                    .unwrap()
+                    .prompt_block()
             );
 
             assert!(one.starts_with(shared) && two.starts_with(shared));
@@ -174,16 +175,16 @@ mod tests {
     #[test]
     fn the_block_names_the_agent() {
         with_roster(|| {
-            let identity = session("s-1", "a-1", std::path::Path::new("/p"), "default");
+            let identity = session("s-1", "a-1", std::path::Path::new("/p"), "default").unwrap();
             assert!(identity.prompt_block().contains(&identity.name));
             assert!(identity.prompt_block().contains("Artist"));
         });
     }
 
-    /// A subagent is not resumable, so its name goes back to the pool when the
-    /// run ends — otherwise a fan-out drains the roster permanently.
+    /// A stopped subagent remains pollable, so its bare public id stays reserved until
+    /// registry retention prunes the stopped session.
     #[test]
-    fn a_run_name_is_released_when_the_run_ends() {
+    fn a_run_name_remains_reserved_after_the_run_ends() {
         with_roster(|| {
             let name = {
                 let run = for_run(
@@ -191,35 +192,37 @@ mod tests {
                     std::path::Path::new("/p"),
                     "worker",
                     Some("Monet"),
-                );
+                )
+                .unwrap();
                 let held = run.name.clone();
                 assert!(artist_registry::names().resolve(&held).unwrap().is_some());
                 held
             };
             assert!(
-                artist_registry::names().resolve(&name).unwrap().is_none(),
-                "the run's name should be back in the pool"
+                artist_registry::names().resolve(&name).unwrap().is_some(),
+                "a retained stopped session must keep its public id reserved"
             );
         });
     }
 
-    /// Cloning the identity into a child environment must not release the name
-    /// when the clone goes out of scope.
+    /// Cloning/dropping process-local identity handles never controls the durable name
+    /// lease; registry retention does.
     #[test]
-    fn a_cloned_run_identity_holds_the_name_until_the_last_copy_drops() {
+    fn cloned_run_identity_drops_do_not_release_the_durable_name() {
         with_roster(|| {
             let run = for_run(
                 "a-child",
                 std::path::Path::new("/p"),
                 "worker",
                 Some("Monet"),
-            );
+            )
+            .unwrap();
             let name = run.name.clone();
             let clone = run.clone();
             drop(run);
             assert!(artist_registry::names().resolve(&name).unwrap().is_some());
             drop(clone);
-            assert!(artist_registry::names().resolve(&name).unwrap().is_none());
+            assert!(artist_registry::names().resolve(&name).unwrap().is_some());
         });
     }
 }

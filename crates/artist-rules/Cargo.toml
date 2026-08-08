@@ -33,6 +33,7 @@ wasmtime = { version = "47", optional = true, default-features = false, features
     # `gc` gates `Config::wasm_exceptions`, which `wasm.rs` calls to turn the
     # proposal *off*. Dropping the feature removes the setter, not the risk.
     "gc",
+    "gc-null",
 ] }
 wasmtime-wasi = { version = "47", optional = true, default-features = false }
 

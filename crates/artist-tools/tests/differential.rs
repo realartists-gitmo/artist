@@ -851,7 +851,7 @@ fn knobs() -> Vec<Knob> {
             json!({"query": "target", "limit": 1}),
             json!({"query": "target", "limit": 50}),
         ),
-        // edit — both parameters take mnemonic anchors, which only exist after
+        // edit — both parameters take semantic anchors, which only exist after
         // a read of the same file, so a two-call driver cannot construct them.
         covered(
             "edit",
@@ -861,7 +861,7 @@ fn knobs() -> Vec<Knob> {
         covered(
             "edit",
             "replacements",
-            "tools.rs::reads_then_edits_with_mnemonic_anchor",
+            "tools.rs::reads_then_edits_with_semantic_anchor",
         ),
         // write
         moves(

@@ -42,14 +42,14 @@ impl PortableTool for EditTool {
                         "properties": {
                             "start": {
                                 "type": "string",
-                                "description": "Bare mnemonic anchor token from read output. For `time: beta`, pass `time`, not `time: beta`; never use a line number."
+                                "description": "Exact opaque anchor from read/code output, including the leading `#`. Pass it byte-for-byte; never trim, normalize, case-fold, fuzzy-match, or use a line number."
                             },
                             "end": {
                                 "anyOf": [
                                     {"type": "string"},
                                     {"type": "null"}
                                 ],
-                                "description": "Ending mnemonic anchor, or null to replace only the start line."
+                                "description": "Exact ending anchor, or null to replace only the start line."
                             },
                             "content": {
                                 "type": "string",
@@ -77,8 +77,8 @@ impl PortableTool for EditTool {
             .replacements
             .into_iter()
             .map(|r| EditOperation::Replace {
-                hash: r.start,
-                end_hash: r.end,
+                anchor: r.start,
+                end_anchor: r.end,
                 content: r.content,
             })
             .collect();
@@ -125,7 +125,7 @@ impl PortableTool for EditTool {
 
         Ok(output::head(
             format!(
-                "Applied edit to {}.\n\nMnemonic updates:\n{}\n\nDiff:\n{}{impact}",
+                "Applied edit to {}.\n\nAnchor updates:\n{}\n\nDiff:\n{}{impact}",
                 args.path, updates, diff
             ),
             output::OUTPUT_CAP,

@@ -627,7 +627,7 @@ struct Recorded {
 struct RecordingHost(Arc<Mutex<Recorded>>);
 
 impl CanvasHost for RecordingHost {
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
+    fn send(&self, _slug: &str, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
         self.0.lock().expect("recorder").sent.push((text, mode));
         Box::pin(async move {
             match mode {

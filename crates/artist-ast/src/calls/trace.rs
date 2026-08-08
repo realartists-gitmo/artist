@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::calls::cli_helpers::resolve_target_qns;
 use crate::calls::graph::{CallEdge, CallGraph, CallTarget, Qn};
-use crate::core::{JSON_SCHEMA_TRACE, ParseResult};
+use crate::core::{ParseResult, JSON_SCHEMA_TRACE};
 
 /// Total inlined-body budget for one trace response. Beyond this, remaining
 /// hops are listed header-only with a note.
@@ -51,7 +51,7 @@ pub struct Found {
 /// shortest path from any `froms` qn to any `tos` qn, or `None` when the
 /// target is unreachable within `max_depth` hops.
 /// Public so a host can render the path itself. `render_trace` bakes in this
-/// crate's `file:line` output; artist addresses lines by mnemonic anchor.
+/// crate's `file:line` output; artist addresses lines by semantic occurrence anchor.
 pub fn find_path(calls: &CallGraph, froms: &[Qn], tos: &[Qn], max_depth: usize) -> Option<Found> {
     use std::collections::HashSet;
     let to_set: HashSet<&Qn> = tos.iter().collect();

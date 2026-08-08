@@ -9,7 +9,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The user's answer to the structured question."
+    "The spawned ask session id."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::canvas::CanvasTool,
@@ -20,7 +20,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: false
     },
-    "Canvas lifecycle, rendering, state, or interaction results."
+    "Canvas search results or the stable canvas session id that was opened/cloned."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::code_search::CodeSearchTool,
@@ -43,7 +43,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The delegated agent's completed response or background task handle."
+    "The spawned subagent's bare artist-name session id."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::handoff::HandoffTool,
@@ -67,51 +67,12 @@ artist_tool_api::impl_text_tool_contract!(
     },
     "Memory retrieval, write, or maintenance results."
 );
-artist_tool_api::impl_serialized_tool_contract!(
-    crate::message_tools::MessageTools,
-    C::Agents,
-    A {
-        read_only: false,
-        destructive: false,
-        idempotent: false,
-        open_world: true
-    }
-);
-artist_tool_api::impl_serialized_tool_contract!(
-    crate::message_tools::QueryTool,
-    C::Agents,
-    A {
-        read_only: false,
-        destructive: false,
-        idempotent: false,
-        open_world: true
-    }
-);
-artist_tool_api::impl_serialized_tool_contract!(
-    crate::message_tools::ReplyTool,
-    C::Agents,
-    A {
-        read_only: false,
-        destructive: false,
-        idempotent: false,
-        open_world: true
-    }
-);
-artist_tool_api::impl_serialized_tool_contract!(
-    crate::message_tools::GroupTool,
-    C::Agents,
-    A {
-        read_only: false,
-        destructive: false,
-        idempotent: false,
-        open_world: true
-    }
-);
+
 artist_tool_api::impl_text_tool_contract!(
     crate::resources::SkillTool,
     C::Files,
     A::read_only(),
-    "The selected skill instructions and supporting context."
+    "Profile-scoped skill search results or the loaded skill instructions."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::todo::TodoTool,
@@ -123,6 +84,17 @@ artist_tool_api::impl_text_tool_contract!(
         open_world: false
     },
     "The durable todo list and completion summary."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::bash_tool::BashTool,
+    C::Shell,
+    A {
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        open_world: true
+    },
+    "The spawned bash session id."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::PollTool,
@@ -158,3 +130,36 @@ artist_tool_api::impl_text_tool_contract!(
     A::read_only(),
     "Live session summaries from the durable registry."
 );
+
+impl artist_tool_api::ArtistToolContract for crate::computer_tool::ComputerTool {
+    fn category(&self) -> C {
+        C::Computer
+    }
+
+    fn annotations(&self) -> A {
+        A {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: true,
+        }
+    }
+
+    fn output_schema(&self) -> serde_json::Value {
+        artist_tool_api::text_output_schema(
+            <Self as rig_core::tool::PortableTool>::NAME,
+            "Computer session identifiers, observations, interaction results, and images.",
+        )
+    }
+
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        match output.as_json() {
+            Some(serde_json::Value::Object(map)) => Ok(serde_json::Value::Object(map.clone())),
+            Some(value) => Ok(serde_json::json!({"value": value})),
+            None => Ok(serde_json::json!({"text": output.render()})),
+        }
+    }
+}

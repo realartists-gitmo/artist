@@ -16,7 +16,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -35,7 +38,7 @@ use axum::{
 use futures::StreamExt as _;
 use rand::{RngExt as _, rngs::ThreadRng};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::{
     assets,
@@ -98,6 +101,14 @@ enum Signal {
     Agent { event: serde_json::Value },
     /// Asks any open page to describe what it is showing.
     Digest { slug: String },
+    /// Universal poll request for the latest page-authored handler.
+    Poll { slug: String, sequence: u64 },
+    /// Universal send delivery for the latest page-authored handler.
+    Input {
+        slug: String,
+        sequence: u64,
+        input: serde_json::Value,
+    },
 }
 
 impl Signal {
@@ -107,6 +118,8 @@ impl Signal {
             Signal::Reload { slug, .. }
             | Signal::Update { slug, .. }
             | Signal::Digest { slug }
+            | Signal::Poll { slug, .. }
+            | Signal::Input { slug, .. }
             | Signal::State { slug, .. } => Some(slug),
             Signal::Ask { .. } | Signal::Agent { .. } => None,
         }
@@ -120,6 +133,8 @@ impl Signal {
             Signal::Ask { .. } => "ask",
             Signal::Agent { .. } => "agent",
             Signal::Digest { .. } => "digest",
+            Signal::Poll { .. } => "poll",
+            Signal::Input { .. } => "input",
         }
     }
 }
@@ -130,11 +145,18 @@ struct Inner {
     addr: SocketAddr,
     signals: broadcast::Sender<Signal>,
     reports: Mutex<VecDeque<Report>>,
+    /// Current harness-owned failure. Cleared on the next source edit and replaced
+    /// by any subsequent error report; unlike `reports`, this is never drained.
+    current_failures: DashMap<String, Report>,
     /// The last thing each canvas said it was showing.
     digests: Mutex<std::collections::HashMap<String, serde_json::Value>>,
     /// One store per canvas, opened lazily and kept for the process lifetime so
     /// two tabs of the same canvas share one revision counter.
     states: DashMap<String, Arc<StateStore>>,
+    handlers: DashMap<String, HandlerState>,
+    request_sequence: AtomicU64,
+    poll_waiters: DashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>,
+    input_waiters: DashMap<u64, oneshot::Sender<Result<(), String>>>,
     /// The windows this session put on screen, so they can be closed with it.
     windows: crate::window::Windows,
     host: Arc<dyn CanvasHost>,
@@ -158,6 +180,18 @@ struct History {
     reports_seen: u64,
     /// When `take_reports` last emptied this canvas's reports.
     last_drain: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HandlerState {
+    poll: bool,
+    send: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct AppHandlers {
+    pub poll: bool,
+    pub send: bool,
 }
 
 /// A running canvas server.
@@ -260,8 +294,13 @@ impl Server {
             addr,
             signals,
             reports: Mutex::new(VecDeque::new()),
+            current_failures: DashMap::new(),
             digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
+            handlers: DashMap::new(),
+            request_sequence: AtomicU64::new(0),
+            poll_waiters: DashMap::new(),
+            input_waiters: DashMap::new(),
             windows: crate::window::Windows::default(),
             host,
             history: Mutex::new(std::collections::HashMap::new()),
@@ -450,6 +489,94 @@ impl Server {
                     reports.drain(..).partition(|report| report.slug == slug);
                 *reports = theirs;
                 mine.into()
+            }
+        }
+    }
+
+    /// Latest page-authored handler registration.
+    pub fn app_handlers(&self, slug: &str) -> AppHandlers {
+        self.inner
+            .handlers
+            .get(slug)
+            .map(|state| AppHandlers {
+                poll: state.poll,
+                send: state.send,
+            })
+            .unwrap_or(AppHandlers {
+                poll: false,
+                send: false,
+            })
+    }
+
+    /// Current harness-owned failure. This is deliberately non-draining so a
+    /// canvas cannot hide a build/runtime failure by controlling its poll hook.
+    pub fn current_failure(&self, slug: &str) -> Option<Report> {
+        self.inner
+            .current_failures
+            .get(slug)
+            .map(|entry| entry.clone())
+    }
+
+    /// Invoke the latest `artist.onPoll` handler. `Ok(None)` is the contractual
+    /// "no app poll hook registered" state.
+    pub async fn app_poll(&self, slug: &str) -> Result<Option<serde_json::Value>, String> {
+        if !self.app_handlers(slug).poll {
+            return Ok(None);
+        }
+        let sequence = self.inner.request_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let (tx, rx) = oneshot::channel();
+        self.inner.poll_waiters.insert(sequence, tx);
+        if self
+            .inner
+            .signals
+            .send(Signal::Poll {
+                slug: slug.to_owned(),
+                sequence,
+            })
+            .is_err()
+        {
+            self.inner.poll_waiters.remove(&sequence);
+            return Err("canvas page is not connected".into());
+        }
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(result)) => result.map(Some),
+            Ok(Err(_)) => Err("canvas poll response channel closed".into()),
+            Err(_) => {
+                self.inner.poll_waiters.remove(&sequence);
+                Err("canvas onPoll handler timed out".into())
+            }
+        }
+    }
+
+    /// Deliver one input to the latest `artist.onSend` handler. Universal send
+    /// queues are drained sequentially by the session owner, so handler calls are
+    /// serialized in send order.
+    pub async fn app_send(&self, slug: &str, input: serde_json::Value) -> Result<(), String> {
+        if !self.app_handlers(slug).send {
+            return Err("canvas has no artist.onSend handler registered".into());
+        }
+        let sequence = self.inner.request_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let (tx, rx) = oneshot::channel();
+        self.inner.input_waiters.insert(sequence, tx);
+        if self
+            .inner
+            .signals
+            .send(Signal::Input {
+                slug: slug.to_owned(),
+                sequence,
+                input,
+            })
+            .is_err()
+        {
+            self.inner.input_waiters.remove(&sequence);
+            return Err("canvas page is not connected".into());
+        }
+        match tokio::time::timeout(Duration::from_secs(5), rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("canvas input response channel closed".into()),
+            Err(_) => {
+                self.inner.input_waiters.remove(&sequence);
+                Err("canvas onSend handler timed out".into())
             }
         }
     }
@@ -1034,6 +1161,55 @@ async fn serve_rpc(
             ok(serde_json::json!({"ok": true}))
         }
 
+        "canvas.handlers" => {
+            let poll = params
+                .get("poll")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let send = params
+                .get("send")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            inner
+                .handlers
+                .insert(slug.clone(), HandlerState { poll, send });
+            ok(serde_json::json!({"ok": true}))
+        }
+
+        "canvas.poll.result" => {
+            let Some(sequence) = params.get("sequence").and_then(|value| value.as_u64()) else {
+                return bad("poll.result needs sequence");
+            };
+            let result = if let Some(error) = params.get("error").and_then(|value| value.as_str()) {
+                Err(error.to_owned())
+            } else if params.get("hasValue").and_then(|value| value.as_bool()) == Some(true) {
+                Ok(params
+                    .get("value")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null))
+            } else {
+                Err("artist.onPoll returned a non-JSON-serializable value".into())
+            };
+            if let Some((_, waiter)) = inner.poll_waiters.remove(&sequence) {
+                let _ = waiter.send(result);
+            }
+            ok(serde_json::json!({"ok": true}))
+        }
+
+        "canvas.input.result" => {
+            let Some(sequence) = params.get("sequence").and_then(|value| value.as_u64()) else {
+                return bad("input.result needs sequence");
+            };
+            let result = params
+                .get("error")
+                .and_then(|value| value.as_str())
+                .map_or(Ok(()), |error| Err(error.to_owned()));
+            if let Some((_, waiter)) = inner.input_waiters.remove(&sequence) {
+                let _ = waiter.send(result);
+            }
+            ok(serde_json::json!({"ok": true}))
+        }
+
         "canvas.state.get" => {
             // A canvas may read another's state, but only one it named in its
             // manifest. Without the gate, the `from` parameter would let any
@@ -1126,7 +1302,7 @@ async fn serve_rpc(
                     "send needs `mode`: \"steer\" to correct a running turn, or \"queue\" to start one",
                 );
             };
-            let outcome = inner.host.send(text.to_owned(), mode).await;
+            let outcome = inner.host.send(&slug, text.to_owned(), mode).await;
             ok(serde_json::json!({"ok": true, "outcome": outcome}))
         }
 
@@ -1257,6 +1433,7 @@ impl Inner {
 
     /// Count an edit and return the build number it produces.
     fn bump_edits(&self, slug: &str) -> u64 {
+        self.current_failures.remove(slug);
         let mut history = self.history.lock().expect("history lock poisoned");
         let entry = history.entry(slug.to_owned()).or_default();
         entry.edits += 1;
@@ -1264,6 +1441,10 @@ impl Inner {
     }
 
     fn push_report(&self, report: Report) {
+        if matches!(report.level.as_str(), "error" | "build-error") {
+            self.current_failures
+                .insert(report.slug.clone(), report.clone());
+        }
         // Counted before it can be drained: the total is what makes a drained
         // buffer distinguishable from one that was always empty.
         self.history
@@ -1592,8 +1773,13 @@ mod tests {
             addr: "127.0.0.1:54321".parse().expect("loopback addr"),
             signals: broadcast::channel(1).0,
             reports: Mutex::new(VecDeque::new()),
+            current_failures: DashMap::new(),
             digests: Mutex::new(std::collections::HashMap::new()),
             states: DashMap::new(),
+            handlers: DashMap::new(),
+            request_sequence: AtomicU64::new(0),
+            poll_waiters: DashMap::new(),
+            input_waiters: DashMap::new(),
             windows: crate::window::Windows::default(),
             host: Arc::new(crate::bridge::DetachedHost),
             history: Mutex::new(std::collections::HashMap::new()),

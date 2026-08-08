@@ -84,18 +84,11 @@ async fn read_declines_to_inline_a_format_no_model_accepts() {
 }
 
 #[tokio::test]
-async fn reads_then_edits_with_mnemonic_anchor() {
+async fn reads_then_edits_with_semantic_anchor() {
     let (_root, _state, workspace) = workspace(&[("src/lib.rs", "fn alpha() {}\nfn beta() {}\n")]);
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"src/lib.rs"})).await;
-    let anchor = read
-        .lines()
-        .nth(1)
-        .unwrap()
-        .split(':')
-        .next()
-        .unwrap()
-        .trim();
+    let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     let edited = call(
         &tools.edit,
         json!({"path":"src/lib.rs","replacements":[{"start":anchor,"content":"fn renamed() {}"}]}),
@@ -118,30 +111,24 @@ async fn writes_finds_and_greps_project_files() {
             .await
             .contains("src/lib.rs")
     );
-    assert!(
-        call(
-            &tools.grep,
-            json!({"query":"needle","glob":"**/*.rs","context":1})
-        )
-        .await
-        .contains("src/lib.rs:1")
-    );
-    assert!(
-        call(
-            &tools.find,
-            json!({"query":"lib rs","path":".","glob":"**/*.rs"})
-        )
-        .await
-        .contains("src/lib.rs")
-    );
-    assert!(
-        call(
-            &tools.grep,
-            json!({"query":"needle","path":".","glob":"**/*.rs"})
-        )
-        .await
-        .contains("src/lib.rs:1")
-    );
+    assert!(call(
+        &tools.grep,
+        json!({"query":"needle","glob":"**/*.rs","context":1})
+    )
+    .await
+    .contains("src/lib.rs:1"));
+    assert!(call(
+        &tools.find,
+        json!({"query":"lib rs","path":".","glob":"**/*.rs"})
+    )
+    .await
+    .contains("src/lib.rs"));
+    assert!(call(
+        &tools.grep,
+        json!({"query":"needle","path":".","glob":"**/*.rs"})
+    )
+    .await
+    .contains("src/lib.rs:1"));
     assert_eq!(
         call(
             &tools.grep,
@@ -155,28 +142,22 @@ async fn writes_finds_and_greps_project_files() {
             .await
             .contains("src/lib.rs:1")
     );
-    assert!(
-        call(
-            &tools.write,
-            json!({"path":"src/new.rs","content":"new file\n"})
-        )
-        .await
-        .contains("created")
-    );
+    assert!(call(
+        &tools.write,
+        json!({"path":"src/new.rs","content":"new file\n"})
+    )
+    .await
+    .contains("created"));
     assert_eq!(
         std::fs::read_to_string(_root.path().join("src/new.rs")).unwrap(),
         "new file\n"
     );
-    assert!(
-        call(&tools.find, json!({"query":"new rs"}))
-            .await
-            .contains("src/new.rs")
-    );
-    assert!(
-        call(&tools.grep, json!({"query":"new file"}))
-            .await
-            .contains("src/new.rs")
-    );
+    assert!(call(&tools.find, json!({"query":"new rs"}))
+        .await
+        .contains("src/new.rs"));
+    assert!(call(&tools.grep, json!({"query":"new file"}))
+        .await
+        .contains("src/new.rs"));
 }
 
 #[tokio::test]
@@ -189,17 +170,15 @@ async fn all_file_tools_accept_external_absolute_paths() {
     let tools = ToolBundle::new(workspace.clone());
 
     let read = call(&tools.read, json!({"path":existing})).await;
-    let anchor = read.lines().next().unwrap().split(':').next().unwrap();
+    let anchor = read.lines().next().unwrap().split_once(": ").unwrap().0;
     call(
         &tools.edit,
         json!({"path":existing,"replacements":[{"start":anchor,"content":"fn edited_external_needle() {}"}]}),
     )
     .await;
-    assert!(
-        std::fs::read_to_string(&existing)
-            .unwrap()
-            .contains("edited_external_needle")
-    );
+    assert!(std::fs::read_to_string(&existing)
+        .unwrap()
+        .contains("edited_external_needle"));
 
     let created = outside.path().join("created.txt");
     call(
@@ -244,14 +223,7 @@ async fn stale_anchor_requires_a_fresh_read() {
     let (root, _state, workspace) = workspace(&[("file.rs", "one\ntwo\n")]);
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"file.rs"})).await;
-    let anchor = read
-        .lines()
-        .nth(1)
-        .unwrap()
-        .split(':')
-        .next()
-        .unwrap()
-        .trim();
+    let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     std::fs::write(root.path().join("file.rs"), "one\ntwo changed externally\n").unwrap();
     let args = serde_json::from_value(
         json!({"path":"file.rs","replacements":[{"start":anchor,"content":"changed"}]}),
@@ -275,14 +247,7 @@ async fn edit_temp_symlink_cannot_escape_workspace() {
     symlink(outside.path(), root.path().join("file.rs.tmp")).unwrap();
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"file.rs"})).await;
-    let anchor = read
-        .lines()
-        .next()
-        .unwrap()
-        .split(':')
-        .next()
-        .unwrap()
-        .trim();
+    let anchor = read.lines().next().unwrap().split_once(": ").unwrap().0;
     call(
         &tools.edit,
         json!({"path":"file.rs","replacements":[{"start":anchor,"content":"changed"}]}),

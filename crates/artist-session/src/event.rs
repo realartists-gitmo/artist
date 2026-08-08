@@ -372,9 +372,16 @@ pub struct AskPosted {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AskAnswered {
     pub answer: crate::ask::Answer,
-    /// Which surface the user answered on — `tui` or `canvas:<slug>`.
+    /// Human decisions and deterministic auto-resolution are both durable.
+    #[serde(default = "default_answer_source")]
+    pub source: crate::ask::AnswerSource,
+    /// Which surface the user answered on — `tui`, `canvas:<slug>`, or `auto_resolve`.
     #[serde(default)]
     pub surface: String,
+}
+
+fn default_answer_source() -> crate::ask::AnswerSource {
+    crate::ask::AnswerSource::Human
 }
 
 /// A durable, provider-private context snapshot. Values are deliberately
@@ -670,13 +677,41 @@ pub struct ConversationCompacted {
     pub modified_files: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
-    #[default]
-    Pending,
-    InProgress,
+pub enum TodoOpenStatus {
+    Idle,
+    Active,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoClosedStatus {
     Done,
+    Failed,
+    Cancelled,
+    Inherited,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum TodoStatus {
+    Open { open: TodoOpenStatus },
+    Closed { closed: TodoClosedStatus },
+}
+
+impl Default for TodoStatus {
+    fn default() -> Self {
+        Self::Open {
+            open: TodoOpenStatus::Idle,
+        }
+    }
+}
+
+impl TodoStatus {
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -684,17 +719,14 @@ pub struct TodoItem {
     pub text: String,
     #[serde(default)]
     pub status: TodoStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<TodoItem>,
 }
 
-/// The todo list after an update.
-///
-/// A snapshot rather than a delta: replay is last-writer-wins per owner, which
-/// keeps rewind correct without folding a history of edits. The list is owned
-/// by the harness, not by the model context, so it survives the context wipe a
-/// handoff performs.
+/// The complete todo tree after an atomic tool update. Replay is
+/// last-writer-wins per artist identity.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TodoUpdated {
-    /// The session for the root agent's list, or a subagent's task id.
     pub owner: String,
     pub items: Vec<TodoItem>,
 }
@@ -710,10 +742,10 @@ pub struct TodoUpdated {
 pub struct HandoffPerformed {
     pub from: String,
     pub to: String,
-    pub summary: String,
-    /// Every profile this session has passed through, oldest first. A handoff
-    /// cannot hand back, but it can hand onward into a cycle; each hop is a
-    /// fresh instance that could not otherwise see the loop.
+    #[serde(alias = "summary")]
+    pub brief: String,
+    /// Every profile this session has passed through, oldest first. Same-profile
+    /// handoff is allowed; the chain is retained only for durable history.
     #[serde(default)]
     pub chain: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

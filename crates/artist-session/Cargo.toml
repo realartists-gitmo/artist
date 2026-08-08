@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+artist-registry = { path = "../artist-registry" }
 anyhow = "1"
 base64 = "0.23"
 fs2 = "0.4"

@@ -102,32 +102,20 @@ impl KindRegistration {
             move |record| json!({"kind": kind, "snapshot": record.snapshot}),
         )
     }
-
-    pub fn immediate(name: &str, send: SendPolicy) -> Self {
-        let kind = name.to_owned();
-        Self::new(
-            name,
-            false,
-            |_record, _| true,
-            move |_record, input| send.validate(input),
-            move |record| json!({"kind": kind, "snapshot": record.snapshot}),
-        )
-    }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum SendPolicy {
-    Unsupported,
     String,
-    Any,
 }
 
 impl SendPolicy {
     fn validate(self, input: &Value) -> Result<(), String> {
         match self {
-            Self::Unsupported => Err("this session kind does not support send".into()),
-            Self::String if !input.is_string() => Err("this session kind requires string input".into()),
-            Self::String | Self::Any => Ok(()),
+            Self::String if !input.is_string() => {
+                Err("this session kind requires string input".into())
+            }
+            Self::String => Ok(()),
         }
     }
 }
@@ -208,7 +196,13 @@ impl SessionHub {
             },
             |record| json!({"kind":"bash", "snapshot": record.snapshot}),
         ));
-        self.register_kind(KindRegistration::one_shot("ask", SendPolicy::Unsupported));
+        self.register_kind(KindRegistration::new(
+            "ask",
+            false,
+            |record, _| !record.lifecycle.is_live(),
+            |_record, _| Err("model-to-ask input is unsupported".into()),
+            |record| json!({"kind":"ask", "snapshot": crate::ask_tool::model_snapshot(&record.snapshot)}),
+        ));
         self.register_kind(KindRegistration::new(
             "canvas",
             true,
@@ -230,7 +224,21 @@ impl SessionHub {
             },
             |record| json!({"kind":"canvas", "snapshot": record.snapshot}),
         ));
-        self.register_kind(KindRegistration::immediate("computer", SendPolicy::Unsupported));
+        self.register_kind(KindRegistration::new(
+            "computer",
+            false,
+            |_record, _| true,
+            |_record, _| Err("generic send is unsupported for computer sessions; use the computer tool".into()),
+            |record| {
+                json!({
+                    "kind":"computer",
+                    "snapshot": {
+                        "control": record.snapshot.get("control").cloned().unwrap_or_else(|| Value::String("live".into())),
+                        "rung": record.snapshot.get("rung").cloned().unwrap_or(Value::Null)
+                    }
+                })
+            },
+        ));
     }
 
     pub fn own(&self, id: impl Into<String>, session: Arc<dyn OwnedSession>) {
@@ -256,7 +264,9 @@ impl SessionHub {
                     Ok(()) => {
                         let state = session.state().await.ok();
                         let snapshot = state.map(|state| state.snapshot);
-                        let _ = self.sessions.finish(&id, SessionStatus::Cancelled, snapshot);
+                        let _ = self
+                            .sessions
+                            .finish(&id, SessionStatus::Cancelled, snapshot);
                         break;
                     }
                     Err(error) => {
@@ -298,7 +308,9 @@ impl SessionHub {
                 let sequence = current.poll_requested;
                 match session.observe().await {
                     Ok(state) => {
-                        let _ = self.sessions.complete_poll(&id, sequence, state.snapshot.clone());
+                        let _ = self
+                            .sessions
+                            .complete_poll(&id, sequence, state.snapshot.clone());
                         if let Some(status) = state.stopped {
                             let _ = self.sessions.finish(&id, status, Some(state.snapshot));
                             break;
@@ -344,20 +356,43 @@ impl SessionHub {
     }
 
     fn kind(&self, kind: &str) -> Result<KindRegistration, SessionError> {
-        self.kinds
+        if let Some(registered) = self
+            .kinds
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
             .get(kind)
             .cloned()
-            .ok_or_else(|| SessionError(format!("unregistered session kind `{kind}`")))
+        {
+            return Ok(registered);
+        }
+        let summary_kind = kind.to_owned();
+        let send_kind = kind.to_owned();
+        Ok(KindRegistration::new(
+            kind,
+            false,
+            |record, _| !record.lifecycle.is_live(),
+            move |_record, _input| {
+                Err(format!(
+                    "generic send is unsupported for session kind `{send_kind}`"
+                ))
+            },
+            move |record| json!({"kind": summary_kind, "snapshot": record.snapshot}),
+        ))
     }
 
-    fn target_ids(session: Option<String>, sessions: Option<Vec<String>>) -> Result<Vec<String>, SessionError> {
+    fn target_ids(
+        session: Option<String>,
+        sessions: Option<Vec<String>>,
+    ) -> Result<Vec<String>, SessionError> {
         match (session, sessions) {
             (Some(session), None) if !session.is_empty() => Ok(vec![session]),
             (None, Some(sessions)) if !sessions.is_empty() => Ok(sessions),
-            (Some(_), Some(_)) => Err(SessionError("exactly one of `session` or `sessions` is allowed".into())),
-            _ => Err(SessionError("one `session` or a non-empty `sessions` list is required".into())),
+            (Some(_), Some(_)) => Err(SessionError(
+                "exactly one of `session` or `sessions` is allowed".into(),
+            )),
+            _ => Err(SessionError(
+                "one `session` or a non-empty `sessions` list is required".into(),
+            )),
         }
     }
 
@@ -393,8 +428,9 @@ impl SessionHub {
                 .collect::<Result<Vec<_>, _>>()?;
             if immediate
                 || records.iter().all(|record| {
-                    self.kind(&record.kind)
-                        .is_ok_and(|kind| (kind.boundary)(record, active_sequences.get(&record.id).copied()))
+                    self.kind(&record.kind).is_ok_and(|kind| {
+                        (kind.boundary)(record, active_sequences.get(&record.id).copied())
+                    })
                 })
                 || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
             {
@@ -438,8 +474,7 @@ impl SessionHub {
         } else {
             Value::Array(values)
         };
-        serde_json::to_string_pretty(&rendered)
-            .map_err(|error| SessionError(error.to_string()))
+        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
     async fn abort(&self, args: AbortArgs) -> Result<String, SessionError> {
@@ -448,27 +483,34 @@ impl SessionHub {
         for id in ids {
             let result = match self.sessions.request_cancel(&id) {
                 Ok((CancelDisposition::LocalOwner, record)) => {
-                    if let Some(local) = self.local.get(&id).map(|entry| Arc::clone(entry.value())) {
+                    if let Some(local) = self.local.get(&id).map(|entry| Arc::clone(entry.value()))
+                    {
                         match local.abort().await {
-                            Ok(()) => match self.sessions.finish(&id, SessionStatus::Cancelled, None) {
-                                Ok(record) => json!({"session":id,"state":record.lifecycle}),
-                                Err(error) => json!({"session":id,"error":error.to_string()}),
-                            },
-                            Err(error) => json!({"session":id,"cancelRequested":true,"error":error}),
+                            Ok(()) => {
+                                match self.sessions.finish(&id, SessionStatus::Cancelled, None) {
+                                    Ok(record) => json!({"session":id,"state":record.lifecycle}),
+                                    Err(error) => json!({"session":id,"error":error.to_string()}),
+                                }
+                            }
+                            Err(error) => {
+                                json!({"session":id,"cancelRequested":true,"error":error})
+                            }
                         }
                     } else {
                         json!({"session":id,"cancelRequested":true,"state":record.lifecycle})
                     }
                 }
-                Ok((CancelDisposition::ForeignOwner(owner), record)) => {
-                    match owner.wake() {
-                        Ok(()) => json!({"session":id,"cancelRequested":true,"state":record.lifecycle}),
-                        Err(_) => match self.sessions.get(&id) {
-                            Ok(Some(record)) => json!({"session":id,"cancelRequested":record.cancel_requested,"state":record.lifecycle}),
-                            _ => json!({"session":id,"error":"owner disappeared while cancellation was requested"}),
-                        },
-                    }
-                }
+                Ok((CancelDisposition::ForeignOwner(owner), record)) => match owner.wake() {
+                    Ok(()) => json!({"session":id,"cancelRequested":true,"state":record.lifecycle}),
+                    Err(_) => match self.sessions.get(&id) {
+                        Ok(Some(record)) => {
+                            json!({"session":id,"cancelRequested":record.cancel_requested,"state":record.lifecycle})
+                        }
+                        _ => {
+                            json!({"session":id,"error":"owner disappeared while cancellation was requested"})
+                        }
+                    },
+                },
                 Ok((CancelDisposition::AlreadyStopped, record)) => {
                     json!({"session":id,"state":record.lifecycle})
                 }
@@ -484,70 +526,67 @@ impl SessionHub {
         } else {
             Value::Array(results)
         };
-        serde_json::to_string_pretty(&rendered)
-            .map_err(|error| SessionError(error.to_string()))
+        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
     async fn send(&self, args: SendArgs) -> Result<String, SessionError> {
         let ids = Self::target_ids(args.session, args.sessions)?;
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
-            match self.sessions.get(&id).map_err(registry_error)? {
+            let result = match self.sessions.get(&id).map_err(registry_error)? {
                 Some(record) => {
                     if !record.lifecycle.is_live() {
-                        results.push(json!({"session":id,"error":"session is stopped"}));
-                        continue;
+                        json!({"session":id,"error":"session is stopped"})
+                    } else {
+                        let kind = self.kind(&record.kind)?;
+                        if let Err(error) = (kind.validate_send)(&record, &args.input) {
+                            json!({"session":id,"error":error})
+                        } else {
+                            self.sessions
+                                .enqueue_input(&id, args.input.clone())
+                                .map_err(registry_error)?;
+                            if record.owner != artist_registry::Owner::current() {
+                                let _ = record.owner.wake();
+                            }
+                            json!({"session":id,"delivered":true})
+                        }
                     }
-                    let kind = self.kind(&record.kind)?;
-                    if let Err(error) = (kind.validate_send)(&record, &args.input) {
-                        results.push(json!({"session":id,"error":error}));
-                        continue;
-                    }
-                    self.sessions
-                        .enqueue_input(&id, args.input.clone())
-                        .map_err(registry_error)?;
-                    if record.owner != artist_registry::Owner::current() {
-                        let _ = record.owner.wake();
-                    }
-                    results.push(json!({"session":id,"delivered":true}));
                 }
                 None => {
-                    // Bare artist identities remain valid communication addresses even
-                    // when they are not the id of a currently retained subagent session.
                     let target = artist_registry::names()
                         .resolve(&id)
                         .map_err(registry_error)?;
                     if target.is_none() {
-                        results.push(json!({"session":id,"error":"unknown session or artist identity"}));
-                        continue;
+                        json!({"session":id,"error":"unknown session or artist identity"})
+                    } else {
+                        let body = args
+                            .input
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| args.input.to_string());
+                        artist_registry::messages()
+                            .send(&Message {
+                                id: artist_tools::short_id("m"),
+                                from: self.artist.to_string(),
+                                to: id.clone(),
+                                audience: Audience::Direct,
+                                body,
+                                expects_reply: false,
+                                sent_at: artist_registry::now(),
+                            })
+                            .map_err(registry_error)?;
+                        json!({"session":id,"delivered":true})
                     }
-                    let body = args
-                        .input
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| args.input.to_string());
-                    artist_registry::messages()
-                        .send(&Message {
-                            id: artist_tools::short_id("m"),
-                            from: self.artist.to_string(),
-                            to: id.clone(),
-                            audience: Audience::Direct,
-                            body,
-                            expects_reply: false,
-                            sent_at: artist_registry::now(),
-                        })
-                        .map_err(registry_error)?;
-                    results.push(json!({"session":id,"delivered":true}));
                 }
-            }
+            };
+            results.push(result);
         }
         let rendered = if results.len() == 1 {
             results.into_iter().next().unwrap_or(Value::Null)
         } else {
             Value::Array(results)
         };
-        serde_json::to_string_pretty(&rendered)
-            .map_err(|error| SessionError(error.to_string()))
+        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
     fn list(&self, args: ListArgs) -> Result<String, SessionError> {
@@ -562,7 +601,11 @@ impl SessionHub {
             .map_err(registry_error)?
             .into_iter()
             .filter(|record| record.lifecycle.is_live())
-            .filter(|record| scope == "project" || record.artist == &*self.artist)
+            .filter(|record| {
+                scope == "project"
+                    || record.artist == &*self.artist
+                    || record.parent_artist.as_deref() == Some(&*self.artist)
+            })
             .filter(|record| kind_filter.is_none_or(|kind| record.kind == kind))
             .map(|record| {
                 let summary = self
@@ -681,7 +724,7 @@ impl PortableTool for SendTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Durably deliver or enqueue the same JSON input to one or more sessions or artist identities. Fire-and-forget; observe resulting state with poll.".into()
+        "Durably deliver the same input to one or more live sessions or retained artist identities. Fire-and-forget; observe session effects with poll.".into()
     }
 
     fn parameters(&self) -> Value {
@@ -757,9 +800,55 @@ mod tests {
 
     #[test]
     fn target_schema_requires_exactly_one_target_shape() {
-        let schema = PollTool(SessionHub::new(std::path::Path::new("/tmp"), "Goethe", None)).parameters();
+        let schema = PollTool(SessionHub::new(
+            std::path::Path::new("/tmp"),
+            "Goethe",
+            None,
+        ))
+        .parameters();
         assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
         assert!(schema["properties"].get("maxBytes").is_none());
+    }
+
+    #[test]
+    fn send_schema_accepts_exactly_one_singular_or_plural_target() {
+        let schema = SendTool(SessionHub::new(
+            std::path::Path::new("/tmp"),
+            "Goethe",
+            None,
+        ))
+        .parameters();
+        assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
+        assert!(schema["properties"].get("session").is_some());
+        assert!(schema["properties"].get("sessions").is_some());
+        assert!(schema["properties"].get("input").is_some());
+        assert!(schema["properties"].get("group").is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_future_kinds_remain_pollable_without_an_enum_arm() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::new(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact(
+                "debugger:future",
+                "debugger",
+                "Goethe",
+                None,
+                json!({"phase":"attached"}),
+            )
+            .unwrap();
+        let snapshot = hub
+            .poll(PollArgs {
+                session: Some(record.id),
+                sessions: None,
+                timeout_ms: Some(0),
+            })
+            .await
+            .unwrap();
+        assert!(snapshot.contains("debugger"));
+        assert!(snapshot.contains("attached"));
     }
 
     #[tokio::test]
@@ -772,14 +861,25 @@ mod tests {
             .create_exact("Goethe", "subagent", "Goethe", None, Value::Null)
             .unwrap();
         hub.registry()
-            .finish(&record.id, SessionStatus::Completed, Some(json!({"output":"done"})))
+            .finish(
+                &record.id,
+                SessionStatus::Completed,
+                Some(json!({"output":"done"})),
+            )
             .unwrap();
         let listed = hub
-            .list(ListArgs { scope: None, kind: None })
+            .list(ListArgs {
+                scope: None,
+                kind: None,
+            })
             .unwrap();
         assert_eq!(listed, "[]");
         let polled = hub
-            .poll(PollArgs { session: Some("Goethe".into()), sessions: None, timeout_ms: Some(0) })
+            .poll(PollArgs {
+                session: Some("Goethe".into()),
+                sessions: None,
+                timeout_ms: Some(0),
+            })
             .await
             .unwrap();
         assert!(polled.contains("completed"));

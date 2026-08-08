@@ -189,6 +189,9 @@ struct ArtistApp {
     session_name: Entity<InputState>,
     model_override: Entity<InputState>,
     question_notes: Entity<InputState>,
+    question_option_notes: HashMap<(String, String), String>,
+    question_free_responses: HashMap<String, String>,
+    question_note_target: Option<(String, Option<String>)>,
     status: String,
     session_id: Option<String>,
     session_events: Vec<artist_session::Envelope>,
@@ -286,6 +289,9 @@ impl ArtistApp {
             session_name,
             model_override,
             question_notes,
+            question_option_notes: HashMap::new(),
+            question_free_responses: HashMap::new(),
+            question_note_target: None,
             status: "Ready".into(),
             session_id: None,
             session_events: Vec::new(),
@@ -1025,17 +1031,64 @@ impl ArtistApp {
             "Stage accessibility action is unavailable because its host is disconnected".into();
     }
 
-    fn toggle_question_choice(&mut self, question_id: &str, label: &str, multi_select: bool) {
+    fn toggle_question_choice(&mut self, question_id: &str, option_id: &str) {
         let selected = self
             .question_choices
             .entry(question_id.to_owned())
             .or_default();
-        if !multi_select {
-            selected.clear();
+        if !selected.remove(option_id) {
+            selected.insert(option_id.to_owned());
         }
-        if !selected.remove(label) {
-            selected.insert(label.to_owned());
+    }
+
+    fn save_question_note_editor(&mut self, cx: &Context<Self>) {
+        let Some((question_id, option_id)) = self.question_note_target.clone() else {
+            return;
+        };
+        let value = self.question_notes.read(cx).value().trim().to_owned();
+        match option_id {
+            Some(option_id) => {
+                let key = (question_id, option_id);
+                if value.is_empty() {
+                    self.question_option_notes.remove(&key);
+                } else {
+                    self.question_option_notes.insert(key, value);
+                }
+            }
+            None => {
+                if value.is_empty() {
+                    self.question_free_responses.remove(&question_id);
+                } else {
+                    self.question_free_responses.insert(question_id, value);
+                }
+            }
         }
+    }
+
+    fn edit_question_note(
+        &mut self,
+        question_id: String,
+        option_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_question_note_editor(cx);
+        let value = match option_id.as_ref() {
+            Some(option_id) => self
+                .question_option_notes
+                .get(&(question_id.clone(), option_id.clone()))
+                .cloned()
+                .unwrap_or_default(),
+            None => self
+                .question_free_responses
+                .get(&question_id)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        self.question_note_target = Some((question_id, option_id));
+        self.question_notes
+            .update(cx, |state, cx| state.set_value(value, window, cx));
+        window.focus(&self.question_notes.read(cx).focus_handle(cx), cx);
     }
 
     fn answer_question(
@@ -1045,21 +1098,52 @@ impl ArtistApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.save_question_note_editor(cx);
         let mut selected = if dismissed {
+            self.question_choices.remove(&question_id);
             Vec::new()
         } else {
             self.question_choices
                 .remove(&question_id)
                 .unwrap_or_default()
                 .into_iter()
-                .collect()
+                .collect::<Vec<_>>()
         };
         selected.sort();
-        let notes = self.question_notes.read(cx).value().trim().to_owned();
+        let mut selections = if dismissed {
+            Vec::new()
+        } else {
+            selected
+                .into_iter()
+                .map(|option_id| {
+                    let note = self
+                        .question_option_notes
+                        .get(&(question_id.clone(), option_id.clone()))
+                        .map(|note| note.trim())
+                        .filter(|note| !note.is_empty())
+                        .map(str::to_owned);
+                    artist_session::ask::Selection {
+                        option_id: Some(option_id),
+                        note,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        if !dismissed
+            && let Some(note) = self
+                .question_free_responses
+                .get(&question_id)
+                .map(|note| note.trim())
+                .filter(|note| !note.is_empty())
+        {
+            selections.push(artist_session::ask::Selection {
+                option_id: None,
+                note: Some(note.to_owned()),
+            });
+        }
         let answer = Answer {
             question_id: question_id.clone(),
-            selected,
-            notes: (!notes.is_empty()).then_some(notes),
+            selections,
         };
         #[cfg(target_os = "linux")]
         let active_lineage = self
@@ -1084,8 +1168,18 @@ impl ArtistApp {
         if host_sent {
             self.pending_questions
                 .retain(|question| question.id != question_id);
-            self.question_notes
-                .update(cx, |state, cx| state.set_value("", window, cx));
+            self.question_option_notes
+                .retain(|(question, _), _| question != &question_id);
+            self.question_free_responses.remove(&question_id);
+            if self
+                .question_note_target
+                .as_ref()
+                .is_some_and(|(question, _)| question == &question_id)
+            {
+                self.question_note_target = None;
+                self.question_notes
+                    .update(cx, |state, cx| state.set_value("", window, cx));
+            }
             self.status = "Answer delivered".into();
         } else {
             self.status = "Could not deliver answer".into();
@@ -1750,10 +1844,22 @@ impl ArtistApp {
             .get(&question.id)
             .cloned()
             .unwrap_or_default();
+        let editing = self.question_note_target.clone();
+        let editor_label = match editing.as_ref() {
+            Some((id, Some(option_id))) if id == &question.id => question
+                .options
+                .iter()
+                .find(|option| &option.id == option_id)
+                .map(|option| format!("Annotation for {}", option.label))
+                .unwrap_or_else(|| "Choice annotation".to_owned()),
+            Some((id, None)) if id == &question.id => "Free response".to_owned(),
+            _ => "Choose a selection to annotate, or enter a free response".to_owned(),
+        };
+
         div()
             .id("pending-question")
             .role(Role::Dialog)
-            .aria_label(format!("{}: {}", question.header, question.question))
+            .aria_label(question.question.clone())
             .w_full()
             .max_w(px(820.))
             .mx_auto()
@@ -1766,62 +1872,120 @@ impl ArtistApp {
             .flex_col()
             .gap_3()
             .child(
-                Alert::warning("pending-question-alert", question.question.clone()).title(
-                    if question.header.is_empty() {
-                        "Artist needs your input".to_owned()
-                    } else {
-                        question.header.clone()
-                    },
-                ),
+                Alert::warning("pending-question-alert", question.question.clone())
+                    .title("Artist needs your input"),
             )
             .children(question.options.iter().enumerate().map(|(index, option)| {
                 let id = question.id.clone();
-                let label = option.label.clone();
-                let multi_select = question.multi_select;
-                let is_selected = selected.contains(&option.label);
-                Button::new(("question-option", index))
+                let option_id = option.id.clone();
+                let annotate_id = option.id.clone();
+                let annotate_question = question.id.clone();
+                let is_selected = selected.contains(&option.id);
+                let note = self
+                    .question_option_notes
+                    .get(&(question.id.clone(), option.id.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                div()
                     .w_full()
-                    .h_auto()
-                    .min_h(px(48.))
-                    .px_2()
-                    .py_2()
-                    .when(is_selected, |button| button.primary())
-                    .when(!is_selected, |button| button.ghost())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
                     .child(
-                        div()
+                        Button::new(("question-option", index))
                             .w_full()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(div().font_bold().child(option.label.clone()))
-                            .when(!option.description.is_empty(), |view| {
-                                view.child(
-                                    div()
-                                        .text_sm()
-                                        .whitespace_normal()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(option.description.clone()),
-                                )
-                            })
-                            .when_some(option.preview.clone(), |view, preview| {
-                                view.child(
-                                    div()
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(cx.theme().group_box)
-                                        .font_family("monospace")
-                                        .text_xs()
-                                        .whitespace_normal()
-                                        .child(preview),
-                                )
-                            }),
+                            .h_auto()
+                            .min_h(px(48.))
+                            .px_2()
+                            .py_2()
+                            .when(is_selected, |button| button.primary())
+                            .when(!is_selected, |button| button.ghost())
+                            .child(div().w_full().min_w_0().font_bold().child(
+                                if option.recommended {
+                                    format!("{} (recommended)", option.label)
+                                } else {
+                                    option.label.clone()
+                                },
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_question_choice(&id, &option_id);
+                                cx.notify();
+                            })),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_question_choice(&id, &label, multi_select);
-                        cx.notify();
-                    }))
+                    .when(is_selected, |view| {
+                        view.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    Button::new(("question-annotate", index))
+                                        .label(if note.is_empty() {
+                                            "Add note"
+                                        } else {
+                                            "Edit note"
+                                        })
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.edit_question_note(
+                                                annotate_question.clone(),
+                                                Some(annotate_id.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        })),
+                                )
+                                .when(!note.is_empty(), |row| {
+                                    row.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(note),
+                                    )
+                                }),
+                        )
+                    })
             }))
+            .child({
+                let id = question.id.clone();
+                let free = self
+                    .question_free_responses
+                    .get(&question.id)
+                    .cloned()
+                    .unwrap_or_default();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("question-free-response")
+                            .label(if free.is_empty() {
+                                "Add free response"
+                            } else {
+                                "Edit free response"
+                            })
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_question_note(id.clone(), None, window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .when(!free.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(free),
+                        )
+                    })
+            })
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(editor_label),
+            )
             .child(Input::new(&self.question_notes).w_full())
             .child(
                 div()
@@ -1844,7 +2008,6 @@ impl ArtistApp {
                         Button::new("answer-question")
                             .label("Answer")
                             .primary()
-                            .disabled(selected.is_empty())
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.answer_question(question_id.clone(), false, window, cx);
                                 cx.notify();

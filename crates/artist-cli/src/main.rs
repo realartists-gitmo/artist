@@ -1466,7 +1466,6 @@ fn steps_len(document: &serde_json::Value) -> usize {
         .map(Vec::len)
         .unwrap_or(0)
 }
-
 async fn computer_replay(file: &std::path::Path, launch: Option<&str>, heal: bool) -> Result<()> {
     use artist_computer::macros::{Healing, Macro};
 
@@ -1714,8 +1713,10 @@ async fn sessions_gc(
     }
     let mut removed = 0usize;
     let mut reclaimed = 0u64;
+    let mut harness_records_pruned = 0usize;
+    let mut http_identities_pruned = 0usize;
     let mut survivors = Vec::new();
-    for (_, mut entries) in by_project {
+    for (project, mut entries) in by_project {
         entries.sort_by_key(|session| std::cmp::Reverse(session.created_at_ms));
         for (index, session) in entries.into_iter().enumerate() {
             if index < keep || session.created_at_ms >= cutoff {
@@ -1742,6 +1743,17 @@ async fn sessions_gc(
                 }
                 println!("deleted {}  {:>8}", session.id, format_size(size));
             }
+        }
+
+        // Durable harness sessions and stateless-HTTP identities share the same
+        // project retention horizon. Their public ids/names remain reserved until
+        // this normal retention path removes the retained record; only that prune
+        // is allowed to release an artist-name lease.
+        if !dry_run {
+            let registry = artist_registry::Registry::for_project(&project);
+            let cutoff_secs = cutoff / 1000;
+            harness_records_pruned += registry.sessions().prune(cutoff_secs)?;
+            http_identities_pruned += registry.http_identities().prune(cutoff_secs)?;
         }
     }
     // Surviving sessions can still hold orphaned image blobs — compaction and
@@ -1787,6 +1799,11 @@ async fn sessions_gc(
         println!(
             "{}{orphans} orphaned attachment(s) in retained sessions",
             if dry_run { "would prune " } else { "pruned " }
+        );
+    }
+    if harness_records_pruned > 0 || http_identities_pruned > 0 {
+        println!(
+            "pruned {harness_records_pruned} harness session record(s) and {http_identities_pruned} HTTP identity record(s)"
         );
     }
     Ok(())

@@ -80,7 +80,7 @@ impl std::fmt::Display for Denied {
 /// The agent, as far as a canvas can see it.
 pub trait CanvasHost: Send + Sync {
     /// Put text into the conversation, reporting what became of it.
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome>;
+    fn send(&self, slug: &str, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome>;
 
     /// Invoke a tool on the canvas's behalf.
     ///
@@ -122,7 +122,7 @@ pub trait CanvasHost: Send + Sync {
 pub struct DetachedHost;
 
 impl CanvasHost for DetachedHost {
-    fn send(&self, _text: String, _mode: SendMode) -> HostFuture<'_, SendOutcome> {
+    fn send(&self, _slug: &str, _text: String, _mode: SendMode) -> HostFuture<'_, SendOutcome> {
         Box::pin(async { SendOutcome::NoTurnRunning })
     }
 

@@ -117,6 +117,8 @@ pub struct Profile {
     pub candidates: Vec<Candidate>,
     allow: Option<Vec<GlobMatcher>>,
     deny: Vec<GlobMatcher>,
+    skill_allow: Option<Vec<GlobMatcher>>,
+    skill_deny: Vec<GlobMatcher>,
     pub source: Option<PathBuf>,
 }
 
@@ -136,6 +138,17 @@ impl Profile {
         allowed && !self.deny.iter().any(|pattern| pattern.is_match(tool))
     }
 
+    pub fn permits_skill(&self, skill: &str) -> bool {
+        let allowed = self
+            .skill_allow
+            .as_ref()
+            .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(skill)));
+        allowed
+            && !self
+                .skill_deny
+                .iter()
+                .any(|pattern| pattern.is_match(skill))
+    }
 }
 
 /// The resolved profile set for a project, plus the delegation concurrency
@@ -171,6 +184,7 @@ struct Frontmatter {
     thinking: Option<Thinking>,
     candidates: Option<Vec<Candidate>>,
     tools: Option<Tools>,
+    skills: Option<Tools>,
 }
 
 #[derive(Default, Deserialize)]
@@ -189,13 +203,13 @@ struct Raw {
     candidates: Option<Vec<Candidate>>,
     allow: Option<Vec<String>>,
     deny: Vec<String>,
+    skill_allow: Option<Vec<String>>,
+    skill_deny: Vec<String>,
     instructions: String,
     source: Option<PathBuf>,
 }
 
 const DEFAULT_MAX_CONCURRENT: usize = 4;
-
-
 
 impl Profiles {
     pub fn discover(project: &Path) -> Self {
@@ -354,6 +368,7 @@ fn parse(path: &Path) -> Result<Raw, String> {
         (None, true) => None,
     };
     let tools = front.tools.unwrap_or_default();
+    let skills = front.skills.unwrap_or_default();
     Ok(Raw {
         name,
         description: front.description,
@@ -361,6 +376,8 @@ fn parse(path: &Path) -> Result<Raw, String> {
         candidates,
         allow: tools.allow,
         deny: tools.deny,
+        skill_allow: skills.allow,
+        skill_deny: skills.deny,
         instructions: body.trim().to_owned(),
         source: Some(path.to_owned()),
     })
@@ -408,6 +425,20 @@ fn resolve(
         compile(&definition.deny, name)?
     };
 
+    let skill_allow = match (&definition.skill_allow, parent.as_ref()) {
+        (Some(patterns), _) => Some(compile(patterns, name)?),
+        (None, Some(parent)) => parent.skill_allow.clone(),
+        (None, None) => None,
+    };
+    let skill_deny = if definition.skill_deny.is_empty() {
+        parent
+            .as_ref()
+            .map(|p| p.skill_deny.clone())
+            .unwrap_or_default()
+    } else {
+        compile(&definition.skill_deny, name)?
+    };
+
     let instructions = if definition.instructions.is_empty() {
         parent
             .as_ref()
@@ -424,6 +455,8 @@ fn resolve(
         candidates,
         allow,
         deny,
+        skill_allow,
+        skill_deny,
         source: definition.source.clone(),
     })
 }
@@ -500,6 +533,8 @@ fn builtins() -> Vec<Raw> {
                 candidates: None,
                 allow,
                 deny,
+                skill_allow: None,
+                skill_deny: Vec::new(),
                 instructions: crate::prompt_config::profile_prompt(name).trim().to_owned(),
                 source: None,
             }
@@ -539,6 +574,19 @@ fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
                     Tool::Find.name(),
                     Tool::Grep.name(),
                     Tool::Skill.name(),
+                    Tool::Todo.name(),
+                    Tool::Ask.name(),
+                    Tool::Handoff.name(),
+                    Tool::Poll.name(),
+                    Tool::Abort.name(),
+                    Tool::Send.name(),
+                    Tool::List.name(),
+                    // MCP's ordinary bounded-result continuation and keyed-operation
+                    // recovery are read-only administration. Keeping them in the
+                    // read-only built-ins preserves pagination without bypassing
+                    // the profile visibility gate.
+                    "page",
+                    "operation",
                 ]
                 .into_iter()
                 .chain(NAVIGATION_TOOLS.iter().copied())

@@ -36,12 +36,6 @@ struct Common {
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "warn")]
     log: String,
-    /// Bring up computer use (drives the machine this process runs on).
-    #[arg(long)]
-    allow_computer: bool,
-    /// Bring up the canvas server, started lazily when the model reaches for it.
-    #[arg(long)]
-    allow_canvas: bool,
     /// Bring up memory (facts + code retrieval). Off unless configured in
     /// settings and this flag is set.
     #[arg(long)]
@@ -49,9 +43,6 @@ struct Common {
     /// Bring up subagents (needs a configured provider account).
     #[arg(long)]
     allow_subagent: bool,
-    /// Claim a durable identity and expose the tell/query/reply message tools.
-    #[arg(long)]
-    allow_comms: bool,
 }
 
 #[derive(Subcommand)]
@@ -169,11 +160,8 @@ async fn run(common: Common, http: Option<std::net::SocketAddr>) -> anyhow::Resu
     );
 
     let allow = Allow {
-        computer: common.allow_computer,
-        canvas: common.allow_canvas,
         memory: common.allow_memory,
         subagent: common.allow_subagent,
-        comms: common.allow_comms,
     };
     let daemon =
         McpDaemon::build(&project, &state_dir, &common.profile, &common.actor, allow).await?;

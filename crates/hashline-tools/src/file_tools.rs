@@ -1,26 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::fmt;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use xxhash_rust::xxh3::xxh3_64;
 
-#[cfg(test)]
-use crate::mnemonic_anchors::pack_binding;
-use crate::mnemonic_anchors::{binding_full, reconcile_handles, PathAnchors};
-
-/// Encode a 64-bit hash as 13 lowercase Crockford Base32 characters.
-fn hash_to_base32(mut hash: u64) -> String {
-    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
-    let mut chars = ['0'; 13];
-    for index in (0..13).rev() {
-        chars[index] = ALPHABET[(hash & 31) as usize] as char;
-        hash >>= 5;
-    }
-    chars.iter().collect()
-}
-
-fn compute_hash(data: &[u8]) -> u64 {
+fn drift_fingerprint(data: &[u8]) -> u64 {
     xxh3_64(data)
 }
 
@@ -91,29 +75,9 @@ fn line_byte_ranges(content: &str) -> Vec<LineRange> {
     ranges
 }
 
-/// Error type signalling that a stale mnemonic anchor needs user confirmation.
-/// The caller must return a structured `confirmation_required` result.
-#[derive(Debug, Clone)]
-pub struct ConfirmationRequired {
-    pub message: String,
-    pub path: String,
-    pub visible_anchor: String,
-    pub candidate_anchor: String,
-    pub context: String,
-    pub operation_fingerprint: String,
-}
-
-impl fmt::Display for ConfirmationRequired {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for ConfirmationRequired {}
-
 #[derive(Debug, Clone)]
 struct LineInfo {
-    full_hash: String,
+    anchor: String,
     content: String,
 }
 
@@ -130,7 +94,7 @@ struct FileView {
 /// this is checked after every tool call.
 #[derive(Debug, Clone)]
 struct ReadStamp {
-    hash: u64,
+    content_fingerprint: u64,
     mtime: Option<std::time::SystemTime>,
     len: u64,
     /// Ordering only, so a drift report can spend its budget on whatever the
@@ -200,162 +164,21 @@ impl DriftCandidate {
 
 impl FileView {
     fn from_text(text: &str, path: &Path) -> Self {
-        let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
         let raw_lines: Vec<&str> = text.lines().collect();
-
-        // Structured parse for semantic identity (Rust only)
-        // For non-Rust, use bare trimmed content so duplicates are detected
-        // and disambiguated by occurrence index.
-        let semantics: Vec<String> = if is_rust {
-            compute_semantic_identities_rust(&raw_lines)
-        } else {
-            raw_lines
-                .iter()
-                .map(|line| line.trim().to_string())
-                .collect()
-        };
-
-        // Build initial line-infos
-        let mut line_infos: Vec<LineInfo> = raw_lines
-            .iter()
-            .map(|line| {
-                let full_hash = hash_to_base32(compute_hash(line.as_bytes()));
-                LineInfo {
-                    full_hash,
-                    content: line.to_string(),
-                }
+        let identities = artist_ast::anchors::line_anchor_identities(path, text);
+        assert_eq!(identities.len(), raw_lines.len());
+        let anchors = crate::semantic_anchors::shortest_live_anchors(&identities);
+        let lines = raw_lines
+            .into_iter()
+            .zip(identities)
+            .zip(anchors)
+            .map(|((content, _identity), anchor)| LineInfo {
+                anchor,
+                content: content.to_owned(),
             })
             .collect();
-
-        // Group by semantic identity
-        let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
-        for (i, sem) in semantics.iter().enumerate() {
-            let semantic_hash = hash_to_base32(compute_hash(sem.as_bytes()));
-            groups.entry(semantic_hash).or_default().push(i);
-        }
-
-        // Final full-ID collision check: verify all hashes are unique.
-        {
-            let mut seen: HashSet<String> = HashSet::new();
-            for li in &mut line_infos {
-                let hash = li.full_hash.clone();
-                if !seen.insert(hash) {
-                    // Collision — disambiguate by content + counter
-                    let mut attempt = 0u64;
-                    loop {
-                        let candidate = hash_to_base32(compute_hash(
-                            format!("{}|{}", li.content, attempt).as_bytes(),
-                        ));
-                        if seen.insert(candidate.clone()) {
-                            li.full_hash = candidate;
-                            break;
-                        }
-                        attempt += 1;
-                    }
-                }
-            }
-        }
-
-        // Freeze the collision-resolved base IDs before duplicate groups are
-        // rewritten. Duplicate groups live in a HashMap, so reading neighboring
-        // IDs from line_infos while mutating it makes results depend on random
-        // group iteration order.
-        let base_hashes: Vec<String> = line_infos
-            .iter()
-            .map(|line| line.full_hash.clone())
-            .collect();
-
-        // Adjust duplicates: incorporate physical line bytes, stable named-node
-        // ancestry, duplicate count, occurrence index, and BOTH previous/next
-        // full base hashes.
-        for indices in groups.values() {
-            if indices.len() <= 1 {
-                continue;
-            }
-            let count = indices.len() as u32;
-            for (occ_idx, &line_idx) in indices.iter().enumerate() {
-                let prev_hash = if line_idx > 0 {
-                    base_hashes[line_idx - 1].clone()
-                } else {
-                    String::new()
-                };
-                let next_hash = if line_idx + 1 < line_infos.len() {
-                    base_hashes[line_idx + 1].clone()
-                } else {
-                    String::new()
-                };
-                // Use the semantic identity (which includes ancestry for Rust)
-                // so the hash is stable across adjacent non-structural changes.
-                let disambiguated = format!(
-                    "{}|{}|{}|{}|{}",
-                    semantics[line_idx], count, occ_idx, prev_hash, next_hash
-                );
-                let new_hash = hash_to_base32(compute_hash(disambiguated.as_bytes()));
-                line_infos[line_idx].full_hash = new_hash;
-            }
-        }
-
-        Self { lines: line_infos }
+        Self { lines }
     }
-}
-
-fn compute_semantic_identities_rust(raw_lines: &[&str]) -> Vec<String> {
-    use tree_sitter::Parser;
-
-    let full_source = raw_lines.join("\n");
-    let mut parser = Parser::new();
-    let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-    if parser.set_language(&lang).is_err() {
-        // Fallback to content-only for duplicate detection
-        return raw_lines.iter().map(|line| line.to_string()).collect();
-    }
-
-    let tree = match parser.parse(&full_source, None) {
-        Some(t) => t,
-        None => {
-            return raw_lines.iter().map(|line| line.to_string()).collect();
-        }
-    };
-
-    let root = tree.root_node();
-    let n = raw_lines.len();
-
-    // Pre-compute byte offsets for each line
-    let mut line_offsets: Vec<usize> = Vec::with_capacity(n + 1);
-    line_offsets.push(0);
-    for line in raw_lines {
-        let prev = *line_offsets.last().unwrap();
-        line_offsets.push(prev + line.len() + 1); // +1 for newline
-    }
-
-    let mut identities: Vec<String> = Vec::with_capacity(n);
-    for (i, line) in raw_lines.iter().enumerate() {
-        let start_byte = line_offsets[i];
-        let end_byte = line_offsets[i + 1].saturating_sub(1); // exclude the newline
-
-        let mut ancestry: Vec<String> = Vec::new();
-        if let Some(node) = root.descendant_for_byte_range(start_byte, end_byte) {
-            let mut current = node;
-            loop {
-                if current.is_named() {
-                    ancestry.push(current.kind().to_string());
-                }
-                match current.parent() {
-                    Some(parent) => current = parent,
-                    None => break,
-                }
-            }
-            ancestry.reverse();
-        }
-
-        if ancestry.is_empty() {
-            identities.push(line.to_string());
-        } else {
-            identities.push(format!("{}|{}", line, ancestry.join("/")));
-        }
-    }
-
-    identities
 }
 
 #[derive(Debug, Clone)]
@@ -398,20 +221,20 @@ pub struct WriteFileResult {
 #[derive(Debug, Clone)]
 pub enum EditOperation {
     Delete {
-        hash: String,
-        end_hash: Option<String>,
+        anchor: String,
+        end_anchor: Option<String>,
     },
     Replace {
-        hash: String,
-        end_hash: Option<String>,
+        anchor: String,
+        end_anchor: Option<String>,
         content: String,
     },
     InsertBefore {
-        hash: String,
+        anchor: String,
         content: String,
     },
     InsertAfter {
-        hash: String,
+        anchor: String,
         content: String,
     },
 }
@@ -430,10 +253,6 @@ pub struct EditResult {
     pub lines: Vec<AnchoredLine>,
     pub total_lines: usize,
 }
-
-/// Compound key for a pending stale-anchor confirmation
-/// waiting for an exact retry.
-type PendingKey = (String, String, String, String);
 
 #[derive(Debug, Clone)]
 pub struct FileToolConfig {
@@ -455,38 +274,10 @@ impl Default for FileToolConfig {
 #[derive(Clone)]
 pub struct FileToolManager {
     config: FileToolConfig,
-    /// Per-path anchor state: handles issued to the model, plus each
-    /// namespace's allocator cursor.
-    ///
-    /// Named `issued_prefixes` until recently, from a scheme where the visible
-    /// anchor was a prefix of the content hash. Nothing here has been a prefix
-    /// since anchors became mnemonics; the persisted column is still called
-    /// `prefixes_json` because the store has no schema migration.
-    issued_anchors: HashMap<String, PathAnchors>,
+    // Drift/read tracking is intentionally behaviorally isolated from anchor identity.
     last_read_view: HashMap<String, FileView>,
-    /// Parallel to `last_read_view`: what disk looked like when that view was
-    /// taken. Separate rather than a field on `FileView` because views are
-    /// content-addressed and shared through `view_cache` — two paths with
-    /// identical content share a view but never a stamp.
     read_stamps: HashMap<String, ReadStamp>,
-    /// Source of `ReadStamp::touched`. Bumped per view recorded.
     touch_counter: u64,
-    /// Per-path slot → logical clock at which that slot was last released.
-    /// Feeds the allocator's preference for slots that have been cold longest.
-    freed_slots: HashMap<String, HashMap<usize, u64>>,
-    /// Monotonic source for `freed_slots`, bumped once per reconcile that frees
-    /// anything. Deliberately separate from `touch_counter`: reads and releases
-    /// are different events and comparing them would be meaningless.
-    slot_clock: u64,
-    /// Set of pending stale-anchor confirmation keys.
-    pending_confirmations: HashSet<PendingKey>,
-    /// Content-addressed cache of parsed views, keyed by (is_rust, xxh3 of the
-    /// text). Building a `FileView` reparses with tree-sitter for `.rs` files —
-    /// expensive, and it runs on every read plus twice per edit on identical
-    /// content, so caching avoids the repeated parse.
-    /// The source is stored beside the view so a hash hit can be confirmed
-    /// rather than trusted.
-    view_cache: HashMap<(bool, u64), (String, FileView)>,
 }
 
 impl Default for FileToolManager {
@@ -503,14 +294,9 @@ impl FileToolManager {
     pub fn with_config(config: FileToolConfig) -> Self {
         Self {
             config,
-            issued_anchors: HashMap::new(),
             last_read_view: HashMap::new(),
             read_stamps: HashMap::new(),
             touch_counter: 0,
-            freed_slots: HashMap::new(),
-            slot_clock: 0,
-            pending_confirmations: HashSet::new(),
-            view_cache: HashMap::new(),
         }
     }
 
@@ -527,7 +313,7 @@ impl FileToolManager {
         self.read_stamps.insert(
             path.to_owned(),
             ReadStamp {
-                hash: compute_hash(text.as_bytes()),
+                content_fingerprint: drift_fingerprint(text.as_bytes()),
                 mtime: meta.as_ref().and_then(|meta| meta.modified().ok()),
                 len: meta.as_ref().map(|meta| meta.len()).unwrap_or(0),
                 touched: self.touch_counter,
@@ -589,7 +375,7 @@ impl FileToolManager {
                 }
             };
 
-            if compute_hash(text.as_bytes()) == stamp.hash {
+            if drift_fingerprint(text.as_bytes()) == stamp.content_fingerprint {
                 // Same bytes after all. Restamp so the next check does not keep
                 // re-reading a file whose mtime merely moved.
                 let view = self.build_view(&text, path);
@@ -610,14 +396,12 @@ impl FileToolManager {
                 .unwrap_or_default();
             let before = before_view
                 .as_ref()
-                .map(|view| self.anchored_lines_for(&candidate.path, view))
+                .map(Self::render_view)
                 .unwrap_or_default();
 
             let after_view = self.build_view(&text, path);
-            // Reconciled before the anchors are rendered, so surviving lines
-            // keep the mnemonics the model already holds and only the changed
-            // region reads as new.
-            let after = self.reconcile_and_anchor(&candidate.path, &after_view);
+            // Recompute deterministic anchors for the changed live file.
+            let after = Self::render_view(&after_view);
             self.remember_view(&candidate.path, after_view, &text);
 
             drifts.push(Drift {
@@ -635,26 +419,8 @@ impl FileToolManager {
         drifts
     }
 
-    /// Build a `FileView`, reusing a cached parse for identical content (same
-    /// text + `.rs`-ness) to skip the tree-sitter reparse.
-    fn build_view(&mut self, text: &str, path: &Path) -> FileView {
-        let is_rust = path.extension().map(|e| e == "rs").unwrap_or(false);
-        let key = (is_rust, compute_hash(text.as_bytes()));
-        // Compare the stored source on a hit, so an (astronomically unlikely)
-        // hash collision reparses instead of returning another file's view.
-        if let Some((cached_text, view)) = self.view_cache.get(&key) {
-            if cached_text == text {
-                return view.clone();
-            }
-        }
-        let view = FileView::from_text(text, path);
-        // Bound the cache; views are content-addressed so a small ring is enough
-        // to cover a read followed by its edit(s).
-        if self.view_cache.len() >= 16 {
-            self.view_cache.clear();
-        }
-        self.view_cache.insert(key, (text.to_owned(), view.clone()));
-        view
+    fn build_view(&self, text: &str, path: &Path) -> FileView {
+        FileView::from_text(text, path)
     }
 
     pub fn config(&self) -> &FileToolConfig {
@@ -665,176 +431,20 @@ impl FileToolManager {
         normalize_path(path, &self.config)
     }
 
-    /// Flatten to the persisted shape: one `handle -> value` map per path with
-    /// the allocator cursors under reserved keys. That format is fixed by what
-    /// is already in `anchor_states.prefixes_json`.
-    pub fn export_anchor_state(&self) -> HashMap<String, HashMap<String, String>> {
-        self.issued_anchors
-            .iter()
-            .map(|(path, anchors)| (path.clone(), anchors.to_flat()))
-            .collect()
-    }
-
-    /// Inverse of [`export_anchor_state`](Self::export_anchor_state): split the
-    /// reserved cursor keys back out of each flat map.
-    pub fn import_anchor_state(&mut self, persisted: HashMap<String, HashMap<String, String>>) {
-        self.issued_anchors = persisted
-            .into_iter()
-            .map(|(path, flat)| (path, PathAnchors::from_flat(flat)))
-            .collect();
-        self.pending_confirmations.clear();
-        self.last_read_view.clear();
-        // Stamps track views. Keeping one without the other would leave the
-        // drift check comparing against a view it can no longer render.
-        self.read_stamps.clear();
-    }
-
     pub fn forget_path(&mut self, path: &str) -> Result<()> {
         let normalized = normalize_path(path, &self.config)?;
-        self.clear_all_for_path(&normalized);
         self.last_read_view.remove(&normalized);
         self.read_stamps.remove(&normalized);
         Ok(())
     }
 
-    fn reconcile_path_anchors(
-        &mut self,
-        path: &str,
-        view: &FileView,
-        reclaim_dead: bool,
-    ) -> Vec<String> {
-        let full_hashes: Vec<String> = view
-            .lines
-            .iter()
-            .map(|line| line.full_hash.clone())
-            .collect();
-        let existing = self.issued_anchors.remove(path).unwrap_or_default();
-        let prefs = self.slot_preference(path);
-        let (state, visible) = reconcile_handles(&existing, &full_hashes, reclaim_dead, &prefs);
-        self.record_freed_slots(path, &existing.bindings, &state.bindings);
-        self.issued_anchors.insert(path.to_string(), state);
-        visible
-    }
-
-    /// Assemble what the allocator should know about slots in use elsewhere.
-    ///
-    /// Built per call from `issued_anchors`, which is already the authoritative
-    /// per-path map, so there is no second source of truth to keep in step. The
-    /// only added state is the freed-slot history below.
-    fn slot_preference(&self, path: &str) -> crate::mnemonic_anchors::SlotPreference {
-        let mut live_elsewhere = Vec::new();
-        for (other, anchors) in &self.issued_anchors {
-            if other == path {
-                continue;
-            }
-            for handle in anchors.bindings.keys() {
-                if let Some((true, slot)) = crate::mnemonic_anchors::handle_slot(handle) {
-                    live_elsewhere.push(slot);
-                }
-            }
-        }
-        live_elsewhere.sort_unstable();
-        live_elsewhere.dedup();
-
-        let mut freed_elsewhere: HashMap<usize, u64> = HashMap::new();
-        for (other, freed) in &self.freed_slots {
-            if other == path {
-                continue;
-            }
-            for (slot, clock) in freed {
-                // Keep the most recent sighting: a slot freed long ago in one
-                // file and moments ago in another is, for reuse purposes, as
-                // fresh as the recent one.
-                let entry = freed_elsewhere.entry(*slot).or_insert(*clock);
-                *entry = (*entry).max(*clock);
-            }
-        }
-
-        crate::mnemonic_anchors::SlotPreference {
-            freed_here: self.freed_slots.get(path).cloned().unwrap_or_default(),
-            live_elsewhere,
-            freed_elsewhere,
-        }
-    }
-
-    /// Stamp every slot that this reconcile released, so later allocations can
-    /// prefer something that has been cold for longer.
-    ///
-    /// In memory only. Losing it across a restart costs ranking quality on the
-    /// first reads of the next session, never correctness — the hard constraint
-    /// is enforced from `issued_prefixes`, which does persist.
-    fn record_freed_slots(
-        &mut self,
-        path: &str,
-        before: &HashMap<String, String>,
-        after: &HashMap<String, String>,
-    ) {
-        let freed: Vec<usize> = before
-            .keys()
-            .filter(|handle| !after.contains_key(*handle))
-            .filter_map(
-                |handle| match crate::mnemonic_anchors::handle_slot(handle) {
-                    Some((true, slot)) => Some(slot),
-                    _ => None,
-                },
-            )
-            .collect();
-        if freed.is_empty() {
-            return;
-        }
-        self.slot_clock += 1;
-        let clock = self.slot_clock;
-        let entry = self.freed_slots.entry(path.to_string()).or_default();
-        for slot in freed {
-            entry.insert(slot, clock);
-        }
-    }
-
-    /// The anchors the model is currently holding for `view`, without issuing
-    /// any new ones.
-    ///
-    /// Read-only on purpose. This renders the *pre-drift* side of a report, and
-    /// reconciling would rewrite the very bindings the report exists to explain
-    /// — a removed line's anchor has to still be the handle the model has, or
-    /// the report cannot tell it which handle just died.
-    fn anchored_lines_for(&self, path: &str, view: &FileView) -> Vec<AnchoredLine> {
-        let issued = self.issued_anchors.get(path);
-        let by_hash: HashMap<&str, &str> = issued
-            .map(|anchors| {
-                anchors
-                    .bindings
-                    .iter()
-                    .map(|(handle, packed)| (binding_full(packed), handle.as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
+    fn render_view(view: &FileView) -> Vec<AnchoredLine> {
         view.lines
             .iter()
             .enumerate()
             .map(|(index, line)| AnchoredLine {
                 line_number: index + 1,
-                anchor: by_hash
-                    .get(line.full_hash.as_str())
-                    .map(|handle| (*handle).to_owned())
-                    .unwrap_or_default(),
-                text: line.content.clone(),
-            })
-            .collect()
-    }
-
-    /// Reconcile `view` into the anchor table and render its lines.
-    ///
-    /// `reclaim_dead` is true, matching a read: a file that changed underneath
-    /// the model is exactly when mnemonics freed by vanished lines should
-    /// become available again.
-    fn reconcile_and_anchor(&mut self, path: &str, view: &FileView) -> Vec<AnchoredLine> {
-        let anchors = self.reconcile_path_anchors(path, view, true);
-        view.lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| AnchoredLine {
-                line_number: index + 1,
-                anchor: anchors.get(index).cloned().unwrap_or_default(),
+                anchor: line.anchor.clone(),
                 text: line.content.clone(),
             })
             .collect()
@@ -842,10 +452,6 @@ impl FileToolManager {
 
     pub async fn read_file(&mut self, request: ReadFileRequest) -> Result<ReadFileResult> {
         let norm = normalize_path(&request.path, &self.config)?;
-        // Reread clears pending confirmations for this path but preserves
-        // existing anchor mappings for lines outside the returned range.
-        self.clear_pending_for_path(&norm);
-
         let path = Path::new(&norm);
         let content = tokio::fs::read_to_string(path)
             .await
@@ -865,10 +471,8 @@ impl FileToolManager {
             None => lines.len(),
         };
 
-        // A full explicit reread acknowledges the latest view, so dead bindings can
-        // be reclaimed. Partial reads preserve unseen tombstones.
-        let full_refresh = start == 0 && end == lines.len();
-        let visible_anchors = self.reconcile_path_anchors(&norm, &view, full_refresh);
+        let visible_anchors: Vec<String> =
+            view.lines.iter().map(|line| line.anchor.clone()).collect();
         let mut rendered = String::new();
         let mut structured = Vec::new();
         for (i, line) in lines[start..end].iter().enumerate() {
@@ -894,9 +498,6 @@ impl FileToolManager {
 
     pub async fn write_file(&mut self, request: WriteFileRequest) -> Result<WriteFileResult> {
         let norm = normalize_path(&request.path, &self.config)?;
-        // Full write replaces all path mappings
-        self.clear_all_for_path(&norm);
-
         let path = Path::new(&norm);
 
         if !request.overwrite && path.exists() {
@@ -922,7 +523,8 @@ impl FileToolManager {
         let view = self.build_view(&request.content, path);
         self.remember_view(&norm, view.clone(), &request.content);
 
-        let visible_anchors = self.reconcile_path_anchors(&norm, &view, true);
+        let visible_anchors: Vec<String> =
+            view.lines.iter().map(|line| line.anchor.clone()).collect();
         let mut rendered = String::new();
         let mut structured = Vec::new();
         for (i, line) in lines.iter().enumerate() {
@@ -956,10 +558,6 @@ impl FileToolManager {
 
     async fn edit_file_inner(&mut self, request: EditRequest, apply: bool) -> Result<EditResult> {
         let norm = normalize_path(&request.path, &self.config)?;
-        // NOTE: we do NOT clear state here — resolution needs stale mappings
-        // to fire the confirmation gate.  After successful apply we replace
-        // the view and prefixes.
-
         let path = Path::new(&norm);
         let content = tokio::fs::read_to_string(path)
             .await
@@ -969,9 +567,11 @@ impl FileToolManager {
         //    (preserves CRLF, tab characters, unrelated bytes).
         let line_ranges = line_byte_ranges(&content);
         let snapshot_view = self.build_view(&content, path);
-        // Allocate mnemonics for newly observed concurrent content while preserving
-        // stale bindings until this edit is acknowledged successfully.
-        let snapshot_anchors = self.reconcile_path_anchors(&norm, &snapshot_view, false);
+        let snapshot_anchors: Vec<String> = snapshot_view
+            .lines
+            .iter()
+            .map(|line| line.anchor.clone())
+            .collect();
         let before_lines = content
             .lines()
             .enumerate()
@@ -984,12 +584,8 @@ impl FileToolManager {
             })
             .collect::<Vec<_>>();
 
-        // 2. Compute a deterministic fingerprint for the ENTIRE request so
-        //    that a confirmation authorises exactly this request.
-        let fp = Self::request_fingerprint(&request);
-
-        // 3. Resolve every operation's hash(es) against the original
-        //    snapshot.  Any stale-prefix confirmation ties the whole batch.
+        // Resolve every operation's opaque anchor against the original snapshot.
+        // Matching is exact: no trimming, case folding, Unicode normalization, or fuzzing.
         #[derive(Clone, Debug)]
         struct ResolvedOp {
             byte_start: usize,
@@ -1009,26 +605,25 @@ impl FileToolManager {
             InsertAfter { content: String },
         }
 
-        let resolve_line_idx = |manager: &mut Self,
-                                hash: &str|
-         -> anyhow::Result<(String, usize)> {
-            let full = manager.resolve_hash_with_confirmation(&norm, hash, &snapshot_view, &fp)?;
-            let idx = snapshot_view
+        let resolve_line_idx = |anchor: &str| -> anyhow::Result<usize> {
+            snapshot_view
                 .lines
                 .iter()
-                .position(|li| li.full_hash == full)
-                .ok_or_else(|| anyhow::anyhow!("line with hash {} not found", full))?;
-            Ok((full, idx))
+                .position(|line| line.anchor == anchor)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "anchor '{}' does not exactly resolve to a live occurrence in '{}'; re-read the file for current anchors",
+                    anchor,
+                    request.path
+                ))
         };
         let mut resolved: Vec<ResolvedOp> = Vec::new();
 
         for (op_idx, operation) in request.operations.iter().enumerate() {
             match operation {
-                EditOperation::Delete { hash, end_hash } => {
-                    let (_, start_idx) = resolve_line_idx(self, hash)?;
-                    let end_idx = if let Some(end_hash) = end_hash {
-                        let (_, end_idx) = resolve_line_idx(self, end_hash)?;
-                        end_idx
+                EditOperation::Delete { anchor, end_anchor } => {
+                    let start_idx = resolve_line_idx(anchor)?;
+                    let end_idx = if let Some(end_anchor) = end_anchor {
+                        resolve_line_idx(end_anchor)?
                     } else {
                         start_idx
                     };
@@ -1046,14 +641,13 @@ impl FileToolManager {
                     });
                 }
                 EditOperation::Replace {
-                    hash,
-                    end_hash,
+                    anchor,
+                    end_anchor,
                     content: new_content,
                 } => {
-                    let (_, start_idx) = resolve_line_idx(self, hash)?;
-                    let end_idx = if let Some(end_hash) = end_hash {
-                        let (_, end_idx) = resolve_line_idx(self, end_hash)?;
-                        end_idx
+                    let start_idx = resolve_line_idx(anchor)?;
+                    let end_idx = if let Some(end_anchor) = end_anchor {
+                        resolve_line_idx(end_anchor)?
                     } else {
                         start_idx
                     };
@@ -1073,16 +667,10 @@ impl FileToolManager {
                     });
                 }
                 EditOperation::InsertBefore {
-                    hash,
+                    anchor,
                     content: new_content,
                 } => {
-                    let full =
-                        self.resolve_hash_with_confirmation(&norm, hash, &snapshot_view, &fp)?;
-                    let idx = snapshot_view
-                        .lines
-                        .iter()
-                        .position(|li| li.full_hash == full)
-                        .ok_or_else(|| anyhow::anyhow!("line with hash {} not found", full))?;
+                    let idx = resolve_line_idx(anchor)?;
                     let lr = line_ranges[idx];
                     resolved.push(ResolvedOp {
                         byte_start: lr.content_start,
@@ -1095,16 +683,10 @@ impl FileToolManager {
                     });
                 }
                 EditOperation::InsertAfter {
-                    hash,
+                    anchor,
                     content: new_content,
                 } => {
-                    let full =
-                        self.resolve_hash_with_confirmation(&norm, hash, &snapshot_view, &fp)?;
-                    let idx = snapshot_view
-                        .lines
-                        .iter()
-                        .position(|li| li.full_hash == full)
-                        .ok_or_else(|| anyhow::anyhow!("line with hash {} not found", full))?;
+                    let idx = resolve_line_idx(anchor)?;
                     let lr = line_ranges[idx];
                     resolved.push(ResolvedOp {
                         byte_start: lr.line_end,
@@ -1264,9 +846,9 @@ impl FileToolManager {
             }
         }
 
-        // 8. Write the final result atomically for an applied edit. Preview uses
-        // the same resolution and reconciliation path against a cloned manager,
-        // but leaves the filesystem and persistent allocator state untouched.
+        // Write the final result atomically for an applied edit. Preview uses
+        // the same exact-anchor resolution against a cloned manager but leaves
+        // the filesystem untouched.
         if apply {
             let dir = path.parent().unwrap_or(Path::new("."));
             tokio::fs::create_dir_all(dir).await?;
@@ -1286,13 +868,14 @@ impl FileToolManager {
                 let _ = directory.sync_all();
             }
         }
-        // 9. A successful edit acknowledges the new view: discard dead tombstones,
-        // preserve every surviving handle unchanged, and make freed one-word
-        // handles available only to newly created lines.
-        self.clear_pending_for_path(&norm);
+        // Recompute complete stateless occurrence identities and shortest live prefixes.
         let final_view = self.build_view(&result, path);
         self.remember_view(&norm, final_view.clone(), &result);
-        let visible_anchors = self.reconcile_path_anchors(&norm, &final_view, true);
+        let visible_anchors: Vec<String> = final_view
+            .lines
+            .iter()
+            .map(|line| line.anchor.clone())
+            .collect();
 
         let result_lines: Vec<&str> = result.lines().collect();
         let mut rendered = String::new();
@@ -1316,130 +899,6 @@ impl FileToolManager {
             lines: structured,
             total_lines: result_lines.len(),
         })
-    }
-
-    fn path_anchors_mut(&mut self, path: &str) -> &mut PathAnchors {
-        self.issued_anchors.entry(path.to_string()).or_default()
-    }
-
-    /// Resolve a model-facing mnemonic anchor for editing. A mnemonic that no
-    /// longer maps to a current line is rejected outright — the caller must
-    /// re-read the file to get fresh anchors.
-    fn resolve_hash_with_confirmation(
-        &mut self,
-        path: &str,
-        visible: &str,
-        view: &FileView,
-        _request_fp: &str,
-    ) -> Result<String> {
-        let visible_owned = visible.trim().to_ascii_lowercase();
-        let visible = visible_owned.as_str();
-        let issued = &mut self.path_anchors_mut(path).bindings;
-        Self::resolve_hash(issued, visible, view)
-    }
-
-    /// Takes the bindings alone rather than the whole [`PathAnchors`]: resolving
-    /// an anchor has no business reading or moving the allocator cursors.
-    fn resolve_hash(
-        issued: &mut HashMap<String, String>,
-        visible: &str,
-        view: &FileView,
-    ) -> Result<String> {
-        let clean_owned = visible.trim().to_ascii_lowercase();
-        let clean = clean_owned.as_str();
-        let packed = issued.get(clean).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "'{}' is not an issued anchor for this file. It looks like line content, not an anchor. Use the anchor token before the colon from the latest read (for example, `abc` from `abc: content`), or re-read the file to get current mnemonic anchors.",
-                visible
-            )
-
-        })?;
-        let full_hash = binding_full(&packed).to_owned();
-        if view.lines.iter().any(|line| line.full_hash == full_hash) {
-            return Ok(full_hash);
-        }
-        bail!(
-            "anchor '{}' is stale: it no longer resolves to a current line. Re-read the file to get fresh anchors before editing.",
-            visible
-        );
-    }
-
-    /// Compute a deterministic fingerprint of the entire EditRequest
-    /// using tagged length-prefixed binary encoding before XXH3/Crockford Base32.
-    fn request_fingerprint(request: &EditRequest) -> String {
-        let mut buf = Vec::new();
-        // Tag 0: path
-        buf.push(0u8);
-        let path_bytes = request.path.as_bytes();
-        buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(path_bytes);
-
-        fn push_string(buf: &mut Vec<u8>, value: &str) {
-            let bytes = value.as_bytes();
-            buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(bytes);
-        }
-        fn push_optional_string(buf: &mut Vec<u8>, value: Option<&String>) {
-            match value {
-                Some(value) => {
-                    buf.push(1);
-                    push_string(buf, value);
-                }
-                None => buf.push(0),
-            }
-        }
-
-        for op in &request.operations {
-            match op {
-                EditOperation::Delete { hash, end_hash } => {
-                    buf.push(1u8);
-                    push_string(&mut buf, hash);
-                    push_optional_string(&mut buf, end_hash.as_ref());
-                }
-                EditOperation::Replace {
-                    hash,
-                    end_hash,
-                    content,
-                } => {
-                    buf.push(2u8);
-                    push_string(&mut buf, hash);
-                    push_optional_string(&mut buf, end_hash.as_ref());
-                    push_string(&mut buf, content);
-                }
-                EditOperation::InsertBefore { hash, content } => {
-                    buf.push(3u8);
-                    let h = hash.as_bytes();
-                    buf.extend_from_slice(&(h.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(h);
-                    let c = content.as_bytes();
-                    buf.extend_from_slice(&(c.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(c);
-                }
-                EditOperation::InsertAfter { hash, content } => {
-                    buf.push(4u8);
-                    let h = hash.as_bytes();
-                    buf.extend_from_slice(&(h.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(h);
-                    let c = content.as_bytes();
-                    buf.extend_from_slice(&(c.len() as u32).to_le_bytes());
-                    buf.extend_from_slice(c);
-                }
-            }
-        }
-        hash_to_base32(compute_hash(&buf))
-    }
-
-    /// Clear pending confirmations for a given path.  Does NOT erase
-    /// issued prefixes (partial read should preserve anchors outside range).
-    fn clear_pending_for_path(&mut self, path: &str) {
-        self.pending_confirmations.retain(|k| k.0 != path);
-    }
-
-    /// Clear pending confirmations AND all issued anchor mappings for a path.
-    /// Used by write/edit which replace the entire mapping.
-    fn clear_all_for_path(&mut self, path: &str) {
-        self.pending_confirmations.retain(|k| k.0 != path);
-        self.issued_anchors.remove(path);
     }
 }
 
@@ -1710,7 +1169,7 @@ mod tests {
         let held = manager
             .last_read_view
             .get(&path)
-            .map(|view| manager.anchored_lines_for(&path, view))
+            .map(FileToolManager::render_view)
             .expect("a view");
         let keep_anchor = held[0].anchor.clone();
         assert!(!keep_anchor.is_empty());
@@ -1743,66 +1202,59 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_to_base32() {
-        let h = hash_to_base32(0);
-        assert_eq!(h.len(), 13);
-        assert_eq!(h, "0000000000000");
-
-        let h2 = hash_to_base32(u64::MAX);
-        assert_eq!(h2.len(), 13);
-
-        // Ensure deterministic
-        assert_eq!(hash_to_base32(42), hash_to_base32(42));
-        // Ensure different hashes produce different strings (likely)
-        assert_ne!(hash_to_base32(0), hash_to_base32(1));
-    }
-
-    #[test]
-    fn test_file_view_from_text_simple() {
-        let path = Path::new("test.txt");
-        let text = "hello\nworld\nfoo\n";
-        let view = FileView::from_text(text, path);
-        assert_eq!(view.lines.len(), 3);
-        // All hashes should be 10 chars
-        for li in &view.lines {
-            assert_eq!(li.full_hash.len(), 13);
+    fn file_view_renders_v1_addresses_for_text_and_rust() {
+        for (path, text) in [
+            (Path::new("test.txt"), "hello\nworld\nfoo\n"),
+            (Path::new("test.rs"), "fn main() {\n    let x = 1;\n}\n"),
+        ] {
+            let view = FileView::from_text(text, path);
+            assert_eq!(view.lines.len(), 3);
+            assert!(view.lines.iter().all(|line| line.anchor.starts_with('#')));
+            let mut anchors: Vec<&str> =
+                view.lines.iter().map(|line| line.anchor.as_str()).collect();
+            anchors.sort_unstable();
+            anchors.dedup();
+            assert_eq!(anchors.len(), 3);
         }
     }
 
-    #[test]
-    fn test_file_view_from_text_rust() {
-        let path = Path::new("test.rs");
-        let text = "fn main() {\n    let x = 1;\n}\n";
-        let view = FileView::from_text(text, path);
-        assert_eq!(view.lines.len(), 3);
-        for li in &view.lines {
-            assert_eq!(li.full_hash.len(), 13);
+    #[tokio::test]
+    async fn edit_anchor_matching_is_exact_and_opaque() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("opaque.txt");
+        let p = path.to_string_lossy().into_owned();
+        tokio::fs::write(&path, "alpha\nbeta\n").await.unwrap();
+        let mut manager = FileToolManager::new();
+        let read = manager
+            .read_file(ReadFileRequest {
+                path: p.clone(),
+                start_line: 1,
+                max_lines: None,
+            })
+            .await
+            .unwrap();
+        let anchor = read.lines[1].anchor.clone();
+        for altered in [
+            format!(" {anchor}"),
+            format!("{anchor} "),
+            anchor.to_uppercase(),
+        ] {
+            if altered == anchor {
+                continue;
+            }
+            let error = manager
+                .preview_edit_file(EditRequest {
+                    path: p.clone(),
+                    operations: vec![EditOperation::Replace {
+                        anchor: altered,
+                        end_anchor: None,
+                        content: "BETA".into(),
+                    }],
+                })
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("does not exactly resolve"));
         }
-    }
-
-    #[test]
-    fn test_resolve_hash_basic() {
-        let path = Path::new("test.txt");
-        let view = FileView::from_text("aaa\nbbb\nccc\n", path);
-        let target = &view.lines[1];
-
-        let mut issued = HashMap::new();
-        issued.insert("beta".to_string(), pack_binding(&target.full_hash));
-        let resolved =
-            FileToolManager::resolve_hash(&mut issued, "beta", &view).expect("should resolve");
-        assert_eq!(resolved, target.full_hash);
-    }
-
-    #[test]
-    fn test_resolve_hash_stale_is_rejected() {
-        let path = Path::new("test.txt");
-        let view = FileView::from_text("aaa\nbbb\nccc\n", path);
-        let mut issued = HashMap::new();
-        // A mnemonic bound to a hash that isn't in the current view is stale
-        // and must be rejected (no candidate-matching gate anymore).
-        issued.insert("beta".to_string(), pack_binding("deadbeefdead0"));
-        let err = FileToolManager::resolve_hash(&mut issued, "beta", &view).unwrap_err();
-        assert!(err.to_string().contains("stale"));
     }
 
     #[tokio::test]
@@ -1828,8 +1280,8 @@ mod tests {
         mgr.edit_file(EditRequest {
             path: p.clone(),
             operations: vec![EditOperation::Replace {
-                hash: beta,
-                end_hash: None,
+                anchor: beta,
+                end_anchor: None,
                 content: "BETA\n".to_string(),
             }],
         })
@@ -1866,17 +1318,17 @@ mod tests {
             path: p.clone(),
             operations: vec![
                 EditOperation::InsertAfter {
-                    hash: alpha,
+                    anchor: alpha,
                     content: "inserted".to_string(),
                 },
                 EditOperation::Replace {
-                    hash: beta,
-                    end_hash: None,
+                    anchor: beta,
+                    end_anchor: None,
                     content: "BETA_EDITED".to_string(),
                 },
                 EditOperation::Delete {
-                    hash: gamma,
-                    end_hash: None,
+                    anchor: gamma,
+                    end_anchor: None,
                 },
             ],
         })
@@ -1917,11 +1369,11 @@ mod tests {
                 path: p.clone(),
                 operations: vec![
                     EditOperation::Delete {
-                        hash: alpha,
-                        end_hash: Some(epsilon),
+                        anchor: alpha,
+                        end_anchor: Some(epsilon),
                     },
                     EditOperation::InsertBefore {
-                        hash: gamma,
+                        anchor: gamma,
                         content: "intruder".to_string(),
                     },
                 ],
@@ -1956,11 +1408,11 @@ mod tests {
             path: p.clone(),
             operations: vec![
                 EditOperation::InsertAfter {
-                    hash: alpha,
+                    anchor: alpha,
                     content: "after-alpha".to_string(),
                 },
                 EditOperation::InsertBefore {
-                    hash: beta,
+                    anchor: beta,
                     content: "before-beta".to_string(),
                 },
             ],
@@ -1972,9 +1424,9 @@ mod tests {
         assert_eq!(content, "alpha\nafter-alpha\nbefore-beta\nbeta\n");
     }
     #[tokio::test]
-    async fn test_stale_relocation_no_gate() {
-        // When the old full hash STILL exists (at a different position),
-        // the edit should apply without confirmation gate.
+    async fn moved_occurrence_resolves_without_relocation_state() {
+        // Moving a unique occurrence changes its position but not its semantic identity.
+        // The exact old anchor therefore resolves without relocation state or confirmation.
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("reloc.txt").to_str().unwrap().to_string();
         tokio::fs::write(&p, "first line\nsecond line\nthird line\n")
@@ -1995,10 +1447,9 @@ mod tests {
             .lines()
             .next()
             .unwrap()
-            .split(':')
-            .next()
+            .split_once(": ")
             .unwrap()
-            .trim()
+            .0
             .to_string();
 
         // Reorder so "first line" moves to position 3
@@ -2010,8 +1461,8 @@ mod tests {
             .edit_file(EditRequest {
                 path: p.clone(),
                 operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: first_prefix.clone(),
+                    end_anchor: None,
+                    anchor: first_prefix.clone(),
                     content: "replaced moved".to_string(),
                 }],
             })
@@ -2023,18 +1474,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Cross-file state isolation test (Requirement 1)
+    // Path independence: path scopes the operation but is not identity input
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn test_cross_file_mnemonic_isolation() {
+    async fn path_is_not_part_of_occurrence_identity() {
         let tmpdir = tempfile::tempdir().unwrap();
         let p1 = tmpdir.path().join("file_a.txt");
         let p2 = tmpdir.path().join("file_b.txt");
-        tokio::fs::write(&p1, "alpha\nbeta\ngamma\n").await.unwrap();
-        tokio::fs::write(&p2, "delta\nepsilon\nzeta\n")
-            .await
-            .unwrap();
+        tokio::fs::write(&p1, "alpha\nbeta\n").await.unwrap();
+        tokio::fs::write(&p2, "alpha\nbeta\n").await.unwrap();
         let s1 = p1.to_str().unwrap().to_string();
         let s2 = p2.to_str().unwrap().to_string();
 
@@ -2056,70 +1505,28 @@ mod tests {
             .await
             .unwrap();
 
-        // `path + handle` remains the complete model-facing address, and a
-        // handle live in two files still addresses each independently. What
-        // changed is that fresh files no longer *start* from the same slot:
-        // every file used to draw `like, time, people, …`, so an anchor read in
-        // one file resolved successfully — and wrongly — against another.
-        let a_anchor = r1.lines[0].anchor.clone();
-        let b_anchor = r2.lines[0].anchor.clone();
-        assert_ne!(
-            a_anchor, b_anchor,
-            "fresh files should not draw the same slot; cross-file preference is not being applied"
-        );
-
-        // The safety property that buys: a handle from another file is not
-        // issued here, so it is refused rather than silently resolving to
-        // whatever happens to occupy that slot.
-        let foreign = mgr
-            .edit_file(EditRequest {
-                path: s2.clone(),
-                operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: a_anchor.clone(),
-                    content: "should not apply".to_string(),
-                }],
-            })
-            .await;
-        assert!(foreign.is_err(), "an anchor from another file was accepted");
-        assert_eq!(
-            tokio::fs::read_to_string(&p2).await.unwrap(),
-            "delta\nepsilon\nzeta\n",
-            "a rejected edit still modified the file"
-        );
+        assert_eq!(r1.lines[0].anchor, r2.lines[0].anchor);
+        assert_eq!(r1.lines[1].anchor, r2.lines[1].anchor);
 
         mgr.edit_file(EditRequest {
-            path: s2.clone(),
+            path: s2,
             operations: vec![EditOperation::Replace {
-                end_hash: None,
-                hash: b_anchor,
-                content: "replaced delta".to_string(),
-            }],
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            tokio::fs::read_to_string(&p1).await.unwrap(),
-            "alpha\nbeta\ngamma\n"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(&p2).await.unwrap(),
-            "replaced delta\nepsilon\nzeta\n"
-        );
-
-        mgr.edit_file(EditRequest {
-            path: s1.clone(),
-            operations: vec![EditOperation::Replace {
-                end_hash: None,
-                hash: a_anchor,
+                end_anchor: None,
+                anchor: r1.lines[0].anchor.clone(),
                 content: "replaced alpha".to_string(),
             }],
         })
         .await
         .unwrap();
+
         assert_eq!(
             tokio::fs::read_to_string(&p1).await.unwrap(),
-            "replaced alpha\nbeta\ngamma\n"
+            "alpha\nbeta\n",
+            "the requested file path scopes resolution but is not identity input"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&p2).await.unwrap(),
+            "replaced alpha\nbeta\n"
         );
     }
 
@@ -2155,8 +1562,8 @@ mod tests {
             .edit_file(EditRequest {
                 path: p.clone(),
                 operations: vec![EditOperation::Replace {
-                    end_hash: None,
-                    hash: "nonexistent".to_string(),
+                    end_anchor: None,
+                    anchor: "nonexistent".to_string(),
                     content: "should NOT write".to_string(),
                 }],
             })
@@ -2173,19 +1580,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Full-hash collision detection (Requirement 6)
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Prefix growth test (Requirement 6)
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // Duplicate determinism regression
+    // Determinism and equivalent-occurrence symmetry breaking
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_repeated_duplicate_blocks_have_deterministic_hashes() {
+    fn repeated_duplicate_blocks_have_deterministic_addresses() {
         let text = "# Identical Blocks Test
 
 ## Block
@@ -2206,14 +1605,14 @@ End blocks test.
         let expected: Vec<String> = FileView::from_text(text, path)
             .lines
             .into_iter()
-            .map(|line| line.full_hash)
+            .map(|line| line.anchor)
             .collect();
 
         for _ in 0..256 {
             let actual: Vec<String> = FileView::from_text(text, path)
                 .lines
                 .into_iter()
-                .map(|line| line.full_hash)
+                .map(|line| line.anchor)
                 .collect();
             assert_eq!(
                 actual, expected,
@@ -2222,39 +1621,32 @@ End blocks test.
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Duplicate invalidation test (Requirement 7)
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_duplicate_invalidation_on_insert_before() {
-        // Given a file with duplicate lines [A, A, A], inserting another A
-        // before the group should produce 4 distinct hashes because the
-        // occurrence indices shift.
+    fn equivalent_occurrences_are_unique_and_deterministic() {
         let path = Path::new("test.txt");
-        let view1 = FileView::from_text("A\nA\nA\n", path);
-        let orig_hashes: Vec<String> = view1.lines.iter().map(|li| li.full_hash.clone()).collect();
-        // All 3 have distinct hashes (disambiguated by occurrence index)
-        let mut sorted = orig_hashes.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(
-            sorted.len(),
-            3,
-            "three duplicates must have three different hashes"
-        );
+        let first = FileView::from_text("A\nA\nA\n", path);
+        let second = FileView::from_text("A\nA\nA\n", path);
+        let first_anchors: Vec<&str> = first
+            .lines
+            .iter()
+            .map(|line| line.anchor.as_str())
+            .collect();
+        let second_anchors: Vec<&str> = second
+            .lines
+            .iter()
+            .map(|line| line.anchor.as_str())
+            .collect();
+        assert_eq!(first_anchors, second_anchors);
+        let mut unique = first_anchors.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 3);
 
-        // Insert a new A before the first A → becomes [A_new, A_0, A_1, A_2]
-        // The old hashes for indices 0,1,2 should NOT be reused for indices 1,2,3
-        let view2 = FileView::from_text("A\nA\nA\nA\n", path);
-        let new_hashes: Vec<String> = view2.lines.iter().map(|li| li.full_hash.clone()).collect();
-        // None of the new hashes should match any old hash (shifted occurrence indices)
-        for old_h in &orig_hashes {
-            assert!(
-                !new_hashes.contains(old_h),
-                "old duplicate hash {} must not be reused after insert-before",
-                old_h
-            );
-        }
+        let four = FileView::from_text("A\nA\nA\nA\n", path);
+        let mut four_unique: Vec<&str> =
+            four.lines.iter().map(|line| line.anchor.as_str()).collect();
+        four_unique.sort_unstable();
+        four_unique.dedup();
+        assert_eq!(four_unique.len(), 4);
     }
 }

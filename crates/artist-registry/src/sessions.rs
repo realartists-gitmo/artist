@@ -228,6 +228,8 @@ impl Sessions {
             record.lifecycle = SessionLifecycle::Stopped {
                 status: SessionStatus::Abandoned,
             };
+            record.last_seen = now();
+            self.write(&record)?;
         }
         record.owner = Owner::current();
         record.artist = artist.to_owned();
@@ -268,23 +270,33 @@ impl Sessions {
 
     pub fn list(&self) -> Result<Vec<SessionRecord>> {
         fs::create_dir_all(&self.dir)?;
-        let ids = fs::read_dir(&self.dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().ok().is_some_and(|ty| ty.is_file()))
-            .filter_map(|entry| {
-                let name = entry.file_name();
-                let name = name.to_str()?;
-                if name == ".lock" || !name.ends_with(".json") {
-                    return None;
-                }
-                read_record(&entry.path()).ok().flatten().map(|record| record.id)
-            })
-            .collect::<Vec<_>>();
+        let _lock = Lock::take(&self.dir)?;
         let mut records = Vec::new();
-        for id in ids {
-            if let Some(record) = self.get(&id)? {
-                records.push(record);
+        for entry in fs::read_dir(&self.dir)?.filter_map(|entry| entry.ok()) {
+            if !entry.file_type().ok().is_some_and(|ty| ty.is_file()) {
+                continue;
             }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name == ".lock" || !name.ends_with(".json") {
+                continue;
+            }
+            let Some(mut record) = read_record(&entry.path())? else {
+                continue;
+            };
+            if record.lifecycle.is_live() {
+                if record.owner.is_alive() {
+                    record.last_seen = now();
+                } else {
+                    record.lifecycle = SessionLifecycle::Stopped {
+                        status: SessionStatus::Abandoned,
+                    };
+                }
+                self.write(&record)?;
+            }
+            records.push(record);
         }
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
         Ok(records)
@@ -295,6 +307,16 @@ impl Sessions {
             record.snapshot = snapshot;
             Ok(())
         })
+    }
+
+    /// Atomically inspect and mutate one retained record under the registry lock.
+    /// Kind implementations use this for first-writer-wins state such as ask answers.
+    pub fn mutate(
+        &self,
+        id: &str,
+        mutate: impl FnOnce(&mut SessionRecord) -> Result<()>,
+    ) -> Result<SessionRecord> {
+        self.update(id, mutate)
     }
 
     /// Request one active kind-authored observation and return its sequence.
@@ -342,12 +364,10 @@ impl Sessions {
     }
 
     pub fn cancel_requested(&self, id: &str) -> Result<bool> {
-        Ok(self.get(id)?.is_some_and(|record| {
-            record.lifecycle.is_live() && record.cancel_requested
-        }))
+        Ok(self
+            .get(id)?
+            .is_some_and(|record| record.lifecycle.is_live() && record.cancel_requested))
     }
-
-
 
     /// Record a cancellation request. This method never claims that a foreign
     /// session has already become cancelled.
@@ -398,7 +418,14 @@ impl Sessions {
             .into_iter()
             .flatten()
             .flatten()
-            .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json")?.parse::<u64>().ok())
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()?
+                    .strip_suffix(".json")?
+                    .parse::<u64>()
+                    .ok()
+            })
             .max()
             .unwrap_or(0)
             .saturating_add(1);
@@ -425,7 +452,9 @@ impl Sessions {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        let mut paths = entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect::<Vec<_>>();
+        let mut paths = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect::<Vec<_>>();
         paths.sort();
         let mut values = Vec::with_capacity(paths.len());
         for path in &paths {
@@ -439,17 +468,34 @@ impl Sessions {
     }
 
     pub fn prune(&self, keep_since: u64) -> Result<usize> {
+        fs::create_dir_all(&self.dir)?;
+        let _lock = Lock::take(&self.dir)?;
         let mut removed = 0;
-        for record in self.list()? {
-            if !record.lifecycle.is_live() && record.last_seen < keep_since {
-                let _lock = Lock::take(&self.dir)?;
-                if let Some(lease) = &record.name_lease {
-                    let _ = crate::names().release(lease);
-                }
-                let _ = fs::remove_file(self.path(&record.id));
-                let _ = fs::remove_dir_all(self.input_dir(&record.id));
-                removed += 1;
+        let entries = fs::read_dir(&self.dir)?;
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
             }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name == ".lock" || !name.ends_with(".json") {
+                continue;
+            }
+            let Some(record) = read_record(&entry.path())? else {
+                continue;
+            };
+            if record.lifecycle.is_live() || record.last_seen >= keep_since {
+                continue;
+            }
+            if let Some(lease) = &record.name_lease {
+                let _ = crate::names().release(lease);
+            }
+            let _ = fs::remove_file(entry.path());
+            let _ = fs::remove_dir_all(self.input_dir(&record.id));
+            removed += 1;
         }
         Ok(removed)
     }
@@ -481,11 +527,6 @@ impl Sessions {
 
     fn input_dir(&self, id: &str) -> PathBuf {
         self.dir.join("input").join(encode(id))
-    }
-
-    #[cfg(test)]
-    fn dir(&self) -> &Path {
-        &self.dir
     }
 }
 
@@ -601,10 +642,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let sessions = sessions(root.path());
         let one = sessions
-            .create_content("bash", "cargo test workspace and report", "Goethe", None, Value::Null)
+            .create_content(
+                "bash",
+                "cargo test workspace and report",
+                "Goethe",
+                None,
+                Value::Null,
+            )
             .unwrap();
         let two = sessions
-            .create_content("bash", "cargo test workspace and report", "Goethe", None, Value::Null)
+            .create_content(
+                "bash",
+                "cargo test workspace and report",
+                "Goethe",
+                None,
+                Value::Null,
+            )
             .unwrap();
         assert_eq!(one.id, "bash:cargo-test-workspace-and");
         assert_eq!(two.id, "bash:cargo-test-workspace-and-2");
@@ -627,6 +680,38 @@ mod tests {
     }
 
     #[test]
+    fn list_does_not_refresh_stopped_records_last_seen() {
+        let root = tempfile::tempdir().unwrap();
+        let sessions = sessions(root.path());
+        let record = sessions
+            .create_content("ask", "old question", "Goethe", None, Value::Null)
+            .unwrap();
+        let stopped = sessions
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let listed = sessions.list().unwrap();
+        let listed = listed.iter().find(|item| item.id == record.id).unwrap();
+        assert_eq!(listed.last_seen, stopped.last_seen);
+        assert_eq!(sessions.prune(stopped.last_seen + 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn prune_does_not_refresh_a_stopped_records_last_seen() {
+        let root = tempfile::tempdir().unwrap();
+        let sessions = sessions(root.path());
+        let record = sessions
+            .create_content("bash", "old command", "Goethe", None, Value::Null)
+            .unwrap();
+        let stopped = sessions
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(sessions.prune(stopped.last_seen + 1).unwrap(), 1);
+        assert!(!sessions.path(&record.id).exists());
+    }
+
+    #[test]
     fn canvas_identity_reactivates_in_place_but_does_not_steal_a_live_owner() {
         let root = tempfile::tempdir().unwrap();
         let sessions = sessions(root.path());
@@ -644,7 +729,9 @@ mod tests {
         let reopened = sessions
             .reactivate("canvas:dash", "canvas", "Monet", None, Value::Null)
             .unwrap();
-        let Reactivate::Opened(record) = reopened else { panic!("not reopened") };
+        let Reactivate::Opened(record) = reopened else {
+            panic!("not reopened")
+        };
         assert_eq!(record.id, "canvas:dash");
         assert_eq!(record.artist, "Monet");
     }
@@ -656,8 +743,12 @@ mod tests {
         sessions
             .create_exact("Goethe", "subagent", "Monet", None, Value::Null)
             .unwrap();
-        sessions.enqueue_input("Goethe", serde_json::json!("one")).unwrap();
-        sessions.enqueue_input("Goethe", serde_json::json!({"two": 2})).unwrap();
+        sessions
+            .enqueue_input("Goethe", serde_json::json!("one"))
+            .unwrap();
+        sessions
+            .enqueue_input("Goethe", serde_json::json!({"two": 2}))
+            .unwrap();
         let drained = sessions.drain_inputs("Goethe").unwrap();
         assert_eq!(drained[0].input, serde_json::json!("one"));
         assert_eq!(drained[1].input, serde_json::json!({"two": 2}));

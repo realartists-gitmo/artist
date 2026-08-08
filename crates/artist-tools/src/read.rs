@@ -42,8 +42,8 @@ impl PortableTool for ReadTool {
     fn description(&self) -> String {
         format!(
             "Read a project-relative or absolute file. Each line renders as `ANCHOR: CONTENT` \
-             (for example, `abc: hello`). Use only the token before the colon as the `start`/`end` \
-             anchor in edit; the content after the colon is not an anchor. Returns up to \
+             (for example, `#abc: hello`). Pass the exact `ANCHOR` substring before the `: ` delimiter \
+             as `start`/`end` in edit; do not trim or normalize it. Returns up to \
              {READ_LINES} lines; a longer file also gets an outline of its whole shape, whose \
              anchors work in edit without reading that part first."
         )
@@ -91,9 +91,8 @@ impl PortableTool for ReadTool {
         let limit = args.limit.unwrap_or(READ_LINES).min(READ_LINES);
         // Always request the whole file, then window for display.
         //
-        // Two reasons. The anchor ledger reconciles over the entire file
-        // whichever way this is called — `max_lines` only slices what comes
-        // back — so asking for everything costs nothing extra. And the outline
+        // Two reasons. Addresses are selected against the entire live file;
+        // `max_lines` only slices what comes back. And the outline
         // appended below needs anchors for declarations *outside* the window,
         // which a windowed request cannot supply.
         let result = self

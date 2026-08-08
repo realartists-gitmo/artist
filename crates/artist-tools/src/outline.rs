@@ -1,4 +1,4 @@
-//! Structural outline rendering against mnemonic anchors.
+//! Structural outline rendering against semantic anchors.
 //!
 //! `artist-ast` answers "which byte ranges are declarations"; this module turns
 //! that into something the model can act on. Two things make it more than a
@@ -130,7 +130,7 @@ pub fn render_with_coverage(
             let end = anchors.get(&row.decl.end_line);
             match end {
                 Some(end) if row.decl.end_line != row.decl.start_line => {
-                    out.push_str(&format!("{start}..{end}: "));
+                    out.push_str(&format!("{start} ⟶ {end}: "));
                 }
                 _ => out.push_str(&format!("{start}: ")),
             }
@@ -280,7 +280,7 @@ mod tests {
         let decls = vec![decl("alpha", 1, 5, vec![])];
         let anchors = anchors_for(&[(1, "time"), (5, "beta")]);
         let out = render(&decls, &anchors, &OutlineOptions::default(), "rust");
-        assert_eq!(out, "time..beta: fn alpha()\n");
+        assert_eq!(out, "time ⟶ beta: fn alpha()\n");
     }
 
     #[test]
@@ -291,14 +291,13 @@ mod tests {
         assert_eq!(out, "time: fn alpha()\n");
     }
 
-    /// Two-word handles contain a space, so a space-separated span would be
-    /// ambiguous with a single handle. `..` cannot occur inside a mnemonic.
+    /// U+27F6 is reserved by the outline renderer and does not occur in the v1 token payloads.
     #[test]
-    fn two_word_anchors_stay_unambiguous() {
+    fn multi_component_anchors_stay_unambiguous() {
         let decls = vec![decl("alpha", 1, 4, vec![])];
-        let anchors = anchors_for(&[(1, "time beta"), (4, "nod deep")]);
+        let anchors = anchors_for(&[(1, "#time‖beta"), (4, "#nod‖deep")]);
         let out = render(&decls, &anchors, &OutlineOptions::default(), "rust");
-        assert_eq!(out, "time beta..nod deep: fn alpha()\n");
+        assert_eq!(out, "#time‖beta ⟶ #nod‖deep: fn alpha()\n");
     }
 
     #[test]
@@ -328,7 +327,7 @@ mod tests {
         let out = render(&decls, &anchors, &OutlineOptions::default(), "rust");
         assert_eq!(
             out,
-            "aa..bb: fn outer()\ncc..dd:   fn inner_a()\nee..ff:   fn inner_b()\n"
+            "aa ⟶ bb: fn outer()\ncc ⟶ dd:   fn inner_a()\nee ⟶ ff:   fn inner_b()\n"
         );
     }
 
@@ -341,7 +340,7 @@ mod tests {
             ..Default::default()
         };
         let out = render(&decls, &anchors, &opts, "rust");
-        assert_eq!(out, "aa..bb: fn outer()\n");
+        assert_eq!(out, "aa ⟶ bb: fn outer()\n");
     }
 
     /// A sibling group that would breach the ceiling is reverted whole. Half a
@@ -363,7 +362,7 @@ mod tests {
             ..Default::default()
         };
         let out = render(&decls, &anchors, &opts, "rust");
-        assert_eq!(out, "aa..bb: fn outer()\n");
+        assert_eq!(out, "aa ⟶ bb: fn outer()\n");
     }
 
     #[test]

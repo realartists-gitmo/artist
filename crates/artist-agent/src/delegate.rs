@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     LifecycleEvent, PromptEvent, SessionHandles,
     capture::{CaptureHook, ToolMeta},
-    delegate_jobs::DelegateJobs,
     resources::Resources,
+    session_tools::{OwnedSession, OwnedState, SessionHub},
     tool_set::{self, DelegationEnv},
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
@@ -13,7 +13,7 @@ use artist_session::{
 };
 use artist_tool_api::ArtistDynamicTool;
 use artist_tools::ToolBundle;
-use futures::StreamExt;
+use futures::{StreamExt, future::BoxFuture};
 use llm_provider::SavedProvider;
 use rig_agent::client::AgentClientExt;
 use rig_agent::{agent::MultiTurnStreamItem, prelude::PromptError, streaming::StreamingChat};
@@ -125,7 +125,7 @@ pub(crate) struct Delegate {
     /// `Arc` so constructing a Delegate each run/retry is a cheap refcount bump;
     /// the history is only deep-cloned if the model actually forks.
     context: Arc<Vec<Message>>,
-    jobs: DelegateJobs,
+    sessions: SessionHub,
     resources: Resources,
     handles: SessionHandles,
     disabled_tools: Vec<String>,
@@ -136,15 +136,6 @@ pub(crate) struct Delegate {
     memory: Option<crate::memory::MemoryWriter>,
     canvas: Option<Arc<artist_canvas::server::Lazy>>,
     dynamic: Vec<ArtistDynamicTool>,
-    /// The seat held by the run that owns this tool. `None` at the session
-    /// root, which holds none.
-    parent_permit: Option<PermitSlot>,
-    /// Whose todo list a child spawned through this tool may read. The list
-    /// belonging to the run that owns the tool — which is the conversation at
-    /// the session root, and the spawning subagent's actor once nested. Taking
-    /// the session id at every depth would show a grandchild the root's list
-    /// instead of the one its own instructions were written against.
-    spawner: String,
     /// The spawning agent's *display* name, recorded on each child so the
     /// directory can answer "everyone under Monet". `None` where the spawner
     /// has no identity, which is only the case in tests.
@@ -153,51 +144,67 @@ pub(crate) struct Delegate {
 
 struct DelegateRun {
     actor: String,
-    background: bool,
+    public_id: String,
+    identity: crate::identity::RunIdentity,
     permit: PermitSlot,
 }
-
-struct SubagentActivityGuard {
-    lifecycle: crate::LifecycleEmitter,
-    id: String,
+struct SubagentSession {
+    state: Arc<tokio::sync::RwLock<OwnedState>>,
+    abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+    sender: String,
+    recipient: String,
 }
 
-impl Drop for SubagentActivityGuard {
-    fn drop(&mut self) {
-        self.lifecycle
-            .emit(LifecycleEvent::SubagentFinished(self.id.clone()));
+impl OwnedSession for SubagentSession {
+    fn state(&self) -> BoxFuture<'_, Result<OwnedState, String>> {
+        Box::pin(async move { Ok(self.state.read().await.clone()) })
     }
-}
 
-fn start_background_activity(
-    lifecycle: crate::LifecycleEmitter,
-    id: String,
-) -> SubagentActivityGuard {
-    lifecycle.emit(LifecycleEvent::SubagentStarted(id.clone()));
-    SubagentActivityGuard { lifecycle, id }
-}
+    fn send(&self, input: Value) -> BoxFuture<'_, Result<(), String>> {
+        let sender = self.sender.clone();
+        let recipient = self.recipient.clone();
+        Box::pin(async move {
+            let body = input
+                .as_str()
+                .ok_or_else(|| "subagent input must be a string".to_owned())?;
+            artist_registry::messages()
+                .send(&artist_registry::Message {
+                    id: artist_tools::short_id("m"),
+                    from: sender,
+                    to: recipient,
+                    audience: artist_registry::Audience::Direct,
+                    body: body.to_owned(),
+                    expects_reply: false,
+                    sent_at: artist_registry::now(),
+                })
+                .map_err(|error| error.to_string())
+        })
+    }
 
-impl DelegateRun {
-    fn new(task_id: Option<String>, permit: PermitSlot) -> Self {
-        let background = task_id.is_some();
-        Self {
-            actor: task_id.unwrap_or_else(|| artist_tools::short_id("a")),
-            background,
-            permit,
-        }
+    fn abort(&self) -> BoxFuture<'_, Result<(), String>> {
+        let abort = Arc::clone(&self.abort);
+        Box::pin(async move {
+            if let Some(handle) = abort
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                handle.abort();
+            }
+            Ok(())
+        })
     }
 }
 
 impl Delegate {
-    /// Built from the environment its spawner was built from, so a nested
-    /// subagent inherits the same subsystems rather than a hand-copied subset.
+    /// Built from the environment its spawner was built from, so nested subagents
+    /// inherit the same profile/resource environment.
     pub(crate) fn new(env: &crate::tool_set::ToolEnv, delegation: &DelegationEnv) -> Self {
-        let jobs = DelegateJobs::for_project(env.bundle.project_root());
         Self {
             provider: delegation.provider.clone(),
             tools: env.bundle.clone(),
             context: Arc::clone(&delegation.context),
-            jobs,
+            sessions: env.sessions.clone(),
             resources: env.resources.clone(),
             handles: delegation.handles.clone(),
             disabled_tools: env.disabled.clone(),
@@ -206,11 +213,6 @@ impl Delegate {
             memory: env.memory.clone(),
             canvas: env.canvas.clone(),
             dynamic: env.dynamic.clone(),
-            parent_permit: delegation.parent_permit.clone(),
-            spawner: env.todo_owner.clone(),
-            // The inbox name is this agent's name, so a child's parent link and
-            // the address a person uses are the same string by construction
-            // rather than by two lookups that could disagree.
             spawner_name: env.inbox.as_ref().map(|inbox| inbox.name.to_string()),
         }
     }
@@ -252,18 +254,10 @@ impl Delegate {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DelegateArgs {
-    mode: Option<String>,
-    prompt: Option<String>,
-    agent: Option<String>,
-    fork: Option<bool>,
-    background: Option<bool>,
-    task_id: Option<String>,
-    /// Several tasks to wait on at once. The motivating shape is a fan-out:
-    /// spawn five researchers, then sleep until all five reports are in.
-    task_ids: Option<Vec<String>>,
-    wait_ms: Option<u64>,
+    prompt: String,
+    profile: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -283,183 +277,136 @@ impl PortableTool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run a focused subagent.".into()
+        "Spawn a focused subagent and return its bare artist session id immediately.".into()
     }
+
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{
-            "mode":{"enum":["run","start","status","read","wait","cancel","list"],"default":"run","description":"Operation to perform."},
-            "prompt":{"type":"string","description":"Task for the subagent."},
-            "agent":{"type":"string","enum":self.profiles.names(),"description":"Configured subagent role."},
-            "fork":{"type":"boolean","default":false,"description":"Include the full main-agent chat context."},
-            "background":{"type":"boolean","default":false,"description":"Start the subagent and return immediately."},
-            "taskIds":{"type":"array","items":{"type":"string"},"description":"Several task ids to wait on at once; the call returns when all of them have settled."},"taskId":{"type":"string","description":"Task identifier returned when a subagent is started; required for status, read, wait, and cancel."},
-            "waitMs":{"type":"integer","minimum":1,"maximum":30000,"description":"Maximum time to wait for a background task state change."}
-        },"additionalProperties":false})
+        json!({
+            "type":"object",
+            "properties":{
+                "prompt":{"type":"string","description":"Task for the subagent."},
+                "profile":{"type":"string","enum":self.profiles.names(),"description":"Subagent profile; defaults to default."}
+            },
+            "required":["prompt"],
+            "additionalProperties":false
+        })
     }
 
     async fn call(&self, args: DelegateArgs) -> Result<String, DelegateError> {
-        let mode = args.mode.clone().unwrap_or_else(|| {
-            if args.background.unwrap_or(false) {
-                "start"
-            } else {
-                "run"
-            }
-            .to_owned()
+        self.spawn(args).await
+    }
+}
+
+impl Delegate {
+    async fn spawn(&self, args: DelegateArgs) -> Result<String, DelegateError> {
+        let profile_name = args.profile.unwrap_or_else(|| "default".into());
+        self.profiles
+            .get(&profile_name)
+            .map_err(DelegateError::Failed)?;
+
+        let actor = artist_tools::short_id("a");
+        let identity = crate::identity::for_run(
+            &actor,
+            self.tools.project_root(),
+            &profile_name,
+            self.spawner_name.as_deref(),
+        )
+        .map_err(|error| {
+            DelegateError::Unavailable(format!("artist identity allocation failed: {error}"))
+        })?;
+        let public_id = identity.name.clone();
+
+        if let Err(error) = self.sessions.registry().create_exact(
+            &public_id,
+            "subagent",
+            &public_id,
+            Some(self.sessions.artist()),
+            json!({"profile":profile_name,"state":"running"}),
+        ) {
+            let _ = artist_registry::names().release(&identity.lease_key);
+            return Err(DelegateError::Failed(error.to_string()));
+        }
+        self.sessions
+            .registry()
+            .set_name_lease(&public_id, identity.lease_key.clone())
+            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+
+        let state = Arc::new(tokio::sync::RwLock::new(OwnedState::live(json!({
+            "profile": profile_name,
+            "state": "running"
+        }))));
+        let abort = Arc::new(Mutex::new(None));
+        self.sessions.own(
+            public_id.clone(),
+            Arc::new(SubagentSession {
+                state: Arc::clone(&state),
+                abort: Arc::clone(&abort),
+                sender: self.sessions.artist().to_owned(),
+                recipient: public_id.clone(),
+            }),
+        );
+
+        self.handles
+            .lifecycle
+            .emit(LifecycleEvent::SubagentStarted(public_id.clone()));
+        self.emit(PromptEvent::SubagentStarted {
+            id: public_id.clone(),
+            role: profile_name.clone(),
+            prompt: args.prompt.clone(),
         });
-        // Only the modes that block this run on a child give up its seat. A
-        // background `start` returns immediately and the child claims a seat of
-        // its own, so the spawner keeps working and keeps its own.
-        let yielded = match mode.as_str() {
-            "run" | "wait" => self.parent_permit.clone(),
-            _ => None,
-        };
-        if let Some(slot) = &yielded {
-            slot.yield_seat().await;
-        }
-        let result = self.run_mode(&mode, args).await;
-        if let Some(slot) = &yielded {
-            slot.retake().await;
-        }
-        result
-    }
-}
 
-impl Delegate {
-    async fn run_mode(&self, mode: &str, args: DelegateArgs) -> Result<String, DelegateError> {
-        match mode {
-            "run" => {
-                let prompt = required(args.prompt, "prompt")?;
-                self.run_agent(
-                    prompt,
-                    args.agent.as_deref().unwrap_or("default"),
-                    args.fork.unwrap_or(false),
-                    None,
-                )
+        let delegate = self.clone();
+        let task_profile = profile_name.clone();
+        let task = tokio::spawn(async move {
+            let next = match delegate
+                .run_agent(args.prompt, task_profile.clone(), actor, identity)
                 .await
-            }
-            "start" => {
-                let prompt = required(args.prompt, "prompt")?;
-                // A background child is not something this run waits on, so it
-                // must not hold this run's seat: it claims its own, and this
-                // one is freed when its own run ends rather than when the
-                // detached job does.
-                let mut delegate = self.clone();
-                delegate.parent_permit = None;
-                let task_prompt = prompt.clone();
-                let role = args.agent.unwrap_or_else(|| "default".into());
-                let task_role = role.clone();
-                Ok(self
-                    .jobs
-                    .start(prompt, role, move |task_id| {
-                        let activity = start_background_activity(
-                            delegate.handles.lifecycle.clone(),
-                            task_id.clone(),
-                        );
-                        async move {
-                            let _activity = activity;
-                            delegate
-                                .run_agent(
-                                    task_prompt,
-                                    &task_role,
-                                    args.fork.unwrap_or(false),
-                                    Some(task_id),
-                                )
-                                .await
-                                .map_err(|error| error.to_string())
-                        }
-                    })
-                    .await)
-            }
-            "status" => self
-                .jobs
-                .status(&required(args.task_id, "taskId")?)
-                .await
-                .map_err(DelegateError::Failed),
-            "read" => self
-                .jobs
-                .read(&required(args.task_id, "taskId")?)
-                .await
-                .map_err(DelegateError::Failed),
-            "wait" => {
-                // One wait primitive, whether the caller named one task or
-                // twenty. Shipping a separate multi-wait would be a second
-                // mechanism that has to agree with this one and eventually
-                // would not — the failure this crate's tool registry exists to
-                // prevent.
-                let ids = match (args.task_ids, args.task_id) {
-                    (Some(ids), _) if !ids.is_empty() => ids,
-                    (_, Some(id)) => vec![id],
-                    _ => return Err(DelegateError::Failed("taskId is required".into())),
-                };
-                if let [single] = ids.as_slice() {
-                    return self
-                        .jobs
-                        .wait(single, args.wait_ms)
-                        .await
-                        .map_err(DelegateError::Failed);
-                }
-                // Concurrently, and bounded by one shared budget: waiting on
-                // five tasks should take as long as the slowest, not as long as
-                // the sum, and a caller that asked to wait 30s means 30s
-                // overall rather than per task.
-                let results = futures::future::join_all(
-                    ids.iter().map(|id| self.jobs.wait(id, args.wait_ms)),
-                )
-                .await;
-                let reports: Vec<Value> = ids
-                    .iter()
-                    .zip(results)
-                    .map(|(id, result)| match result {
-                        Ok(report) => serde_json::from_str(&report)
-                            .unwrap_or_else(|_| json!({"taskId": id, "status": "unknown"})),
-                        Err(error) => json!({"taskId": id, "status": "failed", "error": error}),
-                    })
-                    .collect();
-                Ok(Value::Array(reports).to_string())
-            }
-            "cancel" => self
-                .jobs
-                .cancel(&required(args.task_id, "taskId")?)
-                .await
-                .map_err(DelegateError::Failed),
-            "list" => Ok(self.jobs.list().await),
-            other => Err(DelegateError::Failed(format!(
-                "invalid delegate mode: {other}"
-            ))),
-        }
-    }
-}
+            {
+                Ok(output) => OwnedState::stopped(
+                    artist_registry::SessionStatus::Completed,
+                    json!({"profile":task_profile,"output":output}),
+                ),
+                Err(error) if error.to_string().contains("cancelled") => OwnedState::stopped(
+                    artist_registry::SessionStatus::Cancelled,
+                    json!({"profile":task_profile,"error":error.to_string()}),
+                ),
+                Err(error) => OwnedState::stopped(
+                    artist_registry::SessionStatus::Failed,
+                    json!({"profile":task_profile,"error":error.to_string()}),
+                ),
+            };
+            *state.write().await = next;
+        });
+        *abort.lock().unwrap_or_else(|error| error.into_inner()) = Some(task.abort_handle());
 
-impl Delegate {
-    /// Drive the subagent on the streaming surface (delta hooks — and
-    /// therefore stream rules — only exist there), with the same TTSR
-    /// abort/inject/retry loop as the main agent. The shared `RulesHandle`
-    /// makes once-per-session global across main + delegates; delegate
-    /// events land in the session log under a child lineage.
+        Ok(public_id)
+    }
+
     async fn run_agent(
         &self,
         prompt: String,
-        profile_name: &str,
-        fork: bool,
-        task_id: Option<String>,
+        profile_name: String,
+        actor: String,
+        identity: crate::identity::RunIdentity,
     ) -> Result<String, DelegateError> {
         let profile = self
             .profiles
-            .get(profile_name)
+            .get(&profile_name)
             .map_err(DelegateError::Failed)?;
-        let run = DelegateRun::new(
-            task_id,
-            PermitSlot::claim(
+        let run = DelegateRun {
+            public_id: identity.name.clone(),
+            actor,
+            identity,
+            permit: PermitSlot::claim(
                 self.profiles.permits.clone(),
                 format!("{profile_name}:{}", self.handles.conversation_id),
             )
             .await?,
-        );
+        };
         let breaker = crate::fallback::Breaker::global();
         let mut skipped = Vec::new();
         let mut last_error = None;
 
-        // Ordered, not round-robin: candidate 0 is preferred while healthy.
         for candidate in &profile.candidates {
             let label = crate::fallback::candidate_label(candidate);
             let provider = match self.resolve_provider(candidate) {
@@ -498,7 +445,7 @@ impl Delegate {
                     thinking,
                     prompt.clone(),
                     &profile,
-                    fork,
+                    false,
                     &run,
                 )
                 .await
@@ -515,8 +462,6 @@ impl Delegate {
                     });
                     last_error = Some(message);
                 }
-                // A permanent failure reproduces on every candidate, so trying
-                // the rest would only replace the real error with the last one.
                 Err(other) => return Err(other),
             }
         }
@@ -626,36 +571,21 @@ impl Delegate {
         C::CompletionModel: 'static,
     {
         let actor = run.actor.clone();
+        let display_id = run.public_id.clone();
+        let identity = &run.identity;
         let child_tools = self
             .tools
             .for_actor(&actor)
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
-        if !run.background {
-            self.handles
-                .lifecycle
-                .emit(LifecycleEvent::SubagentStarted(actor.clone()));
-        }
-        self.emit(PromptEvent::SubagentStarted {
-            id: actor.clone(),
-            role: role.name.clone(),
-            prompt: prompt.clone(),
-        });
         let recorder = self.handles.recorder.child_lineage(&actor);
         recorder.record(DelegateStarted {
             prompt: prompt.clone(),
-            // `computer` counts as write access: a subagent that can drive a
-            // GUI can do anything a person at that keyboard could, so the log
-            // must not record it as read-only.
             read_only: !["bash", "edit", "write", "computer"]
                 .into_iter()
                 .any(|tool| role.permits(tool)),
-            fork,
-            background: run.background,
+            fork: false,
+            background: true,
         });
-        // Budded off the parent's, not shared with it: this delegate gets its
-        // own display, session bus and browser profile, and they are torn down
-        // with it. Lazy, so a delegate that never touches a GUI never starts a
-        // compositor — which is most of them.
         let child_computer = self
             .handles
             .computer
@@ -663,22 +593,11 @@ impl Delegate {
             .map(artist_computer::SurfaceRegistry::for_delegate);
 
         let (base, _) = crate::prompt_config::base_prompt();
-        // The subagent's bare artist name is a durable session id and remains
-        // leased while that retained session record is addressable.
-        let identity = crate::identity::for_run(
-            &run.actor,
-            self.tools.project_root(),
-            &role.name,
-            self.spawner_name.as_deref(),
-        )
-        .map_err(|error| DelegateError::Unavailable(format!(
-            "artist identity allocation failed: {error}"
-        )))?;
         let policy = format!(
             "{base}\n\nYou are the '{}' subagent profile.\n{}\n\n{}\nCurrent working directory: {}{}",
             role.name,
             role.instructions,
-            self.resources.prompt_section(),
+            self.resources.prompt_section(role),
             self.tools.project_root().display(),
             identity.prompt_block(),
         );
@@ -763,7 +682,6 @@ impl Delegate {
                 // write to it: concurrent siblings sharing one list would race
                 // with no obvious merge.
                 todo_owner: actor.clone(),
-                todo_parent: Some(self.spawner.clone()),
                 attachments: self.handles.attachments.clone(),
                 // A subagent driving a GUI gets a display of its own, never the
                 // parent's: one stage is one seat, and siblings sharing it
@@ -783,24 +701,21 @@ impl Delegate {
                     handles: self.handles.clone(),
                     events: self.events.clone(),
                     profiles: self.profiles.clone(),
-                    parent_permit: Some(run.permit.clone()),
                 }),
                 // A subagent is addressable too: it has a name for the run's
                 // lifetime, so a sibling or its parent can reach it while it
                 // works rather than only when it returns.
-                // Never in a child: a background subagent blocking on a human
-                // nobody is watching is the worst version of asking, and it has
-                // a better option — `query`, whose target is the parent that
-                // spawned it and is right there. An underspecified task comes
-                // back as a blocked result for the parent to resolve.
+                // Never in a child: a background subagent cannot block on the human.
+                // It can `send` its parent a clarification request through the same
+                // durable artist mailbox used for all inter-agent communication.
                 ask: None,
-                cancel: self.handles.cancel.clone(),
                 inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
                 sessions: crate::session_tools::SessionHub::standard(
                     child_tools.project_root(),
                     identity.name.clone(),
                     Some(run.permit.clone()),
                 ),
+                pages: crate::pagination::PageStore::memory(),
                 dynamic: self.dynamic.clone(),
                 disabled: self.disabled_tools.clone(),
             };
@@ -850,7 +765,7 @@ impl Delegate {
                     _ = self.handles.cancel.cancelled() => {
                         run_recorder.record(RunFinished::Cancelled);
                         recorder.record(DelegateFinished { outcome: "cancelled".into() });
-                        self.finish_child(&actor, "cancelled");
+                        self.finish_child(&display_id, "cancelled");
                         return Err(DelegateError::Failed("cancelled".into()));
                     }
                     item = stream.next() => item,
@@ -865,7 +780,7 @@ impl Delegate {
                         seed_history = committed;
                         crate::record_firing_events(&run_recorder, &ttsr, &firing);
                         self.emit_child(
-                            &actor,
+                            &display_id,
                             PromptEvent::RuleFired {
                                 rule: firing.rule.0.clone(),
                                 matched: firing.matched.clone(),
@@ -899,7 +814,7 @@ impl Delegate {
                             cached_input_tokens: call.usage.cached_input_tokens,
                         });
                         self.emit_child(
-                            &actor,
+                            &display_id,
                             PromptEvent::CompletionUsage {
                                 total_tokens: call.usage.total_tokens,
                                 cached_input_tokens: call.usage.cached_input_tokens,
@@ -912,7 +827,7 @@ impl Delegate {
                         // successful subagent run with an empty output.
                         turn_text = response.output().to_owned();
                         if !last_turn_had_text_delta && !turn_text.is_empty() {
-                            self.emit_child(&actor, PromptEvent::TextDelta(turn_text.clone()));
+                            self.emit_child(&display_id, PromptEvent::TextDelta(turn_text.clone()));
                         }
                         final_messages = response.messages().map(ToOwned::to_owned);
                     }
@@ -920,7 +835,7 @@ impl Delegate {
                         StreamedAssistantContent::Text(text),
                     )) => {
                         turn_text.push_str(&text.text);
-                        self.emit_child(&actor, PromptEvent::TextDelta(text.text));
+                        self.emit_child(&display_id, PromptEvent::TextDelta(text.text));
                     }
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ReasoningDelta {
@@ -938,7 +853,7 @@ impl Delegate {
                             seed_history = committed;
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
                             self.emit_child(
-                                &actor,
+                                &display_id,
                                 PromptEvent::RuleFired {
                                     rule: firing.rule.0.clone(),
                                     matched: firing.matched.clone(),
@@ -950,7 +865,7 @@ impl Delegate {
                             retry = true;
                             break;
                         }
-                        self.emit_child(&actor, PromptEvent::ReasoningSummaryDelta(reasoning));
+                        self.emit_child(&display_id, PromptEvent::ReasoningSummaryDelta(reasoning));
                     }
                     Ok(MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ToolCall {
@@ -958,7 +873,7 @@ impl Delegate {
                             internal_call_id,
                         },
                     )) => self.emit_child(
-                        &actor,
+                        &display_id,
                         PromptEvent::ToolCall {
                             id: internal_call_id,
                             name: tool_call.function.name,
@@ -969,7 +884,7 @@ impl Delegate {
                         tool_call,
                         internal_call_id,
                     }) => self.emit_child(
-                        &actor,
+                        &display_id,
                         PromptEvent::ToolExecutionStart {
                             id: internal_call_id,
                             name: tool_call.function.name,
@@ -998,7 +913,7 @@ impl Delegate {
                             .join("\n");
                         let meta = tool_meta.take(&internal_call_id);
                         self.emit_child(
-                            &actor,
+                            &display_id,
                             PromptEvent::ToolResult {
                                 id: internal_call_id,
                                 content,
@@ -1018,7 +933,7 @@ impl Delegate {
                             seed_history = chat_history.clone();
                             crate::record_firing_events(&run_recorder, &ttsr, &firing);
                             self.emit_child(
-                                &actor,
+                                &display_id,
                                 PromptEvent::RuleFired {
                                     rule: firing.rule.0.clone(),
                                     matched: firing.matched.clone(),
@@ -1045,7 +960,7 @@ impl Delegate {
                                 }
                                 _ = self.handles.cancel.cancelled() => {
                                     recorder.record(DelegateFinished { outcome: "cancelled".into() });
-                                    self.finish_child(&actor, "cancelled");
+                                    self.finish_child(&display_id, "cancelled");
                                     return Err(DelegateError::Failed("cancelled".into()));
                                 }
                             }
@@ -1053,7 +968,7 @@ impl Delegate {
                         recorder.record(DelegateFinished {
                             outcome: "error".into(),
                         });
-                        self.finish_child(&actor, "error");
+                        self.finish_child(&display_id, "error");
                         return Err(match crate::fallback::classify(&error) {
                             crate::fallback::Failure::Unavailable => {
                                 DelegateError::Unavailable(error.to_string())
@@ -1079,11 +994,8 @@ impl Delegate {
         recorder.record(DelegateFinished {
             outcome: "completed".into(),
         });
-        self.finish_child(&actor, "completed");
-        Ok(
-            json!({"role":role.name,"taskId":actor,"output":shorten(&output, 50 * 1024)})
-                .to_string(),
-        )
+        self.finish_child(&display_id, "completed");
+        Ok(shorten(&output, 50 * 1024))
     }
 }
 
@@ -1114,9 +1026,6 @@ fn delegate_context_window(
         .flatten()
 }
 
-fn required<T>(value: Option<T>, name: &str) -> Result<T, DelegateError> {
-    value.ok_or_else(|| DelegateError::Failed(format!("{name} is required")))
-}
 fn shorten(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_owned();
@@ -1130,9 +1039,7 @@ fn shorten(value: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::{DelegateRun, PermitSlot, delegate_context_window, start_background_activity};
-    use crate::{LifecycleEmitter, LifecycleEvent};
-    use std::sync::{Arc, Mutex};
+    use super::{PermitSlot, delegate_context_window};
 
     /// A seat from a pool of this test's own, so identity allocation is tested
     /// without also standing up the project-wide concurrency limit.
@@ -1158,24 +1065,6 @@ mod identity_tests {
         assert_eq!(delegate_context_window("small", None, Some(100_000)), None);
     }
 
-    #[tokio::test]
-    async fn background_run_reuses_reserved_task_id() {
-        let pool = tempfile::tempdir().unwrap();
-        let run = DelegateRun::new(Some("a-reserved-task".into()), seat(&pool).await);
-
-        assert_eq!(run.actor, "a-reserved-task");
-        assert!(run.background);
-    }
-
-    #[tokio::test]
-    async fn foreground_run_allocates_one_actor_id() {
-        let pool = tempfile::tempdir().unwrap();
-        let run = DelegateRun::new(None, seat(&pool).await);
-
-        assert!(run.actor.starts_with("a-"));
-        assert!(!run.background);
-    }
-
     /// The seat pool is the project's, not the process's: a second holder
     /// pointed at the same directory sees the first one's seat. This is the
     /// property the on-disk pool exists for, and the one an in-process
@@ -1193,22 +1082,5 @@ mod identity_tests {
 
         held.yield_seat().await;
         assert!(contender.try_acquire("other-process").unwrap().is_some());
-    }
-
-    #[test]
-    fn background_activity_spans_future_polling_and_drop() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let captured = events.clone();
-        let lifecycle = LifecycleEmitter::new(move |event| captured.lock().unwrap().push(event));
-        let guard = start_background_activity(lifecycle, "a-task".into());
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![LifecycleEvent::SubagentStarted("a-task".into())]
-        );
-        drop(guard);
-        assert_eq!(
-            events.lock().unwrap().last(),
-            Some(&LifecycleEvent::SubagentFinished("a-task".into()))
-        );
     }
 }

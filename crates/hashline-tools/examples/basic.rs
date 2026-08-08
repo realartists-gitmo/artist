@@ -70,8 +70,8 @@ async fn main() -> anyhow::Result<()> {
             EditRequest {
                 path: path.clone(),
                 operations: vec![EditOperation::Replace {
-                    hash: beta_anchor,
-                    end_hash: None,
+                    anchor: beta_anchor,
+                    end_anchor: None,
                     content: "fn beta_renamed() {}".into(),
                 }],
             },

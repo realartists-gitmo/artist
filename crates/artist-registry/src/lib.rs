@@ -23,7 +23,9 @@
 
 use std::path::{Path, PathBuf};
 
-mod jobs;
+mod artist_state;
+
+mod http_identity;
 mod messages;
 mod names;
 mod permits;
@@ -31,13 +33,18 @@ mod process;
 mod roster;
 mod sessions;
 
-pub use jobs::{Job, JobState, Jobs, Outcome};
-pub use messages::{Audience, Group, Message, Messages, now};
-pub use names::{Name, Names, Registration, Selector};
+pub use artist_state::{ArtistState, ArtistStates};
+
+pub use http_identity::{HttpIdentities, HttpIdentity};
+pub use messages::{Audience, Message, Messages, now};
+pub use names::{Name, Names, Registration};
 pub use permits::{Permits, Seat};
 pub use process::{Owner, take_wake};
-pub use sessions::{CancelDisposition, Reactivate, SessionInput, SessionLifecycle, SessionRecord, SessionStatus, Sessions, content_slug};
 pub use roster::ROSTER;
+pub use sessions::{
+    CancelDisposition, Reactivate, SessionInput, SessionLifecycle, SessionRecord, SessionStatus,
+    Sessions, content_slug,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -81,14 +88,19 @@ impl Registry {
         Permits::new(self.root.join("permits"), max)
     }
 
-    /// The background job table for this project.
-    pub fn jobs(&self) -> Jobs {
-        Jobs::new(self.root.join("jobs"))
+    /// Durable state for semantics scoped to one Artist identity/session.
+    pub fn artist_states(&self) -> ArtistStates {
+        ArtistStates::new(self.root.join("artists"))
     }
 
     /// The universal durable session registry for this project.
     pub fn sessions(&self) -> Sessions {
         Sessions::new(self.root.join("sessions"))
+    }
+
+    /// Durable HTTP MCP artist identities for this project.
+    pub fn http_identities(&self) -> HttpIdentities {
+        HttpIdentities::new(self.root.join("http-identities"))
     }
 
     /// A message store rooted here rather than machine-wide.
@@ -121,12 +133,12 @@ impl Registry {
 /// The machine-wide name roster.
 ///
 /// Not per project: two agents in different repositories must not both be
-/// Monet, because `tell(Monet)` has to mean one agent on this machine.
+/// Monet, because universal `send` to a bare Artist name has machine-wide meaning.
 pub fn names() -> Names {
     Names::new(names_root())
 }
 
-/// The machine-wide mailbox and group store.
+/// The machine-wide durable mailbox store.
 ///
 /// Machine-wide for the same reason names are: a message is addressed to an
 /// agent, and agents are unique across the machine rather than within a

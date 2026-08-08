@@ -2,7 +2,8 @@
 name = "hashline-tools"
 version = "0.1.0"
 edition = "2021"
-description = "Mnemonic line-anchor file tools excised from RealArtist: read/write/edit with hidden line hashes, multi-agent coordinator, and SQLite persistence"
+description = "Deterministic semantic anchor file tools with multi-agent coordination"
+
 license = "MIT OR Apache-2.0"
 readme = "FRANKENSTEIN.md"
 keywords = ["agents", "file-edit", "anchors", "hash"]
@@ -10,16 +11,14 @@ categories = ["development-tools", "filesystem"]
 
 
 [dependencies]
+artist-ast = { path = "../artist-ast", default-features = false }
 anyhow = "1"
 blake3 = "1"
 fs2 = "0.4"
 rusqlite = { version = "0.40", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "rt", "macros", "time"] }
 tempfile = "3"
-tree-sitter = "0.26"
-tree-sitter-rust = "0.24"
+
 uuid = { version = "1", features = ["v4"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

@@ -1,7 +1,7 @@
 //! Turning `(file, line)` into `(path, anchor)`.
 //!
 //! `artist-ast` reports locations the way a compiler does — a path and a line
-//! number. Artist addresses lines by content-derived mnemonic, because a line
+//! number. Artist addresses lines by semantic occurrence anchor, because a line
 //! number is invalidated by any insert above it while an anchor survives. Every
 //! cross-file answer therefore has to be translated before the model sees it,
 //! or it hands back coordinates in a system nothing else here speaks.
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 pub struct Located {
     /// Workspace-relative path, as `edit` expects it.
     pub path: String,
-    /// Mnemonic anchor for the line, when one could be issued.
+    /// Semantic anchor for the line, when one could be issued.
     pub anchor: Option<String>,
     /// The original line, kept for the cases an anchor cannot cover: a line
     /// past the end of the file, or a file that could not be read.

@@ -412,10 +412,18 @@ impl ComputerTool {
     /// Dispatch the same structured payload accepted by the model-facing tool.
     /// Resident frontends use this for direct stage input without converting it
     /// through prose or creating a second surface registry.
-    pub async fn dispatch_value(&self, value: Value) -> Result<(), StepError> {
+    /// Dispatch the legacy internal payload and preserve its full model content.
+    /// The Artist agent wraps this behind the shallow `action/session/args` schema;
+    /// resident frontends may still use `dispatch_value` when they intentionally
+    /// discard the presentation.
+    pub async fn invoke_value(&self, value: Value) -> Result<ToolOutput, StepError> {
         let args: ComputerArgs = serde_json::from_value(value)
             .map_err(|error| StepError::Backend(format!("invalid stage input: {error}")))?;
-        self.call(args).await?;
+        self.call(args).await
+    }
+
+    pub async fn dispatch_value(&self, value: Value) -> Result<(), StepError> {
+        self.invoke_value(value).await?;
         Ok(())
     }
 }

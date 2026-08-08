@@ -16,8 +16,8 @@ use artist_session::ask::{Answer, Question, QuestionOption};
 struct Recording;
 
 impl CanvasHost for Recording {
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
-        println!("BRIDGE send mode={mode:?} text={text}");
+    fn send(&self, slug: &str, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
+        println!("BRIDGE send slug={slug} mode={mode:?} text={text}");
         Box::pin(async move {
             match mode {
                 SendMode::Steer => SendOutcome::Steered,
@@ -49,21 +49,20 @@ impl CanvasHost for Recording {
     fn pending_questions(&self) -> Vec<Question> {
         vec![Question {
             id: "q-probe".to_owned(),
-            header: "Probe".to_owned(),
+            ask_session: "ask:probe".to_owned(),
             question: "Does the bridge carry an answer?".to_owned(),
-            multi_select: false,
             options: vec![QuestionOption {
+                id: "o-yes".to_owned(),
                 label: "yes".to_owned(),
-                description: String::new(),
-                preview: None,
+                recommended: true,
             }],
         }]
     }
 
     fn answer_question(&self, answer: Answer, surface: &str) -> bool {
         println!(
-            "BRIDGE answer id={} selected={:?} surface={surface}",
-            answer.question_id, answer.selected
+            "BRIDGE answer id={} selections={:?} surface={surface}",
+            answer.question_id, answer.selections
         );
         true
     }

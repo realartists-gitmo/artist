@@ -26,12 +26,15 @@ base64 = "0.23"
 dashmap = "6"
 dirs = "6"
 futures = "0.3"
+fff-search = "0.10.1"
+neo_frizbee = "0.11.0"
 globset = "0.4"
 ignore = "0.4"
 regex = "1"
 similar = "3"
 llm-provider = { path = "../llm-provider" }
 rig-core = "0.41.0"
+jsonschema = "0.17"
 rmcp = { version = "2.2", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 # `default-features = false` is load-bearing: the default set includes

@@ -40,7 +40,7 @@ artist/                          # Cargo workspace
 │   ├── artist-memory/           # Durable memory: Mnestic store, local embeddings, code index
 │   ├── artist-tools/            # Built-in tools: bash, read, write, edit, find, grep
 │   ├── artist-computer/         # Computer use: surfaces, anchors, the isolated Stage
-│   ├── hashline-tools/          # Mnemonic line anchors + multi-agent file coordination
+│   ├── hashline-tools/          # Deterministic semantic anchors + multi-agent file coordination
 │   └── llm-provider/            # ChatGPT OAuth, SavedProvider, Secret
 └── docs/
     ├── architecture.md          # This file
@@ -63,7 +63,7 @@ artist/                          # Cargo workspace
 | **artist-memory** | Durable cross-session memory: a Mnestic (CozoDB fork) store holding curated facts and an embedded code index, local CPU embeddings via rten, and AST-aware chunking. |
 | **artist-tools** | Tool implementations bound to a `Workspace` (project-jailed file tools, PTY bash, FFF find/grep). |
 | **artist-computer** | Generalized computer use: one observation contract over every application surface, an isolated graphical Stage (headless Wayland compositor + private session bus), and the abstraction ladder that picks the cheapest rung per surface. See [computer use](computer-use.md). |
-| **hashline-tools** | Standalone file-tool core: mnemonic anchors, hidden line hashes, SQLite anchor state, cross-process path locks. Its mnemonic allocator is shared with `artist-computer`, so file anchors and screen anchors mint identically. |
+| **hashline-tools** | Standalone file-tool core: deterministic v1 semantic anchors, exact opaque resolution, coordination-only SQLite state, and cross-process path locks. File and computer surfaces share the same stateless v1 address machinery. |
 | **llm-provider** | ChatGPT subscription auth (PKCE), provider records, redacted-but-serializable secrets. |
 
 Workspace edition is Rust 2024; MSRV `1.88`. License: MIT OR Apache-2.0.
@@ -403,8 +403,8 @@ recall would read as memory simply not working.
 | Tool | Role |
 |------|------|
 | **bash** | One-shot `exec` or persistent PTY sessions. Stopped/exited sessions are reaped from the map (one tombstone appearance in `list`). Unsandboxed by design. |
-| **read** | Bounded text with mnemonic line anchors; images report metadata in the tool channel (image results surface a count marker in the UI). |
-| **edit** | Atomic replacements keyed by mnemonic anchors from the latest read. |
+| **read** | Bounded text with deterministic semantic line anchors; images report metadata in the tool channel (image results surface a count marker in the UI). |
+| **edit** | Atomic replacements keyed by exact semantic anchors from the current live file. |
 | **write** | Atomic full-file create/overwrite. |
 | **find/grep** | FFF index queries. The project index builds in the **background**; an absolute scope outside the project creates a watcher-free transient index for that path. |
 
@@ -547,6 +547,6 @@ for cross-run replay.
 - `crates/artist-rules/wit/rule-plugin.wit` — the plugin interface
 - `crates/artist-rules/tests/fixtures/rule-guest/` — plugin starter template
 - `crates/llm-provider/README.md` — OAuth and secret handling notes
-- `crates/hashline-tools/FRANKENSTEIN.md` / `docs/mnemonic-anchors.md`
+- `crates/hashline-tools/FRANKENSTEIN.md` / `docs/semantic-anchors-v1.md`
 - `crates/artist-agent/src/system_prompt.md` — model-facing tool policy
 - `docs/chatgpt-web-mesh.md` — component-owned ChatGPT tools over the Veilid mesh

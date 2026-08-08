@@ -1,36 +1,31 @@
 //! # hashline-tools
 //!
-//! Excised from [RealArtist](https://github.com/): stable **mnemonic line anchors**
-//! backed by hidden content hashes, plus a multi-agent coordinator with SQLite
-//! persistence and cross-process path locking.
+//! Deterministic semantic line anchors plus multi-agent file coordination.
 //!
-//! ## Layers
-//!
-//! | Layer | Type | Role |
-//! |-------|------|------|
-//! | Core | [`FileToolManager`] | In-process read / write / edit with anchors |
-//! | Persist | [`StateStore`] | Per-agent anchor map in SQLite |
-//! | Coord | [`FileCoordinator`] | Multi-agent + path locks + whole-file BLAKE3 |
-//!
-//! Most harnesses should start with [`FileCoordinator::open`].
-
+//! Anchor identities and v1 addresses are stateless. SQLite is used only for
+//! coordination metadata such as writer attribution, never anchor allocation.
 mod agent;
+mod anchor_address_v1 {
+    include!("anchor_address_v1.rs");
+}
+mod anchor_table;
 mod coordinator;
 mod error;
 mod file_tools;
-mod mnemonic_anchors;
+mod semantic_anchors;
 mod state;
 
 pub use agent::{AgentId, AgentIdentity};
+pub use anchor_table::{not_issued_message, stale_anchor_message, AnchorTable};
 pub use coordinator::{
     content_hash, CoordinatedEditResult, CoordinatedReadResult, FileCoordinator, WriteCondition,
     ANCHOR_USAGE,
 };
 pub use error::{HashlineError, HashlineErrorCode};
 pub use file_tools::{
-    AnchoredLine, ConfirmationRequired, Drift, DriftCandidate, DriftKind, EditOperation,
-    EditRequest, EditResult, FileToolConfig, FileToolManager, ReadFileRequest, ReadFileResult,
-    WriteFileRequest, WriteFileResult,
+    AnchoredLine, Drift, DriftCandidate, DriftKind, EditOperation, EditRequest, EditResult,
+    FileToolConfig, FileToolManager, ReadFileRequest, ReadFileResult, WriteFileRequest,
+    WriteFileResult,
 };
-pub use mnemonic_anchors::{not_issued_message, stale_anchor_message, AnchorTable};
+pub use semantic_anchors::ANCHOR_ABI_VERSION;
 pub use state::StateStore;

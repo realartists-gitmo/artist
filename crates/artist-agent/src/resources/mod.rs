@@ -22,7 +22,7 @@ struct ResourceData {
     agents: Vec<agents::AgentsFile>,
     nested_agents: Vec<std::path::PathBuf>,
     skills: BTreeMap<String, skills::Skill>,
-    activated: std::sync::Mutex<std::collections::HashSet<String>>,
+
     diagnostics: Vec<String>,
 }
 
@@ -36,7 +36,7 @@ impl Resources {
             agents,
             nested_agents,
             skills,
-            activated: std::sync::Mutex::new(std::collections::HashSet::new()),
+
             diagnostics,
         }))
     }
@@ -61,24 +61,7 @@ impl Resources {
             .collect()
     }
 
-    pub fn explicit_skill_section(&self, input: &str) -> String {
-        let mut output = String::new();
-        for skill in self.0.skills.values() {
-            if mentions_skill(input, &skill.name)
-                && let Ok(content) = self.skill_tool().activate(skill.name.clone())
-            {
-                output.push_str("\n\n");
-                output.push_str(&content);
-            }
-        }
-        output
-    }
-
-    pub fn skill_tool(&self) -> SkillTool {
-        SkillTool(self.clone())
-    }
-
-    pub fn prompt_section(&self) -> String {
+    pub fn prompt_section(&self, profile: &crate::profiles::Profile) -> String {
         let mut output = String::new();
         if !self.0.agents.is_empty() {
             output.push_str(
@@ -119,11 +102,17 @@ impl Resources {
             output.push_str("</scoped_project_instructions>");
         }
 
-        if !self.0.skills.is_empty() {
-            output.push_str("\n\nThe following skills provide specialized instructions. When a task matches a description, call the skill tool with mode=activate before proceeding.\n<available_skills>\n");
-            for skill in self.0.skills.values() {
+        let visible = self
+            .0
+            .skills
+            .values()
+            .filter(|skill| profile.permits_skill(&skill.name))
+            .collect::<Vec<_>>();
+        if !visible.is_empty() {
+            output.push_str("\n\nThe following skills provide specialized instructions. Use the skill tool to search first; an exact name loads only after it appeared in an earlier search result.\n<available_skills>\n");
+            for skill in visible {
                 output.push_str(&format!(
-                    "  <skill><name>{}</name><description>{}</description></skill>\n",
+                    "  <skill><id>skill:{}</id><description>{}</description></skill>\n",
                     xml(&skill.name),
                     xml(&skill.description.chars().take(1024).collect::<String>())
                 ));
@@ -139,18 +128,6 @@ fn floor_char_boundary(value: &str, mut index: usize) -> usize {
         index -= 1;
     }
     index
-}
-
-fn mentions_skill(input: &str, name: &str) -> bool {
-    let needle = format!("${name}");
-    input.match_indices(&needle).any(|(index, _)| {
-        input[index + needle.len()..]
-            .chars()
-            .next()
-            .is_none_or(|character| {
-                !(character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-')
-            })
-    })
 }
 
 fn xml(value: &str) -> String {

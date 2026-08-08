@@ -388,7 +388,7 @@ mod tests {
             SessionEvent::HandoffPerformed(crate::event::HandoffPerformed {
                 from: from.into(),
                 to: to.into(),
-                summary: "carry on".into(),
+                brief: "carry on".into(),
                 chain: vec![from.into(), to.into()],
                 read_files: Vec::new(),
                 modified_files: Vec::new(),

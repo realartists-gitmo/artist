@@ -1,25 +1,17 @@
 use crate::{ToolError, Workspace, output};
 use dashmap::{DashMap, DashSet};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-use rig_core::tool::PortableTool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
     path::Path,
-    process::Stdio,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    time::Duration,
 };
 
 const EXEC_CAP: usize = 50 * 1024;
-const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 300;
 const SESSION_CAP: usize = 2 * 1024 * 1024;
 const INPUT_SESSION_ID: &str = "artist-input-shell";
 
@@ -189,6 +181,119 @@ impl BashTool {
         }
     }
 
+    /// Spawn a PTY-backed process for the harness-level durable session layer.
+    /// The returned id is strictly an internal process-local handle.
+    pub async fn managed_start(
+        &self,
+        command: String,
+        cwd: Option<String>,
+        env: Option<BTreeMap<String, String>>,
+    ) -> Result<String, ToolError> {
+        let result = self
+            .start(BashArgs {
+                command: Some(command),
+                session_id: None,
+                input: None,
+                wait_ms: Some(0),
+                max_bytes: Some(EXEC_CAP),
+                cwd,
+                env,
+            })
+            .await?;
+        BashResult::parse(&result).session_id.ok_or_else(|| {
+            ToolError::Message("managed bash failed to allocate an internal session".into())
+        })
+    }
+
+    /// Non-draining current snapshot for the universal session registry.
+    pub fn managed_snapshot(&self, id: &str) -> Result<BashResult, ToolError> {
+        let session = self.session(id)?;
+        let waited = session
+            .child
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .try_wait()?;
+        let (status, exit_code) = match waited {
+            None => (BashStatus::Running, None),
+            Some(status) if status.success() => {
+                (BashStatus::Completed, Some(status.exit_code() as i32))
+            }
+            Some(status) => (BashStatus::Failed, Some(status.exit_code() as i32)),
+        };
+        let output = session
+            .output
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let truncated = output.len() > EXEC_CAP;
+        let output = if truncated {
+            let mut start = output.len().saturating_sub(EXEC_CAP);
+            while start < output.len() && !output.is_char_boundary(start) {
+                start += 1;
+            }
+            output[start..].to_owned()
+        } else {
+            output
+        };
+        Ok(BashResult {
+            status,
+            exit_code,
+            session_id: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            output,
+            duration_ms: None,
+            timeout_secs: None,
+            terminated_by: None,
+            truncated,
+            retry_as_background: false,
+        })
+    }
+
+    /// Whether the live PTY input channel is currently able to accept another unit.
+    /// This is an integration state, not an elapsed-time or output-quiet heuristic.
+    pub fn managed_input_ready(&self, id: &str) -> Result<bool, ToolError> {
+        let session = self.session(id)?;
+        let running = session
+            .child
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .try_wait()?
+            .is_none();
+        if !running {
+            return Ok(false);
+        }
+        Ok(session.writer.try_lock().is_ok())
+    }
+
+    /// Write one unit to a managed PTY. Completion of this method means the PTY
+    /// integration accepted the bytes; it does not use a quiet-period heuristic.
+    pub fn managed_send(&self, id: &str, input: &str) -> Result<(), ToolError> {
+        let session = self.session(id)?;
+        let mut writer = session
+            .writer
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        writer.write_all(input.as_bytes())?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Stop a locally owned managed process immediately.
+    pub fn managed_abort(&self, id: &str) -> Result<(), ToolError> {
+        let session = self.session(id)?;
+        {
+            let mut child = session
+                .child
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            child.kill()?;
+            let _ = child.wait();
+        }
+        self.sessions.remove(id);
+        Ok(())
+    }
+
     /// Send a command to the single persistent shell used by `!` input.
     /// An empty command reads any output produced since the previous request.
     pub async fn run_input(&self, command: &str) -> Result<String, ToolError> {
@@ -206,17 +311,13 @@ impl BashTool {
         }
         if !self.sessions.contains_key(INPUT_SESSION_ID) {
             self.start(BashArgs {
-                mode: Some("start".into()),
                 command: Some(input_shell_command()),
                 session_id: Some(INPUT_SESSION_ID.into()),
                 input: None,
-                timeout: None,
                 wait_ms: Some(300),
                 max_bytes: Some(EXEC_CAP),
                 cwd: None,
                 env: Some(BTreeMap::from([("TERM".into(), "dumb".into())])),
-                signal: None,
-                background: None,
             })
             .await?;
             // Shell initialization can continue writing after the first PTY read.
@@ -245,17 +346,13 @@ impl BashTool {
         input: &str,
     ) -> Result<String, ToolError> {
         self.send(BashArgs {
-            mode: Some("send".into()),
             command: None,
             session_id: Some(session_id.into()),
             input: Some(input.into()),
-            timeout: None,
             wait_ms: None,
             max_bytes: None,
             cwd: None,
             env: None,
-            signal: None,
-            background: None,
         })
         .await
     }
@@ -272,12 +369,13 @@ fn clean_input_output(output: &str, command: Option<&str>) -> String {
         }
     }
     let mut lines = lines.peekable();
-    if let Some(command) = command
-        && lines
+    if let Some(command) = command {
+        if lines
             .peek()
             .is_some_and(|line| line.trim_end_matches('\r').trim_end().ends_with(command))
-    {
-        lines.next();
+        {
+            lines.next();
+        }
     }
     lines.collect::<Vec<_>>().join("\n")
 }
@@ -289,219 +387,33 @@ fn input_shell_command() -> String {
         .unwrap_or_else(|| "/bin/sh".into())
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BashArgs {
-    mode: Option<String>,
+/// Arguments for the internal session operations. Never reaches a model: the
+/// session-shaped surface is `artist-agent`'s, which drives these methods.
+struct BashArgs {
     command: Option<String>,
     session_id: Option<String>,
     input: Option<String>,
-    timeout: Option<u64>,
     wait_ms: Option<u64>,
     max_bytes: Option<usize>,
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
-    signal: Option<String>,
-    background: Option<bool>,
 }
 
 impl BashArgs {
     fn for_input(input: Option<String>) -> Self {
         Self {
-            mode: Some(if input.is_some() { "send" } else { "read" }.into()),
             command: None,
             session_id: Some(INPUT_SESSION_ID.into()),
             input,
-            timeout: None,
             wait_ms: Some(250),
             max_bytes: Some(EXEC_CAP),
             cwd: None,
             env: None,
-            signal: None,
-            background: None,
         }
     }
 }
-impl PortableTool for BashTool {
-    const NAME: &'static str = "bash";
-    type Error = ToolError;
-    type Args = BashArgs;
-    type Output = String;
-    fn description(&self) -> String {
-        "Run shell commands or manage persistent terminal sessions.".into()
-    }
-    fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"mode":{"enum":["exec","start","send","read","stop","list"],"description":"Operation to perform. Defaults to `exec` when command is provided, otherwise `list`."},"command":{"type":"string","description":"Shell command to execute."},"background":{"type":"boolean","default":false,"description":"Start a persistent session immediately and return without waiting for completion."},"sessionId":{"type":"string","description":"Persistent session identifier for session operations."},"input":{"type":"string","description":"Input to send to a persistent session."},"timeout":{"type":"integer","minimum":1,"default":DEFAULT_EXEC_TIMEOUT_SECS,"description":"Maximum seconds to wait for a foreground command; timed-out commands are killed."},"waitMs":{"type":"integer","description":"Milliseconds to wait when reading a persistent session."},"maxBytes":{"type":"integer","description":"Maximum output bytes to return."},"cwd":{"type":"string","description":"Project-relative or absolute working directory. Defaults to the project root."},"env":{"type":"object","additionalProperties":{"type":"string"},"description":"Environment variables for the command."},"signal":{"enum":["SIGINT","SIGTERM","SIGKILL"],"description":"Signal to send when stopping a persistent session."}},"additionalProperties":false})
-    }
-    async fn call(&self, args: BashArgs) -> Result<String, ToolError> {
-        let mode = args.mode.as_deref().unwrap_or(if args.command.is_some() {
-            "exec"
-        } else {
-            "list"
-        });
-        match mode {
-            "exec" if args.background.unwrap_or(false) => self.start(args).await,
-            "exec" => self.exec(args).await,
-            "start" => self.start(args).await,
-            "send" => self.send(args).await,
-            "read" => self.read(args).await,
-            "stop" => self.stop(args).await,
-            "list" => Ok(self.list()),
-            other => Err(ToolError::Message(format!("invalid bash mode: {other}"))),
-        }
-    }
-}
+
 impl BashTool {
-    /// Run a foreground command, coalescing it with an identical one already in
-    /// flight when the command is a tree job.
-    ///
-    /// Only the foreground path reaches the coalescer, and every request from
-    /// it is [`Mode::Blocking`]. Artist's background bash mode starts a
-    /// *persistent session* rather than a detached build — a different thing
-    /// with a different return shape — so there is currently no caller that can
-    /// supersede without blocking, and the no-starvation bound holds trivially.
-    /// `Mode::Background` exists for when a detached build path lands; it is
-    /// the rule that keeps the bound once one does.
-    async fn exec(&self, args: BashArgs) -> Result<String, ToolError> {
-        let Some(command) = args.command.clone() else {
-            return Err(ToolError::Message("command is required".into()));
-        };
-        let Some(job) = crate::tree_jobs::classify(&command, self.workspace.root()) else {
-            return self.exec_once(args, None).await;
-        };
-
-        let shared = crate::coalesce::global()
-            .run(&job, crate::coalesce::Mode::Blocking, |cancel| async move {
-                self.exec_once(args, Some(cancel))
-                    .await
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(ToolError::Message)?;
-
-        // Say when a result covers more than the caller's own work. A model
-        // that reads "failed" needs to know the failure may be in another
-        // agent's edits, not its own — misattribution is the failure mode of a
-        // shared result, not staleness.
-        Ok(if shared.waiters > 1 || shared.superseded_earlier {
-            format!(
-                "note: this run was shared with {} concurrent request(s) on this worktree, so \
-                 its result may include changes made by other agents\n{}",
-                shared.waiters, shared.value
-            )
-        } else {
-            shared.value
-        })
-    }
-
-    async fn exec_once(
-        &self,
-        args: BashArgs,
-        cancel: Option<tokio_util::sync::CancellationToken>,
-    ) -> Result<String, ToolError> {
-        let command = args
-            .command
-            .ok_or_else(|| ToolError::Message("command is required".into()))?;
-        let cwd = self.cwd(args.cwd.as_deref())?;
-        let mut process = Command::new("/bin/bash");
-        process
-            .arg("-lc")
-            .arg(command)
-            .current_dir(cwd)
-            .kill_on_drop(true)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(unix)]
-        process.process_group(0);
-        if let Some(env) = args.env {
-            process.envs(env);
-        }
-        let cap = args.max_bytes.unwrap_or(EXEC_CAP).min(EXEC_CAP);
-        let started = Instant::now();
-        let mut child = process.spawn()?;
-        let stdout_buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
-        let stderr_buffer = Arc::new(tokio::sync::Mutex::new((Vec::new(), false)));
-        let mut stdout = tokio::spawn(pump(
-            child.stdout.take().unwrap(),
-            stdout_buffer.clone(),
-            cap,
-        ));
-        let mut stderr = tokio::spawn(pump(
-            child.stderr.take().unwrap(),
-            stderr_buffer.clone(),
-            cap,
-        ));
-        let timeout_secs = args.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
-        let timeout = Duration::from_secs(timeout_secs);
-        // Supersession is why the token is here: a newer request for the same
-        // command means this build is producing artifacts for a tree state that
-        // has already moved on, so it is killed rather than left to finish and
-        // write fingerprints that no longer match the source.
-        let waited = match &cancel {
-            Some(token) => {
-                tokio::select! {
-                    result = tokio::time::timeout(timeout, child.wait()) => result,
-                    () = token.cancelled() => Ok(Err(std::io::Error::other("superseded"))),
-                }
-            }
-            None => tokio::time::timeout(timeout, child.wait()).await,
-        };
-        let superseded = cancel.as_ref().is_some_and(|token| token.is_cancelled());
-        let (status, exit_code) = match waited {
-            Ok(result) if !superseded => {
-                let status = result?;
-                (
-                    if status.success() {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    status.code(),
-                )
-            }
-            _ => {
-                #[cfg(unix)]
-                if let Some(pid) = child.id() {
-                    let _ = nix::sys::signal::killpg(
-                        nix::unistd::Pid::from_raw(pid as i32),
-                        nix::sys::signal::Signal::SIGKILL,
-                    );
-                }
-                let _ = child.kill().await;
-                // A superseded run is not a timeout, and must not read as one:
-                // the caller is about to be carried onto a newer run, and
-                // "timedOut" would tell the model its command was too slow.
-                (if superseded { "superseded" } else { "timedOut" }, None)
-            }
-        };
-        // Bound the wait for the pipes to close: a daemonizing grandchild that
-        // escaped the killed process group can hold stdout/stderr open forever,
-        // which would otherwise hang this call even though the child exited.
-        if tokio::time::timeout(Duration::from_secs(2), async {
-            let _ = tokio::join!(&mut stdout, &mut stderr);
-        })
-        .await
-        .is_err()
-        {
-            stdout.abort();
-            stderr.abort();
-        }
-        let stdout_buffer = stdout_buffer.lock().await;
-        let stderr_buffer = stderr_buffer.lock().await;
-        let stdout_text = String::from_utf8_lossy(&stdout_buffer.0);
-        let stderr_text = String::from_utf8_lossy(&stderr_buffer.0);
-        let duration_ms = started.elapsed().as_millis();
-        let terminated_by = if matches!(status, "timedOut" | "superseded") {
-            "SIGKILL"
-        } else {
-            "none"
-        };
-        Ok(format!(
-            "status: {status}\nexitCode: {}\ndurationMs: {duration_ms}\ntimeoutSecs: {timeout_secs}\nterminatedBy: {terminated_by}\ntruncated: {}\n--- stdout ---\n{stdout_text}\n--- stderr ---\n{stderr_text}",
-            exit_code.map_or_else(|| "none".to_owned(), |code| code.to_string()),
-            stdout_buffer.1 || stderr_buffer.1,
-        ))
-    }
     async fn start(&self, args: BashArgs) -> Result<String, ToolError> {
         let command = args
             .command
@@ -671,94 +583,6 @@ impl BashTool {
             self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?
         ))
     }
-    async fn stop(&self, args: BashArgs) -> Result<String, ToolError> {
-        let id = args
-            .session_id
-            .ok_or_else(|| ToolError::Message("sessionId is required".into()))?;
-        let session = self.session(&id)?;
-        let requested = args.signal.as_deref().unwrap_or("SIGINT");
-        #[cfg(unix)]
-        {
-            use nix::{
-                sys::signal::{Signal, killpg},
-                unistd::Pid,
-            };
-            let signal = match requested {
-                "SIGINT" => Signal::SIGINT,
-                "SIGTERM" => Signal::SIGTERM,
-                "SIGKILL" => Signal::SIGKILL,
-                other => return Err(ToolError::Message(format!("invalid signal: {other}"))),
-            };
-            if let Some(pid) = session
-                .child
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .process_id()
-            {
-                let _ = killpg(Pid::from_raw(pid as i32), signal);
-            }
-        }
-        #[cfg(not(unix))]
-        session
-            .child
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .kill()?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let output = self.session_output(&id, args.max_bytes.unwrap_or(20 * 1024))?;
-        // Reap the map entry once the child is gone so long-lived processes
-        // don't accumulate dead sessions and their output buffers.
-        let exited = session
-            .child
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .try_wait()
-            .ok()
-            .flatten()
-            .is_some();
-        let status = if exited {
-            self.sessions.remove(&id);
-            "stopped (session removed)"
-        } else {
-            "stopping"
-        };
-        Ok(format!(
-            "status: {status}\nsessionId: {id}\ntruncated: false\n--- output ---\n{output}"
-        ))
-    }
-    fn list(&self) -> String {
-        if self.sessions.is_empty() {
-            return "sessions: []".into();
-        }
-        // Exited sessions appear once (as a tombstone) and are then reaped.
-        let mut exited = Vec::new();
-        let lines = self
-            .sessions
-            .iter()
-            .map(|entry| {
-                let status = match entry
-                    .value()
-                    .child
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .try_wait()
-                {
-                    Ok(Some(_)) => {
-                        exited.push(entry.key().clone());
-                        "exited (removed)"
-                    }
-                    Ok(None) => "running",
-                    Err(_) => "unknown",
-                };
-                format!("{}\t{status}\t{}", entry.key(), entry.value().command)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        for id in exited {
-            self.sessions.remove(&id);
-        }
-        format!("sessions:\n{lines}")
-    }
     fn cwd(&self, input: Option<&str>) -> Result<std::path::PathBuf, ToolError> {
         Ok(match input {
             Some(path) => self.workspace.resolve_existing(path)?,
@@ -836,5 +660,20 @@ mod tests {
         let parsed = BashResult::parse("sessions:\nt-red-wolf\trunning\tcargo test");
         assert_eq!(parsed.status, BashStatus::Listed);
         assert!(parsed.output.contains("t-red-wolf"));
+    }
+
+    #[tokio::test]
+    async fn managed_readiness_comes_from_the_live_pty_input_channel() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(root.path(), &root.path().join("state"), "test").unwrap();
+        let tool = BashTool::new(workspace);
+        let id = tool
+            .managed_start("cat".into(), None, None)
+            .await
+            .expect("start managed PTY");
+        assert!(tool.managed_input_ready(&id).unwrap());
+        tool.managed_send(&id, "hello\n").unwrap();
+        assert!(tool.managed_input_ready(&id).unwrap());
+        tool.managed_abort(&id).unwrap();
     }
 }

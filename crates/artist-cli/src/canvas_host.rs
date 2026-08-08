@@ -114,7 +114,7 @@ impl CanvasControl {
 }
 
 impl CanvasHost for CanvasControl {
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
+    fn send(&self, _slug: &str, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
         Box::pin(async move {
             let control = self
                 .inner
@@ -336,7 +336,9 @@ mod tests {
 
         canvas.set_busy(false);
         assert_eq!(
-            canvas.send("while idle".into(), SendMode::Queue).await,
+            canvas
+                .send("demo", "while idle".into(), SendMode::Queue)
+                .await,
             SendOutcome::Queued
         );
         assert_eq!(extension.take_prompts(), ["while idle"]);
@@ -344,7 +346,7 @@ mod tests {
         // Steering with nothing to steer is refused rather than swallowed.
         assert_eq!(
             canvas
-                .send("nothing to correct".into(), SendMode::Steer)
+                .send("demo", "nothing to correct".into(), SendMode::Steer)
                 .await,
             SendOutcome::NoTurnRunning
         );
@@ -355,7 +357,9 @@ mod tests {
 
         canvas.set_busy(true);
         assert_eq!(
-            canvas.send("mid turn".into(), SendMode::Steer).await,
+            canvas
+                .send("demo", "mid turn".into(), SendMode::Steer)
+                .await,
             SendOutcome::Steered
         );
         // Steering goes to the steering handle, not the prompt queue.
@@ -374,22 +378,32 @@ mod tests {
 
         let waiting = registry.post(Question {
             id: "q1".into(),
-            header: String::new(),
+            ask_session: "ask:which".into(),
             question: "Which?".into(),
-            multi_select: false,
-            options: Vec::new(),
+            options: vec![artist_session::QuestionOption {
+                id: "o1".into(),
+                label: "A".into(),
+                recommended: false,
+            }],
         });
         assert_eq!(canvas.pending_questions().len(), 1);
 
         assert!(canvas.answer_question(
             Answer {
                 question_id: "q1".into(),
-                selected: vec!["A".into()],
-                notes: None,
+                selections: vec![artist_session::ask::Selection {
+                    option_id: Some("o1".into()),
+                    note: None,
+                }],
             },
             "canvas:demo",
         ));
-        assert_eq!(waiting.await.expect("answered").selected, ["A"]);
+        assert_eq!(
+            waiting.await.expect("answered").selections[0]
+                .option_id
+                .as_deref(),
+            Some("o1")
+        );
     }
 
     /// The whole point of publishing the registry: a permitted, declared tool

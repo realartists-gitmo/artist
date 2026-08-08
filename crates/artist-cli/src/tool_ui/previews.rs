@@ -93,7 +93,7 @@ fn is_bash_header(line: &str) -> bool {
 }
 
 fn edit_preview(output: &str) -> PresentedOutput {
-    // The diff already carries a mnemonic-anchor gutter from artist-tools, so it
+    // The diff already carries a semantic-anchor gutter from artist-tools, so it
     // is displayed verbatim rather than being renumbered here.
     let semantic_output = output
         .split_once("Diff:\n")

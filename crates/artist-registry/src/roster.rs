@@ -48,7 +48,7 @@ mod tests {
 
     #[test]
     fn the_roster_parses_to_plain_names() {
-        assert!(ROSTER.len() > 500, "roster is {}", ROSTER.len());
+        assert_eq!(ROSTER.len(), 736, "the identity roster is contractual");
         assert!(ROSTER.contains(&"Monet"));
         assert!(
             ROSTER.iter().all(|name| !name.is_empty()),

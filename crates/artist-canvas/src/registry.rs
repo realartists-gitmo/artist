@@ -8,7 +8,10 @@
 //! the harness rewrites on every interaction, leaving the canvas itself
 //! trackable and the user's `git status` clean.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use crate::manifest::Manifest;
 
@@ -47,43 +50,78 @@ impl Registry {
     /// error, mirroring extension discovery: one broken canvas should not stop
     /// the others from opening.
     pub fn discover(project: &Path) -> Self {
-        let root = project.join(CANVAS_DIR);
+        let config_root = std::env::var_os("ARTIST_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| dirs::config_dir().map(|path| path.join("artist")));
+        Self::discover_from(project, config_root.as_deref())
+    }
+
+    /// Merge global config canvases below project-local canvases. A later scope owns a
+    /// slug even when its manifest is malformed, so a broken local canvas cannot reveal
+    /// a same-named global canvas behind it.
+    pub fn discover_from(project: &Path, config_root: Option<&Path>) -> Self {
         let mut registry = Registry::default();
-
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            return registry;
-        };
-        let mut found: Vec<_> = entries.flatten().collect();
-        found.sort_by_key(std::fs::DirEntry::file_name);
-
-        for entry in found {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let slug = entry.file_name().to_string_lossy().into_owned();
-            let directory = entry.path();
-            let manifest_path = directory.join(MANIFEST_FILE);
-            let Ok(source) = std::fs::read_to_string(&manifest_path) else {
-                // A directory without a manifest is not a canvas; say nothing.
-                continue;
-            };
-            match Manifest::parse(&source) {
-                Ok(manifest) => registry.canvases.push(Canvas {
-                    slug,
-                    root: directory,
-                    manifest,
-                }),
-                Err(error) => registry.diagnostics.push(Diagnostic {
-                    slug,
-                    message: format!("{MANIFEST_FILE} is invalid: {error}"),
-                }),
-            }
+        let mut canvases = BTreeMap::<String, Canvas>::new();
+        if let Some(config_root) = config_root {
+            scan_root(
+                &config_root.join("canvas"),
+                &mut canvases,
+                &mut registry.diagnostics,
+            );
         }
+        scan_root(
+            &project.join(CANVAS_DIR),
+            &mut canvases,
+            &mut registry.diagnostics,
+        );
+        registry.canvases = canvases.into_values().collect();
         registry
     }
 
     pub fn get(&self, slug: &str) -> Option<&Canvas> {
         self.canvases.iter().find(|canvas| canvas.slug == slug)
+    }
+}
+
+fn scan_root(
+    root: &Path,
+    canvases: &mut BTreeMap<String, Canvas>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut found: Vec<_> = entries.flatten().collect();
+    found.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in found {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let slug = entry.file_name().to_string_lossy().into_owned();
+        let directory = entry.path();
+        let manifest_path = directory.join(MANIFEST_FILE);
+        let Ok(source) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        // A later scope owns the name whether valid or not.
+        canvases.remove(&slug);
+        match Manifest::parse(&source) {
+            Ok(manifest) => {
+                canvases.insert(
+                    slug.clone(),
+                    Canvas {
+                        slug,
+                        root: directory,
+                        manifest,
+                    },
+                );
+            }
+            Err(error) => diagnostics.push(Diagnostic {
+                slug,
+                message: format!("{MANIFEST_FILE} is invalid: {error}"),
+            }),
+        }
     }
 }
 
@@ -239,6 +277,45 @@ mod tests {
     }
 
     /// One canvas with a typo must not hide the ones that are fine.
+    #[test]
+    fn global_canvases_are_visible_and_project_local_canvases_shadow_them() {
+        let project = temp();
+        let config = temp();
+        let global = config.join("canvas").join("shared");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join(MANIFEST_FILE), "title = \"Global\"").unwrap();
+
+        let from_global = Registry::discover_from(&project, Some(&config));
+        let shared = from_global.get("shared").expect("global canvas visible");
+        assert_eq!(shared.manifest.title, "Global");
+        assert_eq!(shared.root, global);
+
+        write(&project, "shared", "title = \"Local\"");
+        let merged = Registry::discover_from(&project, Some(&config));
+        let shared = merged.get("shared").expect("local canvas visible");
+        assert_eq!(shared.manifest.title, "Local");
+        assert!(shared.root.starts_with(project.join(CANVAS_DIR)));
+    }
+
+    #[test]
+    fn invalid_project_local_manifest_still_shadows_same_named_global_canvas() {
+        let project = temp();
+        let config = temp();
+        let global = config.join("canvas").join("shared");
+        std::fs::create_dir_all(&global).unwrap();
+        std::fs::write(global.join(MANIFEST_FILE), "title = \"Global\"").unwrap();
+        write(&project, "shared", "entry = [1, 2]");
+
+        let merged = Registry::discover_from(&project, Some(&config));
+        assert!(merged.get("shared").is_none());
+        assert!(
+            merged
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.slug == "shared")
+        );
+    }
+
     #[test]
     fn a_broken_manifest_is_reported_without_losing_its_neighbours() {
         let project = temp();

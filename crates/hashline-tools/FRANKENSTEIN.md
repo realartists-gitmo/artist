@@ -2,12 +2,12 @@
 
 This folder is a **standalone crate** excised from RealArtist. It contains everything you need for:
 
-1. **Read / write / edit** tools that expose stable **one-token mnemonic anchors** per line  
-2. **Hidden line hashes** (xxh3 → Crockford base32) for stale detection  
-3. A **multi-agent coordinator** with per-agent in-memory managers  
-4. **SQLite persistence** of issued anchors so restarts do not forget tokens  
-5. **Cross-process path locks** (`fs2` + lock files) so two harness processes do not race on the same path  
-6. **Whole-file BLAKE3** content hashes for conditional write/delete  
+1. **Read / write / edit** tools that expose deterministic **semantic v1 anchors** per line
+2. **Language-neutral occurrence identities** through Artist's existing `artist-ast` / ast-grep stack, with exact-line fallback
+3. A **multi-agent coordinator** with per-agent read/drift views
+4. **SQLite coordination metadata** for agent registration and writer attribution — never anchor allocation
+5. **Cross-process path locks** (`fs2` + lock files) so two harness processes do not race on the same path
+6. **Whole-file BLAKE3** content hashes for conditional write/delete, independent of anchor identity
 
 Shell tools, MCP, diagnostics, queues, screenshots, etc. were **not** included.
 
@@ -20,17 +20,20 @@ hashline-tools/
 ├── Cargo.toml
 ├── FRANKENSTEIN.md          ← you are here
 ├── docs/
-│   └── mnemonic-anchors.md  ← semantics of the token system
+│   └── semantic-anchors-v1.md ← identity/address ABI and textual grammar
 ├── examples/
 │   └── basic.rs             ← end-to-end multi-agent smoke demo
 └── src/
     ├── lib.rs               ← public re-exports
     ├── agent.rs             ← AgentId / AgentIdentity
     ├── error.rs             ← HashlineError (+ codes)
-    ├── mnemonic_anchors.rs  ← token allocator / reconcilation
-    ├── mnemonic_words.txt   ← ~3k one-token vocabulary (do not drop)
-    ├── file_tools.rs        ← FileToolManager (core algorithm + unit tests)
-    ├── state.rs             ← SQLite StateStore (agents + anchor_states only)
+    ├── anchor_address_v1.rs ← frozen generated F_68399 address function (do not edit)
+    ├── anchor_tokens_68399.txt ← frozen row-indexed v1 token vocabulary (do not edit)
+    ├── scheme_v1.json       ← frozen generated v1 scheme metadata
+    ├── semantic_anchors.rs  ← direct row mapping + shortest live rendered prefixes
+    ├── anchor_table.rs      ← deterministic live binding addresses for non-file surfaces
+    ├── file_tools.rs        ← FileToolManager (exact resolution + unit tests)
+    ├── state.rs             ← SQLite StateStore (coordination metadata only)
     └── coordinator.rs       ← FileCoordinator + WriteCondition + content_hash
 ```
 
@@ -44,7 +47,7 @@ cargo test
 cargo run --example basic
 ```
 
-All unit tests (manager, anchors, state) should pass.
+All unit tests (identity, addressing, manager, state, coordinator) should pass.
 
 ---
 
@@ -64,7 +67,7 @@ anyhow = "1"
 
 System requirements:
 
-- A C toolchain for `rusqlite` (bundled SQLite) and `tree-sitter` / `tree-sitter-rust` (used only to stabilize line IDs on `.rs` files).
+- A C toolchain for `rusqlite` (bundled SQLite) and the tree-sitter grammars already pulled by `artist-ast` / ast-grep.
 - Linux/macOS advisory file locks via `fs2` (Windows may need different locking if you care).
 
 ### Option B — vendored workspace member
@@ -83,9 +86,9 @@ If you refuse a separate crate, the minimal file set is:
 
 | Must copy | Optional |
 |-----------|----------|
-| `file_tools.rs`, `mnemonic_anchors.rs`, `mnemonic_words.txt` | `coordinator.rs`, `state.rs`, `agent.rs`, `error.rs` |
+| `file_tools.rs`, `semantic_anchors.rs`, `anchor_address_v1.rs`, `anchor_tokens_68399.txt`, `scheme_v1.json` plus the `artist-ast` dependency | `coordinator.rs`, `state.rs`, `agent.rs`, `error.rs` |
 
-Without coordinator/state you lose multi-agent isolation, restart durability, path locks, and BLAKE3 write conditions — but single-process `FileToolManager` still works.
+Without coordinator/state you lose cross-process path locks, writer attribution, and the high-level conditional-write API — but single-process `FileToolManager` still computes the same v1 anchors because anchor identity/addressing has no persisted state.
 
 ---
 
@@ -117,9 +120,9 @@ let actor = AgentIdentity::from_id(your_agent_key)?;
 let out = coord.read_file(&actor, ReadFileRequest {
     path: "src/main.rs".into(),
     start_line: 1,
-    max_lines: None, // None = whole file; partial reads keep tombstones
+    max_lines: None, // None = whole file; addressing is computed against the whole live file
 }).await?;
-// out.result.content  → "time | fn main() {\n..."
+// out.result.content  → "#token: fn main() {\n..."
 // out.result.lines    → structured { line_number, anchor, text }
 // out.content_hash    → whole-file BLAKE3 hex
 // show ANCHOR_USAGE to the model
@@ -134,22 +137,22 @@ let out = coord.write_file(
     // or WriteCondition::Any
 ).await?;
 
-// EDIT (batch of line ops; anchors are the bare tokens)
+// EDIT (batch of line ops; anchors are exact opaque strings beginning with '#')
 let out = coord.edit_file(&actor, EditRequest {
     path: "src/main.rs".into(),
     operations: vec![
         EditOperation::Replace {
-            hash: "time".into(),           // field name is historical: pass mnemonic
-            end_hash: None,                // or Some(end_anchor) for inclusive range
+            anchor: "#token".into(),
+            end_anchor: None,              // or Some(end_anchor) for inclusive range
             content: "fn main() { todo!() }".into(),
         },
         EditOperation::InsertAfter {
-            hash: "people".into(),
+            anchor: "#other".into(),
             content: "// note\n".into(),
         },
         EditOperation::Delete {
-            hash: "know".into(),
-            end_hash: None,
+            anchor: "#third".into(),
+            end_anchor: None,
         },
     ],
 }).await?;
@@ -157,7 +160,7 @@ let out = coord.edit_file(&actor, EditRequest {
 // DELETE (requires matching whole-file BLAKE3)
 let maybe_hash = coord.delete_file(&actor, path, expected_blake3).await?;
 
-// PREVIEW (lock + resolve, no write, no persist)
+// PREVIEW (lock + exact resolve, no write)
 let preview = coord.preview_edit_file(&actor, request).await?;
 ```
 
@@ -168,10 +171,8 @@ use hashline_tools::{FileToolManager, FileToolConfig, ReadFileRequest, WriteFile
 
 let mut mgr = FileToolManager::with_config(FileToolConfig::default());
 let view = mgr.read_file(ReadFileRequest { path, start_line: 1, max_lines: None }).await?;
-// on restart: mgr.import_issued_prefixes(saved); ... export_issued_prefixes()
+// No anchor state is imported/exported: the same live text recomputes the same v1 addresses.
 ```
-
-`EditOperation` fields are still named `hash` / `end_hash` for historical reasons; **values are mnemonic tokens**, not the hidden line hashes. Models never see the hidden hashes.
 
 ---
 
@@ -181,73 +182,54 @@ Expose four tools (names are suggestions):
 
 | Tool | Args | Returns |
 |------|------|---------|
-| `read_file` | `path`, optional `start_line`, `max_lines` | `content` (`anchor \| line` text), `lines[]`, `content_hash`, `total_lines`, `anchor_usage` |
+| `read_file` | `path`, optional `start_line`, `max_lines` | `content` (`ANCHOR: line` text), `lines[]`, `content_hash`, `total_lines`, `anchor_usage` |
 | `write_file` | `path`, `content`, `condition` (`absent` \| `any` \| `{content_hash}`) | same as read view + hash |
 | `edit_file` | `path`, `operations[]` | before/after anchored views, new `content_hash` |
 | `delete_file` | `path`, `expected_hash` | ok / hash mismatch |
 
 **Critical instruction for the model** (also available as `hashline_tools::ANCHOR_USAGE`):
 
-> Use only the bare mnemonic token before `: `. For the rendered line `time: beta`, pass anchor `"time"` (not `"time: beta"`).
+> Use the exact opaque anchor beginning with `#` exactly as returned before `: `. Do not trim, case-fold, Unicode-normalize, fuzzy-match, or include the following line text.
 
 Edit ops:
 
 ```json
-{ "op": "replace", "anchor": "time", "end_anchor": null, "content": "..." }
-{ "op": "delete", "anchor": "time", "end_anchor": "people" }
-{ "op": "insert_before", "anchor": "time", "content": "..." }
-{ "op": "insert_after", "anchor": "time", "content": "..." }
+{ "op": "replace", "anchor": "#token", "end_anchor": null, "content": "..." }
+{ "op": "delete", "anchor": "#token", "end_anchor": "#other" }
+{ "op": "insert_before", "anchor": "#token", "content": "..." }
+{ "op": "insert_after", "anchor": "#token", "content": "..." }
 ```
 
-Map JSON `anchor` → Rust `EditOperation::* { hash: anchor, ... }`.
+JSON `anchor` maps directly to Rust `EditOperation::* { anchor, ... }`.
 
 ---
 
-## Stale anchors and confirmation
+## Stale anchors
 
-If another agent (or a human) changed a line after anchors were issued, the hidden guard may uniquely identify a *different* current line. The manager returns a typed error:
+Resolution is exact against the current live occurrence set. There is no stale relocation, confirmation retry, fuzzy match, or hidden guard. If an address no longer resolves — including when a newly live collision requires a longer prefix — re-read/re-map and use the exact current address.
 
-```rust
-use hashline_tools::ConfirmationRequired;
-
-match coord.edit_file(&actor, request).await {
-    Ok(ok) => { /* ... */ }
-    Err(err) => {
-        if let Some(conf) = err.downcast_ref::<ConfirmationRequired>() {
-            // Tell the model: resubmit THE EXACT SAME edit batch to confirm,
-            // or re-read the file. conf.candidate_anchor is the current token.
-            // conf.context is a small anchored window around the candidate.
-        } else {
-            // other I/O / validation failures
-        }
-    }
-}
-```
-
-Exact retry of the same operation fingerprint applies the edit against the candidate; any change invalidates the pending confirmation.
+Address collisions never mutate occurrence identity. They only extend the rendered v1 prefix.
 
 ---
 
 ## Multi-agent rules (do not skip)
 
-1. **Stable agent IDs.** `AgentIdentity::from_id("session-42")` — use the same string across process restarts for that agent, or their anchors reset.
-2. **One coordinator per process is fine.** Managers are keyed by agent id inside the coordinator.
-3. **Anchors are not shared across agents.** Agent A’s `time` is not agent B’s `time` even for the same file. Each agent must read (or write) before editing.
-4. **Path locks are global.** Write/edit/delete take an exclusive lock on the normalized path (in-process mutex + `flock` file under `lock_directory`).
-5. **SQLite is the durability layer.** After every successful read/write/edit the full issued-prefix map is rewritten for that agent. Partial reads keep tombstones for lines outside the window; full-file reads reclaim dead handles.
+1. **Agent IDs are coordination identity, not anchor identity.** They affect writer attribution/session metadata only.
+2. **Anchors are shared deterministically.** The same occurrence identity in the same live set gets the same address for every agent/session/process.
+3. **Path locks are global.** Write/edit/delete take an exclusive lock on the normalized path (in-process mutex + `flock` file under `lock_directory`).
+4. **SQLite is coordination-only.** It stores agent registration and writer attribution. Opening the v1 store drops obsolete pre-v1 `anchor_states`; no anchor allocator state is loaded or saved.
 
 ---
 
 ## Wiring checklist
 
-- [ ] Persist `hashline.db` and `path-locks/` under your harness data dir (not the user’s repo, unless you want that).
-- [ ] Map your harness’s session/user/agent key → `AgentIdentity`.
+- [ ] Persist `hashline.db` and `path-locks/` under your harness data dir if you want coordination attribution/locks across calls.
+- [ ] Map your harness session/user key → `AgentIdentity` for coordination metadata.
 - [ ] Set `workspace_root` and `allow_outside_workspace: false` in production.
 - [ ] Surface `ANCHOR_USAGE` in every file-tool result the model sees.
-- [ ] On edit errors, special-case `ConfirmationRequired` before generic failure.
+- [ ] Pass anchors byte-for-byte; never trim, case-fold, normalize, or fuzzy-match them.
 - [ ] Prefer `edit_file` for surgical changes; use `write_file` + `ContentHash` for full rewrites.
-- [ ] Never ask the model for the hidden line hash or whole-file hash as an *edit target* — only as the write/delete condition.
-- [ ] Include `mnemonic_words.txt` in the same directory as `mnemonic_anchors.rs` (`include_str!`).
+- [ ] Keep `anchor_address_v1.rs`, `anchor_tokens_68399.txt`, and `scheme_v1.json` byte-identical to the frozen v1 artifacts.
 
 ---
 
@@ -267,10 +249,13 @@ Exact retry of the same operation fingerprint applies the edit against the candi
 
 ## File identity notes (advanced)
 
-- Line IDs: xxh3 of line bytes → 13-char Crockford base32; duplicates disambiguated with neighbor hashes and (for `.rs`) tree-sitter named-node ancestry.
-- Visible anchors: mnemonic words from `mnemonic_words.txt`, packed with a hidden guard prefix (`full_hash + U+001F + short_prefix`).
-- Whole-file hash: BLAKE3 hex via `content_hash(&[u8])`.
-- Internal cursor metadata keys: `__hashline_internal_primary_cursor__` / `__hashline_internal_secondary_cursor__` (stored in the same map as anchors; ignore them in UI).
+- Structured occurrence identity is binary TLV under `artist.anchor.identity.v1\0`: language, node kind, field/role, governing named-node ancestry with available semantic keys, canonical leaf content, then equivalent-occurrence rank.
+- Unknown/unparseable text uses exact logical-line bytes plus equivalent-exact-line rank.
+- Path/filename, line number, byte offset, neighbors, duplicate count, read history, and address collisions are never serialized into identity.
+- Canonical identity bytes go directly into the frozen `anchor_address_v1` F_68399 function; there is no cryptographic pre-hash.
+- Each field element `u` maps directly to row `u` of `anchor_tokens_68399.txt`.
+- Visible grammar is `#TOKEN` or `#TOKEN‖TOKEN...`; the shortest rendered prefix unique among live occurrences is shown.
+- Whole-file BLAKE3 via `content_hash(&[u8])` remains only a conditional write/delete guard and is not an anchor input.
 
 ---
 
@@ -279,20 +264,19 @@ Exact retry of the same operation fingerprint applies the edit against the candi
 Excised from the RealArtist monorepo:
 
 - `crates/core/src/file_tools.rs`
-- `crates/core/src/mnemonic_anchors.rs`
-- `crates/core/src/mnemonic_words.txt`
+- the former mnemonic allocator/vocabulary were replaced by the frozen v1 address/token artifacts
 - `crates/tools/src/files.rs` → `coordinator.rs`
-- `crates/tools/src/state.rs` (anchor + agents tables only)
+- `crates/tools/src/state.rs` (coordination metadata only)
 - Agent types / write conditions / error codes slimmed from `crates/tools`
 
-Internal branding was renamed from `realartist` → `hashline` where it was only cosmetic (temp files, cursor keys). Behavior matches the source tests (30 unit tests included).
+The current crate preserves the file/coordinator surface while replacing legacy hashline/mnemonic identity and allocator state with the versioned v1 semantic-address ABI.
 
 ---
 
 ## Support shape if something breaks
 
-1. Re-run `cargo test` inside this crate.  
-2. Check that `mnemonic_words.txt` is present and not re-encoded.  
-3. Confirm agent ids are stable across restarts.  
-4. Confirm the model is passing bare tokens, not `token | line text`.  
-5. On flaky concurrent writes, ensure all writers go through the same `lock_directory`.
+1. Re-run `cargo test -p hashline-tools` and the dependent `artist-ast`, `artist-tools`, and `artist-computer` suites.
+2. Verify the generated v1 address/token/scheme files are byte-identical to their frozen artifacts.
+3. Confirm `artist-ast::anchors` recognizes the language or intentionally falls back to exact line content.
+4. Confirm the model is passing the exact `#...` address before `: `, without normalization.
+5. On concurrent write failures, verify all writers use the same `lock_directory`; whole-file BLAKE3 guards are separate from anchor resolution.

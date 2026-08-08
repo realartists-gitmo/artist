@@ -1,15 +1,14 @@
 //! The Artist agent loop, built on Rig.
 
-mod ask_outbox;
 mod ask_tool;
 pub mod canvas;
 mod capture;
 mod code_search;
 pub mod compaction;
+mod computer_tool;
 mod contracts;
 mod conversation;
 mod delegate;
-mod delegate_jobs;
 #[cfg(test)]
 mod delegate_tests;
 mod fallback;
@@ -19,9 +18,9 @@ mod identity;
 mod lifecycle;
 pub mod mcp;
 pub mod memory;
-mod message_tools;
 mod messaging;
 pub mod openai_responses;
+pub mod pagination;
 pub mod prefix;
 pub mod profiles;
 mod prompt_config;
@@ -34,8 +33,10 @@ mod ttsr_tests;
 
 pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use resources::AvailableSkill;
-mod statefulness;
+mod bash_tool;
 mod session_tools;
+mod statefulness;
+
 mod steering;
 
 mod thinking;
@@ -509,7 +510,7 @@ pub async fn stream_chat_as(
         handles.recorder.record(artist_session::HandoffPerformed {
             from: from.clone(),
             to: handoff.to.clone(),
-            summary: handoff.summary.clone(),
+            brief: handoff.brief.clone(),
             chain: chain.clone(),
             read_files: Vec::new(),
             modified_files: Vec::new(),
@@ -842,7 +843,7 @@ where
             "{}\n\n{}{}<available_profiles>{}</available_profiles>\nCurrent working directory: {}{}",
             persona,
             prompt_diagnostics,
-            resources.prompt_section(),
+            resources.prompt_section(&profile),
             profiles.catalog(),
             tools.project_root().display(),
             identity.prompt_block(),
@@ -850,16 +851,6 @@ where
     );
 
     let mut seed_prompt = user_message(input);
-    // Skill instructions depend on what the user just typed, so ride them on
-    // the user turn instead of folding them into the (otherwise stable)
-    // preamble — that keeps the preamble a stable prompt-cache prefix so the
-    // history behind it can be reused turn to turn.
-    let skill_section = resources.explicit_skill_section(&input.text);
-    if !skill_section.is_empty()
-        && let Message::User { content } = &mut seed_prompt
-    {
-        content.insert(0, UserContent::text(skill_section));
-    }
     // Recalled memory rides the user turn for the same reason skills do: it is
     // conditioned on what was just typed, so folding it into the preamble would
     // break the stable prompt-cache prefix. Bounded so a cold embedding model
@@ -1070,7 +1061,6 @@ where
             resources: resources.clone(),
             todos: handles.todos.clone(),
             todo_owner: handles.conversation_id.clone(),
-            todo_parent: None,
             attachments: handles.attachments.clone(),
             computer: handles.computer.clone(),
             memory: memory_writer.clone(),
@@ -1091,16 +1081,15 @@ where
                 profiles: profiles.clone(),
                 // The session root holds no seat on the delegation semaphore:
                 // it is not itself a delegate, so it has none to yield.
-                parent_permit: None,
             }),
             ask: handles.ask.clone(),
-            cancel: handles.cancel.clone(),
             inbox: Some(messaging::Inbox::new(identity.name.clone())),
             sessions: session_tools::SessionHub::standard(
                 tools.project_root(),
                 identity.name.clone(),
                 None,
             ),
+            pages: pagination::PageStore::memory(),
             dynamic: mcp_tools
                 .iter()
                 .cloned()

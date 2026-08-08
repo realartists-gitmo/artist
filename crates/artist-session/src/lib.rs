@@ -17,7 +17,6 @@
 //! ```
 
 pub mod ask;
-mod ask_outbox;
 mod attachments;
 pub mod capabilities;
 pub mod chain;
@@ -37,7 +36,6 @@ mod replay;
 mod store;
 
 pub use ask::{Answer, AskRegistry, Question, QuestionOption};
-pub use ask_outbox::AskOutbox;
 pub use attachments::{AttachmentStore, content_digest};
 pub use capabilities::ProviderCapabilities;
 pub use chain::{ChainState, Send as ChainSend};
@@ -53,8 +51,9 @@ pub use event::{
     DelegateFinished, DelegateStarted, Envelope, HandoffPerformed, HistoryRewind, LegacyTurn,
     MAIN_LINEAGE, MemoryWritten, ModelTurn, ProviderContext, RuleFired, RuleInjection,
     RuleRetroFindings, RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated,
-    SessionEvent, SteeringDelivered, TaskFinished, TaskStarted, TaskUpdated, TodoItem, TodoStatus,
-    TodoUpdated, ToolOutcomeRecord, ToolResultEvent, TurnUser,
+    SessionEvent, SteeringDelivered, TaskFinished, TaskStarted, TaskUpdated, TodoClosedStatus,
+    TodoItem, TodoOpenStatus, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
+    TurnUser,
 };
 pub use file_handles::HandleLedger;
 pub use history::{HistoryOptions, build as build_history};

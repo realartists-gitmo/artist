@@ -7,7 +7,10 @@
 //! subagent genuinely is occupying one. Treating slowness as death would hand
 //! the same seat to two runs.
 
-use std::sync::{atomic::{AtomicBool, Ordering}, OnceLock};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -128,7 +131,10 @@ pub fn install_wake_handler() {
     WAKE_HANDLER.get_or_init(|| {
         #[cfg(unix)]
         unsafe {
-            libc::signal(libc::SIGUSR1, wake_signal as *const () as libc::sighandler_t);
+            libc::signal(
+                libc::SIGUSR1,
+                wake_signal as *const () as libc::sighandler_t,
+            );
         }
     });
 }

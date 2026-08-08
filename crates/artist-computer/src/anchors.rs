@@ -85,8 +85,8 @@ impl AnchorError {
     }
 }
 
-/// Per-surface anchor state: the allocator, the last epoch's digests, and the
-/// live node set the current anchors point at.
+/// Per-surface observation state: deterministic live addresses, prior digests, and
+/// the live node set the current anchors point at.
 #[derive(Debug, Default)]
 pub struct AnchorBook {
     table: AnchorTable,
@@ -103,13 +103,8 @@ pub struct AnchorBook {
     /// adjacency relates them. Geometry cannot substitute: a PTY row and many
     /// CDP nodes have no bounds at all.
     order: Vec<String>,
-    /// Anchors that named something and no longer do.
-    ///
-    /// The allocator frees a handle as soon as its element disappears, which is
-    /// what keeps the handle space bounded — but it also erases the difference
-    /// between "you used an anchor that expired" and "you invented that token".
-    /// Only the first has a useful recovery ("observe again"), so the book
-    /// remembers retirements even though the allocator has forgotten them.
+    /// Exact addresses that named something and no longer do. Tombstones are
+    /// diagnostic only and never participate in identity or address allocation.
     retired: HashSet<String>,
     retired_order: VecDeque<String>,
     epoch: u64,
@@ -128,15 +123,15 @@ impl AnchorBook {
     ///
     /// `full` forces the complete set to be rendered; otherwise everything after
     /// the first observation is a delta. Either way the *collection* is always
-    /// complete — a delta is a rendering choice, not a partial read — which is
-    /// what lets `reclaim_dead` stay true and keeps the handle space bounded.
+    /// complete — a delta is a rendering choice, not a partial read — so every
+    /// epoch recomputes the live deterministic address set from complete bindings.
     pub fn observe(&mut self, snapshot: &Snapshot, full: bool) -> Observation {
         let nodes = dedupe(&snapshot.nodes);
         let bindings: Vec<String> = nodes
             .iter()
             .map(|node| node.binding.as_str().to_owned())
             .collect();
-        let anchors = self.table.reconcile(&bindings, true);
+        let anchors = self.table.reconcile(&bindings);
 
         let first = self.epoch == 0;
         let previous_population = self.live.len();
@@ -169,9 +164,8 @@ impl AnchorBook {
             });
         }
 
-        // Removals are computed against the *previous* live set, whose anchors
-        // the reconcile has just freed — so they are reported by the name the
-        // model last saw, then never mentioned again.
+        // Removals are computed against the previous live set, so they are
+        // reported by the exact address the model last saw, then not repeated.
         let mut removed = Vec::new();
         for (anchor, node) in &self.live {
             if digests.contains_key(&node.binding) || live.contains_key(anchor) {
@@ -235,13 +229,12 @@ impl AnchorBook {
 
     /// Resolve an anchor to the node it currently names.
     pub fn resolve(&self, anchor: &str) -> Result<&Node, AnchorError> {
-        let handle = anchor.trim().to_ascii_lowercase();
-        if let Some(node) = self.live.get(&handle) {
+        if let Some(node) = self.live.get(anchor) {
             return Ok(node);
         }
-        // Order matters: a handle the allocator has since reissued is live
-        // above, so reaching here means it genuinely names nothing now.
-        if self.retired.contains(&handle) || self.table.binding(&handle).is_some() {
+        // Exact opaque matching only. A retired exact address is stale; any byte-different
+        // spelling was never issued for this surface.
+        if self.retired.contains(anchor) || self.table.binding(anchor).is_some() {
             return Err(AnchorError::Stale(anchor.to_owned()));
         }
         Err(AnchorError::NotIssued(anchor.to_owned()))
@@ -265,13 +258,8 @@ impl AnchorBook {
     }
 }
 
-/// Give repeated bindings distinct identities before they reach the allocator.
-///
-/// A backend that cannot produce a unique id per element (an OCR box, a
-/// coalesced text run) would otherwise hand the same binding twice, and the
-/// allocator would collapse them to one handle on the second epoch but not the
-/// first — an inconsistency that surfaces as an anchor silently naming the
-/// wrong one of two identical buttons.
+/// Give repeated backend bindings the minimal occurrence rank needed to identify twins.
+/// This is deterministic left-to-right symmetry breaking before v1 addressing.
 fn dedupe(nodes: &[Node]) -> Vec<Node> {
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut out = Vec::with_capacity(nodes.len());
@@ -451,6 +439,29 @@ mod tests {
     }
 
     #[test]
+    fn resolution_is_exact_and_opaque() {
+        let mut book = AnchorBook::new();
+        let observed = book.observe(&snapshot(vec![button("a", "Save")]), false);
+        let anchor = observed.entries[0].anchor.clone();
+        assert!(book.resolve(&anchor).is_ok());
+        assert!(matches!(
+            book.resolve(&format!(" {anchor}")),
+            Err(AnchorError::NotIssued(_))
+        ));
+        let upper = anchor.to_uppercase();
+        if upper != anchor {
+            assert!(matches!(
+                book.resolve(&upper),
+                Err(AnchorError::NotIssued(_))
+            ));
+        }
+        assert!(matches!(
+            book.resolve(&format!("{anchor}x")),
+            Err(AnchorError::NotIssued(_))
+        ));
+    }
+
+    #[test]
     fn identical_names_stay_independently_addressable() {
         // The case the whole design exists for: two buttons both called
         // "Delete". A role+name fallback would conflate them.
@@ -474,13 +485,13 @@ mod tests {
 
     #[test]
     fn a_reissued_anchor_stops_being_a_tombstone() {
-        // The allocator may hand a freed handle to a new element. When it does,
-        // the anchor must resolve normally rather than keep reporting stale.
+        // A later deterministic identity may produce the same shortest address.
+        // When it does, the live address must resolve normally rather than remain stale.
         let mut book = AnchorBook::new();
         let first = book.observe(&snapshot(vec![button("a", "Save")]), false);
         let anchor = first.entries[0].anchor.clone();
 
-        // Churn until the freed handle comes back around.
+        // Churn until the same one-component address occurs again.
         for epoch in 0..3000 {
             let nodes = (0..8)
                 .map(|slot| button(&format!("e{epoch}s{slot}"), "Row"))
@@ -499,9 +510,9 @@ mod tests {
     }
 
     #[test]
-    fn churning_surfaces_do_not_exhaust_the_handle_space() {
-        // A list that fully replaces its contents every epoch: without
-        // reclaiming, this leaks a handle per row until the allocator asserts.
+    fn churning_surfaces_keep_deterministic_live_addresses() {
+        // A list that fully replaces its contents every epoch must remain bounded;
+        // only the current live address map and bounded diagnostic tombstones persist.
         let mut book = AnchorBook::new();
         for epoch in 0..500 {
             let nodes = (0..20)

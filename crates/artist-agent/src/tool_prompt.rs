@@ -44,6 +44,7 @@ struct Panicked {
 pub(crate) fn guard(
     tool: ArtistDynamicTool,
     drift: Option<artist_tools::DriftWatch>,
+    pages: crate::pagination::PageStore,
 ) -> ArtistDynamicTool {
     let name = tool.name().to_owned();
     let original = Arc::new(tool.clone());
@@ -51,6 +52,7 @@ pub(crate) fn guard(
         let tool = Arc::clone(&original);
         let name = name.clone();
         let drift = drift.clone();
+        let pages = pages.clone();
         Box::pin(async move {
             let outcome = match AssertUnwindSafe(tool.execute_with_context(arguments, context))
                 .catch_unwind()
@@ -58,11 +60,12 @@ pub(crate) fn guard(
             {
                 Ok(result) => result,
                 Err(panic) => Err(ToolExecutionError::from_error(Panicked {
-                    tool: name,
+                    tool: name.clone(),
                     detail: panic_detail(&panic),
                 })),
             };
-            append_drift(outcome, drift).await
+            let outcome = append_drift(outcome, drift).await;
+            paginate_or_cap(&name, outcome, &pages)
         })
     })
 }
@@ -106,6 +109,141 @@ async fn append_drift(
         Err(_) => rig_core::tool::ToolOutput::text(report),
     };
     Ok(output)
+}
+
+const RESULT_PRESENTATION_CAP: usize = 64 * 1024;
+
+fn paginate_or_cap(
+    tool: &str,
+    outcome: Result<ArtistToolOutput, ToolExecutionError>,
+    pages: &crate::pagination::PageStore,
+) -> Result<ArtistToolOutput, ToolExecutionError> {
+    let Ok(mut output) = outcome else {
+        return outcome;
+    };
+    if tool == "page" {
+        return cap_presentation(Ok(output));
+    }
+    let rendered = output.presentation.render();
+    match pages.paginate(tool, &output.structured, &rendered)? {
+        Some(page) => {
+            let cursor = page.cursor.clone();
+            let preview = page.preview.clone();
+            artist_tool_api::set_page(&mut output.structured, page);
+            let mut blocks = output
+                .presentation
+                .into_content()
+                .into_iter()
+                .filter(|block| {
+                    matches!(
+                        block,
+                        rig_core::completion::message::ToolResultContent::Image(_)
+                    )
+                })
+                .collect::<Vec<_>>();
+            blocks.insert(
+                0,
+                rig_core::completion::message::ToolResultContent::text(format!(
+                    "{preview}\n\n[Result bounded. Continue with page cursor {cursor}.]"
+                )),
+            );
+            output.presentation = rig_core::tool::ToolOutput::content(
+                rig_core::OneOrMany::many(blocks).expect("paged result has preview content"),
+            );
+            Ok(output)
+        }
+        None => cap_presentation(Ok(output)),
+    }
+}
+
+/// Bound ordinary model-facing tool presentation in one place. Structured data remains
+/// intact for contracts/pagination; the model presentation keeps a head/tail excerpt
+/// instead of blindly chopping the useful end off a large result. Images do not consume
+/// this textual budget and are never discarded here.
+fn cap_presentation(
+    outcome: Result<ArtistToolOutput, ToolExecutionError>,
+) -> Result<ArtistToolOutput, ToolExecutionError> {
+    let Ok(mut output) = outcome else {
+        return outcome;
+    };
+    use rig_core::completion::message::ToolResultContent;
+    let mut remaining = RESULT_PRESENTATION_CAP;
+    let mut capped = false;
+    let mut blocks = Vec::new();
+    for block in output.presentation.into_content() {
+        match block {
+            ToolResultContent::Text(mut text) => {
+                if text.text.len() <= remaining {
+                    remaining -= text.text.len();
+                    blocks.push(ToolResultContent::Text(text));
+                } else if remaining > 0 {
+                    text.text = excerpt(&text.text, remaining);
+                    remaining = 0;
+                    capped = true;
+                    blocks.push(ToolResultContent::Text(text));
+                } else {
+                    capped = true;
+                }
+            }
+            ToolResultContent::Json { value } => {
+                let rendered = value.to_string();
+                if rendered.len() <= remaining {
+                    remaining -= rendered.len();
+                    blocks.push(ToolResultContent::Json { value });
+                } else if remaining > 0 {
+                    blocks.push(ToolResultContent::text(excerpt(&rendered, remaining)));
+                    remaining = 0;
+                    capped = true;
+                } else {
+                    capped = true;
+                }
+            }
+            image @ ToolResultContent::Image(_) => blocks.push(image),
+        }
+    }
+    if capped {
+        blocks.push(ToolResultContent::text(
+            "[tool result bounded at 64 KiB; middle/later textual content omitted]",
+        ));
+    }
+    if blocks.is_empty() {
+        blocks.push(ToolResultContent::text("[empty tool result]"));
+    }
+    output.presentation = rig_core::tool::ToolOutput::content(
+        rig_core::OneOrMany::many(blocks).expect("bounded tool output is non-empty"),
+    );
+    Ok(output)
+}
+
+fn excerpt(value: &str, budget: usize) -> String {
+    const MARKER: &str = "\n… [excerpted] …\n";
+    if value.len() <= budget {
+        return value.to_owned();
+    }
+    if budget <= MARKER.len() + 8 {
+        let end = floor_boundary(value, budget.min(value.len()));
+        return value[..end].to_owned();
+    }
+    let payload = budget - MARKER.len();
+    let head = payload * 2 / 3;
+    let tail = payload - head;
+    let head = floor_boundary(value, head);
+    let tail_start = ceil_boundary(value, value.len().saturating_sub(tail));
+    format!("{}{}{}", &value[..head], MARKER, &value[tail_start..])
+}
+
+fn floor_boundary(value: &str, mut index: usize) -> usize {
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_boundary(value: &str, mut index: usize) -> usize {
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn panic_detail(panic: &Box<dyn std::any::Any + Send>) -> String {
@@ -197,10 +335,12 @@ mod tests {
         let read = guard(
             dynamic(artist_tools::ReadTool(workspace.clone())),
             watch.clone(),
+            crate::pagination::PageStore::memory(),
         );
         let bash = guard(
             dynamic(artist_tools::BashTool::new(workspace.clone())),
             watch,
+            crate::pagination::PageStore::memory(),
         );
 
         // The model reads the file, so it now holds anchors into it.
@@ -250,10 +390,12 @@ mod tests {
         let read = guard(
             dynamic(artist_tools::ReadTool(workspace.clone())),
             watch.clone(),
+            crate::pagination::PageStore::memory(),
         );
         let bash = guard(
             dynamic(artist_tools::BashTool::new(workspace.clone())),
             watch,
+            crate::pagination::PageStore::memory(),
         );
 
         read.execute(serde_json::json!({"path": path}))
@@ -284,8 +426,13 @@ mod tests {
         let read = guard(
             dynamic(artist_tools::ReadTool(workspace.clone())),
             watch.clone(),
+            crate::pagination::PageStore::memory(),
         );
-        let write = guard(dynamic(artist_tools::WriteTool(workspace.clone())), watch);
+        let write = guard(
+            dynamic(artist_tools::WriteTool(workspace.clone())),
+            watch,
+            crate::pagination::PageStore::memory(),
+        );
 
         read.execute(serde_json::json!({"path": path}))
             .await
@@ -300,5 +447,73 @@ mod tests {
             !rendered.contains("files changed since you read them"),
             "the write tool reported its own write as drift: {rendered}"
         );
+    }
+
+    #[derive(Clone)]
+    struct Huge;
+
+    impl PortableTool for Huge {
+        const NAME: &'static str = "huge";
+        type Args = serde_json::Value;
+        type Output = String;
+        type Error = Error;
+
+        fn description(&self) -> String {
+            "huge".into()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        async fn call(&self, _: Self::Args) -> Result<String, Error> {
+            Ok(format!("HEAD:{}:TAIL", "x".repeat(100_000)))
+        }
+    }
+
+    artist_tool_api::impl_text_tool_contract!(
+        Huge,
+        artist_tool_api::ToolCategory::Administration,
+        artist_tool_api::ArtistToolAnnotations::read_only(),
+        "Huge output."
+    );
+
+    #[tokio::test]
+    async fn ordinary_guard_pages_oversized_results_and_page_recovers_them() {
+        let pages = crate::pagination::PageStore::memory();
+        let huge = guard(dynamic(Huge), None, pages.clone());
+        let result = huge
+            .execute(serde_json::json!({}))
+            .await
+            .expect("huge result");
+        let cursor = result.structured["page"]["cursor"]
+            .as_str()
+            .expect("page cursor")
+            .to_owned();
+        let rendered = result.presentation.render();
+        assert!(rendered.contains("Continue with page cursor"), "{rendered}");
+        assert!(rendered.len() < 64 * 1024);
+
+        let page = crate::pagination::page_tool(pages);
+        let recovered = page
+            .execute(serde_json::json!({"cursor": cursor, "maxBytes": 65536}))
+            .await
+            .expect("page result");
+        let text = recovered.presentation.render();
+        assert!(text.contains("HEAD:"), "{text}");
+        assert!(
+            text.contains(&"x".repeat(1024)),
+            "paged content was not preserved"
+        );
+    }
+
+    #[test]
+    fn result_excerpt_keeps_both_ends_within_the_budget() {
+        let value = format!("HEAD:{}:TAIL", "x".repeat(100_000));
+        let bounded = excerpt(&value, 4096);
+        assert!(bounded.len() <= 4096, "{}", bounded.len());
+        assert!(bounded.starts_with("HEAD:"), "{bounded}");
+        assert!(bounded.ends_with(":TAIL"), "{bounded}");
+        assert!(bounded.contains("[excerpted]"), "{bounded}");
     }
 }

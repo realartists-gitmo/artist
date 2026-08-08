@@ -100,10 +100,10 @@ where
 }
 
 /// Pull the start anchor out of an outline row: `ANCHOR: sig` or
-/// `START..END: sig`.
+/// `START ⟶ END: sig`.
 fn start_anchor(row: &str) -> &str {
-    let head = row.split(':').next().unwrap();
-    head.split("..").next().unwrap().trim()
+    let head = row.split_once(": ").unwrap().0;
+    head.split(" ⟶ ").next().unwrap().trim()
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ async fn anchor_from_outline_drives_edit_without_an_intervening_read() {
     );
 }
 
-/// A span row (`START..END`) must let the model replace a whole declaration in
+/// A span row (`START ⟶ END`) must let the model replace a whole declaration in
 /// one call — the case that saves an entire `read`.
 #[tokio::test]
 async fn a_span_from_the_outline_replaces_a_whole_declaration() {
@@ -153,11 +153,11 @@ async fn a_span_from_the_outline_replaces_a_whole_declaration() {
     let outline = call(&tools.code_map, json!({"path": "src/lib.rs"})).await;
     let row = outline
         .lines()
-        .find(|l| l.contains("fn top_level") && l.contains(".."))
+        .find(|l| l.contains("fn top_level") && l.contains(" ⟶ "))
         .unwrap_or_else(|| panic!("no span row for top_level:\n{outline}"));
 
-    let head = row.split(':').next().unwrap();
-    let (start, end) = head.split_once("..").unwrap();
+    let head = row.split_once(": ").unwrap().0;
+    let (start, end) = head.split_once(" ⟶ ").unwrap();
 
     let edited = call(
         &tools.edit,

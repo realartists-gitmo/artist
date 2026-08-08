@@ -19,7 +19,7 @@ pub enum DiffStyle {
     Explicit,
 }
 
-/// Render a unified diff with a mnemonic-anchor gutter instead of line numbers —
+/// Render a unified diff with a semantic-anchor gutter instead of line numbers —
 /// the same anchors the model edits by, so a reviewer sees a consistent view.
 /// Removed lines take their pre-edit anchor, added/context lines the post-edit
 /// anchor.

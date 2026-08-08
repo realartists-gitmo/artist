@@ -36,33 +36,10 @@ use crate::{envelope::Envelope, pagination::PageStore, progress::ProgressSession
 /// non-obvious parts are the handle-then-poll shape of long-running tools and
 /// the idempotency contract that makes a tunnel reconnect safe.
 pub(crate) const INSTRUCTIONS: &str = "\
-You are driving the artist harness over MCP: a real project, real files, real \
-shells. It is a durable workbench, not a stateless API.
+You are driving the Artist harness over MCP. Tool schemas are authoritative. Long-running work returns durable session identifiers; use `poll`, `send`, `abort`, and `list` rather than tool-specific lifecycle modes. `bash` and `subagent` are spawn-only. `ask` is non-blocking and returns an `ask:<slug>` session. `canvas` and `skill` are one-query search-first tools. `computer` uses one shallow action/session/args envelope and injects its advanced action reference on first use. Internal actor/process identifiers are never user-facing.\n\nEvery call carrying `_meta.idempotencyKey` is deduplicated server-side; reuse a key only to recover the same operation.";
 
-- Prefer the structural tools (code_map, code_show, code_deps, code_trace, \
-ast_query) over reading whole files; they are cheaper and they reason about the \
-code as a graph.
-- `bash` has two shapes. `exec` runs a foreground command and returns when it \
-finishes. `background`/`start` begins a persistent session and returns a \
-sessionId immediately; read its output with mode `read`, send it input with \
-mode `send`, and stop it with mode `stop`. Keep sessions short.
-- Work may outlive this connection. If you started something long-running, \
-poll for its result rather than re-running it.
-- Every call that carries `_meta.idempotencyKey` is deduplicated server-side: \
-reusing a key returns the stored result instead of executing again. Never reuse \
-a key for two different calls; reuse it only to recover a result you may have \
-already gotten.
-
-Asking the user is post-then-poll, not a blocking call. `ask` writes the \
-questions to a durable outbox and returns their ids immediately; it does not \
-wait for an answer. The user answers out-of-band — relay the questions to them \
-in the chat. Then call `ask_result` with the ids to check for the answer, or \
-`ask_answer` to record what the user said. A question and its answer survive a \
-connection dying, so poll with the ids from your earlier `ask` call rather than \
-re-asking. Use `ask_list` to rediscover questions a previous connection posted.
-
-There is a human behind you. If you need a decision, ask rather than guessing, \
-and wait for the answer before acting on it.";
+pub(crate) const HTTP_INSTRUCTIONS: &str = "\
+HTTP MCP discovery is anonymous. An Artist identity is bound to your MCP transport session the first time an ordinary tool call arrives, so no setup is required. To reclaim a specific durable name, call the transport-owned `identity` tool with `{\"resume\":\"ArtistName\"}`; the resumed identity then stays bound to the session. A missing resume target is an error and never creates a replacement identity. MCP transport session ids and clientInfo are not Artist identities.\n\nLong-running work uses the universal `poll`, `send`, `abort`, and `list` tools. Mail addressed to this Artist is appended only to ordinary HTTP tool-call results.";
 
 /// The MCP server for one project.
 #[derive(Clone)]
@@ -70,6 +47,7 @@ pub struct McpServer {
     tools: Vec<ArtistDynamicTool>,
     by_name: Arc<HashMap<String, ArtistDynamicTool>>,
     identity: artist_agent::tool_set::McpIdentity,
+    profile_instructions: Arc<str>,
     envelope: Envelope,
     pages: PageStore,
     /// Serializes keyed operations across HTTP sessions so two simultaneous
@@ -82,7 +60,7 @@ impl McpServer {
     /// an MCP server. `state_dir` is where the durable envelope lives; `None`
     /// makes calls volatile across restarts but still replay-safe in-process.
     pub fn new(tools: Vec<ArtistDynamicTool>, state_dir: Option<&Path>) -> anyhow::Result<Self> {
-        Self::with_identity(
+        Self::with_identity_profile_and_visibility(
             tools,
             state_dir,
             artist_agent::tool_set::McpIdentity {
@@ -90,29 +68,62 @@ impl McpServer {
                 profile: "worker".into(),
                 project: "unknown".into(),
                 name: "mcp".into(),
-                registered: false,
             },
+            "",
+            true,
+            true,
         )
     }
 
     pub fn with_identity(
+        tools: Vec<ArtistDynamicTool>,
+        state_dir: Option<&Path>,
+        identity: artist_agent::tool_set::McpIdentity,
+    ) -> anyhow::Result<Self> {
+        Self::with_identity_profile_and_visibility(tools, state_dir, identity, "", true, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_identity_and_profile(
+        tools: Vec<ArtistDynamicTool>,
+        state_dir: Option<&Path>,
+        identity: artist_agent::tool_set::McpIdentity,
+        profile_instructions: impl Into<Arc<str>>,
+    ) -> anyhow::Result<Self> {
+        Self::with_identity_profile_and_visibility(
+            tools,
+            state_dir,
+            identity,
+            profile_instructions,
+            true,
+            true,
+        )
+    }
+
+    pub(crate) fn with_identity_profile_and_visibility(
         mut tools: Vec<ArtistDynamicTool>,
         state_dir: Option<&Path>,
         identity: artist_agent::tool_set::McpIdentity,
+        profile_instructions: impl Into<Arc<str>>,
+        permit_operation: bool,
+        permit_page: bool,
     ) -> anyhow::Result<Self> {
         let envelope = Envelope::open(state_dir)?;
         let pages = PageStore::open(state_dir)?;
         anyhow::ensure!(
-            !tools
-                .iter()
-                .any(|tool| matches!(tool.name(), "operation" | "page")),
-            "tool surface already defines a reserved administrative tool"
+            !tools.iter().any(|tool| tool.name() == "operation"),
+            "tool surface already defines the reserved operation tool"
         );
         for tool in &tools {
             validate_annotations(tool)?;
         }
-        tools.push(crate::admin::operation_tool(envelope.clone()));
-        tools.push(crate::admin::page_tool(pages.clone()));
+        tools.retain(|tool| permit_page || tool.name() != "page");
+        if permit_operation {
+            tools.push(crate::admin::operation_tool(envelope.clone()));
+        }
+        if permit_page && !tools.iter().any(|tool| tool.name() == "page") {
+            tools.push(crate::admin::page_tool(pages.clone()));
+        }
         let by_name = tools
             .iter()
             .map(|tool| (tool.name().to_owned(), tool.clone()))
@@ -121,6 +132,7 @@ impl McpServer {
             tools,
             by_name: Arc::new(by_name),
             identity,
+            profile_instructions: profile_instructions.into(),
             envelope,
             pages,
             idempotency_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -132,6 +144,13 @@ impl McpServer {
         &self.identity
     }
     /// The published tool names, in surface order.
+    /// Published MCP tools in surface order. Used by the HTTP transport wrapper,
+    /// which adds transport-owned identity fields without changing the underlying
+    /// tool contract seen by stdio or canvas-internal dispatch.
+    pub(crate) fn published_tools(&self) -> Vec<Tool> {
+        self.tools.iter().map(mcp_tool).collect()
+    }
+
     pub fn names(&self) -> Vec<String> {
         self.tools
             .iter()
@@ -202,14 +221,39 @@ impl McpServer {
             let result = self
                 .execute(name, arguments.clone(), context, Some(&key))
                 .await;
-            if let Ok(encoded) = serde_json::to_value(&result)
-                && let Err(error) = self.envelope.commit(&key, name, &arguments, &encoded)
-            {
-                tracing::warn!("envelope commit failed: {error:#}");
+            if let Ok(encoded) = serde_json::to_value(&result) {
+                if let Err(error) = self.envelope.commit(&key, name, &arguments, &encoded) {
+                    tracing::warn!("envelope commit failed: {error:#}");
+                }
             }
             return result;
         }
         self.execute(name, arguments, context, None).await
+    }
+
+    /// A transport-neutral dispatcher safe to retain inside the canvas host.
+    /// The `canvas` tool itself is excluded so this clone cannot contain the
+    /// `CanvasTool -> Lazy -> McpCanvasHost -> McpServer` reference cycle.
+    pub(crate) fn canvas_dispatcher(&self) -> Self {
+        let tools = self
+            .tools
+            .iter()
+            .filter(|tool| tool.name() != "canvas")
+            .cloned()
+            .collect::<Vec<_>>();
+        let by_name = tools
+            .iter()
+            .map(|tool| (tool.name().to_owned(), tool.clone()))
+            .collect();
+        Self {
+            tools,
+            by_name: Arc::new(by_name),
+            identity: self.identity.clone(),
+            profile_instructions: Arc::clone(&self.profile_instructions),
+            envelope: self.envelope.clone(),
+            pages: self.pages.clone(),
+            idempotency_gate: Arc::clone(&self.idempotency_gate),
+        }
     }
 
     async fn execute(
@@ -229,18 +273,23 @@ impl McpServer {
                 Vec::new(),
             );
         };
-        if let Err(validation) =
-            validate_schema(&tool.definition().input_schema, &arguments, "input", name)
-        {
-            let error = ToolExecutionError::invalid_args(validation.message.clone())
-                .with_code("input_validation_failed")
-                .with_retryable(false);
-            return render_failure(
-                &error,
-                recovery_actions(name, &arguments, &error, recovery_key),
-                result_meta(&context, Some(started.elapsed())),
-                validation.field_errors,
-            );
+        // Computer owns top-level validation so a malformed first invocation still
+        // reaches the wrapper that appends its mandatory one-time reference. Every
+        // other tool remains transport-validated before execution.
+        if name != "computer" {
+            if let Err(validation) =
+                validate_schema(&tool.definition().input_schema, &arguments, "input", name)
+            {
+                let error = ToolExecutionError::invalid_args(validation.message.clone())
+                    .with_code("input_validation_failed")
+                    .with_retryable(false);
+                return render_failure(
+                    &error,
+                    recovery_actions(name, &arguments, &error, recovery_key),
+                    result_meta(&context, Some(started.elapsed())),
+                    validation.field_errors,
+                );
+            }
         }
 
         let operation_id = context.operation_id.clone();
@@ -379,23 +428,25 @@ impl ServerHandler for McpServer {
             "Artist MCP harness for {} using profile {}",
             self.identity.project, self.identity.profile
         ));
-        info.instructions = Some(format!(
-            "You are {name}, Artist actor {actor}, using profile {profile} in {project}. \
-Other agents and the user address you as {name}. Identity was {registration}.\n\n{INSTRUCTIONS}",
+        let mut instruction_blocks = vec![INSTRUCTIONS.to_owned()];
+        if !self.profile_instructions.trim().is_empty() {
+            instruction_blocks.push(self.profile_instructions.to_string());
+        }
+        instruction_blocks.push(format!(
+            "You are {name}, using profile {profile} in {project}.",
             name = self.identity.name,
-            actor = self.identity.actor,
             profile = self.identity.profile,
             project = self.identity.project,
-            registration = if self.identity.registered {
-                "registered successfully"
-            } else {
-                "derived from the actor because the registry was unavailable"
-            },
         ));
+        info.instructions = Some(instruction_blocks.join("\n\n"));
         let mut meta = serde_json::Map::new();
         meta.insert(
             "artist".into(),
-            serde_json::json!({"identity": self.identity}),
+            serde_json::json!({"identity": {
+                "name": self.identity.name,
+                "profile": self.identity.profile,
+                "project": self.identity.project
+            }}),
         );
         info.meta = Some(Meta(meta));
         info
@@ -549,18 +600,6 @@ fn recovery_actions(
     }
     match error.kind() {
         ToolErrorKind::Timeout => {
-            if tool == "bash" {
-                let mut background = arguments.clone();
-                if let Some(object) = background.as_object_mut() {
-                    object.insert("mode".into(), serde_json::json!("start"));
-                    object.insert("background".into(), serde_json::json!(true));
-                    object.remove("timeout");
-                }
-                actions.push(NextAction::StartBackground {
-                    tool: tool.to_owned(),
-                    arguments: background,
-                });
-            }
             actions.push(NextAction::Retry { after_ms: None });
         }
         ToolErrorKind::RateLimited => {
@@ -634,12 +673,13 @@ fn render_failure_with_partial(
     partial_data: serde_json::Value,
 ) -> CallToolResult {
     let mut result = render_failure(error, next_actions, meta, field_errors);
-    if let Some(structured) = result.structured_content.as_mut()
-        && let Some(error) = structured
+    if let Some(structured) = result.structured_content.as_mut() {
+        if let Some(error) = structured
             .get_mut("error")
             .and_then(serde_json::Value::as_object_mut)
-    {
-        error.insert("partialData".into(), partial_data);
+        {
+            error.insert("partialData".into(), partial_data);
+        }
     }
     result
 }
@@ -800,6 +840,62 @@ mod tests {
                 })
             },
         )
+    }
+
+    #[test]
+    fn profile_visibility_can_hide_administrative_tools() {
+        let identity = artist_agent::tool_set::McpIdentity {
+            actor: "test-actor".into(),
+            profile: "restricted".into(),
+            project: "/project".into(),
+            name: "Goethe".into(),
+        };
+        let hidden = McpServer::with_identity_profile_and_visibility(
+            Vec::new(),
+            None,
+            identity.clone(),
+            "",
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!hidden.names().iter().any(|name| name == "operation"));
+        assert!(!hidden.names().iter().any(|name| name == "page"));
+
+        let visible = McpServer::with_identity_profile_and_visibility(
+            Vec::new(),
+            None,
+            identity,
+            "",
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(visible.names().iter().any(|name| name == "operation"));
+        assert!(visible.names().iter().any(|name| name == "page"));
+    }
+
+    #[test]
+    fn stdio_instructions_are_shared_then_profile_then_identity() {
+        let server = McpServer::with_identity_and_profile(
+            Vec::new(),
+            None,
+            artist_agent::tool_set::McpIdentity {
+                actor: "a-secret".into(),
+                profile: "worker".into(),
+                project: "/project".into(),
+                name: "Goethe".into(),
+            },
+            "PROFILE RULES",
+        )
+        .unwrap();
+        let instructions = server.get_info().instructions.unwrap();
+        assert!(instructions.starts_with(INSTRUCTIONS));
+        assert!(
+            instructions.find("PROFILE RULES").unwrap() > instructions.find(INSTRUCTIONS).unwrap()
+        );
+        assert!(instructions.ends_with("You are Goethe, using profile worker in /project."));
+        assert!(!instructions.contains("a-secret"));
     }
 
     #[tokio::test]
@@ -988,7 +1084,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_timeout_status_becomes_a_recoverable_failure() {
+    async fn legacy_bash_timeout_status_never_suggests_deleted_background_arguments() {
         let tool = ArtistDynamicTool::new(
             artist_tool_api::ArtistToolDefinition {
                 name: "bash".into(),
@@ -1039,10 +1135,10 @@ mod tests {
         assert_eq!(structured["ok"], false);
         assert_eq!(structured["error"]["code"], "command_timed_out");
         assert_eq!(structured["error"]["partialData"]["status"], "timed_out");
+        let actions = structured["nextActions"].as_array().unwrap();
+        assert!(actions.iter().any(|action| action["kind"] == "retry"));
         assert!(
-            structured["nextActions"]
-                .as_array()
-                .unwrap()
+            !actions
                 .iter()
                 .any(|action| action["kind"] == "start_background")
         );

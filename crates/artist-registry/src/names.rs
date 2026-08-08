@@ -1,21 +1,15 @@
 //! The artist-name roster.
 //!
-//! Agents get famous names — Monet, Bach, Basquiat — because the internal actor
-//! ids are short random tokens (`a-7f3`) that tokenize badly, read as noise in
-//! a transcript, and are hard for a person to hold in working memory while
-//! several agents are running. A name is a *rendering* of an actor id, never a
-//! second identity: the id stays the key for workspace ownership, todo
-//! ownership, and log lineage, and this table is the mapping between them.
+//! Agents get memorable roster names — Monet, Bach, Basquiat — while internal actor
+//! ids remain harness-only implementation details. The bare roster name is the durable
+//! model-visible Artist identity used by universal `send` and MCP identity handles.
 //!
-//! Names are machine-wide rather than per project, because `tell(Monet)` has to
-//! name one agent on this machine. That makes allocation shared state, and
-//! shared state between processes means disk.
+//! Names are machine-wide rather than per project so a bare Artist identity resolves
+//! consistently from any process. Allocation is therefore shared durable state.
 //!
-//! Unlike a delegation seat, a name is **not** released when its process dies.
-//! A session in history still owns its name: a person returning to it expects
-//! to still be talking to Monet. Release happens when the session can no longer
-//! be resumed, which only its owner can know — so the roster is swept against a
-//! liveness predicate the caller supplies rather than against process liveness.
+//! Unlike a delegation seat, a name is **not** released when its process dies. A retained
+//! identity/session record continues to reserve it; only normal retention pruning releases
+//! the corresponding lease.
 
 use std::{
     fs,
@@ -64,35 +58,6 @@ pub struct Registration {
     pub profile: Option<String>,
     pub parent: Option<String>,
 }
-
-/// Which agents a group is opened over.
-///
-/// Fields are a **conjunction** — every one that is set must match — and
-/// `names` is unioned in afterwards, so an explicit addition can reach someone
-/// the predicate would exclude. That is what lets a manager open a group over
-/// "every reviewer on this repo, plus Bach".
-///
-/// Evaluated exactly once, at group creation. Everything downstream addresses
-/// the recorded membership, never this.
-#[derive(Clone, Debug, Default)]
-pub struct Selector {
-    /// Restrict to one worktree. `None` spans every project on the machine —
-    /// inter-repository coordination is a real want, so it has to be
-    /// expressible rather than merely the default being wrong.
-    pub project: Option<String>,
-    /// Restrict to agents running this profile.
-    pub profile: Option<String>,
-    /// Restrict to agents beneath this one, transitively. A subagent's
-    /// subagent is a descendant.
-    pub descendant_of: Option<String>,
-    /// Union these in regardless of the predicate.
-    pub names: Vec<String>,
-    /// Drop these, whatever else matched. Applied last so an exclusion always
-    /// wins — the safe direction when a predicate turns out to be wider than
-    /// its author expected.
-    pub exclude: Vec<String>,
-}
-
 
 /// The machine-wide roster.
 #[derive(Clone, Debug)]
@@ -186,61 +151,6 @@ impl Names {
     pub fn list(&self) -> Result<Vec<Name>> {
         let _guard = Lock::take(&self.dir).ok();
         self.read_all()
-    }
-
-    /// The directory read: which agents match a predicate, right now.
-    ///
-    /// This is the *only* place a selector is evaluated. Callers materialise
-    /// the answer into a group and address the recorded membership from then
-    /// on — a standing predicate would mean membership differed between send
-    /// and delivery, and "reply to the group" would have no defined audience.
-    ///
-    /// Results are sorted and de-duplicated so a group's membership does not
-    /// depend on directory iteration order, which is not stable across
-    /// filesystems.
-    pub fn select(&self, selector: &Selector) -> Result<Vec<Name>> {
-        let all = self.list()?;
-        let has_predicate = selector.project.is_some()
-            || selector.profile.is_some()
-            || selector.descendant_of.is_some();
-        let mut matched: Vec<Name> = if has_predicate || selector.names.is_empty() {
-            all.iter()
-                .filter(|name| {
-                    selector
-                        .project
-                        .as_ref()
-                        .is_none_or(|wanted| name.project.as_ref() == Some(wanted))
-                        && selector
-                            .profile
-                            .as_ref()
-                            .is_none_or(|wanted| name.profile.as_ref() == Some(wanted))
-                        && selector
-                            .descendant_of
-                            .as_ref()
-                            .is_none_or(|root| is_descendant(&all, &name.name, root))
-                })
-                .cloned()
-                .collect()
-        } else {
-            // Explicit names without a predicate mean exactly those names. An empty
-            // selector still means "everyone", preserving directory discovery.
-            Vec::new()
-        };
-
-        // Unioned after the predicate, so an explicit name reaches someone the
-        // predicate excludes rather than being filtered back out by it.
-        for wanted in &selector.names {
-            if let Some(found) = all.iter().find(|name| &name.name == wanted)
-                && !matched.iter().any(|name| name.name == found.name)
-            {
-                matched.push(found.clone());
-            }
-        }
-
-        matched.retain(|name| !selector.exclude.contains(&name.name));
-        matched.sort_by(|a, b| a.name.cmp(&b.name));
-        matched.dedup_by(|a, b| a.name == b.name);
-        Ok(matched)
     }
 
     /// Release the name held by a session. Called when that session becomes
@@ -339,26 +249,6 @@ fn sanitize(name: &str) -> String {
 /// Bounded by the directory size rather than trusting the links to be acyclic:
 /// a crash between two claims could in principle leave a cycle, and a
 /// group-membership query is not the place to discover it by hanging.
-fn is_descendant(all: &[Name], candidate: &str, root: &str) -> bool {
-    let mut current = candidate;
-    for _ in 0..all.len() {
-        let Some(parent) = all
-            .iter()
-            .find(|name| name.name == current)
-            .and_then(|name| name.parent.as_deref())
-        else {
-            return false;
-        };
-        if parent == root {
-            return true;
-        }
-        current = parent;
-    }
-    false
-}
-
-/// A cheap stable hash, used only to spread concurrent claims across the
-/// roster. Collisions cost a scan, never correctness — the lock decides.
 fn fingerprint(value: &str) -> u32 {
     value.bytes().fold(2166136261u32, |hash, byte| {
         (hash ^ byte as u32).wrapping_mul(16777619)
@@ -414,22 +304,17 @@ mod tests {
         assert_eq!(found.session, "s-1");
     }
 
-    /// Exhaustion must not fail an agent's startup — it degrades to the id.
+    /// Public Artist identities are always roster names. Exhaustion is explicit rather
+    /// than leaking the internal actor id into the model-facing namespace.
     #[test]
-    fn an_exhausted_roster_falls_back_to_the_actor_id() {
+    fn an_exhausted_roster_is_an_error() {
         let root = tempfile::tempdir().unwrap();
         let roster = names(root.path());
         roster.claim(&reg("s-1", "a-1")).unwrap();
         roster.claim(&reg("s-2", "a-2")).unwrap();
-
-        let overflow = roster.claim(&reg("s-3", "a-3")).unwrap();
-        assert_eq!(overflow.name, "a-3");
-        assert!(overflow.is_fallback());
-        assert_eq!(
-            roster.resolve("a-3").unwrap().unwrap().actor,
-            "a-3",
-            "a fallback name still has to be addressable"
-        );
+        let error = roster.claim(&reg("s-3", "a-3")).unwrap_err();
+        assert!(error.to_string().contains("roster exhausted"));
+        assert!(roster.resolve("a-3").unwrap().is_none());
     }
 
     /// A closed terminal must not free a name: the session is still resumable
@@ -462,17 +347,12 @@ mod tests {
         roster.claim(&reg("s-1", "a-1")).unwrap();
         roster.claim(&reg("s-2", "a-2")).unwrap();
         assert!(
-            roster.claim(&reg("s-3", "a-3")).unwrap().is_fallback(),
+            roster.claim(&reg("s-3", "a-3")).is_err(),
             "the two-name roster should be exhausted"
         );
-        roster.release("s-3").unwrap();
 
         roster.release("s-1").unwrap();
         let reclaimed = roster.claim(&reg("s-4", "a-4")).unwrap();
-        assert!(
-            !reclaimed.is_fallback(),
-            "releasing must put the name back in the pool, got {reclaimed:?}"
-        );
         assert!(SMALL.contains(&reclaimed.name.as_str()));
     }
 
@@ -493,182 +373,6 @@ mod tests {
         assert_eq!(
             theirs.resolve(&claimed.name).unwrap().unwrap().session,
             "s-1"
-        );
-    }
-
-    /// A directory populated the way a real fan-out populates it: one root per
-    /// project, with children beneath.
-    fn populated(root: &Path) -> Names {
-        static BIG: &[&str] = &["Monet", "Bach", "Basquiat", "Goya", "Dali", "Warhol"];
-        let roster = Names::new(root.join("names")).with_roster(BIG);
-        let claim = |session: &str, project: &str, profile: &str, parent: Option<&str>| {
-            roster
-                .claim(&Registration {
-                    session: session.into(),
-                    actor: session.into(),
-                    project: Some(project.into()),
-                    profile: Some(profile.into()),
-                    parent: parent.map(str::to_owned),
-                })
-                .unwrap()
-                .name
-        };
-        let lead = claim("s-lead", "/repo-a", "default", None);
-        let child = claim("s-child", "/repo-a", "reviewer", Some(&lead));
-        claim("s-grand", "/repo-a", "worker", Some(&child));
-        claim("s-other", "/repo-b", "reviewer", None);
-        roster
-    }
-
-    /// "Everyone on this repo" — the selector that motivated the whole
-    /// directory.
-    #[test]
-    fn a_project_predicate_excludes_other_repositories() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let matched = roster
-            .select(&Selector {
-                project: Some("/repo-a".into()),
-                ..Selector::default()
-            })
-            .unwrap();
-        assert_eq!(matched.len(), 3, "{matched:?}");
-        assert!(
-            matched
-                .iter()
-                .all(|n| n.project.as_deref() == Some("/repo-a"))
-        );
-    }
-
-    /// "Every reviewer" — and it must be a conjunction with project, not a
-    /// union, or a group meant for one repo reaches another.
-    #[test]
-    fn predicates_compose_as_a_conjunction() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let matched = roster
-            .select(&Selector {
-                project: Some("/repo-a".into()),
-                profile: Some("reviewer".into()),
-                ..Selector::default()
-            })
-            .unwrap();
-        assert_eq!(matched.len(), 1, "{matched:?}");
-        assert_eq!(matched[0].session, "s-child");
-    }
-
-    /// "Everyone under X" has to be transitive: a subagent's subagent is a
-    /// descendant, and a one-level read would silently miss half a fan-out.
-    #[test]
-    fn descendant_of_is_transitive() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let lead = roster
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|n| n.session == "s-lead")
-            .unwrap();
-
-        let matched = roster
-            .select(&Selector {
-                descendant_of: Some(lead.name.clone()),
-                ..Selector::default()
-            })
-            .unwrap();
-        // Sorted by display name, so compare as a set: which agents matched is
-        // the property, not what the roster happened to name them.
-        let mut sessions: Vec<_> = matched.iter().map(|n| n.session.as_str()).collect();
-        sessions.sort();
-        assert_eq!(sessions, ["s-child", "s-grand"]);
-        assert!(
-            !sessions.contains(&"s-lead"),
-            "an agent is not its own descendant"
-        );
-    }
-
-    /// An explicit name reaches someone the predicate excludes — that is what
-    /// makes "every reviewer here, plus Bach" expressible.
-    #[test]
-    fn explicit_names_are_unioned_after_the_predicate() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let outsider = roster
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|n| n.session == "s-other")
-            .unwrap();
-
-        let matched = roster
-            .select(&Selector {
-                project: Some("/repo-a".into()),
-                names: vec![outsider.name.clone()],
-                ..Selector::default()
-            })
-            .unwrap();
-        assert_eq!(matched.len(), 4);
-        assert!(matched.iter().any(|n| n.session == "s-other"));
-    }
-
-    #[test]
-    fn explicit_names_without_a_predicate_select_only_those_names() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let selected_name = roster
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|name| name.session == "s-child")
-            .unwrap()
-            .name;
-
-        let matched = roster
-            .select(&Selector {
-                names: vec![selected_name],
-                ..Selector::default()
-            })
-            .unwrap();
-
-        assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].session, "s-child");
-    }
-    /// Exclusion is applied last so it always wins, which is the safe
-    /// direction when a predicate turns out wider than its author expected.
-    #[test]
-    fn exclusion_beats_both_the_predicate_and_an_explicit_name() {
-        let root = tempfile::tempdir().unwrap();
-        let roster = populated(root.path());
-        let child = roster
-            .list()
-            .unwrap()
-            .into_iter()
-            .find(|n| n.session == "s-child")
-            .unwrap();
-
-        let matched = roster
-            .select(&Selector {
-                project: Some("/repo-a".into()),
-                names: vec![child.name.clone()],
-                exclude: vec![child.name.clone()],
-                ..Selector::default()
-            })
-            .unwrap();
-        assert!(!matched.iter().any(|n| n.session == "s-child"));
-        assert_eq!(matched.len(), 2);
-    }
-
-    /// An empty selector spans the machine — inter-repository coordination has
-    /// to be expressible, not merely a default that happens to be wrong.
-    #[test]
-    fn an_empty_selector_spans_every_project() {
-        let root = tempfile::tempdir().unwrap();
-        assert_eq!(
-            populated(root.path())
-                .select(&Selector::default())
-                .unwrap()
-                .len(),
-            4
         );
     }
 
@@ -704,30 +408,6 @@ mod tests {
         );
     }
 
-    /// A cycle in the parent links must not hang a membership query.
-    #[test]
-    fn a_cyclic_parent_link_terminates() {
-        let all = vec![
-            Name {
-                name: "A".into(),
-                actor: "a".into(),
-                session: "a".into(),
-                project: None,
-                profile: None,
-                parent: Some("B".into()),
-            },
-            Name {
-                name: "B".into(),
-                actor: "b".into(),
-                session: "b".into(),
-                project: None,
-                profile: None,
-                parent: Some("A".into()),
-            },
-        ];
-        assert!(!is_descendant(&all, "A", "Z"));
-    }
-
     /// The full shipped roster has to be big enough that exhaustion is
     /// theoretical, and free of duplicates that would make two sessions
     /// collide on one name.
@@ -736,6 +416,6 @@ mod tests {
         let roster: &[&str] = &crate::roster::ROSTER;
         let unique: std::collections::BTreeSet<_> = roster.iter().collect();
         assert_eq!(unique.len(), roster.len(), "duplicate name in the roster");
-        assert!(roster.len() > 500, "roster is {}", roster.len());
+        assert_eq!(roster.len(), 736, "shipped roster size changed");
     }
 }

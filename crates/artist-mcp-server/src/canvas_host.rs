@@ -1,15 +1,5 @@
-//! The MCP server's side of the canvas bridge.
-//!
-//! `artist-canvas` describes what a canvas may do; this decides whether it may.
-//! Over MCP the "live session" is the server's own tool surface, so a canvas
-//! dispatches through [`McpServer::invoke`] — the same path a model tool call
-//! takes — rather than a second assembly that could drift.
-//!
-//! What is genuinely different from the CLI host: there is no running agent
-//! loop in the MCP process, so `send` cannot steer a live turn (it logs and
-//! reports [`SendOutcome::NoTurnRunning`]), and questions live in the durable
-//! outbox rather than an in-process registry, so a canvas answering one records
-//! the same answer the model's `ask_result` poll sees.
+//! MCP canvas bridge. Canvas-internal tool calls use the owning artist's ordinary
+//! profile-filtered surface but deliberately bypass transport mail consumption.
 
 use std::sync::OnceLock;
 
@@ -18,45 +8,58 @@ use artist_session::ask::{Answer, Question};
 
 use crate::McpServer;
 
-/// The canvas host for one MCP server.
 #[derive(Clone)]
 pub struct McpCanvasHost {
     server: OnceLock<McpServer>,
-    outbox: artist_session::AskOutbox,
-    actor: String,
+    ask: artist_session::AskRegistry,
+    artist: String,
     project: String,
     profile: String,
 }
 
 impl McpCanvasHost {
     pub fn new(
-        outbox: artist_session::AskOutbox,
-        actor: &str,
+        ask: artist_session::AskRegistry,
+        artist: &str,
         project: &std::path::Path,
         profile: &str,
     ) -> Self {
         Self {
             server: OnceLock::new(),
-            outbox,
-            actor: actor.to_owned(),
+            ask,
+            artist: artist.to_owned(),
             project: project.display().to_string(),
             profile: profile.to_owned(),
         }
     }
 
-    /// Point the host at the server its surface is part of. Called once, after
-    /// the `McpServer` is built — the surface cannot exist without the host,
-    /// and the host cannot dispatch without the surface, so the link is made in
-    /// between.
     pub fn attach(&self, server: McpServer) {
         let _ = self.server.set(server);
     }
 }
 
 impl CanvasHost for McpCanvasHost {
-    fn send(&self, text: String, mode: SendMode) -> HostFuture<'_, SendOutcome> {
-        tracing::info!(%text, ?mode, "canvas tried to send text over MCP; no turn to steer");
-        Box::pin(async { SendOutcome::NoTurnRunning })
+    fn send(&self, slug: &str, text: String, _mode: SendMode) -> HostFuture<'_, SendOutcome> {
+        let artist = self.artist.clone();
+        let sender = format!("canvas:{slug}");
+        Box::pin(async move {
+            let message = artist_registry::Message {
+                id: artist_tools::short_id("mail"),
+                from: sender,
+                to: artist,
+                audience: artist_registry::Audience::Direct,
+                body: text,
+                expects_reply: false,
+                sent_at: artist_registry::now(),
+            };
+            match artist_registry::messages().send(&message) {
+                Ok(()) => SendOutcome::Queued,
+                Err(error) => {
+                    tracing::warn!(%error, "canvas mail delivery failed");
+                    SendOutcome::NoTurnRunning
+                }
+            }
+        })
     }
 
     fn call_tool(
@@ -66,11 +69,6 @@ impl CanvasHost for McpCanvasHost {
         allowed: Vec<String>,
     ) -> HostFuture<'_, Result<String, Denied>> {
         Box::pin(async move {
-            // Two gates, in this order, because the messages differ: telling
-            // the canvas to add a permission the model could never use would
-            // be wrong. The "permitted" set is the published surface — exactly
-            // the tools the model can call — so a canvas can never widen its
-            // own reach past the model's.
             let Some(server) = self.server.get() else {
                 return Err(Denied::Unknown { tool });
             };
@@ -80,6 +78,8 @@ impl CanvasHost for McpCanvasHost {
             if !allowed.iter().any(|name| name == &tool) {
                 return Err(Denied::NotDeclared { tool });
             }
+            // `invoke` is intentionally transport-neutral. In particular it must not
+            // drain the artist mailbox merely because a canvas called a tool.
             let result = server.invoke(&tool, arguments, Default::default()).await;
             Ok(render(result))
         })
@@ -88,11 +88,11 @@ impl CanvasHost for McpCanvasHost {
     fn state_changed(&self, _slug: &str, _keys: Vec<String>) {}
 
     fn pending_questions(&self) -> Vec<Question> {
-        self.outbox.pending()
+        self.ask.pending()
     }
 
-    fn answer_question(&self, answer: Answer, _surface: &str) -> bool {
-        self.outbox.answer(answer).unwrap_or(false)
+    fn answer_question(&self, answer: Answer, surface: &str) -> bool {
+        self.ask.answer_from(answer, surface)
     }
 
     fn context(&self) -> serde_json::Value {
@@ -102,12 +102,11 @@ impl CanvasHost for McpCanvasHost {
             "model": null,
             "profile": self.profile,
             "project": self.project,
-            "actor": self.actor,
+            "artist": self.artist,
         })
     }
 }
 
-/// Collapse a tool result the way the model sees it, for the page to show.
 fn render(result: rmcp::model::CallToolResult) -> String {
     let mut text = result
         .content
@@ -121,7 +120,9 @@ fn render(result: rmcp::model::CallToolResult) -> String {
     if let Some(json) = result.structured_content {
         let rendered = json.to_string();
         if !text.contains(&rendered) {
-            text.push('\n');
+            if !text.is_empty() {
+                text.push('\n');
+            }
             text.push_str(&rendered);
         }
     }

@@ -237,8 +237,10 @@ async fn a_call_to_an_unregistered_tool_is_reported_back_to_the_model() {
         "the model should get a chance to recover"
     );
     assert!(
-        requests[1].contains("call_1"),
-        "the failure must be reported against the call: {}",
+        requests[1].contains("no_such_tool")
+            && requests[1].contains("There is no tool named")
+            && requests[1].contains("available this turn"),
+        "the unknown-tool failure must be reported back to the model: {}",
         requests[1]
     );
 }

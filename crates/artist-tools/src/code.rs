@@ -64,8 +64,8 @@ impl PortableTool for CodeMapTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Structural outline of a source file: declarations with their mnemonic anchors, no bodies. \
-         Each row is `ANCHOR: signature`, or `START..END: signature` when the declaration spans \
+        "Structural outline of a source file: declarations with their semantic anchors, no bodies. \
+         Each row is `ANCHOR: signature`, or `START ⟶ END: signature` when the declaration spans \
          lines. Those anchors are live — pass them straight to edit without reading the file first. \
          Prefer this over read when you need a file's shape rather than its contents."
             .into()
@@ -153,7 +153,7 @@ impl PortableTool for CodeShowTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Extract one symbol's source from a file, with each line's mnemonic anchor. Code symbols \
+        "Extract one symbol's source from a file, with each line's semantic anchor. Code symbols \
          match by exact suffix; markdown headings match by case-insensitive substring."
             .into()
     }

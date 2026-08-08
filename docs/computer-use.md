@@ -191,10 +191,10 @@ optimization measured.
 *Implemented and verified: `crates/artist-computer/src/anchors.rs`.*
 
 The model **never emits coordinates**; `bounds` is stripped before rendering.
-This is the same contract `edit` already has with mnemonic line anchors, and it
-reuses the same allocator — `hashline_tools::AnchorTable`, a circular free-slot
-allocator over 2983 tokenizer-screened words. File anchors and screen anchors
-mint from one implementation rather than two.
+This is the same exact opaque-address contract `edit` uses for semantic line
+anchors. `hashline_tools::AnchorTable` computes deterministic v1 live addresses
+from complete binding identities; file and screen anchors share the same stateless
+address function and token vocabulary rather than separate allocators.
 
 **Resolution is identity-only.** There is deliberately no fallback to matching on
 role and name: two buttons both called "Delete" are exactly the case anchors
@@ -573,4 +573,4 @@ GUI can do anything a person at that keyboard could.
 
 - `crates/artist-computer/` — the implementation
 - `crates/artist-computer/tests/stage_client.rs` — the compositor fixture
-- `crates/hashline-tools/src/mnemonic_anchors.rs` — the shared anchor allocator
+- `crates/hashline-tools/src/anchor_table.rs` and `src/semantic_anchors.rs` — shared stateless v1 addressing

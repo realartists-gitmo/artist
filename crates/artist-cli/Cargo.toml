@@ -27,6 +27,7 @@ artist-extensions = { path = "../artist-extensions" }
 artist-herdr = { path = "../artist-herdr" }
 artist-rules = { path = "../artist-rules", features = ["wasm"] }
 artist-memory = { path = "../artist-memory" }
+artist-registry = { path = "../artist-registry" }
 artist-session = { path = "../artist-session" }
 artist-tools = { path = "../artist-tools" }
 artist-ui-core = { path = "../artist-ui-core" }
