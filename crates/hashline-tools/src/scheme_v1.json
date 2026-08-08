@@ -1,0 +1,84 @@
+{
+  "metadata": {
+    "byte_codec": {
+      "balance_score": [
+        0,
+        0.234375
+      ],
+      "multiplier": 17,
+      "offset": 17
+    },
+    "field_prime": 68399,
+    "fit": {
+      "first_component_improvement_vs_uniform": 6.47865225673447,
+      "individual_collision_weights": [
+        2.2566571264638145e-06,
+        2.3898235009142777e-06,
+        2.440279439458775e-06,
+        2.4879376299768987e-06
+      ],
+      "method": "mean of exact all-field CTM root-loss landscapes",
+      "prefix_collision_weights": [
+        2.2566571264638145e-06,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "seeds": [
+        1369956353,
+        1369956354,
+        1369956355,
+        1369956356,
+        1369956357,
+        1369956358,
+        1369956359,
+        1369956360,
+        1369956361,
+        1369956362
+      ],
+      "symbol_permutations": 10
+    },
+    "independent_full_ctm_validation": {
+      "first_component_improvement_vs_uniform": 3.1296192572878785,
+      "individual_collision_weights": [
+        4.671525697892868e-06,
+        5.881933595823631e-06,
+        5.2562992526858e-06,
+        4.736776337027947e-06
+      ],
+      "prefix_collision_weights": [
+        4.671525697892868e-06,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "seed": 4053909726,
+      "symbol_permutations": 32
+    },
+    "optimized_points": [
+      49667,
+      38410,
+      64413,
+      58963
+    ],
+    "status": "experimental v1 candidate for frozen 68,399-token alphabet",
+    "tail_permutation": {
+      "offset": 30920,
+      "step": 8449
+    },
+    "uniform_pair_collision_baseline": 1.4620096785040717e-05
+  },
+  "scheme": {
+    "codec_multiplier": 17,
+    "codec_offset": 17,
+    "optimized_points": [
+      49667,
+      38410,
+      64413,
+      58963
+    ],
+    "prime": 68399,
+    "tail_offset": 30920,
+    "tail_step": 8449
+  }
+}

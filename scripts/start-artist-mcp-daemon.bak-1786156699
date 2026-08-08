@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+binary="${ARTIST_MCP_BINARY:-$HOME/.local/bin/artist-mcp}"
+[[ -x "$binary" ]] || { echo "artist-mcp binary is not executable: $binary" >&2; exit 1; }
+
+args=(daemon
+  --profile "${ARTIST_MCP_PROFILE:-worker}"
+  --actor "${ARTIST_MCP_ACTOR:-mcp}"
+  --log "${ARTIST_MCP_LOG:-warn}"
+)
+
+[[ "${ARTIST_MCP_ALLOW_COMPUTER:-1}" == 1 ]] && args+=(--allow-computer)
+[[ "${ARTIST_MCP_ALLOW_CANVAS:-1}" == 1 ]] && args+=(--allow-canvas)
+[[ "${ARTIST_MCP_ALLOW_MEMORY:-0}" == 1 ]] && args+=(--allow-memory)
+[[ "${ARTIST_MCP_ALLOW_SUBAGENT:-1}" == 1 ]] && args+=(--allow-subagent)
+[[ "${ARTIST_MCP_ALLOW_COMMS:-1}" == 1 ]] && args+=(--allow-comms)
+
+# Do not pass --project here. The daemon resolves the persisted workspace
+# selection first, then ARTIST_MCP_DEFAULT_PROJECT.
+exec "$binary" "${args[@]}"
