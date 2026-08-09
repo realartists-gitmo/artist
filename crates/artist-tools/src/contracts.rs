@@ -1,31 +1,5 @@
 use artist_tool_api::{ArtistToolAnnotations as A, ToolCategory as C};
 
-impl artist_tool_api::ArtistToolContract for crate::BashTool {
-    fn category(&self) -> C {
-        C::Shell
-    }
-
-    fn annotations(&self) -> A {
-        A {
-            read_only: false,
-            destructive: true,
-            idempotent: false,
-            open_world: true,
-        }
-    }
-
-    fn output_schema(&self) -> serde_json::Value {
-        artist_tool_api::schema_for::<crate::bash::BashResult>()
-    }
-
-    fn structured_output(
-        &self,
-        output: &<Self as rig_core::tool::PortableTool>::Output,
-    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
-        serde_json::to_value(crate::bash::BashResult::parse(output))
-            .map_err(rig_core::tool::ToolExecutionError::from_error)
-    }
-}
 artist_tool_api::impl_tool_output_contract!(
     crate::ReadTool,
     C::Files,

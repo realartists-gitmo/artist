@@ -1,6 +1,5 @@
 mod annotate;
 mod bash;
-mod coalesce;
 mod code;
 mod contracts;
 mod drift;
@@ -16,7 +15,6 @@ pub mod output;
 mod read;
 mod short_id;
 pub mod skeleton;
-mod tree_jobs;
 mod workspace;
 mod write;
 

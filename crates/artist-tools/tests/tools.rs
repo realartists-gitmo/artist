@@ -1,4 +1,4 @@
-use artist_tools::{BashTool, ToolBundle, Workspace};
+use artist_tools::{BashResult, BashStatus, BashTool, ToolBundle, Workspace};
 use rig_core::tool::{IntoToolOutput, PortableTool};
 use serde_json::json;
 
@@ -26,6 +26,19 @@ where
     let args = serde_json::from_value(value).unwrap();
     let output = tool.call(args).await.unwrap().into_tool_output().unwrap();
     output.render().trim_matches('"').replace("\\n", "\n")
+}
+
+/// Poll a managed session until it leaves the running state, so tests read
+/// output the same way the session host does instead of racing the child.
+async fn wait_for(bash: &BashTool, id: &str) -> BashResult {
+    for _ in 0..100 {
+        let snapshot = bash.managed_snapshot(id).unwrap();
+        if snapshot.status != BashStatus::Running {
+            return snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("session {id} did not finish in time");
 }
 
 #[test]
@@ -209,13 +222,13 @@ async fn all_file_tools_accept_external_absolute_paths() {
     );
 
     let bash = BashTool::new(workspace);
-    let output = call(
-        &bash,
-        json!({"mode":"exec","command":"pwd; cat created.txt","cwd":scope}),
-    )
-    .await;
-    assert!(output.contains(&*scope));
-    assert!(output.contains("absolute write needle"));
+    let id = bash
+        .managed_start("pwd; cat created.txt".into(), Some(scope.clone().into_owned()), None)
+        .await
+        .unwrap();
+    let finished = wait_for(&bash, &id).await;
+    assert!(finished.output.contains(&*scope), "{finished:?}");
+    assert!(finished.output.contains("absolute write needle"), "{finished:?}");
 }
 
 #[tokio::test]
@@ -257,66 +270,37 @@ async fn edit_temp_symlink_cannot_escape_workspace() {
 }
 
 #[tokio::test]
-async fn bash_exec_and_persistent_session_work_from_root() {
+async fn managed_sessions_run_from_root_and_read_input() {
     let (_root, _state, workspace) = workspace(&[("marker.txt", "ok")]);
     let bash = BashTool::new(workspace);
-    let output = call(
-        &bash,
-        json!({"mode":"exec","command":"pwd; cat marker.txt"}),
-    )
-    .await;
-    assert!(output.contains("ok"));
-    let bounded = call(
-        &bash,
-        json!({"mode":"exec","command":"yes x | head -c 100000","maxBytes":128}),
-    )
-    .await;
-    assert!(bounded.len() < 300);
-    assert!(bounded.contains("truncated: true"));
 
-    let timed_out = call(
-        &bash,
-        json!({"mode":"exec","command":"sleep 5","timeout":1}),
-    )
-    .await;
-    assert!(timed_out.contains("status: timedOut"));
-    assert!(timed_out.contains("timeoutSecs: 1"), "{timed_out}");
-    assert!(timed_out.contains("terminatedBy: SIGKILL"), "{timed_out}");
-    let started = call(&bash, json!({"mode":"start","command":"read line; echo got:$line","sessionId":"shell","waitMs":10})).await;
-    assert!(started.contains("sessionId: shell"));
-    let sent = call(
-        &bash,
-        json!({"mode":"send","sessionId":"shell","input":"hello\n","waitMs":500}),
-    )
-    .await;
-    assert!(sent.contains("got:hello"));
+    let id = bash
+        .managed_start("pwd; cat marker.txt".into(), None, None)
+        .await
+        .unwrap();
+    let finished = wait_for(&bash, &id).await;
+    assert!(finished.output.contains("ok"), "{finished:?}");
+    assert!(finished.output.contains("status: "), "{finished:?}");
+    let _ = bash.managed_abort(&id);
 
-    let background = call(
-        &bash,
-        json!({"mode":"exec","command":"sleep 0.05; echo done","background":true,"sessionId":"job","waitMs":1}),
-    )
-    .await;
-    assert!(background.contains("sessionId: job"));
-    let finished = call(
-        &bash,
-        json!({"mode":"read","sessionId":"job","waitMs":1000}),
-    )
-    .await;
-    assert!(finished.contains("status: completed"));
-    assert!(finished.contains("done"));
+    let interactive = bash
+        .managed_start("read line; echo got:$line".into(), None, None)
+        .await
+        .unwrap();
+    bash.managed_send(&interactive, "hello\n").unwrap();
+    let finished = wait_for(&bash, &interactive).await;
+    assert_eq!(finished.status, BashStatus::Completed, "{finished:?}");
+    assert!(finished.output.contains("got:hello"), "{finished:?}");
+    let _ = bash.managed_abort(&interactive);
 
-    call(
-        &bash,
-        json!({"mode":"exec","command":"exit 7","background":true,"sessionId":"failed","waitMs":100}),
-    )
-    .await;
-    let failed = call(
-        &bash,
-        json!({"mode":"read","sessionId":"failed","waitMs":100}),
-    )
-    .await;
-    assert!(failed.contains("status: failed"));
-    assert!(failed.contains("exitCode: 7"));
+    let failed = bash
+        .managed_start("exit 7".into(), None, None)
+        .await
+        .unwrap();
+    let finished = wait_for(&bash, &failed).await;
+    assert_eq!(finished.status, BashStatus::Failed, "{finished:?}");
+    assert_eq!(finished.exit_code, Some(7), "{finished:?}");
+    let _ = bash.managed_abort(&failed);
 
     bash.run_input("cd /tmp").await.unwrap();
     let direct = bash.run_input("pwd").await.unwrap();
@@ -330,51 +314,4 @@ async fn bash_exec_and_persistent_session_work_from_root() {
     let following = bash.run_input("whoami").await.unwrap();
     assert!(!following.contains(typo));
     assert!(!following.contains("read>"));
-}
-
-/// Coalescing is wired into the foreground bash path, not just implemented
-/// beside it: two identical tree-job commands issued concurrently share one
-/// run and both callers are told the result was shared.
-///
-/// Uses `tsc`, which classifies as a tree job and is almost certainly not
-/// installed — the command fails fast, which is fine. What is under test is
-/// that classification reaches the coalescer and that both callers come back
-/// from the same run, not what the command does.
-#[tokio::test]
-async fn identical_tree_job_commands_share_one_run() {
-    let (_root, _state, workspace) = workspace(&[]);
-    let bash = std::sync::Arc::new(BashTool::new(workspace));
-
-    let invoke = |bash: std::sync::Arc<BashTool>| async move {
-        call(
-            &*bash,
-            json!({"mode":"exec","command":"tsc --build --noEmit"}),
-        )
-        .await
-    };
-    let (first, second) = tokio::join!(invoke(bash.clone()), invoke(bash.clone()));
-
-    let shared = [&first, &second]
-        .iter()
-        .filter(|output| output.contains("shared with"))
-        .count();
-    assert!(
-        shared >= 1,
-        "expected a shared-run note.\nfirst: {first}\nsecond: {second}"
-    );
-}
-
-/// A command with no descriptor must behave exactly as before — no coalescing,
-/// no note, no shared result. Guessing here would either share results between
-/// commands that are not interchangeable or serialize things that never
-/// contended.
-#[tokio::test]
-async fn an_unclassified_command_is_untouched_by_coalescing() {
-    let (_root, _state, workspace) = workspace(&[]);
-    let bash = BashTool::new(workspace);
-    let output = call(&bash, json!({"mode":"exec","command":"echo hello"})).await;
-
-    assert!(output.contains("hello"));
-    assert!(!output.contains("shared with"), "{output}");
-    assert!(output.contains("status: completed"), "{output}");
 }

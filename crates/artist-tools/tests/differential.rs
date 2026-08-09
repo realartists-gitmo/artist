@@ -441,6 +441,10 @@ fn props_of<T: PortableTool>(tool: &T) -> Vec<String> {
 }
 
 /// Every `(tool, parameter)` the agent is told it may pass.
+///
+/// `bash` is deliberately absent: since the modal `PortableTool` surface was
+/// retired, `ToolBundle::bash` is a session backend whose model-facing shape
+/// (command/cwd/env/interactive) lives in the agent crate and is covered there.
 fn advertised(tools: &ToolBundle) -> Vec<(&'static str, String)> {
     macro_rules! surface {
         ($($field:ident),* $(,)?) => {
@@ -448,7 +452,6 @@ fn advertised(tools: &ToolBundle) -> Vec<(&'static str, String)> {
         };
     }
     surface![
-        bash,
         read,
         find,
         grep,
@@ -492,7 +495,6 @@ async fn invoke(tools: &ToolBundle, tool: &str, args: Value) -> String {
         }
     }
     match tool {
-        "bash" => go(&tools.bash, args).await,
         "read" => go(&tools.read, args).await,
         "find" => go(&tools.find, args).await,
         "grep" => go(&tools.grep, args).await,
@@ -678,78 +680,6 @@ const WIDE_MD: [&str; 3] = [
 fn knobs() -> Vec<Knob> {
     use Fixture::{Crate, Inherited, Wide};
     vec![
-        // bash
-        moves(
-            "bash",
-            "mode",
-            Crate,
-            json!({"mode": "list"}),
-            json!({"mode": "exec", "command": "echo alpha"}),
-        ),
-        moves(
-            "bash",
-            "command",
-            Crate,
-            json!({"command": "echo alpha"}),
-            json!({"command": "echo beta"}),
-        ),
-        moves(
-            "bash",
-            "background",
-            Crate,
-            json!({"command": "echo alpha"}),
-            json!({"command": "echo alpha", "background": true}),
-        ),
-        moves(
-            "bash",
-            "sessionId",
-            Crate,
-            json!({"mode": "start", "sessionId": "probe-one", "command": "cat"}),
-            json!({"mode": "start", "sessionId": "probe-two", "command": "cat"}),
-        ),
-        moves(
-            "bash",
-            "timeout",
-            Crate,
-            json!({"command": "sleep 2", "timeout": 1}),
-            json!({"command": "sleep 2", "timeout": 30}),
-        ),
-        moves(
-            "bash",
-            "maxBytes",
-            Crate,
-            json!({"command": "seq 1 4000", "maxBytes": 64}),
-            json!({"command": "seq 1 4000", "maxBytes": 20000}),
-        ),
-        moves(
-            "bash",
-            "cwd",
-            Crate,
-            json!({"command": "pwd"}),
-            json!({"command": "pwd", "cwd": "src"}),
-        ),
-        moves(
-            "bash",
-            "env",
-            Crate,
-            json!({"command": "echo $PROBE", "env": {"PROBE": "alpha"}}),
-            json!({"command": "echo $PROBE", "env": {"PROBE": "beta"}}),
-        ),
-        covered(
-            "bash",
-            "input",
-            "tools.rs::bash_exec_and_persistent_session_work_from_root — needs a live session to send into",
-        ),
-        covered(
-            "bash",
-            "waitMs",
-            "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a live session",
-        ),
-        covered(
-            "bash",
-            "signal",
-            "tools.rs::bash_exec_and_persistent_session_work_from_root — only meaningful against a running session",
-        ),
         // read
         moves(
             "read",

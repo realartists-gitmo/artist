@@ -296,6 +296,64 @@ mod tests {
         "Stub output."
     );
 
+    /// A model-facing tool that runs a shell command to completion.
+    ///
+    /// The drift tests need a tool *call* that mutates the filesystem out of
+    /// band. The real session bash returns a slug and runs in the background,
+    /// so it can never carry a drift note on its own result; this stub stands
+    /// in for it as the synchronous, wait-for-output shape the model sees.
+    #[derive(Clone)]
+    struct Bash;
+    #[derive(Debug, thiserror::Error)]
+    #[error("bash")]
+    struct BashError;
+    impl PortableTool for Bash {
+        const NAME: &'static str = "bash";
+        type Args = serde_json::Value;
+        type Output = String;
+        type Error = BashError;
+        fn description(&self) -> String {
+            "run a shell command".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})
+        }
+        async fn call(&self, args: Self::Args) -> Result<String, BashError> {
+            let command = args
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(BashError)?
+                .to_owned();
+            let output = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("sh").arg("-c").arg(command).output()
+            })
+            .await
+            .map_err(|_| BashError)?
+            .map_err(|_| BashError)?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Ok(format!(
+                "status: {}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+                if output.status.success() {
+                    "completed"
+                } else {
+                    "failed"
+                }
+            ))
+        }
+    }
+    artist_tool_api::impl_text_tool_contract!(
+        Bash,
+        artist_tool_api::ToolCategory::Shell,
+        artist_tool_api::ArtistToolAnnotations {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: true,
+        },
+        "Run a shell command."
+    );
+
     #[test]
     fn disabled_tools_are_dropped() {
         let mut tools = vec![dynamic(Stub("Inspect files"))];
@@ -338,7 +396,7 @@ mod tests {
             crate::pagination::PageStore::memory(),
         );
         let bash = guard(
-            dynamic(artist_tools::BashTool::new(workspace.clone())),
+            dynamic(Bash),
             watch,
             crate::pagination::PageStore::memory(),
         );
@@ -393,7 +451,7 @@ mod tests {
             crate::pagination::PageStore::memory(),
         );
         let bash = guard(
-            dynamic(artist_tools::BashTool::new(workspace.clone())),
+            dynamic(Bash),
             watch,
             crate::pagination::PageStore::memory(),
         );

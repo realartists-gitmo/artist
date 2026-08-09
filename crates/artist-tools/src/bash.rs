@@ -154,7 +154,6 @@ pub struct BashTool {
     starting: Arc<DashSet<String>>,
 }
 struct Session {
-    command: String,
     output: Arc<Mutex<String>>,
     cursor: Arc<Mutex<usize>>,
     writer: Mutex<Box<dyn Write + Send>>,
@@ -540,7 +539,6 @@ impl BashTool {
         self.sessions.insert(
             id.clone(),
             Arc::new(Session {
-                command,
                 output,
                 cursor,
                 writer: Mutex::new(writer),
@@ -631,36 +629,9 @@ impl BashTool {
     }
 }
 
-async fn pump(
-    mut reader: impl AsyncRead + Unpin,
-    buffer: Arc<tokio::sync::Mutex<(Vec<u8>, bool)>>,
-    cap: usize,
-) {
-    let mut chunk = [0u8; 4096];
-    while let Ok(count) = reader.read(&mut chunk).await {
-        if count == 0 {
-            break;
-        }
-        let mut output = buffer.lock().await;
-        output.0.extend_from_slice(&chunk[..count]);
-        if output.0.len() > cap {
-            let drain = output.0.len() - cap;
-            output.0.drain(..drain);
-            output.1 = true;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_nonempty_session_listing_is_typed_as_listed() {
-        let parsed = BashResult::parse("sessions:\nt-red-wolf\trunning\tcargo test");
-        assert_eq!(parsed.status, BashStatus::Listed);
-        assert!(parsed.output.contains("t-red-wolf"));
-    }
 
     #[tokio::test]
     async fn managed_readiness_comes_from_the_live_pty_input_channel() {

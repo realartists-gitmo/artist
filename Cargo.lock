@@ -849,7 +849,6 @@ dependencies = [
  "globset",
  "hashline-tools",
  "ignore",
- "nix 0.31.3",
  "portable-pty",
  "regex",
  "rig-core",
@@ -860,7 +859,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tokio-util",
  "uuid",
 ]
 

@@ -26,7 +26,6 @@ fff-search = "0.10.1"
 globset = "0.4"
 # Unit discovery honours .gitignore, so build output never becomes a "crate".
 ignore = "0.4"
-nix = { version = "0.31", features = ["signal"] }
 hashline-tools = { path = "../hashline-tools" }
 portable-pty = "0.9"
 regex = "1"
@@ -37,7 +36,6 @@ serde_json = "1"
 similar = "3"
 tempfile = "3"
 thiserror = "2"
-tokio-util = "0.7"
 tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
