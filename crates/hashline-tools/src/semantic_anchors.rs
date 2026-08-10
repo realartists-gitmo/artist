@@ -7,11 +7,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use teca::{default_atom_ids, default_lexicon, render::render_text_prefix};
+use teca::{default_address, default_atom_ids};
 
 /// Anchor ABI version.  The value identifies the TECA consumer contract, not
-/// an Artist-side addressing algorithm.
-pub const ANCHOR_ABI_VERSION: &str = "teca-0.1.0";
+/// an Artist-side addressing algorithm. Bumped when the model-visible rendering
+/// contract changes.
+pub const ANCHOR_ABI_VERSION: &str = "teca-0.1.1-lexicon-atoms";
 
 /// Produce anchors for logical lines belonging to a non-file text surface.
 ///
@@ -140,14 +141,76 @@ fn shortest_live_anchors_with_depth(identities: &[Vec<u8>], width: usize) -> Vec
         .collect()
 }
 
+/// Render the first `components` lexicon atoms of `identity` as a compact
+/// `#...` anchor suffix.
+///
+/// The canonical embedded lexicon atoms never contain `/`, so joining them with
+/// `/` is injective over atom sequences: splitting on `/` recovers the atoms,
+/// and no distinct stream can collide with another render.
 pub(crate) fn render_prefix(identity: &[u8], components: usize) -> String {
     assert!(components > 0);
-    let mut address = default_atom_ids(identity);
-    format!(
-        "#{}",
-        render_text_prefix(&mut address, default_lexicon(), components)
-            .expect("the embedded TECA scheme and lexicon must agree")
-    )
+    let mut out = String::with_capacity(2 + components * 4);
+    out.push('#');
+    for (index, atom) in default_address(identity).take(components).enumerate() {
+        if index != 0 {
+            out.push('/');
+        }
+        out.push_str(std::str::from_utf8(atom).expect("TECA lexicon atoms are valid UTF-8"));
+    }
+    out
+}
+
+/// Result of resolving an opaque `#...` anchor suffix against candidate TECA streams.
+pub(crate) enum AnchorResolution {
+    /// Zero candidate streams render to the suffix; the anchor is stale/unknown.
+    Unknown,
+    /// Exactly one candidate stream renders to the suffix.
+    Resolved(usize),
+    /// Multiple candidate streams render to the suffix; carries strictly longer
+    /// renderings of the matched candidates so the caller can disambiguate.
+    Ambiguous(Vec<String>),
+}
+
+/// Resolve an opaque `#...` anchor suffix as a prefix over the actual candidate
+/// TECA streams.
+///
+/// The suffix is never parsed. Each candidate identity is rendered atom by atom
+/// and the accumulated string is compared at atom boundaries, so a suffix is a
+/// match only when it equals the render of the candidate's first N atoms.
+/// Zero matches are stale/unknown, one match is the target, and multiple
+/// matches are ambiguous — never guessed.
+pub(crate) fn resolve_anchor(anchor: &str, identities: &[Vec<u8>]) -> AnchorResolution {
+    let suffix = anchor.strip_prefix('#').unwrap_or(anchor);
+    let mut matched: Vec<(usize, usize)> = Vec::new();
+    for (index, identity) in identities.iter().enumerate() {
+        let mut rendered = String::new();
+        let mut depth = 0usize;
+        for atom in default_address(identity) {
+            depth += 1;
+            if depth != 1 {
+                rendered.push('/');
+            }
+            rendered
+                .push_str(std::str::from_utf8(atom).expect("TECA lexicon atoms are valid UTF-8"));
+            if rendered == suffix {
+                matched.push((index, depth));
+                break;
+            }
+            if rendered.len() > suffix.len() {
+                break;
+            }
+        }
+    }
+    match matched.len() {
+        0 => AnchorResolution::Unknown,
+        1 => AnchorResolution::Resolved(matched[0].0),
+        _ => AnchorResolution::Ambiguous(
+            matched
+                .iter()
+                .map(|&(index, depth)| render_prefix(&identities[index], depth + 2))
+                .collect(),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -157,9 +220,78 @@ mod tests {
     #[test]
     fn anchors_are_deterministic_and_use_teca() {
         let identity = b"canonical occurrence identity";
-        assert_eq!(ANCHOR_ABI_VERSION, "teca-0.1.0");
+        assert_eq!(ANCHOR_ABI_VERSION, "teca-0.1.1-lexicon-atoms");
         assert_eq!(render_prefix(identity, 2), render_prefix(identity, 2));
         assert!(render_prefix(identity, 2).starts_with('#'));
+    }
+
+    #[test]
+    fn rendering_is_compact_lexicon_atoms_joined_by_slash() {
+        let identity = b"compact rendering probe";
+        let anchor = render_prefix(identity, 3);
+        assert!(anchor.starts_with('#'));
+        let suffix = &anchor[1..];
+        assert!(suffix.contains('/'));
+        assert!(!suffix.contains(':'));
+        for part in suffix.split('/') {
+            assert!(!part.is_empty());
+        }
+        assert!(render_prefix(identity, 3).len() < b"compact rendering probe".len() * 3);
+    }
+
+    #[test]
+    fn render_is_injective_for_distinct_identities() {
+        let left = render_prefix(b"alpha identity", 4);
+        let right = render_prefix(b"beta identity", 4);
+        assert_ne!(left, right);
+        assert_ne!(
+            render_prefix(b"same bytes", 2),
+            render_prefix(b"same bytes", 3)
+        );
+    }
+
+    #[test]
+    fn opaque_resolution_reports_unknown_resolved_and_ambiguous() {
+        // Two distinct identities whose TECA streams share their first atom
+        // (both render atom 0 as "irt").
+        let identities: Vec<Vec<u8>> = vec![
+            vec![116, 128, 99, 100, 101, 102, 103, 104],
+            vec![128, 114, 99, 100, 101, 102, 103, 104],
+        ];
+        assert_ne!(identities[0], identities[1]);
+        let shared = render_prefix(&identities[0], 1);
+        match resolve_anchor(&shared, &identities) {
+            AnchorResolution::Ambiguous(candidates) => {
+                assert!(candidates.len() >= 2);
+                assert!(candidates.iter().all(|c| c.starts_with(&shared)));
+            }
+            _ => panic!("expected ambiguity when a shallow prefix is shared"),
+        }
+
+        let deep = render_prefix(&identities[0], 3);
+        match resolve_anchor(&deep, &identities) {
+            AnchorResolution::Resolved(index) => assert_eq!(index, 0),
+            _ => panic!("expected an unambiguous deep prefix to resolve to its identity"),
+        }
+        match resolve_anchor("#no/such/anchor", &identities) {
+            AnchorResolution::Unknown => {}
+            _ => panic!("expected unknown for an anchor outside the live set"),
+        }
+    }
+
+    #[test]
+    fn resolution_never_guesses_between_streams() {
+        let identities: Vec<Vec<u8>> = vec![b"same prefix a".to_vec(), b"same prefix b".to_vec()];
+        let shallow = render_prefix(&identities[0], 2);
+        let shallow_for_second = render_prefix(&identities[1], 2);
+        assert_ne!(shallow, shallow_for_second);
+        match resolve_anchor(&shallow, &identities) {
+            AnchorResolution::Resolved(index) => assert_eq!(index, 0),
+            AnchorResolution::Ambiguous(_) => {
+                // A 2-atom prefix is already unique here; ambiguity must not guess.
+            }
+            AnchorResolution::Unknown => panic!("expected a match within the live set"),
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use xxhash_rust::xxh3::xxh3_64;
 
 fn drift_fingerprint(data: &[u8]) -> u64 {
@@ -78,6 +78,7 @@ fn line_byte_ranges(content: &str) -> Vec<LineRange> {
 #[derive(Debug, Clone)]
 struct LineInfo {
     anchor: String,
+    identity: Vec<u8>,
     content: String,
 }
 
@@ -172,8 +173,9 @@ impl FileView {
             .into_iter()
             .zip(identities)
             .zip(anchors)
-            .map(|((content, _identity), anchor)| LineInfo {
+            .map(|((content, identity), anchor)| LineInfo {
                 anchor,
+                identity,
                 content: content.to_owned(),
             })
             .collect();
@@ -605,16 +607,28 @@ impl FileToolManager {
             InsertAfter { content: String },
         }
 
+        let snapshot_identities: Vec<Vec<u8>> = snapshot_view
+            .lines
+            .iter()
+            .map(|line| line.identity.clone())
+            .collect();
         let resolve_line_idx = |anchor: &str| -> anyhow::Result<usize> {
-            snapshot_view
-                .lines
-                .iter()
-                .position(|line| line.anchor == anchor)
-                .ok_or_else(|| anyhow::anyhow!(
+            match crate::semantic_anchors::resolve_anchor(anchor, &snapshot_identities) {
+                crate::semantic_anchors::AnchorResolution::Resolved(index) => Ok(index),
+                crate::semantic_anchors::AnchorResolution::Ambiguous(candidates) => {
+                    bail!(
+                        "anchor '{}' is ambiguous in '{}'; it matches multiple live occurrences. Re-read the file and use a longer current anchor, e.g. {}",
+                        anchor,
+                        request.path,
+                        candidates.join(", ")
+                    )
+                }
+                crate::semantic_anchors::AnchorResolution::Unknown => Err(anyhow::anyhow!(
                     "anchor '{}' does not exactly resolve to a live occurrence in '{}'; re-read the file for current anchors",
                     anchor,
                     request.path
-                ))
+                )),
+            }
         };
         let mut resolved: Vec<ResolvedOp> = Vec::new();
 

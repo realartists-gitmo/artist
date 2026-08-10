@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use tokio::{
     fs,
@@ -818,13 +818,11 @@ mod tests {
             Some("session-doomed")
         );
         state.forget_agent("session-doomed").await.expect("forget");
-        assert!(
-            state
-                .writers_for(&[path])
-                .await
-                .expect("writers")
-                .is_empty()
-        );
+        assert!(state
+            .writers_for(&[path])
+            .await
+            .expect("writers")
+            .is_empty());
     }
 
     /// Each agent keeps its own view, so one reading a file must not make the
