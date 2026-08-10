@@ -1,31 +1,50 @@
+//! Stateless TECA anchors for logical source-line occurrences.
+//!
+//! Artist owns occurrence identity construction; TECA owns address generation.
+//! This module intentionally has no allocator, persisted cursor, hash, or
+//! actor-local state.  Prefixes are selected only among the live identities in
+//! the view being rendered.
+
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::OnceLock;
 
-use crate::anchor_address_v1::{
-    anchor_address_component, anchor_address_prefix, ADDRESS_ALPHABET_SIZE,
-};
+use teca::{default_atom_ids, default_lexicon, render::render_text_prefix};
 
-/// Separator between address components after the leading `#`.
+/// Anchor ABI version.  The value identifies the TECA consumer contract, not
+/// an Artist-side addressing algorithm.
+pub const ANCHOR_ABI_VERSION: &str = "teca-0.1.0";
+
+/// Produce anchors for logical lines belonging to a non-file text surface.
 ///
-/// U+2016 does not occur in any payload in the frozen v1 token alphabet, so the
-/// textual grammar remains unambiguous without altering any token payload.
-pub const ANCHOR_ABI_VERSION: &str = "v1";
-pub const COMPONENT_SEPARATOR: char = '‖';
-
-const TOKENS_TEXT: &str = include_str!("anchor_tokens_68399.txt");
-
-fn tokens() -> &'static [&'static str] {
-    static TOKENS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    TOKENS
-        .get_or_init(|| {
-            let tokens: Vec<&str> = TOKENS_TEXT.lines().collect();
-            assert_eq!(tokens.len(), ADDRESS_ALPHABET_SIZE);
-            assert!(tokens
-                .iter()
-                .all(|token| !token.contains(COMPONENT_SEPARATOR)));
-            tokens
-        })
-        .as_slice()
+/// The identity intentionally contains only canonical line bytes, the fixed
+/// label-free role ancestry supplied by the caller, and the bidirectional
+/// rank among equivalent siblings. It contains neither a resource path nor
+/// actor-local state.
+pub fn virtual_line_anchors(lines: &[&str], role: &str) -> Vec<String> {
+    let mut equivalent: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, line) in lines.iter().enumerate() {
+        equivalent.entry(line).or_default().push(index);
+    }
+    let mut identities = vec![Vec::new(); lines.len()];
+    for (line, indices) in equivalent {
+        let count = indices.len();
+        for (position, index) in indices.into_iter().enumerate() {
+            let (side, rank) = if position < count / 2 {
+                (b'L', position + 1)
+            } else {
+                // For an odd count, the center is on the right.
+                (b'R', count - position)
+            };
+            let identity = &mut identities[index];
+            identity.extend_from_slice(b"artist.anchor.virtual-line.v1\0");
+            identity.extend_from_slice(&(role.len() as u64).to_le_bytes());
+            identity.extend_from_slice(role.as_bytes());
+            identity.extend_from_slice(&(line.len() as u64).to_le_bytes());
+            identity.extend_from_slice(line.as_bytes());
+            identity.push(side);
+            identity.extend_from_slice(&(rank as u64).to_le_bytes());
+        }
+    }
+    shortest_live_anchors(&identities)
 }
 
 pub(crate) fn shortest_live_anchors(identities: &[Vec<u8>]) -> Vec<String> {
@@ -37,32 +56,41 @@ pub(crate) fn shortest_live_anchors(identities: &[Vec<u8>]) -> Vec<String> {
     for identity in identities {
         assert!(
             unique.insert(identity.as_slice()),
-            "v1 occurrence identities must be unique after equivalent-sibling ranking"
+            "TECA occurrence identities must be unique after equivalent-sibling ranking"
         );
     }
 
-    let vocabulary = tokens();
+    // Calculate rendered-prefix uniqueness using TECA structural atoms.  This
+    // avoids depending on the spelling or boundaries of lexicon tokens.
+    let streams: Vec<Vec<u32>> = identities
+        .iter()
+        .map(|identity| {
+            default_atom_ids(identity)
+                .map(|atom| atom.get())
+                .take(32)
+                .collect()
+        })
+        .collect();
     let mut depths = vec![0usize; identities.len()];
     let mut groups = VecDeque::from([(0usize, (0..identities.len()).collect::<Vec<_>>())]);
 
     while let Some((depth, indices)) = groups.pop_front() {
-        // The frozen vocabulary contains a small number of duplicate payload rows.
-        // Prefix uniqueness is therefore defined over rendered payloads, not merely
-        // numeric field values. Different field elements that render identically extend
-        // by another component; the v1 numeric address itself is never changed.
-        let mut buckets: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut buckets: HashMap<u32, Vec<usize>> = HashMap::new();
         for index in indices {
-            let component = anchor_address_component(&identities[index], depth) as usize;
             buckets
-                .entry(vocabulary[component])
+                .entry(streams[index][depth])
                 .or_default()
                 .push(index);
         }
-
         for bucket in buckets.into_values() {
             if bucket.len() == 1 {
                 depths[bucket[0]] = depth + 1;
             } else {
+                // TECA addresses are indefinitely extensible.  Grow streams
+                // only in the exceptional case where 32 atoms are insufficient.
+                if depth + 1 == streams[bucket[0]].len() {
+                    return shortest_live_anchors_with_depth(identities, depth + 2);
+                }
                 groups.push_back((depth + 1, bucket));
             }
         }
@@ -75,162 +103,85 @@ pub(crate) fn shortest_live_anchors(identities: &[Vec<u8>]) -> Vec<String> {
         .collect()
 }
 
+fn shortest_live_anchors_with_depth(identities: &[Vec<u8>], width: usize) -> Vec<String> {
+    let streams: Vec<Vec<u32>> = identities
+        .iter()
+        .map(|identity| {
+            default_atom_ids(identity)
+                .map(|atom| atom.get())
+                .take(width)
+                .collect()
+        })
+        .collect();
+    let mut depths = vec![0usize; identities.len()];
+    let mut groups = VecDeque::from([(0usize, (0..identities.len()).collect::<Vec<_>>())]);
+    while let Some((depth, indices)) = groups.pop_front() {
+        let mut buckets: HashMap<u32, Vec<usize>> = HashMap::new();
+        for index in indices {
+            buckets
+                .entry(streams[index][depth])
+                .or_default()
+                .push(index);
+        }
+        for bucket in buckets.into_values() {
+            if bucket.len() == 1 {
+                depths[bucket[0]] = depth + 1;
+            } else if depth + 1 == width {
+                return shortest_live_anchors_with_depth(identities, width * 2);
+            } else {
+                groups.push_back((depth + 1, bucket));
+            }
+        }
+    }
+    identities
+        .iter()
+        .zip(depths)
+        .map(|(identity, depth)| render_prefix(identity, depth))
+        .collect()
+}
+
 pub(crate) fn render_prefix(identity: &[u8], components: usize) -> String {
     assert!(components > 0);
-    let vocabulary = tokens();
-    let mut rendered = String::from("#");
-    for (depth, value) in anchor_address_prefix(identity, components)
-        .into_iter()
-        .enumerate()
-    {
-        if depth != 0 {
-            rendered.push(COMPONENT_SEPARATOR);
-        }
-        rendered.push_str(vocabulary[value as usize]);
-    }
-    rendered
+    let mut address = default_atom_ids(identity);
+    format!(
+        "#{}",
+        render_text_prefix(&mut address, default_lexicon(), components)
+            .expect("the embedded TECA scheme and lexicon must agree")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anchor_address_v1::{
-        anchor_address_prefix, BYTE_CODEC_MULTIPLIER, BYTE_CODEC_OFFSET, FIELD_PRIME,
-        OPTIMIZED_POINTS, TAIL_OFFSET, TAIL_STEP,
-    };
 
     #[test]
-    fn frozen_v1_constants_are_exact() {
-        assert_eq!(ANCHOR_ABI_VERSION, "v1");
-        let scheme: String = include_str!("scheme_v1.json")
-            .chars()
-            .filter(|ch| !ch.is_whitespace())
-            .collect();
-        assert!(scheme.contains("\"field_prime\":68399"));
-        assert!(scheme.contains("\"optimized_points\":[49667,38410,64413,58963]"));
-        assert!(scheme.contains("\"tail_offset\":30920"));
-        assert!(scheme.contains("\"tail_step\":8449"));
-        assert_eq!(FIELD_PRIME, 68_399);
-        assert_eq!(ADDRESS_ALPHABET_SIZE, 68_399);
-        assert_eq!(BYTE_CODEC_MULTIPLIER, 17);
-        assert_eq!(BYTE_CODEC_OFFSET, 17);
-        assert_eq!(OPTIMIZED_POINTS, &[49_667, 38_410, 64_413, 58_963]);
-        assert_eq!(TAIL_OFFSET, 30_920);
-        assert_eq!(TAIL_STEP, 8_449);
+    fn anchors_are_deterministic_and_use_teca() {
+        let identity = b"canonical occurrence identity";
+        assert_eq!(ANCHOR_ABI_VERSION, "teca-0.1.0");
+        assert_eq!(render_prefix(identity, 2), render_prefix(identity, 2));
+        assert!(render_prefix(identity, 2).starts_with('#'));
     }
 
     #[test]
-    fn token_rows_are_direct_and_separator_is_reserved() {
-        let vocabulary = tokens();
-        assert_eq!(vocabulary.len(), 68_399);
-        assert_eq!(vocabulary[0], "%");
-        assert_eq!(vocabulary[7], "0");
-        assert_eq!(vocabulary[68_398], "flashdata");
-        assert!(vocabulary
-            .iter()
-            .all(|token| !token.contains(COMPONENT_SEPARATOR)));
-        assert!(vocabulary.iter().all(|token| !token.contains(": ")));
-        assert!(vocabulary.iter().all(|token| !token.contains(" ⟶ ")));
-        // The source artifact intentionally/actually contains duplicate payload rows;
-        // the live-prefix algorithm must handle them textually rather than mutating the
-        // frozen row mapping.
+    fn shortest_prefixes_are_unique_and_order_independent() {
+        let left = b"left occurrence".to_vec();
+        let right = b"right occurrence".to_vec();
+        let forward = shortest_live_anchors(&[left.clone(), right.clone()]);
+        let reverse = shortest_live_anchors(&[right, left]);
+        assert_ne!(forward[0], forward[1]);
+        assert_eq!(forward[0], reverse[1]);
+        assert_eq!(forward[1], reverse[0]);
+    }
+
+    #[test]
+    fn virtual_line_duplicates_are_distinct_and_deterministic() {
+        let lines = ["same", "same", "same", "same", "same"];
+        let anchors = virtual_line_anchors(&lines, "virtual/terminal/logical-line");
+        assert_eq!(anchors.len(), lines.len());
+        assert_eq!(anchors.iter().collect::<HashSet<_>>().len(), lines.len());
         assert_eq!(
-            vocabulary.iter().copied().collect::<HashSet<_>>().len(),
-            68_384
+            anchors,
+            virtual_line_anchors(&lines, "virtual/terminal/logical-line")
         );
-    }
-
-    #[test]
-    fn render_maps_each_field_value_directly_to_its_row() {
-        let identity = b"canonical identity bytes";
-        let values = anchor_address_prefix(identity, 3);
-        let vocabulary = tokens();
-        let expected = format!(
-            "#{}{}{}{}{}",
-            vocabulary[values[0] as usize],
-            COMPONENT_SEPARATOR,
-            vocabulary[values[1] as usize],
-            COMPONENT_SEPARATOR,
-            vocabulary[values[2] as usize],
-        );
-        assert_eq!(render_prefix(identity, 3), expected);
-    }
-
-    #[test]
-    fn duplicate_token_rows_extend_textual_prefixes() {
-        let vocabulary = tokens();
-        assert_eq!(vocabulary[1_402], vocabulary[10_841]);
-
-        let mut left = None;
-        let mut right = None;
-        for n in 0u64..2_000_000 {
-            let identity = format!("duplicate-token-row-{n}").into_bytes();
-            match anchor_address_component(&identity, 0) {
-                1_402 if left.is_none() => left = Some(identity),
-                10_841 if right.is_none() => right = Some(identity),
-                _ => {}
-            }
-            if left.is_some() && right.is_some() {
-                break;
-            }
-        }
-        let left = left.expect("identity hitting first duplicate token row");
-        let right = right.expect("identity hitting second duplicate token row");
-        assert_eq!(render_prefix(&left, 1), render_prefix(&right, 1));
-
-        let rendered = shortest_live_anchors(&[left.clone(), right.clone()]);
-        assert_ne!(rendered[0], rendered[1]);
-        assert_eq!(rendered[0], render_prefix(&left, 2));
-        assert_eq!(rendered[1], render_prefix(&right, 2));
-    }
-
-    #[test]
-    fn live_first_component_collision_extends_without_reassignment() {
-        let mut seen: HashMap<u32, Vec<u8>> = HashMap::new();
-        let (a, b) = (0u64..200_000)
-            .find_map(|n| {
-                let candidate = format!("identity-{n}").into_bytes();
-                let first = anchor_address_component(&candidate, 0);
-                match seen.insert(first, candidate.clone()) {
-                    Some(previous)
-                        if anchor_address_component(&previous, 1)
-                            != anchor_address_component(&candidate, 1) =>
-                    {
-                        Some((previous, candidate))
-                    }
-                    _ => None,
-                }
-            })
-            .expect("expected a first-component collision in bounded search");
-
-        let solo = shortest_live_anchors(std::slice::from_ref(&a));
-        let together = shortest_live_anchors(&[a.clone(), b.clone()]);
-        assert_eq!(solo[0], render_prefix(&a, 1));
-        assert_eq!(together[0], render_prefix(&a, 2));
-        assert_eq!(together[1], render_prefix(&b, 2));
-
-        let reversed = shortest_live_anchors(&[b.clone(), a.clone()]);
-        assert_eq!(together[0], reversed[1]);
-        assert_eq!(together[1], reversed[0]);
-    }
-
-    #[test]
-    fn unrelated_identity_does_not_change_existing_unique_prefixes() {
-        let a = b"alpha identity".to_vec();
-        let b = b"beta identity".to_vec();
-        let before = shortest_live_anchors(&[a.clone(), b.clone()]);
-
-        let mut n = 0u64;
-        let c = loop {
-            let candidate = format!("other-{n}").into_bytes();
-            let first = anchor_address_component(&candidate, 0);
-            if first != anchor_address_component(&a, 0) && first != anchor_address_component(&b, 0)
-            {
-                break candidate;
-            }
-            n += 1;
-        };
-        let after = shortest_live_anchors(&[a, b, c]);
-        assert_eq!(&before, &after[..2]);
     }
 }

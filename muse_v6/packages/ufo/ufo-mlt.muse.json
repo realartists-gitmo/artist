@@ -1,0 +1,981 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "e028c9c3134fda216fc8f37240c7f36f18f8bfef339f057af091afdfdc041dda"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.mlt",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "dd72ee821a3882f929a9b50ee3f1931427413d9c4bf62f8453afcb840481d714"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-MLT",
+          "description": "Executable multi-level theory with orders, cross-level instantiation, characterization, powertypes and partitions.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:mlt",
+            "evidence:types"
+          ]
+        },
+        "concepts": {
+          "mlt:Categorizer": {
+            "id": "mlt:Categorizer",
+            "preferred_labels": {
+              "en": "categorizer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of higher order type used to represent categorizer in UFO-MLT.",
+              "genus": "mlt:HigherOrderType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:HigherOrderType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:CompleteCategorizer": {
+            "id": "mlt:CompleteCategorizer",
+            "preferred_labels": {
+              "en": "complete categorizer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A higher-order type that classifies or organizes lower-order types according to the constraints of UFO-MLT.",
+              "genus": "mlt:Categorizer",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Categorizer"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:CompleteDisjointCategorizer": {
+            "id": "mlt:CompleteDisjointCategorizer",
+            "preferred_labels": {
+              "en": "complete disjoint categorizer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A higher-order type that classifies or organizes lower-order types according to the constraints of UFO-MLT.",
+              "genus": "mlt:CompleteCategorizer",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:CompleteCategorizer",
+              "mlt:DisjointCategorizer"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:DisjointCategorizer": {
+            "id": "mlt:DisjointCategorizer",
+            "preferred_labels": {
+              "en": "disjoint categorizer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A higher-order type that classifies or organizes lower-order types according to the constraints of UFO-MLT.",
+              "genus": "mlt:Categorizer",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Categorizer"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:FirstOrderType": {
+            "id": "mlt:FirstOrderType",
+            "preferred_labels": {
+              "en": "first-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are first-order entities as characterized in UFO-MLT.",
+              "genus": "mlt:Type",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:HigherOrderType": {
+            "id": "mlt:HigherOrderType",
+            "preferred_labels": {
+              "en": "higher-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are higher-order entities as characterized in UFO-MLT.",
+              "genus": "mlt:Type",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:Individual": {
+            "id": "mlt:Individual",
+            "preferred_labels": {
+              "en": "MLT individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of ontological entity used to represent mlt individual in UFO-MLT.",
+              "genus": "mlt:OntologicalEntity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:OntologicalEntity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:OntologicalEntity": {
+            "id": "mlt:OntologicalEntity",
+            "preferred_labels": {
+              "en": "ontological entity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of entity used to represent ontological entity in UFO-MLT.",
+              "genus": "ufo:Entity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Entity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:OrderAssignment": {
+            "id": "mlt:OrderAssignment",
+            "preferred_labels": {
+              "en": "order assignment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of abstract individual used to represent order assignment in UFO-MLT.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:PartitioningType": {
+            "id": "mlt:PartitioningType",
+            "preferred_labels": {
+              "en": "partitioning type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are partitioning entities as characterized in UFO-MLT.",
+              "genus": "mlt:HigherOrderType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:HigherOrderType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:Powertype": {
+            "id": "mlt:Powertype",
+            "preferred_labels": {
+              "en": "powertype"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of higher order type, partitioning type used to represent powertype in UFO-MLT.",
+              "genus": "mlt:HigherOrderType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:HigherOrderType",
+              "mlt:PartitioningType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:SecondOrderType": {
+            "id": "mlt:SecondOrderType",
+            "preferred_labels": {
+              "en": "second-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are second-order entities as characterized in UFO-MLT.",
+              "genus": "mlt:Type",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:ThirdOrderType": {
+            "id": "mlt:ThirdOrderType",
+            "preferred_labels": {
+              "en": "third-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are third-order entities as characterized in UFO-MLT.",
+              "genus": "mlt:Type",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:Type": {
+            "id": "mlt:Type",
+            "preferred_labels": {
+              "en": "MLT type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are mlt entities as characterized in UFO-MLT.",
+              "genus": "mlt:OntologicalEntity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:OntologicalEntity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:TypeOrder": {
+            "id": "mlt:TypeOrder",
+            "preferred_labels": {
+              "en": "type order"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract level used to locate an entity in the cross-level classification structure of UFO-MLT.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          }
+        },
+        "relations": {
+          "mlt:categorizes": {
+            "id": "mlt:categorizes",
+            "preferred_labels": {
+              "en": "categorizes"
+            },
+            "definition": "Holds from a categorizer to a type when the source categorizes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:Categorizer"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:classifiesType"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:characterizes": {
+            "id": "mlt:characterizes",
+            "preferred_labels": {
+              "en": "characterizes"
+            },
+            "definition": "Holds from a higher order type to a type when the source characterizes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:classifiesType": {
+            "id": "mlt:classifiesType",
+            "preferred_labels": {
+              "en": "classifies type"
+            },
+            "definition": "Holds from a higher order type to a type when the source classifies type the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:completelyCharacterizes": {
+            "id": "mlt:completelyCharacterizes",
+            "preferred_labels": {
+              "en": "completely characterizes"
+            },
+            "definition": "Holds from a higher order type to a type when the source completely characterizes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:characterizes"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:disjointlyCharacterizes": {
+            "id": "mlt:disjointlyCharacterizes",
+            "preferred_labels": {
+              "en": "disjointly characterizes"
+            },
+            "definition": "Holds from a higher order type to a type when the source disjointly characterizes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:characterizes"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:hasBaseType": {
+            "id": "mlt:hasBaseType",
+            "preferred_labels": {
+              "en": "has base type"
+            },
+            "definition": "Holds from a higher order type to a type when the source has base type the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:hasOrder": {
+            "id": "mlt:hasOrder",
+            "preferred_labels": {
+              "en": "has ontological order"
+            },
+            "definition": "Holds from a ontological entity to a type order when the source has ontological order the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:OntologicalEntity"
+            ],
+            "ranges": [
+              "mlt:TypeOrder"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:higherThan": {
+            "id": "mlt:higherThan",
+            "preferred_labels": {
+              "en": "is higher than"
+            },
+            "definition": "Holds from a type order to a type order when the source is higher than the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:TypeOrder"
+            ],
+            "ranges": [
+              "mlt:TypeOrder"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:immediatelyHigherThan": {
+            "id": "mlt:immediatelyHigherThan",
+            "preferred_labels": {
+              "en": "is immediately higher than"
+            },
+            "definition": "Holds from a type order to a type order when the source is immediately higher than the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:TypeOrder"
+            ],
+            "ranges": [
+              "mlt:TypeOrder"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:instantiates": {
+            "id": "mlt:instantiates",
+            "preferred_labels": {
+              "en": "MLT instantiates"
+            },
+            "definition": "Holds from a ontological entity to a type when the source MLT instantiates the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:OntologicalEntity"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:isPowertypeOf": {
+            "id": "mlt:isPowertypeOf",
+            "preferred_labels": {
+              "en": "is powertype of"
+            },
+            "definition": "Holds from a powertype to a type when the source is powertype of the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:Powertype"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:partitions"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:partitions": {
+            "id": "mlt:partitions",
+            "preferred_labels": {
+              "en": "partitions"
+            },
+            "definition": "Holds from a partitioning type to a type when the source partitions the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:PartitioningType"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:completelyCharacterizes",
+              "mlt:disjointlyCharacterizes"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:properSpecializes": {
+            "id": "mlt:properSpecializes",
+            "preferred_labels": {
+              "en": "properly specializes"
+            },
+            "definition": "Holds from a type to a type when the source properly specializes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:Type"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [
+              "mlt:specializes"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:specializes": {
+            "id": "mlt:specializes",
+            "preferred_labels": {
+              "en": "MLT specializes"
+            },
+            "definition": "Holds from a type to a type when the source MLT specializes the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:Type"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:subordinates": {
+            "id": "mlt:subordinates",
+            "preferred_labels": {
+              "en": "subordinates"
+            },
+            "definition": "Holds from a type to a type when the source subordinates the target, as defined in UFO-MLT.",
+            "domains": [
+              "mlt:Type"
+            ],
+            "ranges": [
+              "mlt:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "mlt:OntologicalEntity",
+            "members": [
+              "mlt:Individual",
+              "mlt:Type"
+            ]
+          },
+          {
+            "kind": "disjoint",
+            "members": [
+              "mlt:FirstOrderType",
+              "mlt:SecondOrderType",
+              "mlt:ThirdOrderType"
+            ]
+          },
+          {
+            "kind": "subsumption",
+            "child": "mlt:SecondOrderType",
+            "parent": "mlt:HigherOrderType"
+          },
+          {
+            "kind": "subsumption",
+            "child": "mlt:ThirdOrderType",
+            "parent": "mlt:HigherOrderType"
+          },
+          {
+            "kind": "cardinality",
+            "subject": "mlt:OntologicalEntity",
+            "relation": "mlt:hasOrder",
+            "object": "mlt:TypeOrder",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "mlt:HigherOrderType",
+            "relation": "mlt:hasBaseType",
+            "object": "mlt:Type",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "mlt:Powertype",
+            "relation": "mlt:isPowertypeOf",
+            "object": "mlt:Type"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "mlt:PartitioningType",
+            "relation": "mlt:partitions",
+            "object": "mlt:Type"
+          },
+          {
+            "kind": "relation_subsumption",
+            "child": "mlt:isPowertypeOf",
+            "parent": "mlt:partitions"
+          },
+          {
+            "kind": "relation_subsumption",
+            "child": "mlt:partitions",
+            "parent": "mlt:characterizes"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?x",
+                "?y"
+              ],
+              "premises": [
+                {
+                  "predicate": "mlt:immediatelyHigherThan",
+                  "arguments": [
+                    "?x",
+                    "?y"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "mlt:higherThan",
+                "arguments": [
+                  "?x",
+                  "?y"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,2015 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "38962f493dc331783a2bcd49055d5a106aa87b409254a93872544ef5b38a7363"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.core",
+            "version": "0.1.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "8404256f464a30868b04eb3725a0b854e20790e1e30f0ad258cb1bc0a6db3ef6"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO core and event seed",
+          "description": "Source-derived executable seed for the consolidated UFO-A backbone and the required UFO-B event/situation relations.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "0.1.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "f7565f3455ea4b84d0d399fd94b3594a2de5350cba7ef8481cede2b890c67e9e"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo22",
+            "evidence:ufo-b",
+            "evidence:ufo-ab"
+          ]
+        },
+        "concepts": {
+          "ufo:AbstractIndividual": {
+            "id": "ufo:AbstractIndividual",
+            "preferred_labels": {
+              "en": "abstract individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An individual without spatiotemporal qualities in its own right.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Individual"
+            ],
+            "disjoint_with": [
+              "ufo:ConcreteIndividual"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:AtomicEvent": {
+            "id": "ufo:AtomicEvent",
+            "preferred_labels": {
+              "en": "atomic event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event having no proper event part.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [
+              "ufo:ComplexEvent"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Category": {
+            "id": "ufo:Category",
+            "preferred_labels": {
+              "en": "category"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A rigid non-sortal.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NonSortal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Collective": {
+            "id": "ufo:Collective",
+            "preferred_labels": {
+              "en": "collective"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A substantial unified by a membership structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Substantial"
+            ],
+            "disjoint_with": [
+              "ufo:Object",
+              "ufo:Quantity"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:ComplexEvent": {
+            "id": "ufo:ComplexEvent",
+            "preferred_labels": {
+              "en": "complex event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event having at least one proper event part.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [
+              "ufo:AtomicEvent"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:ConcreteIndividual": {
+            "id": "ufo:ConcreteIndividual",
+            "preferred_labels": {
+              "en": "concrete individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An individual that exists in space-time.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Individual"
+            ],
+            "disjoint_with": [
+              "ufo:AbstractIndividual"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Disposition": {
+            "id": "ufo:Disposition",
+            "preferred_labels": {
+              "en": "disposition"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A mode whose manifestation is a perdurant.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Mode"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Endurant": {
+            "id": "ufo:Endurant",
+            "preferred_labels": {
+              "en": "endurant"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete individual that persists through time while possibly changing.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ConcreteIndividual"
+            ],
+            "disjoint_with": [
+              "ufo:Perdurant"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:EndurantType": {
+            "id": "ufo:EndurantType",
+            "preferred_labels": {
+              "en": "endurant type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are endurants.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Type"
+            ],
+            "disjoint_with": [
+              "ufo:PerdurantType"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Entity": {
+            "id": "ufo:Entity",
+            "preferred_labels": {
+              "en": "entity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Anything admitted by the ontology.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "either",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Event": {
+            "id": "ufo:Event",
+            "preferred_labels": {
+              "en": "event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A perdurant that occurs in time and may have event parts.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Perdurant"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:ExternallyDependentMode": {
+            "id": "ufo:ExternallyDependentMode",
+            "preferred_labels": {
+              "en": "externally dependent mode"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A mode that depends on an entity independent of its bearer.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Mode"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Individual": {
+            "id": "ufo:Individual",
+            "preferred_labels": {
+              "en": "individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An entity that cannot itself be instantiated.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Entity"
+            ],
+            "disjoint_with": [
+              "ufo:Type"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:IntrinsicMoment": {
+            "id": "ufo:IntrinsicMoment",
+            "preferred_labels": {
+              "en": "intrinsic moment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A moment depending on exactly one bearer.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Moment"
+            ],
+            "disjoint_with": [
+              "ufo:Relator"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Kind": {
+            "id": "ufo:Kind",
+            "preferred_labels": {
+              "en": "kind"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A rigid sortal that supplies an identity principle.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Sortal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "rigid",
+              "sortality": "sortal",
+              "identity": "supplies",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Mixin": {
+            "id": "ufo:Mixin",
+            "preferred_labels": {
+              "en": "mixin"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A semi-rigid non-sortal.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NonSortal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "semi_rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Mode": {
+            "id": "ufo:Mode",
+            "preferred_labels": {
+              "en": "mode"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intrinsic moment that is not modeled as a quality.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:IntrinsicMoment"
+            ],
+            "disjoint_with": [
+              "ufo:Quality"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Moment": {
+            "id": "ufo:Moment",
+            "preferred_labels": {
+              "en": "moment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An endurant existentially dependent on a bearer.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Endurant"
+            ],
+            "disjoint_with": [
+              "ufo:Substantial"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:NonSortal": {
+            "id": "ufo:NonSortal",
+            "preferred_labels": {
+              "en": "non-sortal"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An endurant type whose instances need not share one identity principle.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:EndurantType"
+            ],
+            "disjoint_with": [
+              "ufo:Sortal"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": "non_sortal",
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Object": {
+            "id": "ufo:Object",
+            "preferred_labels": {
+              "en": "object"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A substantial unified by a functional structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Substantial"
+            ],
+            "disjoint_with": [
+              "ufo:Collective",
+              "ufo:Quantity"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Participation": {
+            "id": "ufo:Participation",
+            "preferred_labels": {
+              "en": "participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A maximal event part exclusively dependent on one endurant.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Perdurant": {
+            "id": "ufo:Perdurant",
+            "preferred_labels": {
+              "en": "perdurant"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete individual that unfolds or occurs in time.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ConcreteIndividual"
+            ],
+            "disjoint_with": [
+              "ufo:Endurant"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:PerdurantType": {
+            "id": "ufo:PerdurantType",
+            "preferred_labels": {
+              "en": "perdurant type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are perdurants.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Type"
+            ],
+            "disjoint_with": [
+              "ufo:EndurantType"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Phase": {
+            "id": "ufo:Phase",
+            "preferred_labels": {
+              "en": "phase"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal defined by an intrinsic contingent condition.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Sortal"
+            ],
+            "disjoint_with": [
+              "ufo:Role"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:PhaseMixin": {
+            "id": "ufo:PhaseMixin",
+            "preferred_labels": {
+              "en": "phase mixin"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid non-sortal defined by an intrinsic contingent condition.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NonSortal"
+            ],
+            "disjoint_with": [
+              "ufo:RoleMixin"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:QuaIndividual": {
+            "id": "ufo:QuaIndividual",
+            "preferred_labels": {
+              "en": "qua individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "The sum of externally dependent modes sharing a bearer, dependence source, and foundational event.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ExternallyDependentMode"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Quale": {
+            "id": "ufo:Quale",
+            "preferred_labels": {
+              "en": "quale"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract quality value.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [
+              "ufo:Set"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Quality": {
+            "id": "ufo:Quality",
+            "preferred_labels": {
+              "en": "quality"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intrinsic moment associated with a value in a quality structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:IntrinsicMoment"
+            ],
+            "disjoint_with": [
+              "ufo:Mode"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:QualityDimension": {
+            "id": "ufo:QualityDimension",
+            "preferred_labels": {
+              "en": "quality dimension"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A one-dimensional quality structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:QualityStructure"
+            ],
+            "disjoint_with": [
+              "ufo:QualityDomain"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:QualityDomain": {
+            "id": "ufo:QualityDomain",
+            "preferred_labels": {
+              "en": "quality domain"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A multidimensional quality structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:QualityStructure"
+            ],
+            "disjoint_with": [
+              "ufo:QualityDimension"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:QualityStructure": {
+            "id": "ufo:QualityStructure",
+            "preferred_labels": {
+              "en": "quality structure"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A non-empty set organizing quality values.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Set"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Quantity": {
+            "id": "ufo:Quantity",
+            "preferred_labels": {
+              "en": "quantity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A maximally topologically self-connected portion of matter.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Substantial"
+            ],
+            "disjoint_with": [
+              "ufo:Collective",
+              "ufo:Object"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Relator": {
+            "id": "ufo:Relator",
+            "preferred_labels": {
+              "en": "relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A relational moment composed of mutually dependent qua individuals that mediates endurants.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Moment"
+            ],
+            "disjoint_with": [
+              "ufo:IntrinsicMoment"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Role": {
+            "id": "ufo:Role",
+            "preferred_labels": {
+              "en": "role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal defined by a relational contingent condition.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Sortal"
+            ],
+            "disjoint_with": [
+              "ufo:Phase"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:RoleMixin": {
+            "id": "ufo:RoleMixin",
+            "preferred_labels": {
+              "en": "role mixin"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid non-sortal defined by a relational contingent condition.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NonSortal"
+            ],
+            "disjoint_with": [
+              "ufo:PhaseMixin"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:SemiRigidSortal": {
+            "id": "ufo:SemiRigidSortal",
+            "preferred_labels": {
+              "en": "semi-rigid sortal"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A sortal applying necessarily to some, but not all, of its instances.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Sortal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "semi_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Set": {
+            "id": "ufo:Set",
+            "preferred_labels": {
+              "en": "set"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract individual determined by its members.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [
+              "ufo:Quale"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Situation": {
+            "id": "ufo:Situation",
+            "preferred_labels": {
+              "en": "situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A configuration of reality that obtains and may trigger or result from an event.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": [
+                "No permanent PreSituation or PostSituation subclasses are asserted."
+              ]
+            },
+            "parents": [
+              "ufo:Individual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Sortal": {
+            "id": "ufo:Sortal",
+            "preferred_labels": {
+              "en": "sortal"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An endurant type whose instances share an identity principle.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:EndurantType"
+            ],
+            "disjoint_with": [
+              "ufo:NonSortal"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": "sortal",
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:SubKind": {
+            "id": "ufo:SubKind",
+            "preferred_labels": {
+              "en": "subkind"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A rigid sortal inheriting its identity principle from one kind.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Sortal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:Substantial": {
+            "id": "ufo:Substantial",
+            "preferred_labels": {
+              "en": "substantial"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An endurant that does not inhere in another entity.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Endurant"
+            ],
+            "disjoint_with": [
+              "ufo:Moment"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:TimePoint": {
+            "id": "ufo:TimePoint",
+            "preferred_labels": {
+              "en": "time point"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A point in the temporal structure used to index events and situations.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ufo:Type": {
+            "id": "ufo:Type",
+            "preferred_labels": {
+              "en": "type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An entity that may classify individuals or lower-order types.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Entity"
+            ],
+            "disjoint_with": [
+              "ufo:Individual"
+            ],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          }
+        },
+        "relations": {
+          "ufo:bringsAbout": {
+            "id": "ufo:bringsAbout",
+            "preferred_labels": {
+              "en": "brings about"
+            },
+            "definition": "Relates an event to a situation it brings about.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Situation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:constitutedBy": {
+            "id": "ufo:constitutedBy",
+            "preferred_labels": {
+              "en": "constituted by"
+            },
+            "definition": "Relates distinct entities of the same broad category in a constitution relation.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:directlyCauses": {
+            "id": "ufo:directlyCauses",
+            "preferred_labels": {
+              "en": "directly causes"
+            },
+            "definition": "Relates an event to another event through an intervening result/trigger situation.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:eventPartOf": {
+            "id": "ufo:eventPartOf",
+            "preferred_labels": {
+              "en": "event part of"
+            },
+            "definition": "Relates an event part to its containing event.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:properPartOf"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:existentiallyDependsOn": {
+            "id": "ufo:existentiallyDependsOn",
+            "preferred_labels": {
+              "en": "existentially depends on"
+            },
+            "definition": "Whenever the dependent exists, the dependee exists.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:externallyDependsOn": {
+            "id": "ufo:externallyDependsOn",
+            "preferred_labels": {
+              "en": "externally depends on"
+            },
+            "definition": "Relates an externally dependent mode to an external dependee.",
+            "domains": [
+              "ufo:ExternallyDependentMode"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [
+              "ufo:existentiallyDependsOn"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:hasBeginPoint": {
+            "id": "ufo:hasBeginPoint",
+            "preferred_labels": {
+              "en": "has begin point"
+            },
+            "definition": "Relates an event to its temporal begin point.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasEndPoint": {
+            "id": "ufo:hasEndPoint",
+            "preferred_labels": {
+              "en": "has end point"
+            },
+            "definition": "Relates an event to its temporal end point.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasValue": {
+            "id": "ufo:hasValue",
+            "preferred_labels": {
+              "en": "has value"
+            },
+            "definition": "Relates a quality to exactly one quale.",
+            "domains": [
+              "ufo:Quality"
+            ],
+            "ranges": [
+              "ufo:Quale"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": {
+              "minimum": 1,
+              "maximum": 1
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:inheresIn": {
+            "id": "ufo:inheresIn",
+            "preferred_labels": {
+              "en": "inheres in"
+            },
+            "definition": "Relates a moment to its bearer.",
+            "domains": [
+              "ufo:Moment"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [
+              "ufo:existentiallyDependsOn"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:instantiates": {
+            "id": "ufo:instantiates",
+            "preferred_labels": {
+              "en": "instantiates"
+            },
+            "definition": "Relates an individual or lower-order type to a type it instantiates.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:isResultSituationOf": {
+            "id": "ufo:isResultSituationOf",
+            "preferred_labels": {
+              "en": "is result situation of"
+            },
+            "definition": "A relational role connecting a situation to an event that brought it about.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:isTriggerSituationOf": {
+            "id": "ufo:isTriggerSituationOf",
+            "preferred_labels": {
+              "en": "is trigger situation of"
+            },
+            "definition": "A relational role connecting a situation to an event it triggers.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:triggers"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:manifests": {
+            "id": "ufo:manifests",
+            "preferred_labels": {
+              "en": "manifests"
+            },
+            "definition": "Relates an endurant or disposition to a perdurant that manifests it.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:Perdurant"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:mediates": {
+            "id": "ufo:mediates",
+            "preferred_labels": {
+              "en": "mediates"
+            },
+            "definition": "Relates a relator to an endurant it mediates.",
+            "domains": [
+              "ufo:Relator"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:partOf": {
+            "id": "ufo:partOf",
+            "preferred_labels": {
+              "en": "part of"
+            },
+            "definition": "The generic parthood relation.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "reflexive",
+              "antisymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:participatesIn": {
+            "id": "ufo:participatesIn",
+            "preferred_labels": {
+              "en": "participates in"
+            },
+            "definition": "Relates an endurant participant to an event.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:properPartOf": {
+            "id": "ufo:properPartOf",
+            "preferred_labels": {
+              "en": "proper part of"
+            },
+            "definition": "Irreflexive proper parthood derived from parthood.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [
+              "ufo:partOf"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:specializes": {
+            "id": "ufo:specializes",
+            "preferred_labels": {
+              "en": "specializes"
+            },
+            "definition": "Relates a subtype to a supertype whose instances necessarily include its instances.",
+            "domains": [
+              "ufo:Type"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo22"
+            ]
+          },
+          "ufo:triggers": {
+            "id": "ufo:triggers",
+            "preferred_labels": {
+              "en": "triggers"
+            },
+            "definition": "Relates a situation to an event it triggers.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Entity",
+            "members": [
+              "ufo:Individual",
+              "ufo:Type"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Individual",
+            "members": [
+              "ufo:AbstractIndividual",
+              "ufo:ConcreteIndividual"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:ConcreteIndividual",
+            "members": [
+              "ufo:Endurant",
+              "ufo:Perdurant"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Endurant",
+            "members": [
+              "ufo:Moment",
+              "ufo:Substantial"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Substantial",
+            "members": [
+              "ufo:Collective",
+              "ufo:Object",
+              "ufo:Quantity"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Moment",
+            "members": [
+              "ufo:IntrinsicMoment",
+              "ufo:Relator"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:IntrinsicMoment",
+            "members": [
+              "ufo:Mode",
+              "ufo:Quality"
+            ]
+          },
+          {
+            "kind": "disjoint",
+            "members": [
+              "ufo:AtomicEvent",
+              "ufo:ComplexEvent"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:Relator",
+            "relation": "ufo:mediates",
+            "object": "ufo:Endurant",
+            "constraint": {
+              "minimum": 2,
+              "maximum": null
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -9,7 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior, params};
 use tokio::sync::Mutex;
 
 use crate::{AgentId, AgentIdentity, HashlineError, HashlineErrorCode};

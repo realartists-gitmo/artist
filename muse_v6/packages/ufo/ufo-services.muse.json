@@ -1,0 +1,2001 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "13b0c1552759529797dd492fb8c5fe5acd8d3df710a57c0878aaa100e8db3953"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.services",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "9808edc11a63ff70d652b3e90b3d8af262252222b00a5e85222b5dc05c7dbc0d"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-S services",
+          "description": "Executable commitment-based service offering, negotiation, agreement, delivery, outcome and lifecycle package, including corrigendum corrections.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.c",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo-s",
+            "evidence:ufo-s-corr"
+          ]
+        },
+        "concepts": {
+          "service:CustomerClaim": {
+            "id": "service:CustomerClaim",
+            "preferred_labels": {
+              "en": "customer claim"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A claim held by one party against another concerning the content identified by this the UFO-S service ontology category.",
+              "genus": "ufo:SocialClaim",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialClaim"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:CustomerCommitment": {
+            "id": "service:CustomerCommitment",
+            "preferred_labels": {
+              "en": "customer commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the customer content or role specified in the UFO-S service ontology.",
+              "genus": "ufo:SocialCommitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialCommitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:CustomerParticipation": {
+            "id": "service:CustomerParticipation",
+            "preferred_labels": {
+              "en": "customer participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a customer participant in an event.",
+              "genus": "service:ServiceParticipation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceParticipation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:CustomerRole": {
+            "id": "service:CustomerRole",
+            "preferred_labels": {
+              "en": "customer role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-S service ontology.",
+              "genus": "service:ServiceRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:DeliveryPhase": {
+            "id": "service:DeliveryPhase",
+            "preferred_labels": {
+              "en": "delivery phase"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid classification whose instances satisfy a contingent intrinsic condition during the delivery stage.",
+              "genus": "ufo:Phase",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Phase"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:FailureSituation": {
+            "id": "service:FailureSituation",
+            "preferred_labels": {
+              "en": "failure situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A service result representing a state of affairs in which failure conditions obtain.",
+              "genus": "service:ServiceResult",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceResult"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:NegotiationPhase": {
+            "id": "service:NegotiationPhase",
+            "preferred_labels": {
+              "en": "negotiation phase"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid classification whose instances satisfy a contingent intrinsic condition during the negotiation stage.",
+              "genus": "ufo:Phase",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Phase"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:OfferingPhase": {
+            "id": "service:OfferingPhase",
+            "preferred_labels": {
+              "en": "offering phase"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid classification whose instances satisfy a contingent intrinsic condition during the offering stage.",
+              "genus": "ufo:Phase",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Phase"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:PostDeliveryPhase": {
+            "id": "service:PostDeliveryPhase",
+            "preferred_labels": {
+              "en": "post-delivery phase"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid classification whose instances satisfy a contingent intrinsic condition during the post-delivery stage.",
+              "genus": "ufo:Phase",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Phase"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ProviderClaim": {
+            "id": "service:ProviderClaim",
+            "preferred_labels": {
+              "en": "provider claim"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A claim held by one party against another concerning the content identified by this the UFO-S service ontology category.",
+              "genus": "ufo:SocialClaim",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialClaim"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ProviderCommitment": {
+            "id": "service:ProviderCommitment",
+            "preferred_labels": {
+              "en": "provider commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the provider content or role specified in the UFO-S service ontology.",
+              "genus": "ufo:SocialCommitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialCommitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ProviderParticipation": {
+            "id": "service:ProviderParticipation",
+            "preferred_labels": {
+              "en": "provider participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a provider participant in an event.",
+              "genus": "service:ServiceParticipation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceParticipation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ProviderRole": {
+            "id": "service:ProviderRole",
+            "preferred_labels": {
+              "en": "provider role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-S service ontology.",
+              "genus": "service:ServiceRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:SatisfactionSituation": {
+            "id": "service:SatisfactionSituation",
+            "preferred_labels": {
+              "en": "satisfaction situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A service result representing a state of affairs in which satisfaction conditions obtain.",
+              "genus": "service:ServiceResult",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceResult"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceAgent": {
+            "id": "service:ServiceAgent",
+            "preferred_labels": {
+              "en": "service agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A service thing recognized as capable of bearing or exercising the agency associated with service agent in the UFO-S service ontology.",
+              "genus": "ufo:Agent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Agent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceAgreement": {
+            "id": "service:ServiceAgreement",
+            "preferred_labels": {
+              "en": "service agreement"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A service thing that mediates the parties and correlated dependent moments constituting a service agreement.",
+              "genus": "ufo:SocialRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceCapability": {
+            "id": "service:ServiceCapability",
+            "preferred_labels": {
+              "en": "service capability"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A disposition whose bearer can realize the behavior or institutional effect identified by service capability in the UFO-S service ontology.",
+              "genus": "ufo:Disposition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Disposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceCustomer": {
+            "id": "service:ServiceCustomer",
+            "preferred_labels": {
+              "en": "service customer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of target customer used to represent service customer in the UFO-S service ontology.",
+              "genus": "service:TargetCustomer",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:TargetCustomer"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceDelivery": {
+            "id": "service:ServiceDelivery",
+            "preferred_labels": {
+              "en": "service delivery"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service thing, action used to represent service delivery in the UFO-S service ontology.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceDescription": {
+            "id": "service:ServiceDescription",
+            "preferred_labels": {
+              "en": "service description"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative or descriptive social object that specifies the content and conditions of service description in the UFO-S service ontology.",
+              "genus": "ufo:NormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceLevelAgreement": {
+            "id": "service:ServiceLevelAgreement",
+            "preferred_labels": {
+              "en": "service-level agreement"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A service agreement that mediates the parties and correlated dependent moments constituting a service-level agreement.",
+              "genus": "service:ServiceAgreement",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceAgreement"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceLifecycle": {
+            "id": "service:ServiceLifecycle",
+            "preferred_labels": {
+              "en": "service lifecycle"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service thing, complex event used to represent service lifecycle in the UFO-S service ontology.",
+              "genus": "ufo:ComplexEvent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:ComplexEvent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceNegotiation": {
+            "id": "service:ServiceNegotiation",
+            "preferred_labels": {
+              "en": "service negotiation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service thing, interaction used to represent service negotiation in the UFO-S service ontology.",
+              "genus": "ufo:Interaction",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Interaction"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceOffering": {
+            "id": "service:ServiceOffering",
+            "preferred_labels": {
+              "en": "service offering"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service thing, social relator used to represent service offering in the UFO-S service ontology.",
+              "genus": "ufo:SocialRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceOfferingClaim": {
+            "id": "service:ServiceOfferingClaim",
+            "preferred_labels": {
+              "en": "service offering claim"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A claim held by one party against another concerning the content identified by this the UFO-S service ontology category.",
+              "genus": "ufo:SocialClaim",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialClaim"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceOfferingCommitment": {
+            "id": "service:ServiceOfferingCommitment",
+            "preferred_labels": {
+              "en": "service offering commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the service offering content or role specified in the UFO-S service ontology.",
+              "genus": "ufo:SocialCommitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialCommitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceParticipation": {
+            "id": "service:ServiceParticipation",
+            "preferred_labels": {
+              "en": "service participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a service participant in an event.",
+              "genus": "ufo:ActionContribution",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:ActionContribution"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceProvider": {
+            "id": "service:ServiceProvider",
+            "preferred_labels": {
+              "en": "service provider"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service agent used to represent service provider in the UFO-S service ontology.",
+              "genus": "service:ServiceAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceResource": {
+            "id": "service:ServiceResource",
+            "preferred_labels": {
+              "en": "service resource"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service thing, resource used to represent service resource in the UFO-S service ontology.",
+              "genus": "ufo:Resource",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Resource"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceResult": {
+            "id": "service:ServiceResult",
+            "preferred_labels": {
+              "en": "service result"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation brought about by the relevant process and evaluated as a service result in the UFO-S service ontology.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceRole": {
+            "id": "service:ServiceRole",
+            "preferred_labels": {
+              "en": "service role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-S service ontology.",
+              "genus": "ufo:SocialRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:SocialRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceSpecification": {
+            "id": "service:ServiceSpecification",
+            "preferred_labels": {
+              "en": "service specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative or descriptive social object that specifies the content and conditions of service specification in the UFO-S service ontology.",
+              "genus": "service:ServiceDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:ServiceThing": {
+            "id": "service:ServiceThing",
+            "preferred_labels": {
+              "en": "service thing"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of entity used to represent service thing in the UFO-S service ontology.",
+              "genus": "ufo:Entity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Entity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:TargetCustomer": {
+            "id": "service:TargetCustomer",
+            "preferred_labels": {
+              "en": "target customer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of service agent used to represent target customer in the UFO-S service ontology.",
+              "genus": "service:ServiceAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:TargetCustomerRoleMixin": {
+            "id": "service:TargetCustomerRoleMixin",
+            "preferred_labels": {
+              "en": "target customer role mixin"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid non-sortal whose instances play a common relational role in the UFO-S service ontology.",
+              "genus": "ufo:RoleMixin",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "service:ServiceThing",
+              "ufo:RoleMixin"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          }
+        },
+        "relations": {
+          "service:agreementCustomer": {
+            "id": "service:agreementCustomer",
+            "preferred_labels": {
+              "en": "has agreement customer"
+            },
+            "definition": "Holds from a service agreement to a service customer when the source has agreement customer the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:ServiceCustomer"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:agreementPrecedesDelivery": {
+            "id": "service:agreementPrecedesDelivery",
+            "preferred_labels": {
+              "en": "agreement precedes delivery"
+            },
+            "definition": "Holds from a service agreement to a service delivery when the source agreement precedes delivery the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:ServiceDelivery"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:agreementProvider": {
+            "id": "service:agreementProvider",
+            "preferred_labels": {
+              "en": "has agreement provider"
+            },
+            "definition": "Holds from a service agreement to a service provider when the source has agreement provider the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:ServiceProvider"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:capabilityInheresIn": {
+            "id": "service:capabilityInheresIn",
+            "preferred_labels": {
+              "en": "capability inheres in"
+            },
+            "definition": "Holds from a service capability to a service provider when the source capability inheres in the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceCapability"
+            ],
+            "ranges": [
+              "service:ServiceProvider"
+            ],
+            "super_relations": [
+              "ufo:inheresIn"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:deliversUnder": {
+            "id": "service:deliversUnder",
+            "preferred_labels": {
+              "en": "delivers under"
+            },
+            "definition": "Holds from a service delivery to a service agreement when the source delivers under the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ServiceAgreement"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:deliveryPrecedesResult": {
+            "id": "service:deliveryPrecedesResult",
+            "preferred_labels": {
+              "en": "delivery precedes result"
+            },
+            "definition": "Holds from a service delivery to a service result when the source delivery precedes result the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ServiceResult"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:describedBy": {
+            "id": "service:describedBy",
+            "preferred_labels": {
+              "en": "is described by"
+            },
+            "definition": "Holds from a service thing to a service description when the source is described by the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceThing"
+            ],
+            "ranges": [
+              "service:ServiceDescription"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:failsAgreement": {
+            "id": "service:failsAgreement",
+            "preferred_labels": {
+              "en": "fails agreement"
+            },
+            "definition": "Holds from a failure situation to a service agreement when the source fails agreement the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:FailureSituation"
+            ],
+            "ranges": [
+              "service:ServiceAgreement"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:fulfillsCommitment": {
+            "id": "service:fulfillsCommitment",
+            "preferred_labels": {
+              "en": "fulfills commitment"
+            },
+            "definition": "Holds from a service delivery to a social commitment when the source fulfills commitment the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "ufo:SocialCommitment"
+            ],
+            "super_relations": [
+              "ufo:fulfillsCommitment"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasCustomerClaim": {
+            "id": "service:hasCustomerClaim",
+            "preferred_labels": {
+              "en": "has customer claim"
+            },
+            "definition": "Holds from a service agreement to a customer claim when the source has customer claim the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:CustomerClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasCustomerCommitment": {
+            "id": "service:hasCustomerCommitment",
+            "preferred_labels": {
+              "en": "has customer commitment"
+            },
+            "definition": "Holds from a service agreement to a customer commitment when the source has customer commitment the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:CustomerCommitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasCustomerParticipation": {
+            "id": "service:hasCustomerParticipation",
+            "preferred_labels": {
+              "en": "has customer participation"
+            },
+            "definition": "Holds from a service delivery to a customer participation when the source has customer participation the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:CustomerParticipation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasOfferingClaim": {
+            "id": "service:hasOfferingClaim",
+            "preferred_labels": {
+              "en": "has offering claim"
+            },
+            "definition": "Holds from a service offering to a service offering claim when the source has offering claim the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:ServiceOfferingClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasOfferingCommitment": {
+            "id": "service:hasOfferingCommitment",
+            "preferred_labels": {
+              "en": "has offering commitment"
+            },
+            "definition": "Holds from a service offering to a service offering commitment when the source has offering commitment the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:ServiceOfferingCommitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasProviderClaim": {
+            "id": "service:hasProviderClaim",
+            "preferred_labels": {
+              "en": "has provider claim"
+            },
+            "definition": "Holds from a service agreement to a provider claim when the source has provider claim the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:ProviderClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasProviderCommitment": {
+            "id": "service:hasProviderCommitment",
+            "preferred_labels": {
+              "en": "has provider commitment"
+            },
+            "definition": "Holds from a service agreement to a provider commitment when the source has provider commitment the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgreement"
+            ],
+            "ranges": [
+              "service:ProviderCommitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:hasProviderParticipation": {
+            "id": "service:hasProviderParticipation",
+            "preferred_labels": {
+              "en": "has provider participation"
+            },
+            "definition": "Holds from a service delivery to a provider participation when the source has provider participation the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ProviderParticipation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:negotiates": {
+            "id": "service:negotiates",
+            "preferred_labels": {
+              "en": "negotiates"
+            },
+            "definition": "Holds from a service agent to a service negotiation when the source negotiates the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceAgent"
+            ],
+            "ranges": [
+              "service:ServiceNegotiation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:negotiatesOffering": {
+            "id": "service:negotiatesOffering",
+            "preferred_labels": {
+              "en": "negotiates offering"
+            },
+            "definition": "Holds from a service negotiation to a service offering when the source negotiates offering the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceNegotiation"
+            ],
+            "ranges": [
+              "service:ServiceOffering"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:offeredBy": {
+            "id": "service:offeredBy",
+            "preferred_labels": {
+              "en": "is offered by"
+            },
+            "definition": "Holds from a service offering to a service provider when the source is offered by the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:ServiceProvider"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:offeringPrecedesNegotiation": {
+            "id": "service:offeringPrecedesNegotiation",
+            "preferred_labels": {
+              "en": "offering precedes negotiation"
+            },
+            "definition": "Holds from a service offering to a service negotiation when the source offering precedes negotiation the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:ServiceNegotiation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:partOfLifecycle": {
+            "id": "service:partOfLifecycle",
+            "preferred_labels": {
+              "en": "is part of service lifecycle"
+            },
+            "definition": "Holds from a service thing to a service lifecycle when the source is part of service lifecycle the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceThing"
+            ],
+            "ranges": [
+              "service:ServiceLifecycle"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:performedByProvider": {
+            "id": "service:performedByProvider",
+            "preferred_labels": {
+              "en": "is performed by provider"
+            },
+            "definition": "Holds from a service delivery to a service provider when the source is performed by provider the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ServiceProvider"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:producesResult": {
+            "id": "service:producesResult",
+            "preferred_labels": {
+              "en": "produces result"
+            },
+            "definition": "Holds from a service delivery to a service result when the source produces result the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ServiceResult"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:requiresCapability": {
+            "id": "service:requiresCapability",
+            "preferred_labels": {
+              "en": "requires capability"
+            },
+            "definition": "Holds from a service offering to a service capability when the source requires capability the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:ServiceCapability"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:resultsInAgreement": {
+            "id": "service:resultsInAgreement",
+            "preferred_labels": {
+              "en": "results in agreement"
+            },
+            "definition": "Holds from a service negotiation to a service agreement when the source results in agreement the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceNegotiation"
+            ],
+            "ranges": [
+              "service:ServiceAgreement"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:satisfiesAgreement": {
+            "id": "service:satisfiesAgreement",
+            "preferred_labels": {
+              "en": "satisfies agreement"
+            },
+            "definition": "Holds from a satisfaction situation to a service agreement when the source satisfies agreement the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:SatisfactionSituation"
+            ],
+            "ranges": [
+              "service:ServiceAgreement"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:targets": {
+            "id": "service:targets",
+            "preferred_labels": {
+              "en": "targets"
+            },
+            "definition": "Holds from a service offering to a target customer when the source targets the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceOffering"
+            ],
+            "ranges": [
+              "service:TargetCustomer"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:usesServiceResource": {
+            "id": "service:usesServiceResource",
+            "preferred_labels": {
+              "en": "uses service resource"
+            },
+            "definition": "Holds from a service delivery to a service resource when the source uses service resource the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "service:ServiceResource"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          },
+          "service:violatesCommitment": {
+            "id": "service:violatesCommitment",
+            "preferred_labels": {
+              "en": "violates commitment"
+            },
+            "definition": "Holds from a service delivery to a social commitment when the source violates commitment the target, as defined in the UFO-S service ontology.",
+            "domains": [
+              "service:ServiceDelivery"
+            ],
+            "ranges": [
+              "ufo:SocialCommitment"
+            ],
+            "super_relations": [
+              "ufo:violatesCommitment"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-s"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "service:ServiceRole",
+            "members": [
+              "service:CustomerRole",
+              "service:ProviderRole"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "service:ServiceParticipation",
+            "members": [
+              "service:CustomerParticipation",
+              "service:ProviderParticipation"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "service:ServiceResult",
+            "members": [
+              "service:FailureSituation",
+              "service:SatisfactionSituation"
+            ]
+          },
+          {
+            "kind": "disjoint",
+            "members": [
+              "service:DeliveryPhase",
+              "service:NegotiationPhase",
+              "service:OfferingPhase",
+              "service:PostDeliveryPhase"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "service:ServiceOffering",
+            "relation": "service:offeredBy",
+            "object": "service:ServiceProvider",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceOffering",
+            "relation": "service:targets",
+            "object": "service:TargetCustomer"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceOffering",
+            "relation": "service:hasOfferingCommitment",
+            "object": "service:ServiceOfferingCommitment"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceOffering",
+            "relation": "service:hasOfferingClaim",
+            "object": "service:ServiceOfferingClaim"
+          },
+          {
+            "kind": "cardinality",
+            "subject": "service:ServiceAgreement",
+            "relation": "service:agreementProvider",
+            "object": "service:ServiceProvider",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "service:ServiceAgreement",
+            "relation": "service:agreementCustomer",
+            "object": "service:ServiceCustomer",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceAgreement",
+            "relation": "service:hasProviderCommitment",
+            "object": "service:ProviderCommitment"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceAgreement",
+            "relation": "service:hasCustomerCommitment",
+            "object": "service:CustomerCommitment"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceDelivery",
+            "relation": "service:deliversUnder",
+            "object": "service:ServiceAgreement"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "service:ServiceDelivery",
+            "relation": "service:producesResult",
+            "object": "service:ServiceResult"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?delivery",
+                "?result"
+              ],
+              "premises": [
+                {
+                  "predicate": "service:producesResult",
+                  "arguments": [
+                    "?delivery",
+                    "?result"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:bringsAbout",
+                "arguments": [
+                  "?delivery",
+                  "?result"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?delivery",
+                "?provider"
+              ],
+              "premises": [
+                {
+                  "predicate": "service:performedByProvider",
+                  "arguments": [
+                    "?delivery",
+                    "?provider"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:performs",
+                "arguments": [
+                  "?provider",
+                  "?delivery"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

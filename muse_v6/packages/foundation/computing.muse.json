@@ -1,0 +1,3207 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "994db4ad133296fcccd70e686c188a30e09efd6cd2b0cbf040ccefcf06557a34"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.computing",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "09cbf3a3fe079c0d82ad4ed02b3375d5b070403bd70627d13f9cb85e4de74c7f"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse computing ontology",
+          "description": "Execution, command, process, filesystem, stream, status, and resource concepts for deterministic tool and runtime formalization.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.software",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "059dbe013f45b2cf77374c75c194d8eb3dac7252b3ca2518c6b2788171709d0e"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:muse-design",
+            "evidence:otel",
+            "evidence:seon-rro"
+          ]
+        },
+        "concepts": {
+          "comp:AdditionExpressionValue": {
+            "id": "comp:AdditionExpressionValue",
+            "preferred_labels": {
+              "en": "addition expression value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An arithmetic expression value formed by source-explicit addition.",
+              "genus": "comp:ArithmeticExpressionValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ApproximateNumericValue": {
+            "id": "comp:ApproximateNumericValue",
+            "preferred_labels": {
+              "en": "approximate numeric value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value explicitly presented as approximate rather than exact.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:Argument": {
+            "id": "comp:Argument",
+            "preferred_labels": {
+              "en": "invocation argument"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact/value supplied as an input parameter to a program, command, or tool invocation.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ArithmeticExpressionValue": {
+            "id": "comp:ArithmeticExpressionValue",
+            "preferred_labels": {
+              "en": "arithmetic expression value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value represented by an unevaluated arithmetic expression whose operands and operation are source explicit.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ArtifactState": {
+            "id": "comp:ArtifactState",
+            "preferred_labels": {
+              "en": "artifact state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing source-established state/content metadata of an artifact at a specified point, interval, or event-relative role; it is distinct from the artifact's enduring identity.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:BooleanValue": {
+            "id": "comp:BooleanValue",
+            "preferred_labels": {
+              "en": "boolean value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A data value representing one of the two boolean truth values.",
+              "genus": "comp:DataValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:DataValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:CancelledOutcome": {
+            "id": "comp:CancelledOutcome",
+            "preferred_labels": {
+              "en": "cancelled outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reporting that an operation was cancelled before normal completion.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:Command": {
+            "id": "comp:Command",
+            "preferred_labels": {
+              "en": "command"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying an operation to be invoked, including command text or structured method identity distinct from its execution.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:CommandInvocation": {
+            "id": "comp:CommandInvocation",
+            "preferred_labels": {
+              "en": "command invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A process-execution occurrence initiated from a command specification.",
+              "genus": "comp:ProcessExecution",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ProcessExecution"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ComputerSystem": {
+            "id": "comp:ComputerSystem",
+            "preferred_labels": {
+              "en": "computer system"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A physical or virtual system capable of executing programs and maintaining computational state.",
+              "genus": "ufo:Object",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Object"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:DataValue": {
+            "id": "comp:DataValue",
+            "preferred_labels": {
+              "en": "data value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract scalar or structured data value used as exact computational input, output, status, or metadata content.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:DecimalValue": {
+            "id": "comp:DecimalValue",
+            "preferred_labels": {
+              "en": "decimal value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value denoting a finite decimal/rational decimal quantity.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:DeniedOutcome": {
+            "id": "comp:DeniedOutcome",
+            "preferred_labels": {
+              "en": "denied outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reporting that execution/effect was denied by policy, permissions, or an explicit gate.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:DiagnosticEmission": {
+            "id": "comp:DiagnosticEmission",
+            "preferred_labels": {
+              "en": "diagnostic emission"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event in which an executing program or tool emits a diagnostic information artifact.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:Directory": {
+            "id": "comp:Directory",
+            "preferred_labels": {
+              "en": "directory"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem object that organizes named filesystem entries.",
+              "genus": "comp:FilesystemObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemObject"
+            ],
+            "disjoint_with": [
+              "comp:File"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:DivisionExpressionValue": {
+            "id": "comp:DivisionExpressionValue",
+            "preferred_labels": {
+              "en": "division expression value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An arithmetic expression value formed by source-explicit division.",
+              "genus": "comp:ArithmeticExpressionValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:EnvironmentBinding": {
+            "id": "comp:EnvironmentBinding",
+            "preferred_labels": {
+              "en": "environment binding"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact binding an environment variable/name to a value for an execution context.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ExecutionEnvironment": {
+            "id": "comp:ExecutionEnvironment",
+            "preferred_labels": {
+              "en": "execution environment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation/configured environment providing the runtime conditions under which software is executed.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ExecutionOutcome": {
+            "id": "comp:ExecutionOutcome",
+            "preferred_labels": {
+              "en": "execution outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation/status attributed to an execution occurrence by an observed or reported result.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ExitStatus": {
+            "id": "comp:ExitStatus",
+            "preferred_labels": {
+              "en": "exit status"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact/value reported when a process execution terminates, distinct from independent verification of requested external effects.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FailureOutcome": {
+            "id": "comp:FailureOutcome",
+            "preferred_labels": {
+              "en": "failure outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reported as failed with respect to the execution protocol's success criterion.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [
+              "comp:SuccessOutcome"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:File": {
+            "id": "comp:File",
+            "preferred_labels": {
+              "en": "file"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem object that stores a sequence of content bytes or equivalent file content.",
+              "genus": "comp:FilesystemObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemObject"
+            ],
+            "disjoint_with": [
+              "comp:Directory"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileCopy": {
+            "id": "comp:FileCopy",
+            "preferred_labels": {
+              "en": "file copy"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that creates a distinct filesystem object whose initial content is derived from another object.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileCreate": {
+            "id": "comp:FileCreate",
+            "preferred_labels": {
+              "en": "file creation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that creates a new file identity or filesystem entry.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileDelete": {
+            "id": "comp:FileDelete",
+            "preferred_labels": {
+              "en": "file deletion"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that removes a filesystem entry or makes the referenced object no longer present at that path.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileMove": {
+            "id": "comp:FileMove",
+            "preferred_labels": {
+              "en": "file move"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that changes the filesystem location/name of a file or directory while preserving the moved object's intended identity where supported.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileRead": {
+            "id": "comp:FileRead",
+            "preferred_labels": {
+              "en": "file read"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that observes file content or metadata without itself entailing a write.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileState": {
+            "id": "comp:FileState",
+            "preferred_labels": {
+              "en": "file state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artifact state representing the content/metadata state of a file at a specified point or interval.",
+              "genus": "comp:ArtifactState",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ArtifactState"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FileWrite": {
+            "id": "comp:FileWrite",
+            "preferred_labels": {
+              "en": "file write"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem operation that requests or performs a change to file content or metadata.",
+              "genus": "comp:FilesystemOperation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FilesystemObject": {
+            "id": "comp:FilesystemObject",
+            "preferred_labels": {
+              "en": "filesystem object"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A digitally represented object addressable through a filesystem namespace.",
+              "genus": "se:DigitalArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:DigitalArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:FilesystemOperation": {
+            "id": "comp:FilesystemOperation",
+            "preferred_labels": {
+              "en": "filesystem operation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An action that reads, creates, changes, relocates, copies, or deletes filesystem state.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:IntegerValue": {
+            "id": "comp:IntegerValue",
+            "preferred_labels": {
+              "en": "integer value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value denoting an integer.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:InterruptedOutcome": {
+            "id": "comp:InterruptedOutcome",
+            "preferred_labels": {
+              "en": "interrupted outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reporting that an operation began but was interrupted before normal completion.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:MeasurementValue": {
+            "id": "comp:MeasurementValue",
+            "preferred_labels": {
+              "en": "measurement value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A quale carrying an explicit numeric magnitude and unit of measure.",
+              "genus": "ufo:Quale",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Quale"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:MultiplicationExpressionValue": {
+            "id": "comp:MultiplicationExpressionValue",
+            "preferred_labels": {
+              "en": "multiplication expression value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An arithmetic expression value formed by source-explicit multiplication.",
+              "genus": "comp:ArithmeticExpressionValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:NullValue": {
+            "id": "comp:NullValue",
+            "preferred_labels": {
+              "en": "null value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A distinguished data value representing an explicit null/no-value token in a structured protocol.",
+              "genus": "comp:DataValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:DataValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:NumericInterval": {
+            "id": "comp:NumericInterval",
+            "preferred_labels": {
+              "en": "numeric interval"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value denoting a source-specified interval with explicit lower and upper numeric bounds.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:NumericValue": {
+            "id": "comp:NumericValue",
+            "preferred_labels": {
+              "en": "numeric value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A data value with mathematical numeric denotation; transport spelling is not part of its semantic identity.",
+              "genus": "comp:DataValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:DataValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:OperatingSystem": {
+            "id": "comp:OperatingSystem",
+            "preferred_labels": {
+              "en": "operating system"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software system that manages computer resources and provides execution services to programs.",
+              "genus": "se:SoftwareProduct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareProduct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:PartialOutcome": {
+            "id": "comp:PartialOutcome",
+            "preferred_labels": {
+              "en": "partial outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reporting that only part of the requested or attempted operation completed.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:Path": {
+            "id": "comp:Path",
+            "preferred_labels": {
+              "en": "filesystem path"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact denoting or attempting to denote a filesystem location through a path expression.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:PercentageValue": {
+            "id": "comp:PercentageValue",
+            "preferred_labels": {
+              "en": "percentage value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A ratio value explicitly presented as a percentage.",
+              "genus": "comp:RatioValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:RatioValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:PluralScaleValue": {
+            "id": "comp:PluralScaleValue",
+            "preferred_labels": {
+              "en": "plural scale value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A vague numeric scale expression such as thousands or millions that denotes an order/scale without asserting one exact cardinality.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ProcessExecution": {
+            "id": "comp:ProcessExecution",
+            "preferred_labels": {
+              "en": "process execution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A temporally extended occurrence of executing a program or command under a computer execution environment.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ProgramInvocation": {
+            "id": "comp:ProgramInvocation",
+            "preferred_labels": {
+              "en": "program invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A process-execution occurrence that requests execution of a particular program with supplied invocation parameters.",
+              "genus": "comp:ProcessExecution",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ProcessExecution"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:RatioValue": {
+            "id": "comp:RatioValue",
+            "preferred_labels": {
+              "en": "ratio value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A numeric value represented as an unevaluated ratio of a numerator numeric value to a nonzero denominator numeric value.",
+              "genus": "comp:NumericValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:NumericValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ResourceUsage": {
+            "id": "comp:ResourceUsage",
+            "preferred_labels": {
+              "en": "resource usage record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact recording resource consumption associated with an execution occurrence.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel"
+            ]
+          },
+          "comp:SkippedOutcome": {
+            "id": "comp:SkippedOutcome",
+            "preferred_labels": {
+              "en": "skipped outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reporting that an operation was not attempted because the source protocol skipped it.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StandardError": {
+            "id": "comp:StandardError",
+            "preferred_labels": {
+              "en": "standard error"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A stream artifact emitted through an invocation's standard-error channel.",
+              "genus": "comp:StreamArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:StreamArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StandardInput": {
+            "id": "comp:StandardInput",
+            "preferred_labels": {
+              "en": "standard input"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A stream artifact supplied through an invocation's standard-input channel.",
+              "genus": "comp:StreamArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:StreamArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StandardOutput": {
+            "id": "comp:StandardOutput",
+            "preferred_labels": {
+              "en": "standard output"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A stream artifact emitted through an invocation's standard-output channel.",
+              "genus": "comp:StreamArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:StreamArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StreamArtifact": {
+            "id": "comp:StreamArtifact",
+            "preferred_labels": {
+              "en": "execution stream artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact emitted to or consumed from a process stream.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StringValue": {
+            "id": "comp:StringValue",
+            "preferred_labels": {
+              "en": "string value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A data value whose exact computational representation is a character string.",
+              "genus": "comp:DataValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:DataValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:StructuredDataValue": {
+            "id": "comp:StructuredDataValue",
+            "preferred_labels": {
+              "en": "structured data value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A data value representing an ordered array or key/value object preserved in canonical structured form.",
+              "genus": "comp:DataValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:DataValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:SubtractionExpressionValue": {
+            "id": "comp:SubtractionExpressionValue",
+            "preferred_labels": {
+              "en": "subtraction expression value"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An arithmetic expression value formed by source-explicit subtraction.",
+              "genus": "comp:ArithmeticExpressionValue",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:SuccessOutcome": {
+            "id": "comp:SuccessOutcome",
+            "preferred_labels": {
+              "en": "success outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome reported as successful with respect to the execution protocol's success criterion.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [
+              "comp:FailureOutcome"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:UnitOfMeasure": {
+            "id": "comp:UnitOfMeasure",
+            "preferred_labels": {
+              "en": "unit of measure"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract unit used to interpret an explicitly measured magnitude.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:UnknownOutcome": {
+            "id": "comp:UnknownOutcome",
+            "preferred_labels": {
+              "en": "unknown outcome"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution outcome token whose protocol-level status is preserved without assigning a stronger success/failure interpretation.",
+              "genus": "comp:ExecutionOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          }
+        },
+        "relations": {
+          "comp:afterArtifactState": {
+            "id": "comp:afterArtifactState",
+            "preferred_labels": {
+              "en": "after artifact state"
+            },
+            "definition": "Relates an event to an artifact state explicitly identified as following/resulting from that event/effect.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:ArtifactState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:approximateNumericValue": {
+            "id": "comp:approximateNumericValue",
+            "preferred_labels": {
+              "en": "approximate numeric value"
+            },
+            "definition": "Relates an explicit approximation value to the exact numeric value around which the source expresses approximation.",
+            "domains": [
+              "comp:ApproximateNumericValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:argumentName": {
+            "id": "comp:argumentName",
+            "preferred_labels": {
+              "en": "argument name"
+            },
+            "definition": "Relates an invocation-argument artifact to its source-level parameter name; the object is represented as a literal value in occurrence documents.",
+            "domains": [
+              "comp:Argument"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:argumentValue": {
+            "id": "comp:argumentValue",
+            "preferred_labels": {
+              "en": "argument value"
+            },
+            "definition": "Relates an invocation-argument artifact to its losslessly preserved source-level value; the object is represented as a literal value in occurrence documents.",
+            "domains": [
+              "comp:Argument"
+            ],
+            "ranges": [
+              "comp:DataValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:arithmeticLeftOperand": {
+            "id": "comp:arithmeticLeftOperand",
+            "preferred_labels": {
+              "en": "arithmetic left operand"
+            },
+            "definition": "Relates an arithmetic expression value to its left operand.",
+            "domains": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:arithmeticRightOperand": {
+            "id": "comp:arithmeticRightOperand",
+            "preferred_labels": {
+              "en": "arithmetic right operand"
+            },
+            "definition": "Relates an arithmetic expression value to its right operand.",
+            "domains": [
+              "comp:ArithmeticExpressionValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:beforeArtifactState": {
+            "id": "comp:beforeArtifactState",
+            "preferred_labels": {
+              "en": "before artifact state"
+            },
+            "definition": "Relates an event to an artifact state explicitly identified as preceding that event/effect.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:ArtifactState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:copyDestinationObject": {
+            "id": "comp:copyDestinationObject",
+            "preferred_labels": {
+              "en": "copy destination object"
+            },
+            "definition": "Relates a copy operation to the distinct filesystem object established or observed as the copy destination.",
+            "domains": [
+              "comp:FileCopy"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:copyDestinationPath": {
+            "id": "comp:copyDestinationPath",
+            "preferred_labels": {
+              "en": "copy destination path"
+            },
+            "definition": "Relates a copy operation to the path expression supplied or resolved as its destination.",
+            "domains": [
+              "comp:FileCopy"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:copySource": {
+            "id": "comp:copySource",
+            "preferred_labels": {
+              "en": "copy source object"
+            },
+            "definition": "Relates a copy operation to the filesystem object whose content/state is used as source when source-object identity is established.",
+            "domains": [
+              "comp:FileCopy"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:copySourcePath": {
+            "id": "comp:copySourcePath",
+            "preferred_labels": {
+              "en": "copy source path"
+            },
+            "definition": "Relates a copy operation to the path expression supplied/resolved as its source.",
+            "domains": [
+              "comp:FileCopy"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:createPath": {
+            "id": "comp:createPath",
+            "preferred_labels": {
+              "en": "creates at path"
+            },
+            "definition": "Relates a file-creation operation to its requested/resolved destination path without by itself asserting successful object creation.",
+            "domains": [
+              "comp:FileCreate"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:createsObject": {
+            "id": "comp:createsObject",
+            "preferred_labels": {
+              "en": "creates object"
+            },
+            "definition": "Relates a creation operation to the filesystem object created when creation is observed/established.",
+            "domains": [
+              "comp:FileCreate"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:deletePath": {
+            "id": "comp:deletePath",
+            "preferred_labels": {
+              "en": "deletes path"
+            },
+            "definition": "Relates a deletion operation to the path expression it targets without asserting that an object exists at the path.",
+            "domains": [
+              "comp:FileDelete"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:deletesObject": {
+            "id": "comp:deletesObject",
+            "preferred_labels": {
+              "en": "deletes object"
+            },
+            "definition": "Relates a deletion operation to a filesystem object whose identity is established as its target.",
+            "domains": [
+              "comp:FileDelete"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:durationMillis": {
+            "id": "comp:durationMillis",
+            "preferred_labels": {
+              "en": "duration milliseconds"
+            },
+            "definition": "Relates a process execution to a source-reported elapsed duration in milliseconds represented as an integer data value.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel"
+            ]
+          },
+          "comp:emitsDiagnostic": {
+            "id": "comp:emitsDiagnostic",
+            "preferred_labels": {
+              "en": "emits diagnostic"
+            },
+            "definition": "Relates a diagnostic-emission event to the diagnostic information artifact emitted.",
+            "domains": [
+              "comp:DiagnosticEmission"
+            ],
+            "ranges": [
+              "se:Diagnostic"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:environmentHasBinding": {
+            "id": "comp:environmentHasBinding",
+            "preferred_labels": {
+              "en": "environment has binding"
+            },
+            "definition": "Relates an execution environment to one of its explicit environment bindings.",
+            "domains": [
+              "comp:ExecutionEnvironment"
+            ],
+            "ranges": [
+              "comp:EnvironmentBinding"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:exitCodeValue": {
+            "id": "comp:exitCodeValue",
+            "preferred_labels": {
+              "en": "exit-code value"
+            },
+            "definition": "Relates an exit-status artifact to the exact source-reported numeric exit code represented as a literal.",
+            "domains": [
+              "comp:ExitStatus"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:hasArgument": {
+            "id": "comp:hasArgument",
+            "preferred_labels": {
+              "en": "has argument"
+            },
+            "definition": "Relates an invocation occurrence to an explicitly supplied invocation argument.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:Argument"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:hasExitStatus": {
+            "id": "comp:hasExitStatus",
+            "preferred_labels": {
+              "en": "has exit status"
+            },
+            "definition": "Relates a completed process execution to its reported exit status.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:ExitStatus"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:hasFileState": {
+            "id": "comp:hasFileState",
+            "preferred_labels": {
+              "en": "has file state"
+            },
+            "definition": "Relates a file to a represented state/version of that file.",
+            "domains": [
+              "comp:File"
+            ],
+            "ranges": [
+              "comp:FileState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:hasReportedOutcome": {
+            "id": "comp:hasReportedOutcome",
+            "preferred_labels": {
+              "en": "has reported outcome"
+            },
+            "definition": "Relates an execution occurrence to an outcome status explicitly reported by its source/protocol.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:ExecutionOutcome"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:hasStandardInput": {
+            "id": "comp:hasStandardInput",
+            "preferred_labels": {
+              "en": "has standard input"
+            },
+            "definition": "Relates a process execution to standard-input content supplied to it.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:StandardInput"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:inputArtifactState": {
+            "id": "comp:inputArtifactState",
+            "preferred_labels": {
+              "en": "input artifact state"
+            },
+            "definition": "Relates an event to an artifact state explicitly used as an input state.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:ArtifactState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:intervalLowerBound": {
+            "id": "comp:intervalLowerBound",
+            "preferred_labels": {
+              "en": "interval lower bound"
+            },
+            "definition": "Relates a numeric interval to its lower bound.",
+            "domains": [
+              "comp:NumericInterval"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:intervalUpperBound": {
+            "id": "comp:intervalUpperBound",
+            "preferred_labels": {
+              "en": "interval upper bound"
+            },
+            "definition": "Relates a numeric interval to its upper bound.",
+            "domains": [
+              "comp:NumericInterval"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:invocationHasEnvironmentBinding": {
+            "id": "comp:invocationHasEnvironmentBinding",
+            "preferred_labels": {
+              "en": "invocation has environment binding"
+            },
+            "definition": "Relates a process execution to an environment binding explicitly supplied for that invocation.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:EnvironmentBinding"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:invokesCommand": {
+            "id": "comp:invokesCommand",
+            "preferred_labels": {
+              "en": "invokes command"
+            },
+            "definition": "Relates a command invocation to the command information artifact that specified it.",
+            "domains": [
+              "comp:CommandInvocation"
+            ],
+            "ranges": [
+              "comp:Command"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:invokesProgram": {
+            "id": "comp:invokesProgram",
+            "preferred_labels": {
+              "en": "invokes program"
+            },
+            "definition": "Relates a program invocation to the program whose execution it requests.",
+            "domains": [
+              "comp:ProgramInvocation"
+            ],
+            "ranges": [
+              "se:Program"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:measurementMagnitude": {
+            "id": "comp:measurementMagnitude",
+            "preferred_labels": {
+              "en": "measurement magnitude"
+            },
+            "definition": "Relates a measurement quale to its explicit numeric magnitude.",
+            "domains": [
+              "comp:MeasurementValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:measurementUnit": {
+            "id": "comp:measurementUnit",
+            "preferred_labels": {
+              "en": "measurement unit"
+            },
+            "definition": "Relates a measurement quale to its explicit unit of measure.",
+            "domains": [
+              "comp:MeasurementValue"
+            ],
+            "ranges": [
+              "comp:UnitOfMeasure"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:moveDestinationObject": {
+            "id": "comp:moveDestinationObject",
+            "preferred_labels": {
+              "en": "move destination object"
+            },
+            "definition": "Relates a move operation to the filesystem object established or observed at its destination.",
+            "domains": [
+              "comp:FileMove"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:moveDestinationPath": {
+            "id": "comp:moveDestinationPath",
+            "preferred_labels": {
+              "en": "move destination path"
+            },
+            "definition": "Relates a move operation to the path expression supplied or resolved as its destination.",
+            "domains": [
+              "comp:FileMove"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:moveSource": {
+            "id": "comp:moveSource",
+            "preferred_labels": {
+              "en": "move source object"
+            },
+            "definition": "Relates a move operation to its source filesystem object when source-object identity is established.",
+            "domains": [
+              "comp:FileMove"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:moveSourcePath": {
+            "id": "comp:moveSourcePath",
+            "preferred_labels": {
+              "en": "move source path"
+            },
+            "definition": "Relates a move operation to the path expression supplied/resolved as its source.",
+            "domains": [
+              "comp:FileMove"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:observedArtifactState": {
+            "id": "comp:observedArtifactState",
+            "preferred_labels": {
+              "en": "observed artifact state"
+            },
+            "definition": "Relates an event to an artifact state observed in association with that event when no narrower before/after/input/output role is established.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:ArtifactState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:outputArtifactState": {
+            "id": "comp:outputArtifactState",
+            "preferred_labels": {
+              "en": "output artifact state"
+            },
+            "definition": "Relates an event to an artifact state explicitly identified as an output state.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:ArtifactState"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:pathDenotes": {
+            "id": "comp:pathDenotes",
+            "preferred_labels": {
+              "en": "path denotes"
+            },
+            "definition": "Relates a filesystem path expression to the filesystem object it denotes in a particular resolved context.",
+            "domains": [
+              "comp:Path"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:pluralScaleBase": {
+            "id": "comp:pluralScaleBase",
+            "preferred_labels": {
+              "en": "plural scale base"
+            },
+            "definition": "Relates a vague plural-scale value to its source-grounded numeric scale base.",
+            "domains": [
+              "comp:PluralScaleValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:producesStandardError": {
+            "id": "comp:producesStandardError",
+            "preferred_labels": {
+              "en": "produces standard error"
+            },
+            "definition": "Relates a process execution to standard-error content it emits.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:StandardError"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:producesStandardOutput": {
+            "id": "comp:producesStandardOutput",
+            "preferred_labels": {
+              "en": "produces standard output"
+            },
+            "definition": "Relates a process execution to standard-output content it emits.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:StandardOutput"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ratioDenominator": {
+            "id": "comp:ratioDenominator",
+            "preferred_labels": {
+              "en": "ratio denominator"
+            },
+            "definition": "Relates a ratio value to its source-grounded nonzero denominator.",
+            "domains": [
+              "comp:RatioValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:ratioNumerator": {
+            "id": "comp:ratioNumerator",
+            "preferred_labels": {
+              "en": "ratio numerator"
+            },
+            "definition": "Relates a ratio value to its source-grounded numerator.",
+            "domains": [
+              "comp:RatioValue"
+            ],
+            "ranges": [
+              "comp:NumericValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:readPath": {
+            "id": "comp:readPath",
+            "preferred_labels": {
+              "en": "reads path"
+            },
+            "definition": "Relates a filesystem read operation to the path expression it attempts/resolves for the read without asserting filesystem-object existence merely from the path string.",
+            "domains": [
+              "comp:FileRead"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:readsObject": {
+            "id": "comp:readsObject",
+            "preferred_labels": {
+              "en": "reads object"
+            },
+            "definition": "Relates a filesystem read operation to the filesystem object it reads when object identity is established.",
+            "domains": [
+              "comp:FileRead"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:resourceUsageOf": {
+            "id": "comp:resourceUsageOf",
+            "preferred_labels": {
+              "en": "resource usage of"
+            },
+            "definition": "Relates a resource-usage record to the execution occurrence whose consumption it reports.",
+            "domains": [
+              "comp:ResourceUsage"
+            ],
+            "ranges": [
+              "comp:ProcessExecution"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel"
+            ]
+          },
+          "comp:runsOn": {
+            "id": "comp:runsOn",
+            "preferred_labels": {
+              "en": "runs on"
+            },
+            "definition": "Relates a process execution to the computer system on which it executes.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:ComputerSystem"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:stateDigest": {
+            "id": "comp:stateDigest",
+            "preferred_labels": {
+              "en": "state digest"
+            },
+            "definition": "Relates an artifact-state situation to an exact source-reported content/state digest represented as a string data value.",
+            "domains": [
+              "comp:ArtifactState"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:stateOfArtifact": {
+            "id": "comp:stateOfArtifact",
+            "preferred_labels": {
+              "en": "state of artifact"
+            },
+            "definition": "Relates an artifact-state situation to the artifact whose state it represents.",
+            "domains": [
+              "comp:ArtifactState"
+            ],
+            "ranges": [
+              "se:Artifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:streamContent": {
+            "id": "comp:streamContent",
+            "preferred_labels": {
+              "en": "stream content"
+            },
+            "definition": "Relates an execution-stream artifact to exact captured stream content represented as a literal.",
+            "domains": [
+              "comp:StreamArtifact"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:underEnvironment": {
+            "id": "comp:underEnvironment",
+            "preferred_labels": {
+              "en": "under environment"
+            },
+            "definition": "Relates a process execution to its execution environment.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:ExecutionEnvironment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:workingDirectory": {
+            "id": "comp:workingDirectory",
+            "preferred_labels": {
+              "en": "has working directory"
+            },
+            "definition": "Relates a process execution to the directory used as its working directory.",
+            "domains": [
+              "comp:ProcessExecution"
+            ],
+            "ranges": [
+              "comp:Directory"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:writePath": {
+            "id": "comp:writePath",
+            "preferred_labels": {
+              "en": "writes path"
+            },
+            "definition": "Relates a filesystem write operation to the path expression it targets without asserting that a filesystem object already exists at that path.",
+            "domains": [
+              "comp:FileWrite"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          },
+          "comp:writesObject": {
+            "id": "comp:writesObject",
+            "preferred_labels": {
+              "en": "writes object"
+            },
+            "definition": "Relates a filesystem write operation to the filesystem object whose state it attempts or performs a change upon when object identity is established.",
+            "domains": [
+              "comp:FileWrite"
+            ],
+            "ranges": [
+              "comp:FilesystemObject"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-rro"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

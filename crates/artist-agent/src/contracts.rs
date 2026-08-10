@@ -1,5 +1,24 @@
 use artist_tool_api::{ArtistToolAnnotations as A, ToolCategory as C};
 
+artist_tool_api::impl_tool_output_contract!(
+    crate::virtual_read::VirtualReadTool,
+    C::Files,
+    A::read_only(),
+    "File content or typed virtual-resource snapshots selected by the read request."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::virtual_read::VirtualFindTool,
+    C::Files,
+    A::read_only(),
+    "Ranked real-file or typed virtual-resource paths selected by the find request."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::virtual_read::VirtualGrepTool,
+    C::Files,
+    A::read_only(),
+    "Text matches from real files or canonical typed virtual-resource snapshots."
+);
+
 artist_tool_api::impl_text_tool_contract!(
     crate::ask_tool::AskTool,
     C::UserInteraction,
@@ -44,6 +63,17 @@ artist_tool_api::impl_text_tool_contract!(
         open_world: true
     },
     "The spawned subagent's bare artist-name session id."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::delegate::AgentCreation,
+    C::Agents,
+    A {
+        read_only: false,
+        destructive: true,
+        idempotent: false,
+        open_world: true
+    },
+    "The retained Artist's canonical roster name."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::handoff::HandoffTool,
@@ -97,10 +127,32 @@ artist_tool_api::impl_text_tool_contract!(
     "The spawned bash session id."
 );
 artist_tool_api::impl_text_tool_contract!(
+    crate::run_tool::RunTool,
+    C::Shell,
+    A {
+        read_only: false,
+        destructive: false,
+        idempotent: false,
+        open_world: true
+    },
+    "The spawned durable session id for the requested executable path."
+);
+artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::PollTool,
     C::Agents,
     A::read_only(),
     "The current durable session snapshot or ordered snapshots."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::StopTool,
+    C::Agents,
+    A {
+        read_only: false,
+        destructive: true,
+        idempotent: true,
+        open_world: true
+    },
+    "Durable graceful-cancellation state for the targeted sessions."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::AbortTool,
@@ -112,6 +164,17 @@ artist_tool_api::impl_text_tool_contract!(
         open_world: true
     },
     "The durable cancellation-request state for the targeted sessions."
+);
+artist_tool_api::impl_text_tool_contract!(
+    crate::session_tools::DeleteTool,
+    C::Agents,
+    A {
+        read_only: false,
+        destructive: true,
+        idempotent: false,
+        open_world: true
+    },
+    "Permanent session-resource deletion confirmations or recovery directions."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::SendTool,

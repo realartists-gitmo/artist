@@ -2,12 +2,9 @@
 //!
 //! Deterministic semantic line anchors plus multi-agent file coordination.
 //!
-//! Anchor identities and v1 addresses are stateless. SQLite is used only for
+//! Anchor identities and TECA addresses are stateless. SQLite is used only for
 //! coordination metadata such as writer attribution, never anchor allocation.
 mod agent;
-mod anchor_address_v1 {
-    include!("anchor_address_v1.rs");
-}
 mod anchor_table;
 mod coordinator;
 mod error;
@@ -16,10 +13,10 @@ mod semantic_anchors;
 mod state;
 
 pub use agent::{AgentId, AgentIdentity};
-pub use anchor_table::{not_issued_message, stale_anchor_message, AnchorTable};
+pub use anchor_table::{AnchorTable, not_issued_message, stale_anchor_message};
 pub use coordinator::{
-    content_hash, CoordinatedEditResult, CoordinatedReadResult, FileCoordinator, WriteCondition,
-    ANCHOR_USAGE,
+    ANCHOR_USAGE, CoordinatedEditResult, CoordinatedReadResult, FileCoordinator, WriteCondition,
+    content_hash,
 };
 pub use error::{HashlineError, HashlineErrorCode};
 pub use file_tools::{
@@ -27,5 +24,5 @@ pub use file_tools::{
     FileToolConfig, FileToolManager, ReadFileRequest, ReadFileResult, WriteFileRequest,
     WriteFileResult,
 };
-pub use semantic_anchors::ANCHOR_ABI_VERSION;
+pub use semantic_anchors::{ANCHOR_ABI_VERSION, virtual_line_anchors};
 pub use state::StateStore;

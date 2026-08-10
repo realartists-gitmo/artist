@@ -1,0 +1,932 @@
+AUTHORITATIVE UFO MASTER GRAPH FOR THE ARTIST HARNESS
+=====================================================
+
+Purpose
+-------
+This is a source-derived master graph of the UFO theory family needed as a
+fallback ontology for the Artist harness.
+
+It is NOT:
+- gUFO
+- OntoUML syntax
+- the synthetic A/B/C/S/L/MLT/AB diagram previously supplied
+- a project-specific extension disguised as UFO
+
+Source status tags
+------------------
+[UFO22]  Current consolidated UFO formalization:
+         Guizzardi et al., "UFO: Unified Foundational Ontology",
+         Applied Ontology 17(1), 2022, DOI 10.3233/AO-210256.
+
+[UFO-B]  Event theory:
+         Almeida, Falbo, Guizzardi, "Events as Entities in
+         Ontology-Driven Conceptual Modeling", ER 2019,
+         DOI 10.1007/978-3-030-33223-5_39.
+
+[UFO-C]  Intentional/social layer:
+         Official UFO-C class specification and the UFO-C papers it encodes.
+         This layer is older and has not been consolidated in the 2022 paper
+         to the same degree as the UFO-A backbone.
+
+[MLT]    Carvalho et al., "Extending the Foundations of Ontology-Based
+         Conceptual Modeling with a Multi-Level Theory", ER 2015,
+         DOI 10.1007/978-3-319-25264-3_9.
+
+[AB]     Benevides, Almeida, Guizzardi, "Towards a Unified Theory of
+         Endurants and Perdurants: UFO-AB", JOWO/FOUST 2019.
+
+Notation
+--------
++-- / `--     taxonomy branch
+<:            proper specialization
+::            instantiation
+--R-->        typed relation
+[complete]    children exhaustively cover the parent
+[disjoint]    children cannot overlap
+[orthogonal]  a separate classification dimension, not another child tree
+
+
+======================================================================
+I. UFO THEORY-FAMILY ORGANIZATION
+======================================================================
+
+UFO
+|
++-- UFO-A: endurants and their types                         [UFO22]
+|
++-- UFO-B: perdurants/events and endurant-event interplay   [UFO-B]
+|
+`-- UFO-C: intentional and social entities                  [UFO-C]
+    `-- built on UFO-A + UFO-B
+
+Orthogonal additions/integration:
+|
++-- UFO-MLT: orders of types and cross-level relations      [MLT]
+|
+`-- UFO-AB: formal reconciliation of UFO-A and UFO-B        [AB]
+    `-- not a new taxonomic branch; it unifies modality and time
+
+Outside the foundational core:
+|
++-- OntoUML: modeling language grounded in UFO
++-- gUFO: lightweight OWL implementation of selected UFO content
++-- UFO-S: service-domain reference ontology grounded in UFO
+`-- UFO-L: legal-domain/core ontology grounded in UFO
+
+
+======================================================================
+II. TOP TAXONOMY
+======================================================================
+
+Entity                                                     [UFO22]
+|
++-- Individual                                             [complete, disjoint]
+|   |
+|   +-- ConcreteIndividual                                [complete, disjoint]
+|   |   |
+|   |   +-- Endurant                                      [complete, disjoint]
+|   |   |
+|   |   `-- Perdurant
+|   |
+|   `-- AbstractIndividual
+|
+`-- Type
+
+Important:
+- Individual and Type are disjoint and complete under Entity.
+- ConcreteIndividual and AbstractIndividual are disjoint and complete.
+- Endurant and Perdurant are disjoint and complete under ConcreteIndividual.
+- EndurantType and PerdurantType are disjoint Type categories, but UFO22 does
+  not state that those two exhaust all Type.
+
+
+======================================================================
+III. UFO-A: ENDURANT INDIVIDUALS
+======================================================================
+
+Endurant                                                   [UFO22]
+|
++-- Substantial                                           [complete, disjoint]
+|   |
+|   +-- Object                                            [complete, pairwise disjoint]
+|   |
+|   +-- Collective
+|   |
+|   `-- Quantity
+|
+`-- Moment                                                [complete, disjoint]
+    |
+    +-- Relator                                           [complete, disjoint]
+    |
+    `-- IntrinsicMoment
+        |
+        +-- Mode                                          [complete, disjoint]
+        |
+        `-- Quality
+
+
+Derived/refined notions attached to this tree
+---------------------------------------------
+
+Mode
+|
++-- Disposition
+|   `-- capability, capacity, function, vulnerability, tendency, etc.
+|
+`-- ExternallyDependentMode
+    |
+    `-- QuaIndividual
+        `-- sum of externally dependent modes sharing:
+            - the same bearer
+            - the same source of external dependence
+            - the same foundational event
+
+Relator
+|
++-- has at least two distinct QuaIndividuals as parts
++-- mediates at least two distinct Endurants
+`-- bearer is the mereological sum of the mediated Endurants
+
+
+Substantial unification distinctions
+------------------------------------
+
+Object
+`-- functional complex; unified by a functional structure
+
+Collective
+`-- unified by a membership structure
+
+Quantity
+`-- maximally topologically self-connected portion of matter
+
+
+======================================================================
+IV. ABSTRACT INDIVIDUALS AND QUALITY STRUCTURES
+======================================================================
+
+AbstractIndividual                                        [UFO22]
+|
++-- Quale                                                 [disjoint from Set]
+|
+`-- Set
+    |
+    `-- QualityStructure                                  [non-empty Set]
+        |
+        +-- QualityDimension                              [complete, disjoint]
+        |
+        `-- QualityDomain
+
+Quality
+|
++-- instantiates exactly one QualityKind
+|
+`-- hasValue --> exactly one Quale
+
+QualityType
+|
+`-- associatedWith --> exactly one QualityStructure
+
+If QualityType-2 properly specializes QualityType-1, then the quality structure
+associated with QualityType-2 is a proper subset of the quality structure
+associated with QualityType-1.
+
+
+======================================================================
+V. TYPES OF ENTITIES BY THE NATURE OF THEIR INSTANCES
+======================================================================
+
+Type                                                      [UFO22]
+|
++-- EndurantType                                          [disjoint from PerdurantType]
+|   |
+|   +-- SubstantialType
+|   |   |
+|   |   +-- ObjectType
+|   |   +-- CollectiveType
+|   |   `-- QuantityType
+|   |
+|   `-- MomentType
+|       |
+|       +-- RelatorType
+|       |
+|       `-- IntrinsicMomentType
+|           |
+|           +-- ModeType
+|           `-- QualityType
+|
+`-- PerdurantType
+
+Corresponding Kind categories:
+|
++-- ObjectKind
++-- CollectiveKind
++-- QuantityKind
++-- RelatorKind
++-- ModeKind
+`-- QualityKind
+
+Each category above classifies only individuals of its corresponding
+ontological nature.
+
+
+======================================================================
+VI. ENDURANT TYPES BY SORTALITY AND RIGIDITY
+======================================================================
+
+EndurantType                                              [UFO22]
+|
++-- Sortal                                                [complete, disjoint]
+|   |
+|   +-- RigidSortal                                       [defined intersection]
+|   |   |
+|   |   +-- Kind                                          [complete, disjoint]
+|   |   |   `-- supplies the identity principle
+|   |   |
+|   |   `-- SubKind
+|   |       `-- inherits the identity principle from one Kind
+|   |
+|   +-- AntiRigidSortal                                   [defined intersection]
+|   |   |
+|   |   +-- Phase                                         [complete, disjoint]
+|   |   |   `-- contingent classification by intrinsic condition
+|   |   |
+|   |   `-- Role
+|   |       `-- contingent classification by relational condition
+|   |
+|   `-- SemiRigidSortal
+|
+`-- NonSortal                                             [complete, disjoint]
+    |
+    +-- RigidNonSortal                                    [defined intersection]
+    |   |
+    |   `-- Category
+    |
+    +-- SemiRigidNonSortal                                [defined intersection]
+    |   |
+    |   `-- Mixin
+    |
+    `-- AntiRigidNonSortal                                [defined intersection]
+        |
+        +-- PhaseMixin                                    [complete, disjoint]
+        |   `-- contingent classification by intrinsic condition
+        |
+        `-- RoleMixin
+            `-- contingent classification by relational condition
+
+
+Leaf partition of EndurantType in UFO22
+---------------------------------------
+
+Kind
+SubKind
+Role
+Phase
+SemiRigidSortal
+RoleMixin
+PhaseMixin
+Category
+Mixin
+
+These are pairwise disjoint and complete for EndurantType.
+
+
+Identity constraints
+--------------------
+
+Endurant
+`-- necessarily instantiates exactly one Kind
+
+Sortal
+`-- all instances necessarily instantiate the same Kind
+
+NonSortal
+`-- does not directly supply/carry one common identity principle
+
+
+======================================================================
+VII. CORE RELATIONS AND MICRO-THEORIES
+======================================================================
+
+1. Classification
+-----------------
+
+Individual-or-Type --instantiates (::)--> Type
+
+Type-1 --specializes--> Type-2
+`-- necessary inclusion of instances
+
+
+2. Mereology
+------------
+
+Entity --partOf (P)--> Entity
+
+Properties:
+- reflexive
+- antisymmetric
+- transitive
+- strong supplementation
+
+Derived:
+- properPartOf
+- overlaps
+
+Functional composition:
+Object-Part --componentOf--> Object-Whole
+
+componentOf combines:
+- proper parthood
+- functional dependence
+- the part functioning as a specified type in the whole
+
+
+3. Constitution
+---------------
+
+Entity-1 --constitutedBy--> Entity-2
+
+Constraints in UFO22:
+- same broad ontological category:
+  endurant-by-endurant or perdurant-by-perdurant
+- different Kinds
+- non-reflexive
+- asymmetric
+- not identified with parthood or identity
+
+The UFO22 theory of constitution is explicitly preliminary/minimal.
+
+
+4. Existence and existential dependence
+----------------------------------------
+
+Entity-1 --existentiallyDependsOn--> Entity-2
+
+Meaning:
+whenever Entity-1 exists, Entity-2 exists.
+
+
+5. Moments and inherence
+------------------------
+
+Moment --inheresIn--> Type-or-ConcreteIndividual
+
+Constraints:
+- inherence implies existential dependence
+- a moment cannot migrate between distinct bearers
+- inherence is non-reflexive, asymmetric and anti-transitive
+- chains of moments terminate in exactly one UltimateBearer
+
+
+6. Externally dependent modes
+-----------------------------
+
+ExternallyDependentMode
+|
++-- inheresIn --> one bearer
+|
+`-- externallyDependsOn --> an entity independent of that bearer
+
+
+7. Relators and mediation
+-------------------------
+
+Relator --hasPart--> QuaIndividual
+QuaIndividual --quaIndividualOf--> Endurant
+Relator --mediates--> Endurant
+
+Every Relator mediates at least two distinct Endurants.
+
+
+8. Characterization
+-------------------
+
+EndurantType --characterizedBy--> MomentType
+
+Meaning:
+- every instance of the EndurantType bears an instance of the MomentType
+- every instance of the MomentType inheres in exactly one instance of the
+  EndurantType
+
+
+9. Qualities
+------------
+
+Quality --hasValue--> Quale
+QualityStructure --associatedWith--> QualityType
+
+
+10. Endurant-perdurant connection
+---------------------------------
+
+Endurant --manifests-via--> Perdurant
+
+UFO22 formal predicate:
+manifests(Endurant, Perdurant)
+
+The life of an Endurant is the mereological sum of the Perdurants that manifest
+it.
+
+
+======================================================================
+VIII. UFO-B: PERDURANTS / EVENTS
+======================================================================
+
+Perdurant
+|
+`-- Event                                                 [UFO-B]
+    |
+    +-- AtomicEvent                                       [mereological refinement]
+    |
+    +-- ComplexEvent                                      [mereological refinement]
+    |
+    `-- Participation                                     [event part]
+        `-- maximal event part exclusively dependent on one Endurant
+
+
+UFO-B is organized into five sub-theories
+-----------------------------------------
+
+Event
+|
++-- 1. Event mereology
+|   |
+|   +-- Event --eventPartOf--> Event
+|   +-- events form extensional partonomies
+|   `-- events may be partitioned into exhaustive, disjoint participations
+|
++-- 2. Participation
+|   |
+|   +-- Event --dependsOn--> Endurant participant
+|   +-- Participation --eventPartOf--> Event
+|   `-- Participation --exclusivelyDependsOn--> one Endurant
+|
++-- 3. Temporal relations
+|   |
+|   +-- Event --hasBeginPoint--> TimePoint
+|   +-- Event --hasEndPoint--> TimePoint
+|   `-- Allen interval relations:
+|       before, meets, overlaps, starts, during, finishes, equals,
+|       and their converses
+|
++-- 4. Manifestation of dispositions
+|   |
+|   +-- Disposition --inheresIn--> Endurant
+|   +-- Situation --activates/triggers--> Disposition
+|   `-- Event --isManifestationOf--> Disposition
+|
+`-- 5. Change and causation
+    |
+    +-- Situation --triggers--> Event
+    +-- Event --bringsAbout--> Situation
+    |
+    `-- direct causal pattern:
+        Event-1 --bringsAbout--> Situation
+        Situation --triggers--> Event-2
+        therefore Event-1 --directlyCauses--> Event-2
+
+
+Additional event-endurant participation refinements
+---------------------------------------------------
+
+Endurant --participatesIn--> Event
+
+Special participation cases:
+- creation of an Endurant in an Event
+- termination of an Endurant in an Event
+- historical roles defined by participation in past Events
+
+Do not equate:
+- a participant with its Participation
+- an Event with the relation that the Event truthmakes
+- a Relator with the Event that manifests it
+
+
+======================================================================
+IX. SITUATIONS
+======================================================================
+
+Situation                                                  [UFO-B / AB]
+|
++-- obtains at a TimePoint
++-- serves as a synchronic truthmaker for a proposition
++-- can trigger an Event
+`-- can be brought about by an Event
+
+Correct graph:
+Situation --triggers--> Event
+Event --bringsAbout--> Situation
+
+Do NOT create permanent subtype branches:
+- PreSituation <: Situation
+- PostSituation <: Situation
+
+Instead use relational roles:
+Situation --isTriggerSituationOf--> Event
+Situation --isResultSituationOf--> Event
+
+The same Situation may be:
+- the result situation of one Event
+- the trigger situation of another Event
+
+
+======================================================================
+X. UFO-C: INTENTIONAL AND SOCIAL LAYER
+======================================================================
+
+UFO-C is built on UFO-A + UFO-B. The detailed hierarchy below follows the
+official UFO-C specification; unlike the UFO-A backbone, it has not been
+reconsolidated in the 2022 paper to the same level of formal completeness.
+
+
+A. Agents and objects
+---------------------
+
+Substantial
+|
++-- Agent                                                 [UFO-C]
+|   |
+|   +-- PhysicalAgent
+|   |
+|   `-- SocialAgent
+|       |
+|       +-- CollectiveSocialAgent
+|       |   `-- Society
+|       |
+|       `-- InstitutionalAgent
+|
+`-- Object
+    |
+    +-- PhysicalObject
+    +-- Resource
+    |
+    `-- SocialObject
+        |
+        `-- NormativeDescription
+            |
+            `-- PlanDescription
+
+
+B. Intentional moments and commitments
+--------------------------------------
+
+IntrinsicMoment
+|
+`-- IntentionalMoment
+    |
+    `-- MentalMoment
+        |
+        +-- Belief
+        `-- Desire
+
+Commitment
+|
++-- Intention / InternalCommitment
+|
++-- SocialCommitment
+|
++-- Appointment
+|
++-- AtomicCommitment
++-- ComplexCommitment
++-- OpenCommitment
+`-- ClosedCommitment
+
+
+C. Propositional content
+------------------------
+
+Proposition
+|
+`-- Goal
+    `-- AppointmentGoal
+
+Goal is the propositional content of an Intention.
+
+
+D. Actions and participation
+----------------------------
+
+Event
+|
++-- Action
+|
++-- AtomicEvent
+|   `-- AtomicAction
+|       `-- CommunicativeAct
+|
++-- ComplexEvent
+|   `-- ComplexAction
+|       `-- Interaction
+|
+`-- Participation
+    |
+    +-- ActionContribution
+    |
+    `-- ResourceParticipation
+        |
+        +-- Change
+        +-- Creation
+        +-- Termination
+        `-- Usage
+
+Action
+|
++-- performedBy --> Agent
++-- causedBy / directedBy --> Intention
+`-- aims to satisfy --> Goal
+
+
+E. Social moments, relators and roles
+-------------------------------------
+
+QuaIndividual
+|
+`-- SocialMoment
+    `-- SocialClaim
+
+Relator
+|
+`-- SocialRelator
+    `-- Delegatum
+
+Role
+|
+`-- SocialRole
+
+MaterialRelation
+|
+`-- Delegation
+
+Social commitment/claim pattern:
+|
++-- SocialCommitment inheres in debtor
++-- SocialCommitment externally depends on creditor
++-- SocialClaim inheres in creditor
++-- SocialClaim externally depends on debtor
++-- commitment and claim share propositional content
+`-- mutually dependent commitments and claims compose a SocialRelator
+
+
+======================================================================
+XI. UFO-MLT: MULTI-LEVEL CLASSIFICATION
+======================================================================
+
+MLT is orthogonal to the individual/type taxonomy. It is not a branch under
+ConcreteIndividual and it is not the DTT universe hierarchy.
+
+
+Basic MLT orders
+----------------
+
+Individual
+   :: 1stOT
+
+1stOT
+   :: 2ndOT
+
+2ndOT
+   :: 3rdOT
+
+... extend as required
+
+
+Meaning
+-------
+
+Individual:
+`-- has no possible instances
+
+FirstOrderType:
+`-- its instances are Individuals
+
+SecondOrderType:
+`-- its instances are FirstOrderTypes
+
+NthOrderType:
+`-- its instances are (N-1)thOrderTypes
+
+
+Domain pattern
+--------------
+
+Person
+|
++-- Person :: 1stOT
+`-- Person <: Individual
+
+PersonAgePhase
+|
++-- PersonAgePhase :: 2ndOT
++-- PersonAgePhase <: 1stOT
+`-- its instances may include Child, Adult, Elderly
+
+
+MLT relations
+-------------
+
+same-order:
+- specializes
+- properSpecializes
+- subordinates
+
+cross-order:
+- characterizes
+- completelyCharacterizes
+- disjointlyCharacterizes
+- partitions
+- isPowertypeOf
+
+Partition:
+a higher-order type partitions a lower-order type iff every instance of the
+lower-order type instantiates exactly one instance of the higher-order type.
+
+Critical separation:
+UFO/MLT ontological order != DTT universe level
+
+
+======================================================================
+XII. UFO-AB: A/B FORMAL INTEGRATION
+======================================================================
+
+UFO-AB is not a taxonomy containing duplicate Endurant, Event, Situation,
+TimePoint and Disposition boxes.
+
+It is:
+
+UFO-AB
+|
++-- UFO-A translated from quantified modal logic into FOL
+|
++-- revised UFO-B with partially ordered / branching time
+|
+`-- interpretation of UFO-A alethic modality through that temporal structure
+
+It preserves the A/B interaction:
+
+Endurant
+`-- bears --> Disposition
+
+Situation
+`-- triggers --> Event
+
+Event
++-- manifests --> Disposition
+`-- bringsAbout --> Situation
+
+Causation:
+Event-1 --bringsAbout--> Situation --triggers--> Event-2
+
+Counterfactual alternatives:
+- represented through incomparable branches/time histories
+- used to reconcile contingency/necessity with causal determinism
+
+Do not model CounterfactualLine as an ordinary subclass of a concrete entity
+unless a chosen formal theory explicitly reifies histories that way.
+
+
+======================================================================
+XIII. WHAT MUST NOT APPEAR IN THE CORE GRAPH
+======================================================================
+
+The following are downstream or domain-level, not peer foundational UFO
+fragments:
+
+OntoUML
+`-- modeling notation grounded in UFO
+
+gUFO
+`-- lightweight OWL implementation of selected UFO content
+
+UFO-S
+`-- service reference ontology grounded in UFO-C commitments/claims
+
+UFO-L
+`-- legal ontology grounded in UFO-C social/legal notions
+
+They may be imported as separate packages, but they do not extend the
+foundational root taxonomy merely by being placed beside UFO-A/B/C.
+
+
+======================================================================
+XIV. HARNESS PROJECTION
+======================================================================
+
+This section is PROJECT POLICY, not UFO.
+
+Fallback classification rule:
+1. Assign the most specific UFO category guaranteed by the harness.
+2. Never infer a narrower category merely because it is plausible.
+3. Preserve unresolved refinement as explicit uncertainty.
+4. Never use "Thing" as a silent semantic wastebasket when a stronger upper
+   category is known.
+
+Examples:
+
+known:
+    x :: ConcreteIndividual
+unknown:
+    whether Endurant or Perdurant
+
+assert:
+    x :: ConcreteIndividual
+
+do not assert:
+    x :: Endurant
+    x :: Perdurant
+
+
+known:
+    t :: EndurantType
+    t is Sortal
+    t is AntiRigid
+    t has relational membership condition
+
+derive:
+    t :: Role
+
+
+known:
+    p is possibly instantiated
+
+derive:
+    p :: Type
+
+known:
+    p is necessarily not instantiated
+
+derive:
+    p :: Individual
+
+
+DTT boundary:
+- UFO Type is an ontological category.
+- DTT Type is a universe/forming judgment in the proof calculus.
+- The embedding represents UFO classifications as declarations and
+  propositions; it never identifies MLT order with DTT universe level.
+
+
+======================================================================
+XV. MINIMUM MODULE SET FOR THE HARNESS
+======================================================================
+
+artist.ufo.core
+|
++-- entity / individual / type
++-- concrete / abstract
++-- endurant / perdurant
++-- substantial / moment
++-- object / collective / quantity
++-- relator / intrinsic moment / mode / quality
++-- endurant-type taxonomy
++-- instantiation / specialization
++-- mereology / composition / constitution
++-- dependence / inherence / mediation
++-- characterization / qualities / quality structures
+`-- endurant-perdurant manifestation
+
+artist.ufo.events
+|
++-- event mereology
++-- participation
++-- time and Allen relations
++-- disposition manifestation
++-- situation trigger/result
++-- creation / termination
+`-- causation / historical dependence
+
+artist.ufo.social
+|
++-- agent / object
++-- intentional moment / belief / desire / intention
++-- proposition / goal
++-- action / communicative act / interaction
++-- commitment / claim
++-- social relator
++-- social role
+`-- normative description
+
+artist.ufo.mlt
+|
++-- orders
++-- instantiation
++-- specialization
++-- characterization
++-- subordination
++-- powertype
+`-- partition
+
+artist.ufo.ab
+|
++-- branching temporal structure
++-- alethic-temporal interpretation
++-- situation/event causal nexus
+`-- counterfactual histories
+
+Optional, separate imports:
+- artist.ufo.services
+- artist.ufo.legal
+
+Downstream serializers/adapters:
+- OntoUML adapter
+- gUFO/OWL adapter

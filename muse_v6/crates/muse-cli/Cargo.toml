@@ -1,0 +1,17 @@
+[package]
+name = "muse-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "muse"
+path = "src/main.rs"
+
+[dependencies]
+muse = { path = "../muse", features = ["full"] }
+serde_json.workspace = true

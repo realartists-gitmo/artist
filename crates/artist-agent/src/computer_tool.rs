@@ -28,6 +28,55 @@ const ACTIONS: &[&str] = &[
     "do",
 ];
 
+/// Addressable rung-0 capability resources.  These are deliberately separate
+/// from the model tool's prose reference: callers can discover a permitted
+/// operation through `computer://use` before deciding to invoke it.
+pub(crate) fn capability_paths() -> Vec<String> {
+    ACTIONS
+        .iter()
+        .map(|action| format!("computer://use/{action}"))
+        .collect()
+}
+
+/// Compact, stable capability metadata for the virtual-path catalog.
+pub(crate) fn capability_document(action: &str) -> Option<Value> {
+    let (intent, requires_surface, effect) = match action {
+        "launch" => (
+            "launch an isolated program",
+            false,
+            "creates a computer surface",
+        ),
+        "attach" => (
+            "attach to a permitted existing surface",
+            false,
+            "creates a computer surface",
+        ),
+        "observe" => (
+            "read the unified semantic surface snapshot",
+            true,
+            "read-only",
+        ),
+        "find" => ("locate named semantic elements", true, "read-only"),
+        "extract" => ("extract structured values by label", true, "read-only"),
+        "zoom" => ("inspect one anchored element", true, "read-only"),
+        "screenshot" => ("capture visual surface context", true, "read-only"),
+        "focus" => ("give a surface input focus", true, "control"),
+        "resize" => ("resize the isolated display", true, "control"),
+        "watch" => ("show the isolated display to a human", true, "control"),
+        "do" => ("perform guarded atomic interaction steps", true, "control"),
+        _ => return None,
+    };
+    Some(json!({
+        "path": format!("computer://use/{action}"),
+        "action": action,
+        "rung": 0,
+        "intent": intent,
+        "requiresSurface": requires_surface,
+        "effect": effect,
+        "invocation": {"tool":"computer", "action":action},
+    }))
+}
+
 #[derive(Clone)]
 pub(crate) struct ComputerTool {
     inner: Arc<artist_computer::ComputerTool>,
@@ -246,6 +295,56 @@ impl ComputerTool {
         } else {
             Ok(rewrite_output(output, &surface, session))
         }
+    }
+
+    /// Route a small semantic intent through the addressable rung-0 catalog.
+    /// This is the `send(computer:<id>, {intent, args?})` counterpart to the
+    /// explicit `computer` tool: it never invents a capability outside the
+    /// catalog and reports those runnable paths when selection fails.
+    pub(crate) async fn dispatch_intent(
+        &self,
+        session: &str,
+        input: Value,
+    ) -> Result<ToolOutput, ComputerError> {
+        let object = input.as_object().ok_or_else(|| {
+            ComputerError::plain(
+                "computer intent must be an object with `intent` and optional object `args`",
+            )
+        })?;
+        let intent = object
+            .get("intent")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|intent| !intent.is_empty())
+            .ok_or_else(|| ComputerError::plain("computer intent requires a non-empty `intent`"))?;
+        let action = match intent.to_ascii_lowercase().as_str() {
+            "read" | "inspect" | "observe" | "snapshot" => "observe",
+            "locate" | "find" => "find",
+            "extract" => "extract",
+            "zoom" => "zoom",
+            "screenshot" => "screenshot",
+            "focus" => "focus",
+            "resize" => "resize",
+            "watch" => "watch",
+            "interact" | "do" => "do",
+            _ => {
+                return Err(ComputerError::plain(format!(
+                    "no permitted computer capability matches intent `{intent}`; runnable capability paths: {}",
+                    capability_paths().join(", ")
+                )));
+            }
+        };
+        let mut args = object.get("args").cloned().unwrap_or_else(|| json!({}));
+        if !args.is_object() {
+            return Err(ComputerError::plain(
+                "computer intent `args` must be an object",
+            ));
+        }
+        if action == "observe" && args.as_object().is_some_and(Map::is_empty) {
+            args = json!({"full":true});
+        }
+        self.validate(action, Some(session), &args)?;
+        self.act(action, session, args).await
     }
 }
 
@@ -585,6 +684,19 @@ mod tests {
         assert!(description.contains("endpoint: string"));
         assert!(description.contains("universal `list`"));
         assert!(description.contains("`abort`"));
+    }
+
+    #[tokio::test]
+    async fn unknown_intent_returns_ranked_runnable_capability_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let error = tool(root.path())
+            .dispatch_intent("computer:surface", json!({"intent":"teleport"}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no permitted computer capability matches"));
+        assert!(error.contains("computer://use/observe"));
+        assert!(error.contains("computer://use/do"));
     }
 
     #[tokio::test]

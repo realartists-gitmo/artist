@@ -1,0 +1,21 @@
+[package]
+name = "artist-cog"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "artist-cog"
+path = "src/main.rs"
+
+[dependencies]
+artist-cognition = { path = "../artist-cognition" }
+artist-formal.workspace = true
+artist-kernel.workspace = true
+artist-theories.workspace = true
+serde.workspace = true
+serde_json.workspace = true

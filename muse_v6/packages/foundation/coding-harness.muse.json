@@ -1,0 +1,1960 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "2af3de109273244b2654bfc402564516626df407400ebca89a360a9941cf8ce1"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.coding_harness",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "aac26dfb624b68669dab1ef9092bf1fb137c596e4956e788c061ef1cfe4b6a37"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse generic coding-harness ontology",
+          "description": "Reusable coding-harness run/workspace/repository/event-log/tool/build/test/retry concepts independent of Artist.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.software",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "059dbe013f45b2cf77374c75c194d8eb3dac7252b3ca2518c6b2788171709d0e"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.computing",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "09cbf3a3fe079c0d82ad4ed02b3375d5b070403bd70627d13f9cb85e4de74c7f"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.agent",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "6dd9938e8bb60e0ba55cbb4ff26a36843eff6087eef5cc3f5a6d0ded7982a6fa"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:muse-design",
+            "evidence:otel-genai"
+          ]
+        },
+        "concepts": {
+          "harness:AgentCoordinationToolInvocation": {
+            "id": "harness:AgentCoordinationToolInvocation",
+            "preferred_labels": {
+              "en": "agent coordination tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation used to delegate, message, poll, abort, list, or hand off agent work.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ApplicationToolInvocation": {
+            "id": "harness:ApplicationToolInvocation",
+            "preferred_labels": {
+              "en": "application interaction tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that creates, opens, or manipulates a harness-managed application surface.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:BuildExecution": {
+            "id": "harness:BuildExecution",
+            "preferred_labels": {
+              "en": "build execution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete build activity/process execution performed within a coding harness.",
+              "genus": "se:BuildActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ProcessExecution",
+              "se:BuildActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:BuildToolInvocation": {
+            "id": "harness:BuildToolInvocation",
+            "preferred_labels": {
+              "en": "build tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation explicitly structured as a software build operation.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodeInspectionToolInvocation": {
+            "id": "harness:CodeInspectionToolInvocation",
+            "preferred_labels": {
+              "en": "code inspection tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that inspects source-code structure, symbols, dependencies, calls, or related indexed code information.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodeTransformationToolInvocation": {
+            "id": "harness:CodeTransformationToolInvocation",
+            "preferred_labels": {
+              "en": "code transformation tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that performs a structured source-code transformation.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodingAgent": {
+            "id": "harness:CodingAgent",
+            "preferred_labels": {
+              "en": "coding agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software agent operating in a coding harness to perform software-engineering tasks.",
+              "genus": "agent:SoftwareAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:SoftwareAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodingHarness": {
+            "id": "harness:CodingHarness",
+            "preferred_labels": {
+              "en": "coding harness"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software system that orchestrates coding-agent runs, model turns, tools, workspaces, and run/event records.",
+              "genus": "se:SoftwareProduct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareProduct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodingRun": {
+            "id": "harness:CodingRun",
+            "preferred_labels": {
+              "en": "coding run"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An agent run scoped to a coding-harness execution episode and its run identity.",
+              "genus": "agent:AgentRun",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:AgentRun"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CodingTask": {
+            "id": "harness:CodingTask",
+            "preferred_labels": {
+              "en": "coding task"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An agent task whose subject matter is software engineering or modification of a software workspace.",
+              "genus": "agent:Task",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:Task"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CommandFailure": {
+            "id": "harness:CommandFailure",
+            "preferred_labels": {
+              "en": "command failure"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A failure outcome reported for a shell/command invocation.",
+              "genus": "harness:ToolFailure",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:ToolFailure"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CompilationExecution": {
+            "id": "harness:CompilationExecution",
+            "preferred_labels": {
+              "en": "compilation execution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete compilation activity/process execution performed within a coding harness.",
+              "genus": "se:CompilationActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:BuildExecution",
+              "se:CompilationActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:CompilationToolInvocation": {
+            "id": "harness:CompilationToolInvocation",
+            "preferred_labels": {
+              "en": "compilation tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation explicitly structured as compilation.",
+              "genus": "harness:BuildToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:BuildToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ComputerToolInvocation": {
+            "id": "harness:ComputerToolInvocation",
+            "preferred_labels": {
+              "en": "computer interaction tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that observes or acts on a computer surface through a structured interface.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ConversationLineage": {
+            "id": "harness:ConversationLineage",
+            "preferred_labels": {
+              "en": "conversation lineage"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact/identity that designates one ordered conversational branch through a coding-harness session and can persist across multiple model runs.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:EventLog": {
+            "id": "harness:EventLog",
+            "preferred_labels": {
+              "en": "coding event log"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact containing ordered structured records for coding-harness occurrences and content.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:EventLogRecord": {
+            "id": "harness:EventLogRecord",
+            "preferred_labels": {
+              "en": "coding event-log record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A structured information artifact recording one harness occurrence, state update, message, tool invocation/result, or other logged datum.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ExternalServiceInvocation": {
+            "id": "harness:ExternalServiceInvocation",
+            "preferred_labels": {
+              "en": "external service invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation directed to a service outside the local harness process/workspace boundary.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:FilesystemToolInvocation": {
+            "id": "harness:FilesystemToolInvocation",
+            "preferred_labels": {
+              "en": "filesystem tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation whose structured operation addresses filesystem paths or filesystem information.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:GeneratedArtifact": {
+            "id": "harness:GeneratedArtifact",
+            "preferred_labels": {
+              "en": "generated coding artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact created as an output of coding-agent/tool activity.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:HarnessSession": {
+            "id": "harness:HarnessSession",
+            "preferred_labels": {
+              "en": "coding-harness session"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A temporally bounded harness context that groups one or more coding runs, conversation lineages, tool activity, and its event-log identity without identifying the session with any single run.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:MemoryToolInvocation": {
+            "id": "harness:MemoryToolInvocation",
+            "preferred_labels": {
+              "en": "memory tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that reads or changes durable agent memory through a structured harness interface.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ModelToolInvocation": {
+            "id": "harness:ModelToolInvocation",
+            "preferred_labels": {
+              "en": "model tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation explicitly structured as a model/inference operation.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:NetworkToolInvocation": {
+            "id": "harness:NetworkToolInvocation",
+            "preferred_labels": {
+              "en": "network tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation explicitly structured as network or remote-service interaction.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:PatchApplication": {
+            "id": "harness:PatchApplication",
+            "preferred_labels": {
+              "en": "patch application"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A filesystem/software-development action that attempts to apply a patch artifact to workspace artifacts.",
+              "genus": "se:CodingActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FilesystemOperation",
+              "se:CodingActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:PatchArtifact": {
+            "id": "harness:PatchArtifact",
+            "preferred_labels": {
+              "en": "patch artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying a set of intended textual/source changes.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:PatchToolInvocation": {
+            "id": "harness:PatchToolInvocation",
+            "preferred_labels": {
+              "en": "patch tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation whose structured operation applies or constructs a patch.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:Recovery": {
+            "id": "harness:Recovery",
+            "preferred_labels": {
+              "en": "recovery"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An action intended to restore progress or usable state after a failed/partial coding-harness occurrence.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:Repository": {
+            "id": "harness:Repository",
+            "preferred_labels": {
+              "en": "software repository"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact collection managed under a repository identity, potentially with version-control history.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ResourceLookupToolInvocation": {
+            "id": "harness:ResourceLookupToolInvocation",
+            "preferred_labels": {
+              "en": "resource lookup tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that retrieves harness resources such as skills or other registered informational resources.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:Retry": {
+            "id": "harness:Retry",
+            "preferred_labels": {
+              "en": "retry"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An action that repeats or re-attempts a prior invocation/run step after failure, interruption, or another retry condition.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:RunRecord": {
+            "id": "harness:RunRecord",
+            "preferred_labels": {
+              "en": "run record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event-log record identifying creation, status, usage, or completion information for a coding run.",
+              "genus": "harness:EventLogRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:EventLogRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ShellInvocation": {
+            "id": "harness:ShellInvocation",
+            "preferred_labels": {
+              "en": "shell invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A command invocation executed through a shell/process tool in a coding harness.",
+              "genus": "comp:CommandInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:CommandInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ShellToolInvocation": {
+            "id": "harness:ShellToolInvocation",
+            "preferred_labels": {
+              "en": "shell tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation whose structured operation is shell/process execution or session management.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:SourceFile": {
+            "id": "harness:SourceFile",
+            "preferred_labels": {
+              "en": "source file"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A file artifact that bears source-code information content.",
+              "genus": "comp:File",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:File",
+              "se:SourceCodeArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:TaskManagementToolInvocation": {
+            "id": "harness:TaskManagementToolInvocation",
+            "preferred_labels": {
+              "en": "task-management tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that reads or changes harness-owned task/todo state.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:TestExecution": {
+            "id": "harness:TestExecution",
+            "preferred_labels": {
+              "en": "test execution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete testing activity/process execution performed within a coding harness.",
+              "genus": "se:TestingActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ProcessExecution",
+              "se:TestingActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:TestToolInvocation": {
+            "id": "harness:TestToolInvocation",
+            "preferred_labels": {
+              "en": "test tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation explicitly structured as test execution.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ToolCallRecord": {
+            "id": "harness:ToolCallRecord",
+            "preferred_labels": {
+              "en": "tool-call record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A structured event-log/message record that identifies a tool invocation and its arguments, distinct from the invocation occurrence itself.",
+              "genus": "harness:EventLogRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:EventLogRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ToolFailure": {
+            "id": "harness:ToolFailure",
+            "preferred_labels": {
+              "en": "tool failure"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A failure outcome reported for a coding-harness tool invocation.",
+              "genus": "comp:FailureOutcome",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:FailureOutcome"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:ToolResultRecord": {
+            "id": "harness:ToolResultRecord",
+            "preferred_labels": {
+              "en": "tool-result record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A structured event-log record that records result/error content for a tool invocation, distinct from independently observed world effects.",
+              "genus": "harness:EventLogRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:EventLogRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:TurnRecord": {
+            "id": "harness:TurnRecord",
+            "preferred_labels": {
+              "en": "turn record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event-log record representing a user/agent conversational turn or model turn.",
+              "genus": "harness:EventLogRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:EventLogRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:UserInteractionToolInvocation": {
+            "id": "harness:UserInteractionToolInvocation",
+            "preferred_labels": {
+              "en": "user interaction tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A tool invocation that explicitly requests or records interaction with the attached human user.",
+              "genus": "agent:ToolInvocation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ToolInvocation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:Workspace": {
+            "id": "harness:Workspace",
+            "preferred_labels": {
+              "en": "coding workspace"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An execution environment containing the filesystem/repository state made available for a coding run.",
+              "genus": "comp:ExecutionEnvironment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "comp:ExecutionEnvironment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          }
+        },
+        "relations": {
+          "harness:eventSequence": {
+            "id": "harness:eventSequence",
+            "preferred_labels": {
+              "en": "event sequence"
+            },
+            "definition": "Relates a coding-harness event to the exact source-log sequence number represented as an integer data value.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:generatedByRun": {
+            "id": "harness:generatedByRun",
+            "preferred_labels": {
+              "en": "generated by run"
+            },
+            "definition": "Relates a generated coding artifact to the coding run during which it was generated.",
+            "domains": [
+              "harness:GeneratedArtifact"
+            ],
+            "ranges": [
+              "harness:CodingRun"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:logRecords": {
+            "id": "harness:logRecords",
+            "preferred_labels": {
+              "en": "log records"
+            },
+            "definition": "Relates a coding event log to a record contained in that log.",
+            "domains": [
+              "harness:EventLog"
+            ],
+            "ranges": [
+              "harness:EventLogRecord"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:occursInWorkspace": {
+            "id": "harness:occursInWorkspace",
+            "preferred_labels": {
+              "en": "occurs in workspace"
+            },
+            "definition": "Relates a coding-harness event to the workspace that provides the local execution/filesystem context for that event.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "harness:Workspace"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:patchUsesArtifact": {
+            "id": "harness:patchUsesArtifact",
+            "preferred_labels": {
+              "en": "patch uses artifact"
+            },
+            "definition": "Relates a patch application to the patch artifact it attempts to apply.",
+            "domains": [
+              "harness:PatchApplication"
+            ],
+            "ranges": [
+              "harness:PatchArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:recordBelongsToRun": {
+            "id": "harness:recordBelongsToRun",
+            "preferred_labels": {
+              "en": "record belongs to run"
+            },
+            "definition": "Relates a structured harness record to the coding run identity whose occurrence/content it records.",
+            "domains": [
+              "harness:EventLogRecord"
+            ],
+            "ranges": [
+              "harness:CodingRun"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:recoversFromEvent": {
+            "id": "harness:recoversFromEvent",
+            "preferred_labels": {
+              "en": "recovers from event"
+            },
+            "definition": "Relates a recovery action to an event whose failure, interruption, or partial completion motivated recovery.",
+            "domains": [
+              "harness:Recovery"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:recoversFromOutcome": {
+            "id": "harness:recoversFromOutcome",
+            "preferred_labels": {
+              "en": "recovers from outcome"
+            },
+            "definition": "Relates a recovery action to a reported execution outcome that motivated recovery.",
+            "domains": [
+              "harness:Recovery"
+            ],
+            "ranges": [
+              "comp:ExecutionOutcome"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:retryOf": {
+            "id": "harness:retryOf",
+            "preferred_labels": {
+              "en": "retry of"
+            },
+            "definition": "Relates a retry action to the prior occurrence/invocation/run step being re-attempted.",
+            "domains": [
+              "harness:Retry"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:runInHarness": {
+            "id": "harness:runInHarness",
+            "preferred_labels": {
+              "en": "run in harness"
+            },
+            "definition": "Relates a coding run to the coding harness orchestrating it.",
+            "domains": [
+              "harness:CodingRun"
+            ],
+            "ranges": [
+              "harness:CodingHarness"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:runInLineage": {
+            "id": "harness:runInLineage",
+            "preferred_labels": {
+              "en": "run in lineage"
+            },
+            "definition": "Relates a coding run to the conversation lineage under which that run contributes model/tool activity.",
+            "domains": [
+              "harness:CodingRun"
+            ],
+            "ranges": [
+              "harness:ConversationLineage"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:runWorkspace": {
+            "id": "harness:runWorkspace",
+            "preferred_labels": {
+              "en": "run workspace"
+            },
+            "definition": "Relates a coding run to the workspace against which it operates.",
+            "domains": [
+              "harness:CodingRun"
+            ],
+            "ranges": [
+              "harness:Workspace"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:sessionHasLineage": {
+            "id": "harness:sessionHasLineage",
+            "preferred_labels": {
+              "en": "session has lineage"
+            },
+            "definition": "Relates a harness session to a conversational lineage identified within that session.",
+            "domains": [
+              "harness:HarnessSession"
+            ],
+            "ranges": [
+              "harness:ConversationLineage"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:sessionHasRun": {
+            "id": "harness:sessionHasRun",
+            "preferred_labels": {
+              "en": "session has run"
+            },
+            "definition": "Relates a harness session to a coding run grouped within that session.",
+            "domains": [
+              "harness:HarnessSession"
+            ],
+            "ranges": [
+              "harness:CodingRun"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:sessionInHarness": {
+            "id": "harness:sessionInHarness",
+            "preferred_labels": {
+              "en": "session in harness"
+            },
+            "definition": "Relates a harness session to the coding harness orchestrating that session.",
+            "domains": [
+              "harness:HarnessSession"
+            ],
+            "ranges": [
+              "harness:CodingHarness"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:toolCallRecordsInvocation": {
+            "id": "harness:toolCallRecordsInvocation",
+            "preferred_labels": {
+              "en": "tool-call record records invocation"
+            },
+            "definition": "Relates a tool-call record to the tool-invocation occurrence it denotes/records.",
+            "domains": [
+              "harness:ToolCallRecord"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:toolResultCarriesResult": {
+            "id": "harness:toolResultCarriesResult",
+            "preferred_labels": {
+              "en": "tool-result record carries result"
+            },
+            "definition": "Relates a tool-result record to the tool-result information artifact it carries.",
+            "domains": [
+              "harness:ToolResultRecord"
+            ],
+            "ranges": [
+              "agent:ToolResult"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:toolResultRecordsInvocation": {
+            "id": "harness:toolResultRecordsInvocation",
+            "preferred_labels": {
+              "en": "tool-result record records invocation"
+            },
+            "definition": "Relates a tool-result record to the tool invocation whose result/error it reports.",
+            "domains": [
+              "harness:ToolResultRecord"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "harness:workspaceRepository": {
+            "id": "harness:workspaceRepository",
+            "preferred_labels": {
+              "en": "workspace repository"
+            },
+            "definition": "Relates a coding workspace to a repository represented within it.",
+            "domains": [
+              "harness:Workspace"
+            ],
+            "ranges": [
+              "harness:Repository"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

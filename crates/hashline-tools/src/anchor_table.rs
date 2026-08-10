@@ -4,7 +4,7 @@ use crate::semantic_anchors::shortest_live_anchors;
 
 /// Deterministic live-set address table for non-file surfaces such as `computer`.
 ///
-/// Allocation is stateless: every reconciliation recomputes v1 addresses directly
+/// Allocation is stateless: every reconciliation recomputes TECA addresses directly
 /// from complete binding identities. The map retained here exists only so callers can
 /// resolve the currently live opaque address back to its binding.
 #[derive(Clone, Debug, Default)]

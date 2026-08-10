@@ -30,6 +30,7 @@ mod history;
 pub mod inline_images;
 mod log;
 mod memory;
+mod muse;
 mod provider_context;
 mod recorder;
 mod replay;
@@ -53,13 +54,26 @@ pub use event::{
     RuleRetroFindings, RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated,
     SessionEvent, SteeringDelivered, TaskFinished, TaskStarted, TaskUpdated, TodoClosedStatus,
     TodoItem, TodoOpenStatus, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
-    TurnUser,
+    ToolResultImagesEvent, TurnUser,
 };
 pub use file_handles::HandleLedger;
 pub use history::{HistoryOptions, build as build_history};
 pub use inline_images::InlineImage;
 pub use log::{EVENTS_FILE, EventLogReader, EventLogWriter};
 pub use memory::SessionMemory;
+pub use muse::{
+    MuseBayesianError, MuseBayesianEstimate, MuseBayesianObservation, MuseBayesianPrior,
+    MuseCandidateError, MuseCaptureError, MuseDiagnostic, MuseExplicitFacts, MuseFormalFinding,
+    MuseFormalRule, MuseIngestion, MuseLabelError, MuseModelLabel, MuseOntologyCandidate,
+    MuseOntologyCandidateKind, MuseRuleAuthority, MuseRuleError, evaluate_muse_formal_rules,
+    explicit_facts_for_muse, formalize_for_muse, ingest_for_muse, muse_bayesian_estimates_dir,
+    muse_bayesian_observations_dir, muse_bayesian_priors_dir, muse_candidates_dir,
+    muse_diagnostics_dir, muse_documents_dir, muse_envelope, muse_facts_dir, muse_findings_dir,
+    muse_labels_dir, muse_rules_dir, normalize_for_muse, recompute_muse_bayesian_estimate,
+    write_muse_bayesian_observation, write_muse_bayesian_prior, write_muse_candidate,
+    write_muse_diagnostic, write_muse_documents, write_muse_explicit_facts, write_muse_formal_rule,
+    write_muse_model_label,
+};
 pub use provider_context::{PROVIDER_CONTEXT_SCHEMA, ProviderContextHandle};
 pub use recorder::{Recorder, WriterTask, spawn_writer};
 pub use replay::{

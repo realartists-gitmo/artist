@@ -45,6 +45,34 @@ impl CanvasTool {
             states,
         }
     }
+
+    /// Open the canvas owning an explicitly addressed source file. This is the
+    /// path-first counterpart to the search-first `canvas` tool: callers that
+    /// already hold the canonical source path do not need a second discovery
+    /// round trip merely to run it.
+    pub(crate) async fn run_source(&self, source: &Path) -> Result<Option<String>, CanvasError> {
+        let source =
+            std::fs::canonicalize(source).map_err(|error| CanvasError(error.to_string()))?;
+        if !source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| matches!(extension, "js" | "jsx" | "ts" | "tsx"))
+        {
+            return Ok(None);
+        }
+        let registry = registry::Registry::discover(&self.project);
+        for canvas in registry.canvases {
+            let root = std::fs::canonicalize(&canvas.root)
+                .map_err(|error| CanvasError(error.to_string()))?;
+            if source.starts_with(&root) {
+                return self
+                    .open(&canvas.slug, &canvas.manifest.title)
+                    .await
+                    .map(Some);
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,6 +532,21 @@ mod tests {
         ] {
             assert!(schema["properties"].get(deleted).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn run_source_declines_files_outside_a_canvas_root() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("ordinary.jsx");
+        std::fs::write(&source, "export default null;\n").unwrap();
+
+        assert!(
+            tool(root.path())
+                .run_source(&source)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

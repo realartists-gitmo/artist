@@ -1,4 +1,4 @@
-use crate::{ToolError, Workspace, output};
+use crate::{ToolError, Workspace, output, resource_path::ResourcePath};
 use hashline_tools::{EditOperation, EditRequest};
 use rig_core::tool::PortableTool;
 use serde::Deserialize;
@@ -10,6 +10,7 @@ pub struct EditTool(pub Workspace);
 #[derive(Deserialize)]
 pub struct EditArgs {
     path: String,
+    revision: String,
     replacements: Vec<Replacement>,
 }
 #[derive(Deserialize)]
@@ -24,7 +25,7 @@ impl PortableTool for EditTool {
     type Args = EditArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Atomically replace line ranges in a project-relative or absolute file. Use anchors from a recent read of the same file. Re-read before retrying if an anchor is stale or unknown."
+        "Atomically replace line ranges in a project-relative or absolute file. Supply the exact revision returned by read; stale revisions fail without writing. Use anchors from that same read."
             .into()
     }
     fn parameters(&self) -> Value {
@@ -34,6 +35,10 @@ impl PortableTool for EditTool {
                 "path": {
                     "type": "string",
                     "description": "Project-relative or absolute path to the file being edited. Anchors must come from a read of this same file."
+                },
+                "revision": {
+                    "type": "string",
+                    "description": "Exact revision returned by read for this resource. It is required to prevent stale edits."
                 },
                 "replacements": {
                     "type": "array",
@@ -62,12 +67,13 @@ impl PortableTool for EditTool {
                     "minItems": 1
                 }
             },
-            "required": ["path", "replacements"],
+            "required": ["path", "revision", "replacements"],
             "additionalProperties": false
         })
     }
 
     async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
+        reject_unresolved_virtual_mutation(&args.path)?;
         let target = self.0.resolve_existing(&args.path)?;
         if args.replacements.is_empty() {
             return Err(ToolError::Message("replacements cannot be empty".into()));
@@ -85,14 +91,31 @@ impl PortableTool for EditTool {
         let result = self
             .0
             .files
-            .edit_file(
+            .edit_file_at_revision(
                 &self.0.actor,
                 EditRequest {
                     path: args.path.clone(),
                     operations,
                 },
+                Some(&args.revision),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                let detail = error.to_string();
+                if detail.contains("content hash mismatch") {
+                    ToolError::Message(format!(
+                        "stale_revision: {} changed after it was read; start a fresh read(path=\"{}\") before editing it",
+                        args.path, args.path
+                    ))
+                } else if detail.contains("stale") || detail.contains("anchor") {
+                    ToolError::Message(format!(
+                        "stale_revision: {detail}; start a fresh read(path=\"{}\") before editing it",
+                        args.path
+                    ))
+                } else {
+                    ToolError::Anyhow(error)
+                }
+            })?;
         self.0.refresh_index(&target);
         let after = tokio::fs::read_to_string(&target).await?;
         let diff = TextDiff::from_lines(&before, &after)
@@ -130,5 +153,14 @@ impl PortableTool for EditTool {
             ),
             output::OUTPUT_CAP,
         ))
+    }
+}
+
+pub(crate) fn reject_unresolved_virtual_mutation(path: &str) -> Result<(), ToolError> {
+    match ResourcePath::parse(path).map_err(|error| ToolError::Message(error.to_string()))? {
+        ResourcePath::Real(_) => Ok(()),
+        ResourcePath::Virtual { scheme, .. } => Err(ToolError::Message(format!(
+            "{path} is a typed {scheme}:// resource, not a host file; read its canonical projection and use the owning runtime's mutation operation"
+        ))),
     }
 }

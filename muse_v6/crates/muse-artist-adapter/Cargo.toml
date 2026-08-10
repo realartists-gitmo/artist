@@ -1,0 +1,18 @@
+[package]
+name = "muse-artist-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+muse-core.workspace = true
+muse-occurrence.workspace = true
+muse-registry.workspace = true
+muse-tooling.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

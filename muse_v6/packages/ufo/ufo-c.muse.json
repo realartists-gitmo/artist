@@ -1,0 +1,2604 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "819c04edda8c136b8e5c53cf04e99d717e4db035055bda73b688f4a3f48050a8"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.c",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-C",
+          "description": "Executable source-derived UFO-C intentional, action, commitment, claim, social-relator, role and normative package.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo-c",
+            "evidence:ufo-story"
+          ]
+        },
+        "concepts": {
+          "ufo:Action": {
+            "id": "ufo:Action",
+            "preferred_labels": {
+              "en": "action"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event intentionally performed by an agent under an intention.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ActionContribution": {
+            "id": "ufo:ActionContribution",
+            "preferred_labels": {
+              "en": "action contribution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of agent participation used to represent action contribution in UFO-C.",
+              "genus": "ufo:AgentParticipation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AgentParticipation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ActionType": {
+            "id": "ufo:ActionType",
+            "preferred_labels": {
+              "en": "action type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are action entities as characterized in UFO-C.",
+              "genus": "ufo:EventType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:EventType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Agent": {
+            "id": "ufo:Agent",
+            "preferred_labels": {
+              "en": "agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A substantial capable of intentional action.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Substantial"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:AgentType": {
+            "id": "ufo:AgentType",
+            "preferred_labels": {
+              "en": "agent type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are agent entities as characterized in UFO-C.",
+              "genus": "ufo:ObjectType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ObjectType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Appointment": {
+            "id": "ufo:Appointment",
+            "preferred_labels": {
+              "en": "appointment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of commitment used to represent appointment in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:AppointmentGoal": {
+            "id": "ufo:AppointmentGoal",
+            "preferred_labels": {
+              "en": "appointment goal"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of goal used to represent appointment goal in UFO-C.",
+              "genus": "ufo:Goal",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Goal"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:AtomicAction": {
+            "id": "ufo:AtomicAction",
+            "preferred_labels": {
+              "en": "atomic action"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An atomic event that is an action.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action",
+              "ufo:AtomicEvent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:AtomicCommitment": {
+            "id": "ufo:AtomicCommitment",
+            "preferred_labels": {
+              "en": "atomic commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the atomic content or role specified in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Belief": {
+            "id": "ufo:Belief",
+            "preferred_labels": {
+              "en": "belief"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A mental moment whose propositional content is accepted as true.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:MentalMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ClaimSituation": {
+            "id": "ufo:ClaimSituation",
+            "preferred_labels": {
+              "en": "claim situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social situation representing a state of affairs in which claim conditions obtain.",
+              "genus": "ufo:SocialSituation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialSituation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ClosedCommitment": {
+            "id": "ufo:ClosedCommitment",
+            "preferred_labels": {
+              "en": "closed commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the closed content or role specified in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:CollectiveSocialAgent": {
+            "id": "ufo:CollectiveSocialAgent",
+            "preferred_labels": {
+              "en": "collective social agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social agent constituted by multiple agents.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Commitment": {
+            "id": "ufo:Commitment",
+            "preferred_labels": {
+              "en": "commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intentional or social moment binding an agent toward content.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:IntentionalMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:CommitmentSituation": {
+            "id": "ufo:CommitmentSituation",
+            "preferred_labels": {
+              "en": "commitment situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social situation representing a state of affairs in which commitment conditions obtain.",
+              "genus": "ufo:SocialSituation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialSituation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:CommunicativeAct": {
+            "id": "ufo:CommunicativeAct",
+            "preferred_labels": {
+              "en": "communicative act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An atomic action that communicates propositional or normative content.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AtomicAction"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ComplexAction": {
+            "id": "ufo:ComplexAction",
+            "preferred_labels": {
+              "en": "complex action"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A complex event intentionally performed by an agent.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action",
+              "ufo:ComplexEvent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ComplexCommitment": {
+            "id": "ufo:ComplexCommitment",
+            "preferred_labels": {
+              "en": "complex commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the complex content or role specified in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Delegation": {
+            "id": "ufo:Delegation",
+            "preferred_labels": {
+              "en": "delegation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of material relation used to represent delegation in UFO-C.",
+              "genus": "ufo:MaterialRelation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:MaterialRelation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Delegatum": {
+            "id": "ufo:Delegatum",
+            "preferred_labels": {
+              "en": "delegatum"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of social relator used to represent delegatum in UFO-C.",
+              "genus": "ufo:SocialRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Desire": {
+            "id": "ufo:Desire",
+            "preferred_labels": {
+              "en": "desire"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A mental moment whose propositional content is desired.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:MentalMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Directive": {
+            "id": "ufo:Directive",
+            "preferred_labels": {
+              "en": "directive"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of normative description used to represent directive in UFO-C.",
+              "genus": "ufo:NormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Goal": {
+            "id": "ufo:Goal",
+            "preferred_labels": {
+              "en": "goal"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A proposition functioning as the content of an intention.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": [
+                "Goal is role-like relative to an intention."
+              ]
+            },
+            "parents": [
+              "ufo:Proposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Institution": {
+            "id": "ufo:Institution",
+            "preferred_labels": {
+              "en": "institution"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A institutional agent recognized as capable of bearing or exercising the agency associated with institution in UFO-C.",
+              "genus": "ufo:InstitutionalAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:InstitutionalAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:InstitutionalAct": {
+            "id": "ufo:InstitutionalAct",
+            "preferred_labels": {
+              "en": "institutional act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A communicative act representing the occurrence of institutional act in UFO-C.",
+              "genus": "ufo:CommunicativeAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:CommunicativeAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:InstitutionalAgent": {
+            "id": "ufo:InstitutionalAgent",
+            "preferred_labels": {
+              "en": "institutional agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social agent recognized by an institution or normative system.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Intention": {
+            "id": "ufo:Intention",
+            "preferred_labels": {
+              "en": "intention"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An internal commitment directed toward a goal.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:IntentionalMoment": {
+            "id": "ufo:IntentionalMoment",
+            "preferred_labels": {
+              "en": "intentional moment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intrinsic moment directed toward propositional content.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:IntrinsicMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Interaction": {
+            "id": "ufo:Interaction",
+            "preferred_labels": {
+              "en": "interaction"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A complex action involving multiple agents.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ComplexAction"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:InternalCommitment": {
+            "id": "ufo:InternalCommitment",
+            "preferred_labels": {
+              "en": "internal commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the internal content or role specified in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:MaterialRelation": {
+            "id": "ufo:MaterialRelation",
+            "preferred_labels": {
+              "en": "material relation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of material relationship type used to represent material relation in UFO-C.",
+              "genus": "ufo:MaterialRelationshipType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:MaterialRelationshipType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:MentalMoment": {
+            "id": "ufo:MentalMoment",
+            "preferred_labels": {
+              "en": "mental moment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intentional moment borne by an agent.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:IntentionalMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:NormativeDescription": {
+            "id": "ufo:NormativeDescription",
+            "preferred_labels": {
+              "en": "normative description"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social object describing norms, rules, or expected conduct.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialObject"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:NormativeProposition": {
+            "id": "ufo:NormativeProposition",
+            "preferred_labels": {
+              "en": "normative proposition"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of proposition used to represent normative proposition in UFO-C.",
+              "genus": "ufo:Proposition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Proposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:NormativeSystem": {
+            "id": "ufo:NormativeSystem",
+            "preferred_labels": {
+              "en": "normative system"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of social object used to represent normative system in UFO-C.",
+              "genus": "ufo:SocialObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialObject"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:OpenCommitment": {
+            "id": "ufo:OpenCommitment",
+            "preferred_labels": {
+              "en": "open commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment whose bearer is bound by the open content or role specified in UFO-C.",
+              "genus": "ufo:Commitment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:PhysicalAgent": {
+            "id": "ufo:PhysicalAgent",
+            "preferred_labels": {
+              "en": "physical agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An agent with a physical bearer.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Agent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "concrete",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:PhysicalObject": {
+            "id": "ufo:PhysicalObject",
+            "preferred_labels": {
+              "en": "physical object"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of object used to represent physical object in UFO-C.",
+              "genus": "ufo:Object",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Object"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:PlanDescription": {
+            "id": "ufo:PlanDescription",
+            "preferred_labels": {
+              "en": "plan description"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative description specifying an intended course of action.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Policy": {
+            "id": "ufo:Policy",
+            "preferred_labels": {
+              "en": "policy"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of normative description used to represent policy in UFO-C.",
+              "genus": "ufo:NormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Proposition": {
+            "id": "ufo:Proposition",
+            "preferred_labels": {
+              "en": "proposition"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "The abstract content of an intentional moment or communicative act.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:RecognizedAgent": {
+            "id": "ufo:RecognizedAgent",
+            "preferred_labels": {
+              "en": "recognized agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social agent recognized as capable of bearing or exercising the agency associated with recognized agent in UFO-C.",
+              "genus": "ufo:SocialAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Resource": {
+            "id": "ufo:Resource",
+            "preferred_labels": {
+              "en": "resource"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of object used to represent resource in UFO-C.",
+              "genus": "ufo:Object",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Object"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:ResourceParticipation": {
+            "id": "ufo:ResourceParticipation",
+            "preferred_labels": {
+              "en": "resource participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a resource participant in an event.",
+              "genus": "ufo:ObjectParticipation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ObjectParticipation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Rule": {
+            "id": "ufo:Rule",
+            "preferred_labels": {
+              "en": "rule"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of normative description used to represent rule in UFO-C.",
+              "genus": "ufo:NormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialAgent": {
+            "id": "ufo:SocialAgent",
+            "preferred_labels": {
+              "en": "social agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An agent constituted through social or institutional structure.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Agent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialClaim": {
+            "id": "ufo:SocialClaim",
+            "preferred_labels": {
+              "en": "social claim"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social moment inhering in a creditor and correlated with a social commitment.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:SocialMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialCommitment": {
+            "id": "ufo:SocialCommitment",
+            "preferred_labels": {
+              "en": "social commitment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A commitment inhering in a debtor and externally depending on a creditor.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Commitment",
+              "ufo:ExternallyDependentMode"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialMoment": {
+            "id": "ufo:SocialMoment",
+            "preferred_labels": {
+              "en": "social moment"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A qua individual grounded in a social relation.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:QuaIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialObject": {
+            "id": "ufo:SocialObject",
+            "preferred_labels": {
+              "en": "social object"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An object whose existence or identity depends on social recognition.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Object"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialRelator": {
+            "id": "ufo:SocialRelator",
+            "preferred_labels": {
+              "en": "social relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A relator composed of mutually dependent social commitments and claims.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Relator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialRole": {
+            "id": "ufo:SocialRole",
+            "preferred_labels": {
+              "en": "social role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A role defined through participation in a social relation or institution.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Role"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialRoleMixin": {
+            "id": "ufo:SocialRoleMixin",
+            "preferred_labels": {
+              "en": "social role mixin"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid non-sortal whose instances play a common relational role in UFO-C.",
+              "genus": "ufo:RoleMixin",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:RoleMixin"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "non_sortal",
+              "identity": "none",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialRoleType": {
+            "id": "ufo:SocialRoleType",
+            "preferred_labels": {
+              "en": "social role type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are social role entities as characterized in UFO-C.",
+              "genus": "ufo:Role",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Role"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:SocialSituation": {
+            "id": "ufo:SocialSituation",
+            "preferred_labels": {
+              "en": "social situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing a state of affairs in which social conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:Society": {
+            "id": "ufo:Society",
+            "preferred_labels": {
+              "en": "society"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A collective social agent recognized as capable of bearing or exercising the agency associated with society in UFO-C.",
+              "genus": "ufo:CollectiveSocialAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:CollectiveSocialAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          }
+        },
+        "relations": {
+          "ufo:aimsAt": {
+            "id": "ufo:aimsAt",
+            "preferred_labels": {
+              "en": "aims at"
+            },
+            "definition": "Relates an intention or action to a goal.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Goal"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:assignsRole": {
+            "id": "ufo:assignsRole",
+            "preferred_labels": {
+              "en": "assigns role"
+            },
+            "definition": "Holds from a institution to a social role when the source assigns role the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Institution"
+            ],
+            "ranges": [
+              "ufo:SocialRole"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:bearsIntentionalMoment": {
+            "id": "ufo:bearsIntentionalMoment",
+            "preferred_labels": {
+              "en": "bears intentional moment"
+            },
+            "definition": "Holds from a agent to a intentional moment when the source bears intentional moment the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Agent"
+            ],
+            "ranges": [
+              "ufo:IntentionalMoment"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:intentionalMomentInheresIn",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:claimAgainst": {
+            "id": "ufo:claimAgainst",
+            "preferred_labels": {
+              "en": "has claim against"
+            },
+            "definition": "Holds from a social claim to a agent when the source has claim against the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialClaim"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:claimHolder": {
+            "id": "ufo:claimHolder",
+            "preferred_labels": {
+              "en": "has claim holder"
+            },
+            "definition": "Holds from a social claim to a agent when the source has claim holder the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialClaim"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:composesSocialRelator": {
+            "id": "ufo:composesSocialRelator",
+            "preferred_labels": {
+              "en": "composes social relator"
+            },
+            "definition": "Holds from a social moment to a social relator when the source composes social relator the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialMoment"
+            ],
+            "ranges": [
+              "ufo:SocialRelator"
+            ],
+            "super_relations": [
+              "ufo:properPartOf"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:contributesToAction": {
+            "id": "ufo:contributesToAction",
+            "preferred_labels": {
+              "en": "contributes to action"
+            },
+            "definition": "Holds from a action contribution to a action when the source contributes to action the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:ActionContribution"
+            ],
+            "ranges": [
+              "ufo:Action"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:createsSocialRelator": {
+            "id": "ufo:createsSocialRelator",
+            "preferred_labels": {
+              "en": "creates social relator"
+            },
+            "definition": "Holds from a institutional act to a social relator when the source creates social relator the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:InstitutionalAct"
+            ],
+            "ranges": [
+              "ufo:SocialRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:delegatesGoal": {
+            "id": "ufo:delegatesGoal",
+            "preferred_labels": {
+              "en": "delegates goal"
+            },
+            "definition": "Holds from a delegatum to a goal when the source delegates goal the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Delegatum"
+            ],
+            "ranges": [
+              "ufo:Goal"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:delegatesTo": {
+            "id": "ufo:delegatesTo",
+            "preferred_labels": {
+              "en": "delegates to"
+            },
+            "definition": "Holds from a agent to a agent when the source delegates to the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Agent"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:expresses": {
+            "id": "ufo:expresses",
+            "preferred_labels": {
+              "en": "expresses"
+            },
+            "definition": "Holds from a communicative act to a proposition when the source expresses the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:CommunicativeAct"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [
+              "ufo:hasContent"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:fulfillsCommitment": {
+            "id": "ufo:fulfillsCommitment",
+            "preferred_labels": {
+              "en": "fulfills commitment"
+            },
+            "definition": "Holds from a action to a commitment when the source fulfills commitment the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Action"
+            ],
+            "ranges": [
+              "ufo:Commitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:governedBy": {
+            "id": "ufo:governedBy",
+            "preferred_labels": {
+              "en": "is governed by"
+            },
+            "definition": "Holds from a institution to a normative description when the source is governed by the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Institution"
+            ],
+            "ranges": [
+              "ufo:NormativeDescription"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:hasContent": {
+            "id": "ufo:hasContent",
+            "preferred_labels": {
+              "en": "has content"
+            },
+            "definition": "Relates an intentional moment or communicative act to propositional content.",
+            "domains": [
+              "ufo:Entity"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:hasCreditor": {
+            "id": "ufo:hasCreditor",
+            "preferred_labels": {
+              "en": "has creditor"
+            },
+            "definition": "Holds from a social commitment to a agent when the source has creditor the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialCommitment"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:hasDebtor": {
+            "id": "ufo:hasDebtor",
+            "preferred_labels": {
+              "en": "has debtor"
+            },
+            "definition": "Holds from a social commitment to a agent when the source has debtor the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialCommitment"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:intentionalMomentInheresIn": {
+            "id": "ufo:intentionalMomentInheresIn",
+            "preferred_labels": {
+              "en": "intentional moment inheres in"
+            },
+            "definition": "Holds from a intentional moment to a agent when the source intentional moment inheres in the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:IntentionalMoment"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [
+              "ufo:inheresIn"
+            ],
+            "inverse": "ufo:bearsIntentionalMoment",
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:isCorrelativeOf": {
+            "id": "ufo:isCorrelativeOf",
+            "preferred_labels": {
+              "en": "is correlative of"
+            },
+            "definition": "Relates a social claim and social commitment with shared content and reciprocal dependence.",
+            "domains": [
+              "ufo:SocialClaim"
+            ],
+            "ranges": [
+              "ufo:SocialCommitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "symmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:mediatesSocialAgent": {
+            "id": "ufo:mediatesSocialAgent",
+            "preferred_labels": {
+              "en": "mediates social agent"
+            },
+            "definition": "Holds from a social relator to a agent when the source mediates social agent the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialRelator"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [
+              "ufo:mediates"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:modifiesSocialRelator": {
+            "id": "ufo:modifiesSocialRelator",
+            "preferred_labels": {
+              "en": "modifies social relator"
+            },
+            "definition": "Holds from a institutional act to a social relator when the source modifies social relator the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:InstitutionalAct"
+            ],
+            "ranges": [
+              "ufo:SocialRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:motivatedBy": {
+            "id": "ufo:motivatedBy",
+            "preferred_labels": {
+              "en": "motivated by"
+            },
+            "definition": "Relates an action to an intention directing it.",
+            "domains": [
+              "ufo:Action"
+            ],
+            "ranges": [
+              "ufo:Intention"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:performs": {
+            "id": "ufo:performs",
+            "preferred_labels": {
+              "en": "performs"
+            },
+            "definition": "Relates an agent to an action it performs.",
+            "domains": [
+              "ufo:Agent"
+            ],
+            "ranges": [
+              "ufo:Action"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:recognizedBy": {
+            "id": "ufo:recognizedBy",
+            "preferred_labels": {
+              "en": "is recognized by"
+            },
+            "definition": "Holds from a social object to a institution when the source is recognized by the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:SocialObject"
+            ],
+            "ranges": [
+              "ufo:Institution"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:terminatesSocialRelator": {
+            "id": "ufo:terminatesSocialRelator",
+            "preferred_labels": {
+              "en": "terminates social relator"
+            },
+            "definition": "Holds from a institutional act to a social relator when the source terminates social relator the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:InstitutionalAct"
+            ],
+            "ranges": [
+              "ufo:SocialRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:usesResource": {
+            "id": "ufo:usesResource",
+            "preferred_labels": {
+              "en": "uses resource"
+            },
+            "definition": "Holds from a action to a resource when the source uses resource the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Action"
+            ],
+            "ranges": [
+              "ufo:Resource"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          },
+          "ufo:violatesCommitment": {
+            "id": "ufo:violatesCommitment",
+            "preferred_labels": {
+              "en": "violates commitment"
+            },
+            "definition": "Holds from a action to a commitment when the source violates commitment the target, as defined in UFO-C.",
+            "domains": [
+              "ufo:Action"
+            ],
+            "ranges": [
+              "ufo:Commitment"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-c"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Agent",
+            "members": [
+              "ufo:PhysicalAgent",
+              "ufo:SocialAgent"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:SocialAgent",
+            "members": [
+              "ufo:CollectiveSocialAgent",
+              "ufo:InstitutionalAgent"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:MentalMoment",
+            "members": [
+              "ufo:Belief",
+              "ufo:Desire"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Action",
+            "members": [
+              "ufo:AtomicAction",
+              "ufo:ComplexAction"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Commitment",
+            "members": [
+              "ufo:Appointment",
+              "ufo:InternalCommitment",
+              "ufo:SocialCommitment"
+            ]
+          },
+          {
+            "kind": "disjoint",
+            "members": [
+              "ufo:AtomicCommitment",
+              "ufo:ComplexCommitment"
+            ]
+          },
+          {
+            "kind": "disjoint",
+            "members": [
+              "ufo:ClosedCommitment",
+              "ufo:OpenCommitment"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:IntentionalMoment",
+            "relation": "ufo:hasContent",
+            "object": "ufo:Proposition",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:SocialCommitment",
+            "relation": "ufo:hasDebtor",
+            "object": "ufo:Agent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:SocialCommitment",
+            "relation": "ufo:hasCreditor",
+            "object": "ufo:Agent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:SocialClaim",
+            "relation": "ufo:claimHolder",
+            "object": "ufo:Agent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:SocialClaim",
+            "relation": "ufo:claimAgainst",
+            "object": "ufo:Agent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "ufo:SocialCommitment",
+            "relation": "ufo:isCorrelativeOf",
+            "object": "ufo:SocialClaim"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "ufo:SocialClaim",
+            "relation": "ufo:isCorrelativeOf",
+            "object": "ufo:SocialCommitment"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "ufo:SocialRelator",
+            "relation": "ufo:mediatesSocialAgent",
+            "object": "ufo:Agent"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?action",
+                "?agent"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:performs",
+                  "arguments": [
+                    "?agent",
+                    "?action"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:participatesIn",
+                "arguments": [
+                  "?agent",
+                  "?action"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?moment",
+                "?relator"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:composesSocialRelator",
+                  "arguments": [
+                    "?moment",
+                    "?relator"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:properPartOf",
+                "arguments": [
+                  "?moment",
+                  "?relator"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

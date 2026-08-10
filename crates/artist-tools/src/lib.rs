@@ -13,6 +13,7 @@ mod outline;
 // cut, rather than inventing a second rule that drifts.
 pub mod output;
 mod read;
+pub mod resource_path;
 mod short_id;
 pub mod skeleton;
 mod workspace;
@@ -25,10 +26,10 @@ pub use code::{
 };
 pub use drift::{DRIFT_BUDGET, DriftWatch, report as drift_report};
 pub use edit::EditTool;
-pub use find::FindTool;
-pub use grep::GrepTool;
+pub use find::{FindArgs, FindTool};
+pub use grep::{GrepArgs, GrepTool};
 pub use locate::{Located, Locator};
-pub use read::ReadTool;
+pub use read::{ReadArgs, ReadTool};
 pub use short_id::short_id;
 pub use workspace::{Workspace, forget_conversation};
 pub use write::WriteTool;

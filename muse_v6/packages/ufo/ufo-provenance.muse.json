@@ -1,0 +1,371 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "48c55e321202935e1699c05eef30827d282b3b2d989ad2e75c97af0a7869dadc"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "provenance",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.provenance",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+            }
+          },
+          "kind": "provenance",
+          "title": "Muse UFO-family provenance",
+          "description": "Primary source and evidence records for the bundled UFO family.",
+          "license": "CC-BY-4.0",
+          "imports": [],
+          "evidence": []
+        },
+        "sources": {
+          "source:mlt": {
+            "id": "source:mlt",
+            "kind": "peer_reviewed_paper",
+            "title": "Extending the Foundations of Ontology-Based Conceptual Modeling with a Multi-Level Theory",
+            "creators": [
+              "Victorio A. Carvalho",
+              "Claudenir M. Fonseca",
+              "João Paulo A. Almeida",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://doi.org/10.1007/978-3-319-25264-3_9",
+            "citation": "ER 2015.",
+            "issued": "2015",
+            "notes": []
+          },
+          "source:types": {
+            "id": "source:types",
+            "kind": "peer_reviewed_paper",
+            "title": "Incorporating Types of Types in Ontology-Driven Conceptual Modeling",
+            "creators": [
+              "Claudenir M. Fonseca",
+              "Giancarlo Guizzardi",
+              "João Paulo A. Almeida",
+              "Tiago Prince Sales"
+            ],
+            "locator": "https://doi.org/10.1007/978-3-031-17995-2_2",
+            "citation": "ER 2022, 18-34.",
+            "issued": "2022",
+            "notes": []
+          },
+          "source:ufo-ab": {
+            "id": "source:ufo-ab",
+            "kind": "peer_reviewed_paper",
+            "title": "Towards a Unified Theory of Endurants and Perdurants: UFO-AB",
+            "creators": [
+              "Alessander Botti Benevides",
+              "João Paulo A. Almeida",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://ceur-ws.org/Vol-2518/paper-FOUST2.pdf",
+            "citation": "JOWO/FOUST 2019.",
+            "issued": "2019",
+            "notes": []
+          },
+          "source:ufo-b": {
+            "id": "source:ufo-b",
+            "kind": "peer_reviewed_paper",
+            "title": "Events as Entities in Ontology-Driven Conceptual Modeling",
+            "creators": [
+              "João Paulo A. Almeida",
+              "Ricardo de Almeida Falbo",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://doi.org/10.1007/978-3-030-33223-5_39",
+            "citation": "ER 2019, 469-483.",
+            "issued": "2019",
+            "notes": []
+          },
+          "source:ufo-c": {
+            "id": "source:ufo-c",
+            "kind": "documentation",
+            "title": "Official UFO-C class specification",
+            "creators": [
+              "NEMO Research Group"
+            ],
+            "locator": "https://ontology.com.br/ufo/ufo-c/spec/",
+            "citation": "Official UFO-C hierarchy and definitions.",
+            "issued": "2015",
+            "notes": []
+          },
+          "source:ufo-l": {
+            "id": "source:ufo-l",
+            "kind": "peer_reviewed_paper",
+            "title": "Conceptual Modeling of Legal Relations",
+            "creators": [
+              "Cristine Griffo",
+              "João Paulo A. Almeida",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://doi.org/10.1007/978-3-030-00847-5_14",
+            "citation": "ER 2018, 169-183.",
+            "issued": "2018",
+            "notes": []
+          },
+          "source:ufo-l-judicial": {
+            "id": "source:ufo-l-judicial",
+            "kind": "peer_reviewed_paper",
+            "title": "Legal Theories and Judicial Decision-Making: An Ontological Analysis",
+            "creators": [
+              "Cristine Griffo",
+              "João Paulo A. Almeida",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://doi.org/10.3233/FAIA200661",
+            "citation": "FOIS 2020, 63-76.",
+            "issued": "2020",
+            "notes": []
+          },
+          "source:ufo-l-powers": {
+            "id": "source:ufo-l-powers",
+            "kind": "peer_reviewed_paper",
+            "title": "Legal Powers, Subjections, Disabilities, and Immunities",
+            "creators": [
+              "Cristine Griffo",
+              "João Paulo A. Almeida",
+              "João A. O. Lima",
+              "Tiago Prince Sales",
+              "Giancarlo Guizzardi"
+            ],
+            "locator": "https://doi.org/10.3233/AO-220267",
+            "citation": "Applied Ontology 18(3).",
+            "issued": "2023",
+            "notes": []
+          },
+          "source:ufo-s": {
+            "id": "source:ufo-s",
+            "kind": "peer_reviewed_paper",
+            "title": "A Commitment-Based Reference Ontology for Services",
+            "creators": [
+              "Julio Cesar Nardi",
+              "Ricardo de Almeida Falbo",
+              "João Paulo A. Almeida",
+              "Giancarlo Guizzardi",
+              "Luis Ferreira Pires",
+              "Marten J. van Sinderen",
+              "Nicola Guarino",
+              "Claudenir Morais Fonseca"
+            ],
+            "locator": "https://doi.org/10.1016/j.is.2015.01.012",
+            "citation": "Information Systems 54, 263-288.",
+            "issued": "2015",
+            "notes": []
+          },
+          "source:ufo-s-corr": {
+            "id": "source:ufo-s-corr",
+            "kind": "peer_reviewed_paper",
+            "title": "Corrigendum to A Commitment-Based Reference Ontology for Services",
+            "creators": [
+              "Julio Cesar Nardi et al."
+            ],
+            "locator": "https://doi.org/10.1016/j.is.2015.09.008",
+            "citation": "Information Systems 56, 133-134.",
+            "issued": "2016",
+            "notes": []
+          },
+          "source:ufo-story": {
+            "id": "source:ufo-story",
+            "kind": "peer_reviewed_paper",
+            "title": "The UFO Story",
+            "creators": [
+              "Giancarlo Guizzardi",
+              "Gerd Wagner",
+              "João Paulo A. Almeida",
+              "Renata Guizzardi"
+            ],
+            "locator": "https://doi.org/10.3233/AO-150157",
+            "citation": "Applied Ontology 10(3-4), 259-271.",
+            "issued": "2015",
+            "notes": []
+          },
+          "source:ufo22": {
+            "id": "source:ufo22",
+            "kind": "peer_reviewed_paper",
+            "title": "UFO: Unified Foundational Ontology",
+            "creators": [
+              "Giancarlo Guizzardi",
+              "Alessander Botti Benevides",
+              "Claudenir M. Fonseca",
+              "Daniele Porello",
+              "João Paulo A. Almeida",
+              "Tiago Prince Sales"
+            ],
+            "locator": "https://doi.org/10.3233/AO-210256",
+            "citation": "Applied Ontology 17(1), 167-210.",
+            "issued": "2022",
+            "notes": []
+          }
+        },
+        "agents": {},
+        "activities": {},
+        "evidence": {
+          "evidence:mlt": {
+            "id": "evidence:mlt",
+            "status": "canonical",
+            "source": "source:mlt",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Multi-level orders and relations."
+            ]
+          },
+          "evidence:types": {
+            "id": "evidence:types",
+            "status": "canonical",
+            "source": "source:types",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Updated types-of-types distinctions."
+            ]
+          },
+          "evidence:ufo-ab": {
+            "id": "evidence:ufo-ab",
+            "status": "canonical",
+            "source": "source:ufo-ab",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Branching-time A/B integration."
+            ]
+          },
+          "evidence:ufo-b": {
+            "id": "evidence:ufo-b",
+            "status": "canonical",
+            "source": "source:ufo-b",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Event, participation, time, manifestation, change and causation."
+            ]
+          },
+          "evidence:ufo-c": {
+            "id": "evidence:ufo-c",
+            "status": "canonical",
+            "source": "source:ufo-c",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Official intentional/social hierarchy, cross-checked with the UFO Story."
+            ]
+          },
+          "evidence:ufo-l": {
+            "id": "evidence:ufo-l",
+            "status": "canonical",
+            "source": "source:ufo-l",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Legal relators and Hohfeldian positions."
+            ]
+          },
+          "evidence:ufo-l-judicial": {
+            "id": "evidence:ufo-l-judicial",
+            "status": "canonical",
+            "source": "source:ufo-l-judicial",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Legal things, norms, events and judicial reasoning."
+            ]
+          },
+          "evidence:ufo-l-powers": {
+            "id": "evidence:ufo-l-powers",
+            "status": "canonical",
+            "source": "source:ufo-l-powers",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Competence-level legal positions."
+            ]
+          },
+          "evidence:ufo-s": {
+            "id": "evidence:ufo-s",
+            "status": "canonical",
+            "source": "source:ufo-s",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Service offering, negotiation, agreement, delivery and outcome."
+            ]
+          },
+          "evidence:ufo-s-corr": {
+            "id": "evidence:ufo-s-corr",
+            "status": "canonical",
+            "source": "source:ufo-s-corr",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Corrected service model."
+            ]
+          },
+          "evidence:ufo-story": {
+            "id": "evidence:ufo-story",
+            "status": "canonical",
+            "source": "source:ufo-story",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "A/B/C theory-family organization."
+            ]
+          },
+          "evidence:ufo22": {
+            "id": "evidence:ufo22",
+            "status": "canonical",
+            "source": "source:ufo22",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Consolidated UFO-A backbone and micro-theories."
+            ]
+          }
+        },
+        "assertions": {}
+      }
+    }
+  }
+}

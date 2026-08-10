@@ -5,8 +5,7 @@ use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType, T
 use rig_core::tool::{PortableTool, ToolOutput};
 use serde::Deserialize;
 use serde_json::{Value, json};
-
-const READ_BYTES: usize = 50 * 1024;
+use sha2::Digest;
 
 /// Lines of content returned per read, and the point past which the file's
 /// shape is appended.
@@ -30,9 +29,12 @@ pub struct ReadTool(pub Workspace);
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadArgs {
-    path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
+    pub path: String,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    /// The revision returned by the preceding partial read.  A non-initial
+    /// read must carry it, so an offset can never drift onto changed content.
+    pub revision: Option<String>,
 }
 impl PortableTool for ReadTool {
     const NAME: &'static str = "read";
@@ -43,17 +45,20 @@ impl PortableTool for ReadTool {
         format!(
             "Read a project-relative or absolute file. Each line renders as `ANCHOR: CONTENT` \
              (for example, `#abc: hello`). Pass the exact `ANCHOR` substring before the `: ` delimiter \
-             as `start`/`end` in edit; do not trim or normalize it. Returns up to \
-             {READ_LINES} lines; a longer file also gets an outline of its whole shape, whose \
+             as `start`/`end` in edit; do not trim or normalize it. Defaults to \
+             {READ_LINES} lines, but an explicit `limit` is honored without a hard ceiling; a longer file also gets an outline of its whole shape, whose \
              anchors work in edit without reading that part first."
         )
     }
 
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false})
+        json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1},"revision":{"type":"string","description":"Required for a continuation (offset greater than 1); must exactly match the preceding read revision."}},"required":["path"],"additionalProperties":false})
     }
     async fn call(&self, args: ReadArgs) -> Result<ToolOutput, ToolError> {
         let path = self.0.resolve_existing(&args.path)?;
+        if tokio::fs::metadata(&path).await?.is_dir() {
+            return read_directory(&path, &args.path).await;
+        }
         let extension = path
             .extension()
             .and_then(|v| v.to_str())
@@ -88,7 +93,11 @@ impl PortableTool for ReadTool {
             })));
         }
         let offset = args.offset.unwrap_or(1).max(1);
-        let limit = args.limit.unwrap_or(READ_LINES).min(READ_LINES);
+        // The default keeps ordinary reads compact. An explicit caller limit
+        // is authoritative: never split a logical line or silently impose a
+        // second byte/line ceiling that makes an exact continuation
+        // impossible to request.
+        let limit = args.limit.unwrap_or(READ_LINES).max(1);
         // Always request the whole file, then window for display.
         //
         // Two reasons. Addresses are selected against the entire live file;
@@ -107,29 +116,37 @@ impl PortableTool for ReadTool {
                 },
             )
             .await?;
+        let revision = result.content_hash.clone();
+        if offset > 1 {
+            let supplied = args.revision.as_deref().ok_or_else(|| {
+                ToolError::Message(format!(
+                    "stale_revision: continuation for {} requires the revision from its preceding read; start a fresh read(path=\"{}\")",
+                    args.path, args.path
+                ))
+            })?;
+            if supplied != revision {
+                return Err(ToolError::Message(format!(
+                    "stale_revision: {} is now revision {revision}, not {supplied}; start a fresh read(path=\"{}\")",
+                    args.path, args.path
+                )));
+            }
+        }
         let all = &result.result.lines;
         let window = all.iter().skip(offset.saturating_sub(1)).take(limit);
 
-        let mut output = String::new();
+        let mut output = format!("[revision: {revision}]\n");
         let mut shown = 0;
         for line in window {
             let rendered = format!("{}: {}\n", line.anchor, line.text);
-            if shown > 0 && output.len() + rendered.len() > READ_BYTES.saturating_sub(200) {
-                break;
-            }
             output.push_str(&rendered);
             shown += 1;
-            if output.len() > READ_BYTES.saturating_sub(200) {
-                output.truncate(floor_char_boundary(&output, READ_BYTES.saturating_sub(200)));
-                break;
-            }
         }
         let truncated = result.result.total_lines > offset.saturating_sub(1) + shown;
         if truncated {
             let next = offset + shown;
             output.push_str(&format!(
-                "\n[truncated: continue with read(path=\"{}\", offset={next})]",
-                args.path
+                "\n[truncated: continue with read(path=\"{}\", offset={next}, revision=\"{revision}\")]",
+                args.path,
             ));
         }
 
@@ -182,6 +199,45 @@ impl PortableTool for ReadTool {
     }
 }
 
+/// Return only immediate children of a real directory. A directory is a
+/// resource root, not an invitation to recursively dump a host tree into the
+/// model context.
+async fn read_directory(path: &std::path::Path, requested: &str) -> Result<ToolOutput, ToolError> {
+    let mut entries = tokio::fs::read_dir(path).await?;
+    let mut children = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let suffix = if file_type.is_dir() { "/" } else { "" };
+        // Metadata failures should not make an otherwise readable directory
+        // disappear. Such entries sort behind known timestamps, then by path.
+        let modified = entry
+            .metadata()
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
+        children.push((modified, format!("{requested}/{name}{suffix}")));
+    }
+    children.sort_by(|(left_time, left_path), (right_time, right_path)| {
+        right_time
+            .cmp(left_time)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    let children = children
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
+    let revision = sha2::Sha256::digest(children.join("\n").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(ToolOutput::text(if children.is_empty() {
+        format!("[revision: {revision}]\n[{requested} has no immediate children]")
+    } else {
+        format!("[revision: {revision}]\n{}", children.join("\n"))
+    }))
+}
+
 /// `bmp` has no rig media type, so it is read as a file but never inlined.
 fn image_media_type(extension: &str) -> Option<ImageMediaType> {
     Some(match extension {
@@ -194,11 +250,4 @@ fn image_media_type(extension: &str) -> Option<ImageMediaType> {
         "heif" => ImageMediaType::HEIF,
         _ => return None,
     })
-}
-
-fn floor_char_boundary(value: &str, mut index: usize) -> usize {
-    while index > 0 && !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }

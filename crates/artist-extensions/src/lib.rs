@@ -46,6 +46,7 @@ impl HostControl for NoopControl {
 }
 
 /// Runtime registry supporting atomic rediscovery/reload and diagnostics.
+#[derive(Clone)]
 pub struct Registry {
     root: PathBuf,
     pub extensions: Vec<DiscoveredExtension>,
@@ -64,6 +65,11 @@ impl Registry {
         let (extensions, diagnostics) = discover(&self.root);
         self.extensions = extensions;
         self.diagnostics = diagnostics;
+    }
+    /// Directory containing the extension layouts.  Runtime reloads always
+    /// rediscover from this same root instead of mutating a live registry.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
     }
     pub fn tools(&self) -> impl Iterator<Item = (&Manifest, &ToolDeclaration)> {
         self.extensions

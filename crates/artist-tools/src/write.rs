@@ -11,6 +11,7 @@ pub struct WriteTool(pub Workspace);
 pub struct WriteArgs {
     path: String,
     content: String,
+    revision: Option<String>,
 }
 impl PortableTool for WriteTool {
     const NAME: &'static str = "write";
@@ -18,7 +19,7 @@ impl PortableTool for WriteTool {
     type Args = WriteArgs;
     type Output = String;
     fn description(&self) -> String {
-        "Create or fully overwrite a project-relative or absolute file; use read+edit for targeted changes."
+        "Create or fully overwrite a project-relative or absolute file. Replacing an existing resource requires its exact current revision from read."
             .into()
     }
     fn parameters(&self) -> Value {
@@ -32,6 +33,10 @@ impl PortableTool for WriteTool {
                 "content": {
                     "type": "string",
                     "description": "The complete new contents of the file. This is the whole file, not a fragment appended or spliced into the existing one."
+                },
+                "revision": {
+                    "type": ["string", "null"],
+                    "description": "Required current revision when replacing an existing file; omit or use null only when creating a new file."
                 }
             },
             "required": ["path", "content"],
@@ -39,6 +44,7 @@ impl PortableTool for WriteTool {
         })
     }
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
+        crate::edit::reject_unresolved_virtual_mutation(&args.path)?;
         let target = self.0.resolve_new(&args.path)?;
         let created = !target.exists();
         let before = if created {
@@ -49,6 +55,23 @@ impl PortableTool for WriteTool {
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let condition = if created {
+            if args.revision.is_some() {
+                return Err(ToolError::Message(format!(
+                    "{} does not exist; omit revision when creating it",
+                    args.path
+                )));
+            }
+            WriteCondition::Absent
+        } else {
+            let revision = args.revision.as_deref().ok_or_else(|| ToolError::Message(format!(
+                "{} already exists; read it and supply its current revision before replacing it",
+                args.path
+            )))?;
+            WriteCondition::ContentHash {
+                hash: revision.to_owned(),
+            }
+        };
         let result = self
             .0
             .files
@@ -56,9 +79,20 @@ impl PortableTool for WriteTool {
                 &self.0.actor,
                 args.path.clone(),
                 args.content.clone(),
-                WriteCondition::Any,
+                condition,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                let detail = error.to_string();
+                if detail.contains("content hash mismatch") {
+                    ToolError::Message(format!(
+                        "stale_revision: {} changed after it was read; start a fresh read(path=\"{}\") before replacing it",
+                        args.path, args.path
+                    ))
+                } else {
+                    ToolError::Anyhow(error)
+                }
+            })?;
         self.0.refresh_index(&target);
         let diff = TextDiff::from_lines(&before, &args.content)
             .unified_diff()
@@ -76,10 +110,11 @@ impl PortableTool for WriteTool {
             .unwrap_or_default();
         Ok(output::head(
             format!(
-                "Written {} ({} bytes; {}).\n\nDiff:\n{}{aftermath}",
+                "Written {} ({} bytes; {}; revision {}).\n\nDiff:\n{}{aftermath}",
                 args.path,
                 args.content.len(),
                 if created { "created" } else { "overwritten" },
+                result.content_hash,
                 diff
             ),
             output::OUTPUT_CAP,

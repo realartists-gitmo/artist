@@ -10,9 +10,9 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use wezterm_term::{Terminal, TerminalConfiguration, TerminalSize, color::ColorPalette};
 
 const EXEC_CAP: usize = 50 * 1024;
-const SESSION_CAP: usize = 2 * 1024 * 1024;
 const INPUT_SESSION_ID: &str = "artist-input-shell";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -155,9 +155,70 @@ pub struct BashTool {
 }
 struct Session {
     output: Arc<Mutex<String>>,
+    terminal: Arc<Mutex<Terminal>>,
     cursor: Arc<Mutex<usize>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+/// Artist owns no visual terminal UI, but must model the same terminal state
+/// a user would see. The upstream emulator may emit query responses while it
+/// parses output; the PTY-facing writer remains owned by the session, so those
+/// UI-only responses are intentionally discarded here.
+#[derive(Debug)]
+struct ArtistTerminalConfig;
+
+impl TerminalConfiguration for ArtistTerminalConfig {
+    fn color_palette(&self) -> ColorPalette {
+        ColorPalette::default()
+    }
+}
+
+struct DiscardTerminalResponses;
+
+impl Write for DiscardTerminalResponses {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn new_terminal() -> Terminal {
+    Terminal::new(
+        TerminalSize {
+            rows: 24,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+            dpi: 0,
+        },
+        Arc::new(ArtistTerminalConfig),
+        "Artist",
+        env!("CARGO_PKG_VERSION"),
+        Box::new(DiscardTerminalResponses),
+    )
+}
+
+/// Render only the currently visible screen. The separate `output` transcript
+/// remains append-only for `read(bash://...)`; `poll(bash://...)` uses this
+/// terminal rendering and therefore honors cursor movement, erases, and the
+/// alternate screen.
+fn render_terminal_screen(terminal: &Terminal) -> String {
+    let screen = terminal.screen();
+    let total = screen.scrollback_rows();
+    let start = total.saturating_sub(terminal.get_size().rows);
+    let mut lines = screen
+        .lines_in_phys_range(start..total)
+        .into_iter()
+        .map(|line| line.as_str().trim_end().to_owned())
+        .collect::<Vec<_>>();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 impl Drop for Session {
@@ -178,6 +239,11 @@ impl BashTool {
             sessions: Arc::new(DashMap::new()),
             starting: Arc::new(DashSet::new()),
         }
+    }
+
+    /// Workspace used for durable process path resolution.
+    pub fn workspace(&self) -> Workspace {
+        self.workspace.clone()
     }
 
     /// Spawn a PTY-backed process for the harness-level durable session layer.
@@ -224,16 +290,6 @@ impl BashTool {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
-        let truncated = output.len() > EXEC_CAP;
-        let output = if truncated {
-            let mut start = output.len().saturating_sub(EXEC_CAP);
-            while start < output.len() && !output.is_char_boundary(start) {
-                start += 1;
-            }
-            output[start..].to_owned()
-        } else {
-            output
-        };
         Ok(BashResult {
             status,
             exit_code,
@@ -244,9 +300,20 @@ impl BashTool {
             duration_ms: None,
             timeout_secs: None,
             terminated_by: None,
-            truncated,
+            truncated: false,
             retry_as_background: false,
         })
+    }
+
+    /// Current visible emulator screen for `poll`. Unlike the semantic
+    /// transcript, this models cursor and alternate-screen behavior.
+    pub fn managed_screen(&self, id: &str) -> Result<String, ToolError> {
+        let session = self.session(id)?;
+        let terminal = session
+            .terminal
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        Ok(render_terminal_screen(&terminal))
     }
 
     /// Whether the live PTY input channel is currently able to accept another unit.
@@ -489,18 +556,24 @@ impl BashTool {
         };
         let output = Arc::new(Mutex::new(String::new()));
         let sink = output.clone();
+        let terminal = Arc::new(Mutex::new(new_terminal()));
+        let terminal_sink = Arc::clone(&terminal);
         let cursor = Arc::new(Mutex::new(0usize));
-        let reader_cursor = cursor.clone();
         std::thread::spawn(move || {
             let mut bytes = [0u8; 4096];
             // Carry an incomplete trailing UTF-8 sequence across reads so a
             // multi-byte char split at a 4096-byte boundary isn't corrupted
             // into replacement characters.
             let mut carry: Vec<u8> = Vec::new();
+            let mut pending_control = String::new();
             while let Ok(count) = reader.read(&mut bytes) {
                 if count == 0 {
                     break;
                 }
+                terminal_sink
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .advance_bytes(&bytes[..count]);
                 let mut buf = std::mem::take(&mut carry);
                 buf.extend_from_slice(&bytes[..count]);
                 let decoded = match std::str::from_utf8(&buf) {
@@ -521,25 +594,16 @@ impl BashTool {
                         piece
                     }
                 };
+                let decoded = sanitize_terminal_chunk(&decoded, &mut pending_control);
                 let mut text = sink.lock().unwrap_or_else(|poison| poison.into_inner());
                 text.push_str(&decoded);
-                if text.len() > SESSION_CAP {
-                    let mut drain = text.len() - SESSION_CAP;
-                    while drain < text.len() && !text.is_char_boundary(drain) {
-                        drain += 1;
-                    }
-                    text.drain(..drain);
-                    let mut cursor = reader_cursor
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    *cursor = cursor.saturating_sub(drain);
-                }
             }
         });
         self.sessions.insert(
             id.clone(),
             Arc::new(Session {
                 output,
+                terminal,
                 cursor,
                 writer: Mutex::new(writer),
                 child: Mutex::new(child),
@@ -629,9 +693,89 @@ impl BashTool {
     }
 }
 
+/// Remove terminal control traffic before it becomes semantic transcript text.
+/// Newlines remain structural text; CR, BEL, CSI/OSC escapes, and other raw
+/// controls never cross the model boundary. Incomplete escape sequences carry
+/// to the next PTY read so splitting a sequence cannot leak its tail.
+fn sanitize_terminal_chunk(chunk: &str, pending: &mut String) -> String {
+    let mut input = std::mem::take(pending);
+    input.push_str(chunk);
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut output = String::with_capacity(input.len());
+    while index < bytes.len() {
+        if bytes[index] == 0x1b {
+            let start = index;
+            index += 1;
+            let Some(&kind) = bytes.get(index) else {
+                pending.push_str(&input[start..]);
+                break;
+            };
+            index += 1;
+            match kind {
+                b'[' => {
+                    while let Some(&byte) = bytes.get(index) {
+                        index += 1;
+                        if (0x40..=0x7e).contains(&byte) {
+                            break;
+                        }
+                    }
+                    if index == bytes.len()
+                        && bytes
+                            .last()
+                            .is_some_and(|byte| !(0x40..=0x7e).contains(byte))
+                    {
+                        pending.push_str(&input[start..]);
+                    }
+                }
+                b']' => {
+                    let mut terminated = false;
+                    while let Some(&byte) = bytes.get(index) {
+                        if byte == 0x07 {
+                            index += 1;
+                            terminated = true;
+                            break;
+                        }
+                        if byte == 0x1b {
+                            if bytes.get(index + 1) == Some(&b'\\') {
+                                index += 2;
+                                terminated = true;
+                                break;
+                            }
+                            index += 1;
+                            continue;
+                        }
+                        index += 1;
+                    }
+                    if !terminated {
+                        pending.push_str(&input[start..]);
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let character = input[index..].chars().next().expect("valid utf-8");
+        index += character.len_utf8();
+        if character == '\n' {
+            output.push(character);
+        } else if !character.is_control() {
+            output.push(character);
+        }
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wezterm_screen_models_cursor_movement_without_changing_transcript_rules() {
+        let mut terminal = new_terminal();
+        terminal.advance_bytes(b"one\rT");
+        assert_eq!(render_terminal_screen(&terminal), "Tne");
+    }
 
     #[tokio::test]
     async fn managed_readiness_comes_from_the_live_pty_input_channel() {

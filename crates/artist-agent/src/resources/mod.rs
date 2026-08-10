@@ -7,6 +7,7 @@ mod skills;
 mod tests;
 
 pub use skill_tool::SkillTool;
+pub(crate) use skills::Skill;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +60,32 @@ impl Resources {
                 description: skill.description.clone(),
             })
             .collect()
+    }
+
+    /// The canonical skill resources visible to a particular profile. Reading
+    /// one of these files is itself activation; this catalog carries no
+    /// separate activation state.
+    pub(crate) fn skills_for(&self, profile: &crate::profiles::Profile) -> Vec<Skill> {
+        self.0
+            .skills
+            .values()
+            .filter(|skill| profile.permits_skill(&skill.name))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn read_skill(
+        &self,
+        profile: &crate::profiles::Profile,
+        name: &str,
+    ) -> Result<String, String> {
+        let skill = self
+            .0
+            .skills
+            .get(name)
+            .filter(|skill| profile.permits_skill(&skill.name))
+            .ok_or_else(|| format!("unknown or disallowed skill `{name}`"))?;
+        skill_io::read_bounded(&skill.file, &skill.base).map_err(|error| error.to_string())
     }
 
     pub fn prompt_section(&self, profile: &crate::profiles::Profile) -> String {

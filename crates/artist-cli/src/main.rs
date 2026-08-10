@@ -144,6 +144,13 @@ impl EmbeddedRuntime {
         }
     }
 
+    /// Rediscover extensions and activate a replacement set without replacing
+    /// this runtime. The extension manager retains the last working revision
+    /// when a newly edited WASM module cannot be loaded.
+    pub async fn reload_extensions(&self) {
+        self.extensions.reload().await;
+    }
+
     pub async fn open(project: &std::path::Path) -> Result<Self> {
         std::env::set_current_dir(project)
             .with_context(|| format!("enter project {}", project.display()))?;
@@ -824,7 +831,7 @@ async fn execute_prompt(
                 canvas: embedded_resources.map(|resources| &resources.canvas),
                 native: tools,
                 mcp,
-                extensions: Some(extensions),
+                extensions: Some(Arc::clone(extensions)),
                 disabled: &effective.denied_tools,
             },
             handles,

@@ -1,0 +1,1203 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "02067c528fc190c713a844a59fe6fdb3b23c7af816e1f031696c8c3b117dbbb2"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.artist",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "adfa5d0c27979533d144a316ed337bce312717b4f2d8359ea1fbd073439ed59a"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse Artist adapter ontology",
+          "description": "Artist-specific session/event concepts pinned to the audited Gortnite implementation; generic coding-harness semantics remain in muse.coding_harness.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.coding_harness",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "aac26dfb624b68669dab1ef9092bf1fb137c596e4956e788c061ef1cfe4b6a37"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.agent",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "6dd9938e8bb60e0ba55cbb4ff26a36843eff6087eef5cc3f5a6d0ded7982a6fa"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.computing",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "09cbf3a3fe079c0d82ad4ed02b3375d5b070403bd70627d13f9cb85e4de74c7f"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:artist-gortnite-capture",
+            "evidence:artist-gortnite-events",
+            "evidence:artist-gortnite-tools"
+          ]
+        },
+        "concepts": {
+          "artist:ArtistChangeRecord": {
+            "id": "artist:ArtistChangeRecord",
+            "preferred_labels": {
+              "en": "Artist change record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist change.recorded event record that independently records a path mutation with before/after digests and optional diff evidence associated with a tool-call identity.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerActionRecord": {
+            "id": "artist:ArtistComputerActionRecord",
+            "preferred_labels": {
+              "en": "Artist computer action record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist computer.acted record containing the model-requested target label separately from any resolved target name and action result.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerElisionRecord": {
+            "id": "artist:ArtistComputerElisionRecord",
+            "preferred_labels": {
+              "en": "Artist computer elision record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist computer.elided record documenting context elision metadata without asserting a world-state change.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerLaunchRecord": {
+            "id": "artist:ArtistComputerLaunchRecord",
+            "preferred_labels": {
+              "en": "Artist computer launch record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist computer.launched record describing the program and surface produced by a launch.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerObservationRecord": {
+            "id": "artist:ArtistComputerObservationRecord",
+            "preferred_labels": {
+              "en": "Artist computer observation record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist computer.observed record describing one structured observation of a surface.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerStage": {
+            "id": "artist:ArtistComputerStage",
+            "preferred_labels": {
+              "en": "Artist computer stage"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete Artist computer-tool stage identity opened/closed by computer.stage_opened and computer.stage_closed records.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerStageRecord": {
+            "id": "artist:ArtistComputerStageRecord",
+            "preferred_labels": {
+              "en": "Artist computer-stage record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist computer.stage_opened or computer.stage_closed record describing a computer-stage lifecycle transition.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistComputerStep": {
+            "id": "artist:ArtistComputerStep",
+            "preferred_labels": {
+              "en": "Artist computer action step"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "One ordered step recorded inside an Artist computer.acted record, preserving requested label separately from resolved target name.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistHandoffRecord": {
+            "id": "artist:ArtistHandoffRecord",
+            "preferred_labels": {
+              "en": "Artist handoff record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist handoff.performed record documenting an Artist agent-profile handoff occurrence.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistHarness": {
+            "id": "artist:ArtistHarness",
+            "preferred_labels": {
+              "en": "Artist coding harness"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "The concrete Artist coding-harness software system defined by the pinned Gortnite implementation.",
+              "genus": "harness:CodingHarness",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:CodingHarness"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events",
+              "evidence:artist-gortnite-tools"
+            ]
+          },
+          "artist:ArtistLineage": {
+            "id": "artist:ArtistLineage",
+            "preferred_labels": {
+              "en": "Artist lineage"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist conversation lineage identified by the frozen session envelope's lineage field; it is distinct from an individual model run.",
+              "genus": "harness:ConversationLineage",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:ConversationLineage"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistModelTurnRecord": {
+            "id": "artist:ArtistModelTurnRecord",
+            "preferred_labels": {
+              "en": "Artist model-turn record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist model.turn event record whose content blocks can contain model prose, reasoning material, tool-call blocks, images, or opaque content.",
+              "genus": "harness:TurnRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord",
+              "harness:TurnRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistRuleFiringRecord": {
+            "id": "artist:ArtistRuleFiringRecord",
+            "preferred_labels": {
+              "en": "Artist rule-firing record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist rule.fired record documenting a concrete Artist rule-engine firing without treating rule output as unqualified world truth.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistSession": {
+            "id": "artist:ArtistSession",
+            "preferred_labels": {
+              "en": "Artist session"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist session identified by the frozen session envelope's session field and grouping runs, lineages, and one ordered event log.",
+              "genus": "harness:HarnessSession",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:HarnessSession"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistSessionEventRecord": {
+            "id": "artist:ArtistSessionEventRecord",
+            "preferred_labels": {
+              "en": "Artist session event record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "One versioned ordered Artist session-log record carrying seq, timestamp, session, optional run, lineage, kind, and payload fields.",
+              "genus": "harness:EventLogRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:EventLogRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistTask": {
+            "id": "artist:ArtistTask",
+            "preferred_labels": {
+              "en": "Artist task"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A durable Artist task identity scoped by session and lineage and referenced by task lifecycle records.",
+              "genus": "harness:CodingTask",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "harness:CodingTask"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistTaskRecord": {
+            "id": "artist:ArtistTaskRecord",
+            "preferred_labels": {
+              "en": "Artist task record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist task.started, task.updated, or task.finished record for a durable task identity scoped by session and lineage.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistToolResultImagesRecord": {
+            "id": "artist:ArtistToolResultImagesRecord",
+            "preferred_labels": {
+              "en": "Artist tool-result images record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist tool.result.images record carrying image content associated with an internal tool-call identity.",
+              "genus": "artist:ArtistSessionEventRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:ArtistToolResultRecord": {
+            "id": "artist:ArtistToolResultRecord",
+            "preferred_labels": {
+              "en": "Artist tool-result record"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An Artist tool.result event record keyed by internal_call_id and carrying tool identity, arguments, presentation result, structured outcome, and optional timing.",
+              "genus": "harness:ToolResultRecord",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "artist:ArtistSessionEventRecord",
+              "harness:ToolResultRecord"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-capture",
+              "evidence:artist-gortnite-events"
+            ]
+          }
+        },
+        "relations": {
+          "artist:changeInvocation": {
+            "id": "artist:changeInvocation",
+            "preferred_labels": {
+              "en": "Artist change invocation"
+            },
+            "definition": "Relates an Artist change record to the tool invocation whose internal/provider call identity the record associates with the mutation evidence.",
+            "domains": [
+              "artist:ArtistChangeRecord"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:changePath": {
+            "id": "artist:changePath",
+            "preferred_labels": {
+              "en": "Artist change path"
+            },
+            "definition": "Relates an Artist change record to the exact filesystem path expression recorded in its path field.",
+            "domains": [
+              "artist:ArtistChangeRecord"
+            ],
+            "ranges": [
+              "comp:Path"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerActionStep": {
+            "id": "artist:computerActionStep",
+            "preferred_labels": {
+              "en": "Artist computer action step"
+            },
+            "definition": "Relates an Artist computer.acted record to one exact ordered step record.",
+            "domains": [
+              "artist:ArtistComputerActionRecord"
+            ],
+            "ranges": [
+              "artist:ArtistComputerStep"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerClaimedTargetLabel": {
+            "id": "artist:computerClaimedTargetLabel",
+            "preferred_labels": {
+              "en": "Artist computer claimed target label"
+            },
+            "definition": "Relates an Artist computer action record to the model-supplied target label, represented as a string value and kept distinct from the resolved target name.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerResolvedTargetName": {
+            "id": "artist:computerResolvedTargetName",
+            "preferred_labels": {
+              "en": "Artist computer resolved target name"
+            },
+            "definition": "Relates an Artist computer action record to the target name actually resolved by Artist, represented as a string value and not conflated with the model-supplied label.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerStepAction": {
+            "id": "artist:computerStepAction",
+            "preferred_labels": {
+              "en": "Artist computer step action"
+            },
+            "definition": "Relates a computer action step to its exact action string.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerStepIndex": {
+            "id": "artist:computerStepIndex",
+            "preferred_labels": {
+              "en": "Artist computer step index"
+            },
+            "definition": "Relates a computer action step to its zero-based index in the recorded action program.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerStepOutcome": {
+            "id": "artist:computerStepOutcome",
+            "preferred_labels": {
+              "en": "Artist computer step outcome"
+            },
+            "definition": "Relates a computer action step to its exact recorded outcome string.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:computerStepPayload": {
+            "id": "artist:computerStepPayload",
+            "preferred_labels": {
+              "en": "Artist computer step payload"
+            },
+            "definition": "Relates a computer action step to the text/chord payload explicitly recorded for it.",
+            "domains": [
+              "artist:ArtistComputerStep"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordKind": {
+            "id": "artist:eventRecordKind",
+            "preferred_labels": {
+              "en": "Artist event-record kind"
+            },
+            "definition": "Relates an Artist session event record to its exact stable kind string.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordLineage": {
+            "id": "artist:eventRecordLineage",
+            "preferred_labels": {
+              "en": "Artist event-record lineage"
+            },
+            "definition": "Relates an Artist session event record to the Artist lineage named by its envelope.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "artist:ArtistLineage"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordPayload": {
+            "id": "artist:eventRecordPayload",
+            "preferred_labels": {
+              "en": "Artist event-record payload"
+            },
+            "definition": "Relates an Artist session event record to its exact structured JSON payload represented as a structured data value; this relation does not interpret provider-private payload internals.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "comp:StructuredDataValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordSequence": {
+            "id": "artist:eventRecordSequence",
+            "preferred_labels": {
+              "en": "Artist event-record sequence"
+            },
+            "definition": "Relates an Artist session event record to its exact monotonic sequence number.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordSession": {
+            "id": "artist:eventRecordSession",
+            "preferred_labels": {
+              "en": "Artist event-record session"
+            },
+            "definition": "Relates an Artist session event record to the Artist session named by its envelope.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "artist:ArtistSession"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:eventRecordTimestampMillis": {
+            "id": "artist:eventRecordTimestampMillis",
+            "preferred_labels": {
+              "en": "Artist event-record timestamp milliseconds"
+            },
+            "definition": "Relates an Artist session event record to the Unix-millisecond timestamp carried by the frozen envelope.",
+            "domains": [
+              "artist:ArtistSessionEventRecord"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:modelTurnToolInvocation": {
+            "id": "artist:modelTurnToolInvocation",
+            "preferred_labels": {
+              "en": "Artist model turn tool invocation"
+            },
+            "definition": "Relates an Artist model-turn record containing a tool_call block to the normalized tool invocation identified by that block's internal id.",
+            "domains": [
+              "artist:ArtistModelTurnRecord"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:sessionLineage": {
+            "id": "artist:sessionLineage",
+            "preferred_labels": {
+              "en": "Artist session lineage"
+            },
+            "definition": "Relates an Artist session to a lineage named in its event-log records.",
+            "domains": [
+              "artist:ArtistSession"
+            ],
+            "ranges": [
+              "artist:ArtistLineage"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskCommand": {
+            "id": "artist:taskCommand",
+            "preferred_labels": {
+              "en": "Artist task command"
+            },
+            "definition": "Relates an Artist task.started record to the exact command string recorded for the task.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskExitCode": {
+            "id": "artist:taskExitCode",
+            "preferred_labels": {
+              "en": "Artist task exit code"
+            },
+            "definition": "Relates an Artist task.finished record to its reported integer exit code when present.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskInterrupted": {
+            "id": "artist:taskInterrupted",
+            "preferred_labels": {
+              "en": "Artist task interrupted flag"
+            },
+            "definition": "Relates an Artist task.finished record to its explicitly recorded interrupted flag.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "comp:BooleanValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskOutput": {
+            "id": "artist:taskOutput",
+            "preferred_labels": {
+              "en": "Artist task output"
+            },
+            "definition": "Relates an Artist task.updated record to exact incremental output recorded for the task.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskPersistent": {
+            "id": "artist:taskPersistent",
+            "preferred_labels": {
+              "en": "Artist task persistent flag"
+            },
+            "definition": "Relates an Artist task.started record to its explicitly recorded persistent flag.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "comp:BooleanValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:taskRecordTask": {
+            "id": "artist:taskRecordTask",
+            "preferred_labels": {
+              "en": "Artist task-record task"
+            },
+            "definition": "Relates an Artist task lifecycle record to the durable task identity named by its task field.",
+            "domains": [
+              "artist:ArtistTaskRecord"
+            ],
+            "ranges": [
+              "artist:ArtistTask"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-events"
+            ]
+          },
+          "artist:toolResultInvocation": {
+            "id": "artist:toolResultInvocation",
+            "preferred_labels": {
+              "en": "Artist tool result invocation"
+            },
+            "definition": "Relates an Artist tool-result record to the normalized tool invocation joined through internal_call_id.",
+            "domains": [
+              "artist:ArtistToolResultRecord"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:artist-gortnite-capture",
+              "evidence:artist-gortnite-events"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

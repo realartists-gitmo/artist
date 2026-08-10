@@ -1,0 +1,3117 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "5dab586de61c456a8e5a8e542304a232ad50fc4020df20413bb0f4ec67517528"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.legal",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "6b3e6f25a9203dff256c4711eedce5ecaa16da867b223c9e70b15ceb42e953e1"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-L legal",
+          "description": "Executable legal norms, agents, acts, Hohfeldian conduct and competence positions, legal relators, compliance, violation and institutional change package.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.c",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo-l",
+            "evidence:ufo-l-judicial",
+            "evidence:ufo-l-powers"
+          ]
+        },
+        "concepts": {
+          "legal:AdministrativeAct": {
+            "id": "legal:AdministrativeAct",
+            "preferred_labels": {
+              "en": "administrative act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal act representing the occurrence of administrative act in the UFO-L legal ontology.",
+              "genus": "legal:LegalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Authority": {
+            "id": "legal:Authority",
+            "preferred_labels": {
+              "en": "authority"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal agent recognized as capable of bearing or exercising the agency associated with authority in the UFO-L legal ontology.",
+              "genus": "legal:LegalAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ClaimRight": {
+            "id": "legal:ClaimRight",
+            "preferred_labels": {
+              "en": "claim-right"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of conduct position used to represent claim-right in the UFO-L legal ontology.",
+              "genus": "legal:ConductPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ConductPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Competence": {
+            "id": "legal:Competence",
+            "preferred_labels": {
+              "en": "competence"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal individual, disposition used to represent competence in the UFO-L legal ontology.",
+              "genus": "ufo:Disposition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Disposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:CompetencePosition": {
+            "id": "legal:CompetencePosition",
+            "preferred_labels": {
+              "en": "competence legal position"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:LegalPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ComplexLegalRelator": {
+            "id": "legal:ComplexLegalRelator",
+            "preferred_labels": {
+              "en": "complex legal relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal relator that mediates the parties and correlated dependent moments constituting a complex legal relator.",
+              "genus": "legal:LegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ComplianceSituation": {
+            "id": "legal:ComplianceSituation",
+            "preferred_labels": {
+              "en": "compliance situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal situation representing a state of affairs in which compliance conditions obtain.",
+              "genus": "legal:LegalSituation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSituation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ConductPosition": {
+            "id": "legal:ConductPosition",
+            "preferred_labels": {
+              "en": "conduct legal position"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:LegalPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Contract": {
+            "id": "legal:Contract",
+            "preferred_labels": {
+              "en": "contract"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of complex legal relator used to represent contract in the UFO-L legal ontology.",
+              "genus": "legal:ComplexLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ComplexLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Disability": {
+            "id": "legal:Disability",
+            "preferred_labels": {
+              "en": "disability"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:CompetencePosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:CompetencePosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:DisabilityImmunityRelator": {
+            "id": "legal:DisabilityImmunityRelator",
+            "preferred_labels": {
+              "en": "disability-immunity relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A simple legal relator that mediates the parties and correlated dependent moments constituting a disability-immunity relator.",
+              "genus": "legal:SimpleLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:SimpleLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:DisabledRole": {
+            "id": "legal:DisabledRole",
+            "preferred_labels": {
+              "en": "disabled role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Duty": {
+            "id": "legal:Duty",
+            "preferred_labels": {
+              "en": "duty"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:ConductPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ConductPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:DutyHolderRole": {
+            "id": "legal:DutyHolderRole",
+            "preferred_labels": {
+              "en": "duty-holder role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Immunity": {
+            "id": "legal:Immunity",
+            "preferred_labels": {
+              "en": "immunity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:CompetencePosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:CompetencePosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ImmunityHolderRole": {
+            "id": "legal:ImmunityHolderRole",
+            "preferred_labels": {
+              "en": "immunity-holder role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:JudicialAct": {
+            "id": "legal:JudicialAct",
+            "preferred_labels": {
+              "en": "judicial act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal act representing the occurrence of judicial act in the UFO-L legal ontology.",
+              "genus": "legal:LegalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:JudicialDecision": {
+            "id": "legal:JudicialDecision",
+            "preferred_labels": {
+              "en": "judicial decision"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social object that records or expresses legally relevant normative or decisional content in the UFO-L legal ontology.",
+              "genus": "legal:LegalDocument",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalDocument"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:JuridicalPerson": {
+            "id": "legal:JuridicalPerson",
+            "preferred_labels": {
+              "en": "juridical person"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal agent recognized as capable of bearing or exercising the agency associated with juridical person in the UFO-L legal ontology.",
+              "genus": "legal:LegalAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Jurisdiction": {
+            "id": "legal:Jurisdiction",
+            "preferred_labels": {
+              "en": "jurisdiction"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal object used to represent jurisdiction in the UFO-L legal ontology.",
+              "genus": "legal:LegalObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalObject"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalAct": {
+            "id": "legal:LegalAct",
+            "preferred_labels": {
+              "en": "legal act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal event representing the occurrence of legal act in the UFO-L legal ontology.",
+              "genus": "ufo:InstitutionalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalEvent",
+              "ufo:InstitutionalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalAgent": {
+            "id": "legal:LegalAgent",
+            "preferred_labels": {
+              "en": "legal agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal individual recognized as capable of bearing or exercising the agency associated with legal agent in the UFO-L legal ontology.",
+              "genus": "ufo:Agent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Agent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalCase": {
+            "id": "legal:LegalCase",
+            "preferred_labels": {
+              "en": "legal case"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A complex legal relator that mediates the parties and correlated dependent moments constituting a legal case.",
+              "genus": "legal:ComplexLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ComplexLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalDocument": {
+            "id": "legal:LegalDocument",
+            "preferred_labels": {
+              "en": "legal document"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social object that records or expresses legally relevant normative or decisional content in the UFO-L legal ontology.",
+              "genus": "legal:LegalObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalObject"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalEvent": {
+            "id": "legal:LegalEvent",
+            "preferred_labels": {
+              "en": "legal event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal individual representing the occurrence of legal event in the UFO-L legal ontology.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalFact": {
+            "id": "legal:LegalFact",
+            "preferred_labels": {
+              "en": "legal fact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal situation representing a state of affairs in which legal conditions obtain.",
+              "genus": "legal:LegalSituation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSituation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalIndividual": {
+            "id": "legal:LegalIndividual",
+            "preferred_labels": {
+              "en": "legal individual"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal thing, individual used to represent legal individual in the UFO-L legal ontology.",
+              "genus": "ufo:Individual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalThing",
+              "ufo:Individual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalInterpretation": {
+            "id": "legal:LegalInterpretation",
+            "preferred_labels": {
+              "en": "legal interpretation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal individual, proposition used to represent legal interpretation in the UFO-L legal ontology.",
+              "genus": "ufo:Proposition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Proposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalNorm": {
+            "id": "legal:LegalNorm",
+            "preferred_labels": {
+              "en": "legal norm"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative description that prescribes, permits, forbids, or otherwise regulates conduct in the UFO-L legal ontology.",
+              "genus": "legal:LegalNormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalNormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalNormativeDescription": {
+            "id": "legal:LegalNormativeDescription",
+            "preferred_labels": {
+              "en": "legal normative description"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative or descriptive social object that specifies the content and conditions of legal normative description in the UFO-L legal ontology.",
+              "genus": "ufo:NormativeDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalObject",
+              "ufo:NormativeDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalObject": {
+            "id": "legal:LegalObject",
+            "preferred_labels": {
+              "en": "legal object"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal individual, social object used to represent legal object in the UFO-L legal ontology.",
+              "genus": "ufo:SocialObject",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:SocialObject"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalPolicy": {
+            "id": "legal:LegalPolicy",
+            "preferred_labels": {
+              "en": "legal policy"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative description that prescribes, permits, forbids, or otherwise regulates conduct in the UFO-L legal ontology.",
+              "genus": "legal:LegalNorm",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalNorm"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalPosition": {
+            "id": "legal:LegalPosition",
+            "preferred_labels": {
+              "en": "legal position"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "ufo:SocialMoment",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:SocialMoment"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalPrinciple": {
+            "id": "legal:LegalPrinciple",
+            "preferred_labels": {
+              "en": "legal principle"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal norm used to represent legal principle in the UFO-L legal ontology.",
+              "genus": "legal:LegalNorm",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalNorm"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalRelator": {
+            "id": "legal:LegalRelator",
+            "preferred_labels": {
+              "en": "legal relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal individual that mediates the parties and correlated dependent moments constituting a legal relator.",
+              "genus": "ufo:SocialRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:SocialRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalRule": {
+            "id": "legal:LegalRule",
+            "preferred_labels": {
+              "en": "legal rule"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A normative description that prescribes, permits, forbids, or otherwise regulates conduct in the UFO-L legal ontology.",
+              "genus": "legal:LegalNorm",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalNorm"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalSituation": {
+            "id": "legal:LegalSituation",
+            "preferred_labels": {
+              "en": "legal situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal individual representing a state of affairs in which legal conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalSubjectRole": {
+            "id": "legal:LegalSubjectRole",
+            "preferred_labels": {
+              "en": "legal subject role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "ufo:SocialRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalType",
+              "ufo:SocialRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": "anti_rigid",
+              "sortality": "sortal",
+              "identity": "carries",
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalThing": {
+            "id": "legal:LegalThing",
+            "preferred_labels": {
+              "en": "legal thing"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of entity used to represent legal thing in the UFO-L legal ontology.",
+              "genus": "ufo:Entity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Entity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegalType": {
+            "id": "legal:LegalType",
+            "preferred_labels": {
+              "en": "legal type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are legal entities as characterized in the UFO-L legal ontology.",
+              "genus": "ufo:Type",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalThing",
+              "ufo:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:LegislativeAct": {
+            "id": "legal:LegislativeAct",
+            "preferred_labels": {
+              "en": "legislative act"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal act representing the occurrence of legislative act in the UFO-L legal ontology.",
+              "genus": "legal:LegalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Liberty": {
+            "id": "legal:Liberty",
+            "preferred_labels": {
+              "en": "liberty"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:ComplexLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ComplexLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:NaturalLegalPerson": {
+            "id": "legal:NaturalLegalPerson",
+            "preferred_labels": {
+              "en": "natural legal person"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal agent recognized as capable of bearing or exercising the agency associated with natural legal person in the UFO-L legal ontology.",
+              "genus": "legal:LegalAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:NoRight": {
+            "id": "legal:NoRight",
+            "preferred_labels": {
+              "en": "no-right"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:ConductPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ConductPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:NoRightPermissionRelator": {
+            "id": "legal:NoRightPermissionRelator",
+            "preferred_labels": {
+              "en": "no-right-permission relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A simple legal relator that mediates the parties and correlated dependent moments constituting a no-right-permission relator.",
+              "genus": "legal:SimpleLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:SimpleLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Omission": {
+            "id": "legal:Omission",
+            "preferred_labels": {
+              "en": "omission"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal individual, event used to represent omission in the UFO-L legal ontology.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalIndividual",
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Permission": {
+            "id": "legal:Permission",
+            "preferred_labels": {
+              "en": "permission"
+            },
+            "alternate_labels": {
+              "en": [
+                "liberty",
+                "privilege"
+              ]
+            },
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:ConductPosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:ConductPosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Power": {
+            "id": "legal:Power",
+            "preferred_labels": {
+              "en": "power"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:CompetencePosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:CompetencePosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:PowerHolderRole": {
+            "id": "legal:PowerHolderRole",
+            "preferred_labels": {
+              "en": "power-holder role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:PowerSubjectionRelator": {
+            "id": "legal:PowerSubjectionRelator",
+            "preferred_labels": {
+              "en": "power-subjection relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A simple legal relator that mediates the parties and correlated dependent moments constituting a power-subjection relator.",
+              "genus": "legal:SimpleLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:SimpleLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Regulation": {
+            "id": "legal:Regulation",
+            "preferred_labels": {
+              "en": "regulation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social object that records or expresses legally relevant normative or decisional content in the UFO-L legal ontology.",
+              "genus": "legal:LegalDocument",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalDocument"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Remedy": {
+            "id": "legal:Remedy",
+            "preferred_labels": {
+              "en": "remedy"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal act used to represent remedy in the UFO-L legal ontology.",
+              "genus": "legal:LegalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:RightDutyRelator": {
+            "id": "legal:RightDutyRelator",
+            "preferred_labels": {
+              "en": "right-duty relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A simple legal relator that mediates the parties and correlated dependent moments constituting a right-duty relator.",
+              "genus": "legal:SimpleLegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:SimpleLegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:RightHolderRole": {
+            "id": "legal:RightHolderRole",
+            "preferred_labels": {
+              "en": "right-holder role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Sanction": {
+            "id": "legal:Sanction",
+            "preferred_labels": {
+              "en": "sanction"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of legal act used to represent sanction in the UFO-L legal ontology.",
+              "genus": "legal:LegalAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:SimpleLegalRelator": {
+            "id": "legal:SimpleLegalRelator",
+            "preferred_labels": {
+              "en": "simple legal relator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal relator that mediates the parties and correlated dependent moments constituting a simple legal relator.",
+              "genus": "legal:LegalRelator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalRelator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Statute": {
+            "id": "legal:Statute",
+            "preferred_labels": {
+              "en": "statute"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A social object that records or expresses legally relevant normative or decisional content in the UFO-L legal ontology.",
+              "genus": "legal:LegalDocument",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalDocument"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:SubjectedRole": {
+            "id": "legal:SubjectedRole",
+            "preferred_labels": {
+              "en": "subjected role"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An anti-rigid sortal whose instances satisfy a contingent relational condition in the UFO-L legal ontology.",
+              "genus": "legal:LegalSubjectRole",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSubjectRole"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:Subjection": {
+            "id": "legal:Subjection",
+            "preferred_labels": {
+              "en": "subjection"
+            },
+            "alternate_labels": {
+              "en": [
+                "liability"
+              ]
+            },
+            "definition": {
+              "text": "A dependent normative position borne by a legal subject and correlated with another subject's position in the UFO-L legal ontology.",
+              "genus": "legal:CompetencePosition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:CompetencePosition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:ViolationSituation": {
+            "id": "legal:ViolationSituation",
+            "preferred_labels": {
+              "en": "violation situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A legal situation representing a state of affairs in which violation conditions obtain.",
+              "genus": "legal:LegalSituation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "legal:LegalSituation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          }
+        },
+        "relations": {
+          "legal:appliesNorm": {
+            "id": "legal:appliesNorm",
+            "preferred_labels": {
+              "en": "applies norm"
+            },
+            "definition": "Holds from a legal act to a legal norm when the source applies norm the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalNorm"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:authorizes": {
+            "id": "legal:authorizes",
+            "preferred_labels": {
+              "en": "authorizes"
+            },
+            "definition": "Holds from a legal norm to a action when the source authorizes the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNorm"
+            ],
+            "ranges": [
+              "ufo:Action"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:composesLegalRelator": {
+            "id": "legal:composesLegalRelator",
+            "preferred_labels": {
+              "en": "composes legal relator"
+            },
+            "definition": "Holds from a legal position to a legal relator when the source composes legal relator the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalPosition"
+            ],
+            "ranges": [
+              "legal:LegalRelator"
+            ],
+            "super_relations": [
+              "ufo:properPartOf"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:containsLegalRelator": {
+            "id": "legal:containsLegalRelator",
+            "preferred_labels": {
+              "en": "contains legal relator"
+            },
+            "definition": "Holds from a complex legal relator to a legal relator when the source contains legal relator the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:ComplexLegalRelator"
+            ],
+            "ranges": [
+              "legal:LegalRelator"
+            ],
+            "super_relations": [
+              "ufo:hasProperPart"
+            ],
+            "inverse": "legal:legalRelatorPartOf",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:createsLegalPosition": {
+            "id": "legal:createsLegalPosition",
+            "preferred_labels": {
+              "en": "creates legal position"
+            },
+            "definition": "Holds from a legal act to a legal position when the source creates legal position the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalPosition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:createsLegalRelator": {
+            "id": "legal:createsLegalRelator",
+            "preferred_labels": {
+              "en": "creates legal relator"
+            },
+            "definition": "Holds from a legal act to a legal relator when the source creates legal relator the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:decidesCase": {
+            "id": "legal:decidesCase",
+            "preferred_labels": {
+              "en": "decides case"
+            },
+            "definition": "Holds from a judicial act to a legal case when the source decides case the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:JudicialAct"
+            ],
+            "ranges": [
+              "legal:LegalCase"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:declaresViolation": {
+            "id": "legal:declaresViolation",
+            "preferred_labels": {
+              "en": "declares violation"
+            },
+            "definition": "Holds from a legal act to a violation situation when the source declares violation the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:ViolationSituation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:definedIn": {
+            "id": "legal:definedIn",
+            "preferred_labels": {
+              "en": "is defined in"
+            },
+            "definition": "Holds from a legal thing to a legal normative description when the source is defined in the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalThing"
+            ],
+            "ranges": [
+              "legal:LegalNormativeDescription"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:exercisesPower": {
+            "id": "legal:exercisesPower",
+            "preferred_labels": {
+              "en": "exercises power"
+            },
+            "definition": "Holds from a legal act to a power when the source exercises power the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:Power"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:externallyDependsOnLegalSubject": {
+            "id": "legal:externallyDependsOnLegalSubject",
+            "preferred_labels": {
+              "en": "externally depends on legal subject"
+            },
+            "definition": "Holds from a legal position to a legal agent when the source externally depends on legal subject the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalPosition"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [
+              "ufo:externallyDependsOn"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:forbids": {
+            "id": "legal:forbids",
+            "preferred_labels": {
+              "en": "forbids"
+            },
+            "definition": "Holds from a legal norm to a proposition when the source forbids the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNorm"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:grantsRemedy": {
+            "id": "legal:grantsRemedy",
+            "preferred_labels": {
+              "en": "grants remedy"
+            },
+            "definition": "Holds from a authority to a remedy when the source grants remedy the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:Authority"
+            ],
+            "ranges": [
+              "legal:Remedy"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:grounds": {
+            "id": "legal:grounds",
+            "preferred_labels": {
+              "en": "grounds"
+            },
+            "definition": "Holds from a legal norm to a legal individual when the source grounds the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNorm"
+            ],
+            "ranges": [
+              "legal:LegalIndividual"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasAuthority": {
+            "id": "legal:hasAuthority",
+            "preferred_labels": {
+              "en": "has authority"
+            },
+            "definition": "Holds from a legal agent to a competence when the source has authority the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAgent"
+            ],
+            "ranges": [
+              "legal:Competence"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasDisabledParty": {
+            "id": "legal:hasDisabledParty",
+            "preferred_labels": {
+              "en": "has disabled party"
+            },
+            "definition": "Holds from a disability immunity relator to a legal agent when the source has disabled party the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:DisabilityImmunityRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasDutyHolder": {
+            "id": "legal:hasDutyHolder",
+            "preferred_labels": {
+              "en": "has duty holder"
+            },
+            "definition": "Holds from a right duty relator to a legal agent when the source has duty holder the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:RightDutyRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasImmunityHolder": {
+            "id": "legal:hasImmunityHolder",
+            "preferred_labels": {
+              "en": "has immunity holder"
+            },
+            "definition": "Holds from a disability immunity relator to a legal agent when the source has immunity holder the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:DisabilityImmunityRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasInterpretation": {
+            "id": "legal:hasInterpretation",
+            "preferred_labels": {
+              "en": "has interpretation"
+            },
+            "definition": "Holds from a legal norm to a legal interpretation when the source has interpretation the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNorm"
+            ],
+            "ranges": [
+              "legal:LegalInterpretation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasLegalContent": {
+            "id": "legal:hasLegalContent",
+            "preferred_labels": {
+              "en": "has legal content"
+            },
+            "definition": "Holds from a legal individual to a proposition when the source has legal content the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalIndividual"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasPowerHolder": {
+            "id": "legal:hasPowerHolder",
+            "preferred_labels": {
+              "en": "has power holder"
+            },
+            "definition": "Holds from a power subjection relator to a legal agent when the source has power holder the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:PowerSubjectionRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasRightHolder": {
+            "id": "legal:hasRightHolder",
+            "preferred_labels": {
+              "en": "has right holder"
+            },
+            "definition": "Holds from a right duty relator to a legal agent when the source has right holder the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:RightDutyRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:hasSubjectedParty": {
+            "id": "legal:hasSubjectedParty",
+            "preferred_labels": {
+              "en": "has subjected party"
+            },
+            "definition": "Holds from a power subjection relator to a legal agent when the source has subjected party the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:PowerSubjectionRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:imposesSanction": {
+            "id": "legal:imposesSanction",
+            "preferred_labels": {
+              "en": "imposes sanction"
+            },
+            "definition": "Holds from a authority to a sanction when the source imposes sanction the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:Authority"
+            ],
+            "ranges": [
+              "legal:Sanction"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:inheresInLegalSubject": {
+            "id": "legal:inheresInLegalSubject",
+            "preferred_labels": {
+              "en": "inheres in legal subject"
+            },
+            "definition": "Holds from a legal position to a legal agent when the source inheres in legal subject the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalPosition"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [
+              "ufo:inheresIn"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:interprets": {
+            "id": "legal:interprets",
+            "preferred_labels": {
+              "en": "interprets"
+            },
+            "definition": "Holds from a legal agent to a legal norm when the source interprets the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAgent"
+            ],
+            "ranges": [
+              "legal:LegalNorm"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:isLegalCorrelativeOf": {
+            "id": "legal:isLegalCorrelativeOf",
+            "preferred_labels": {
+              "en": "is legal correlative of"
+            },
+            "definition": "Holds from a legal position to a legal position when the source is legal correlative of the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalPosition"
+            ],
+            "ranges": [
+              "legal:LegalPosition"
+            ],
+            "super_relations": [],
+            "inverse": "legal:isLegalCorrelativeOf",
+            "characteristics": [
+              "irreflexive",
+              "symmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:isLegalOppositeOf": {
+            "id": "legal:isLegalOppositeOf",
+            "preferred_labels": {
+              "en": "is legal opposite of"
+            },
+            "definition": "Holds from a legal position to a legal position when the source is legal opposite of the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalPosition"
+            ],
+            "ranges": [
+              "legal:LegalPosition"
+            ],
+            "super_relations": [],
+            "inverse": "legal:isLegalOppositeOf",
+            "characteristics": [
+              "irreflexive",
+              "symmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:legalRelatorPartOf": {
+            "id": "legal:legalRelatorPartOf",
+            "preferred_labels": {
+              "en": "is legal-relator part of"
+            },
+            "definition": "Holds from a legal relator to a complex legal relator when the source is legal-relator part of the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalRelator"
+            ],
+            "ranges": [
+              "legal:ComplexLegalRelator"
+            ],
+            "super_relations": [
+              "ufo:properPartOf"
+            ],
+            "inverse": "legal:containsLegalRelator",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:mediatesLegalSubject": {
+            "id": "legal:mediatesLegalSubject",
+            "preferred_labels": {
+              "en": "mediates legal subject"
+            },
+            "definition": "Holds from a legal relator to a legal agent when the source mediates legal subject the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalRelator"
+            ],
+            "ranges": [
+              "legal:LegalAgent"
+            ],
+            "super_relations": [
+              "ufo:mediates"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:modifiesLegalPosition": {
+            "id": "legal:modifiesLegalPosition",
+            "preferred_labels": {
+              "en": "modifies legal position"
+            },
+            "definition": "Holds from a legal act to a legal position when the source modifies legal position the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalPosition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:modifiesLegalRelator": {
+            "id": "legal:modifiesLegalRelator",
+            "preferred_labels": {
+              "en": "modifies legal relator"
+            },
+            "definition": "Holds from a legal act to a legal relator when the source modifies legal relator the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:recognizesLegalThing": {
+            "id": "legal:recognizesLegalThing",
+            "preferred_labels": {
+              "en": "recognizes legal thing"
+            },
+            "definition": "Holds from a legal normative description to a legal thing when the source recognizes legal thing the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNormativeDescription"
+            ],
+            "ranges": [
+              "legal:LegalThing"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:recordsDecision": {
+            "id": "legal:recordsDecision",
+            "preferred_labels": {
+              "en": "records decision"
+            },
+            "definition": "Holds from a judicial act to a judicial decision when the source records decision the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:JudicialAct"
+            ],
+            "ranges": [
+              "legal:JudicialDecision"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:requires": {
+            "id": "legal:requires",
+            "preferred_labels": {
+              "en": "requires"
+            },
+            "definition": "Holds from a legal norm to a proposition when the source requires the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalNorm"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:satisfiesDuty": {
+            "id": "legal:satisfiesDuty",
+            "preferred_labels": {
+              "en": "satisfies duty"
+            },
+            "definition": "Holds from a compliance situation to a duty when the source satisfies duty the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:ComplianceSituation"
+            ],
+            "ranges": [
+              "legal:Duty"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:terminatesLegalPosition": {
+            "id": "legal:terminatesLegalPosition",
+            "preferred_labels": {
+              "en": "terminates legal position"
+            },
+            "definition": "Holds from a legal act to a legal position when the source terminates legal position the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalPosition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:terminatesLegalRelator": {
+            "id": "legal:terminatesLegalRelator",
+            "preferred_labels": {
+              "en": "terminates legal relator"
+            },
+            "definition": "Holds from a legal act to a legal relator when the source terminates legal relator the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalAct"
+            ],
+            "ranges": [
+              "legal:LegalRelator"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:violatesDuty": {
+            "id": "legal:violatesDuty",
+            "preferred_labels": {
+              "en": "violates duty"
+            },
+            "definition": "Holds from a violation situation to a duty when the source violates duty the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:ViolationSituation"
+            ],
+            "ranges": [
+              "legal:Duty"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          },
+          "legal:withinJurisdiction": {
+            "id": "legal:withinJurisdiction",
+            "preferred_labels": {
+              "en": "is within jurisdiction"
+            },
+            "definition": "Holds from a legal thing to a jurisdiction when the source is within jurisdiction the target, as defined in the UFO-L legal ontology.",
+            "domains": [
+              "legal:LegalThing"
+            ],
+            "ranges": [
+              "legal:Jurisdiction"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-l"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "legal:LegalPosition",
+            "members": [
+              "legal:CompetencePosition",
+              "legal:ConductPosition"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:ConductPosition",
+            "members": [
+              "legal:ClaimRight",
+              "legal:Duty",
+              "legal:NoRight",
+              "legal:Permission"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:CompetencePosition",
+            "members": [
+              "legal:Disability",
+              "legal:Immunity",
+              "legal:Power",
+              "legal:Subjection"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:LegalRelator",
+            "members": [
+              "legal:ComplexLegalRelator",
+              "legal:SimpleLegalRelator"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:SimpleLegalRelator",
+            "members": [
+              "legal:DisabilityImmunityRelator",
+              "legal:NoRightPermissionRelator",
+              "legal:PowerSubjectionRelator",
+              "legal:RightDutyRelator"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:LegalSituation",
+            "members": [
+              "legal:ComplianceSituation",
+              "legal:ViolationSituation"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "legal:LegalAgent",
+            "members": [
+              "legal:JuridicalPerson",
+              "legal:NaturalLegalPerson"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:LegalPosition",
+            "relation": "legal:inheresInLegalSubject",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:LegalPosition",
+            "relation": "legal:externallyDependsOnLegalSubject",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:RightDutyRelator",
+            "relation": "legal:hasRightHolder",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:RightDutyRelator",
+            "relation": "legal:hasDutyHolder",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:PowerSubjectionRelator",
+            "relation": "legal:hasPowerHolder",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:PowerSubjectionRelator",
+            "relation": "legal:hasSubjectedParty",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:DisabilityImmunityRelator",
+            "relation": "legal:hasImmunityHolder",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "legal:DisabilityImmunityRelator",
+            "relation": "legal:hasDisabledParty",
+            "object": "legal:LegalAgent",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:ClaimRight",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Duty"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Duty",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:ClaimRight"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Permission",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:NoRight"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:NoRight",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Permission"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Power",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Subjection"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Subjection",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Power"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Immunity",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Disability"
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "legal:Disability",
+            "relation": "legal:isLegalCorrelativeOf",
+            "object": "legal:Immunity"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?position",
+                "?relator"
+              ],
+              "premises": [
+                {
+                  "predicate": "legal:composesLegalRelator",
+                  "arguments": [
+                    "?position",
+                    "?relator"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:properPartOf",
+                "arguments": [
+                  "?position",
+                  "?relator"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?agent",
+                "?relator"
+              ],
+              "premises": [
+                {
+                  "predicate": "legal:mediatesLegalSubject",
+                  "arguments": [
+                    "?relator",
+                    "?agent"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:mediates",
+                "arguments": [
+                  "?relator",
+                  "?agent"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

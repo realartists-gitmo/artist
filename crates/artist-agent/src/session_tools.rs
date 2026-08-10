@@ -15,6 +15,7 @@ use std::{
 use artist_registry::{
     Audience, CancelDisposition, Message, SessionRecord, SessionStatus, Sessions,
 };
+use artist_tools::resource_path::{ResourcePath, ResourceScheme};
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use rig_core::tool::{PortableTool, ToolExecutionError};
@@ -23,6 +24,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const CADENCE: Duration = Duration::from_millis(100);
+/// A stop request is cooperative first. This duration is deliberately fixed
+/// and persisted against the resource's cancellation timestamp so it means
+/// the same thing across owner restarts.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub(crate) struct OwnedState {
@@ -259,7 +264,12 @@ impl SessionHub {
             if !record.lifecycle.is_live() {
                 break;
             }
-            if record.cancel_requested {
+            if record.cancel_requested
+                && record.cancel_requested_at.is_some_and(|requested_at| {
+                    artist_registry::now().saturating_sub(requested_at)
+                        >= STOP_GRACE.as_millis() as u64
+                })
+            {
                 match session.abort().await {
                     Ok(()) => {
                         let state = session.state().await.ok();
@@ -279,25 +289,29 @@ impl SessionHub {
                 }
             }
 
-            match self.sessions.drain_inputs(&id) {
-                Ok(inputs) => {
-                    for input in inputs {
-                        if let Err(error) = session.send(input.input).await {
-                            let mut snapshot = self
-                                .sessions
-                                .get(&id)
-                                .ok()
-                                .flatten()
-                                .map(|record| record.snapshot)
-                                .unwrap_or(Value::Null);
-                            if let Some(object) = snapshot.as_object_mut() {
-                                object.insert("sendError".into(), Value::String(error));
+            // Once a graceful stop is requested, no new work is admitted; the
+            // owned runtime may still settle naturally during the grace period.
+            if !record.cancel_requested {
+                match self.sessions.drain_inputs(&id) {
+                    Ok(inputs) => {
+                        for input in inputs {
+                            if let Err(error) = session.send(input.input).await {
+                                let mut snapshot = self
+                                    .sessions
+                                    .get(&id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|record| record.snapshot)
+                                    .unwrap_or(Value::Null);
+                                if let Some(object) = snapshot.as_object_mut() {
+                                    object.insert("sendError".into(), Value::String(error));
+                                }
+                                let _ = self.sessions.set_snapshot(&id, snapshot);
                             }
-                            let _ = self.sessions.set_snapshot(&id, snapshot);
                         }
                     }
+                    Err(_) => break,
                 }
-                Err(_) => break,
             }
 
             let current = match self.sessions.get(&id) {
@@ -385,8 +399,13 @@ impl SessionHub {
         sessions: Option<Vec<String>>,
     ) -> Result<Vec<String>, SessionError> {
         match (session, sessions) {
-            (Some(session), None) if !session.is_empty() => Ok(vec![session]),
-            (None, Some(sessions)) if !sessions.is_empty() => Ok(sessions),
+            (Some(session), None) if !session.is_empty() => {
+                Ok(vec![canonical_session_id(&session)?])
+            }
+            (None, Some(sessions)) if !sessions.is_empty() => sessions
+                .iter()
+                .map(|session| canonical_session_id(session))
+                .collect(),
             (Some(_), Some(_)) => Err(SessionError(
                 "exactly one of `session` or `sessions` is allowed".into(),
             )),
@@ -398,6 +417,12 @@ impl SessionHub {
 
     async fn poll(&self, args: PollArgs) -> Result<String, SessionError> {
         let ids = Self::target_ids(args.session, args.sessions)?;
+        let matcher = args
+            .match_pattern
+            .as_deref()
+            .map(regex::Regex::new)
+            .transpose()
+            .map_err(|error| SessionError(format!("invalid poll match regex: {error}")))?;
         let immediate = args.timeout_ms == Some(0);
         let mut active_sequences = BTreeMap::new();
         if !immediate {
@@ -428,13 +453,19 @@ impl SessionHub {
                 .collect::<Result<Vec<_>, _>>()?;
             if immediate
                 || records.iter().all(|record| {
+                    if !record.lifecycle.is_live() {
+                        return true;
+                    }
+                    if let Some(matcher) = &matcher {
+                        return poll_text(record).is_some_and(|text| matcher.is_match(&text));
+                    }
                     self.kind(&record.kind).is_ok_and(|kind| {
                         (kind.boundary)(record, active_sequences.get(&record.id).copied())
                     })
                 })
                 || deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
             {
-                break self.render_poll(&records)?;
+                break self.render_poll(&records, matcher.as_ref())?;
             }
             if !yielded {
                 if let Some(seat) = &self.seat {
@@ -452,12 +483,16 @@ impl SessionHub {
         Ok(result)
     }
 
-    fn render_poll(&self, records: &[SessionRecord]) -> Result<String, SessionError> {
+    fn render_poll(
+        &self,
+        records: &[SessionRecord],
+        matcher: Option<&regex::Regex>,
+    ) -> Result<String, SessionError> {
         let values = records
             .iter()
             .map(|record| {
                 let kind = self.kind(&record.kind)?;
-                Ok(json!({
+                let mut value = json!({
                     "session": record.id,
                     "kind": record.kind,
                     "lifecycle": record.lifecycle,
@@ -466,7 +501,13 @@ impl SessionHub {
                         .get("snapshot")
                         .cloned()
                         .unwrap_or_else(|| record.snapshot.clone())
-                }))
+                });
+                if let Some(matcher) = matcher
+                    && let Some(continuation) = transcript_continuation(record, matcher)
+                {
+                    value["continuation"] = continuation;
+                }
+                Ok(value)
             })
             .collect::<Result<Vec<Value>, SessionError>>()?;
         let rendered = if values.len() == 1 {
@@ -529,6 +570,66 @@ impl SessionHub {
         serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
+    async fn stop(&self, args: AbortArgs) -> Result<String, SessionError> {
+        let ids = Self::target_ids(args.session, args.sessions)?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let result = match self.sessions.request_cancel(&id) {
+                Ok((CancelDisposition::LocalOwner, record)) => json!({
+                    "session": id,
+                    "cancelRequested": true,
+                    "state": record.lifecycle,
+                    "forceAfterMs": STOP_GRACE.as_millis(),
+                }),
+                Ok((CancelDisposition::ForeignOwner(owner), record)) => {
+                    let _ = owner.wake();
+                    json!({
+                        "session": id,
+                        "cancelRequested": true,
+                        "state": record.lifecycle,
+                        "forceAfterMs": STOP_GRACE.as_millis(),
+                    })
+                }
+                Ok((CancelDisposition::AlreadyStopped | CancelDisposition::Abandoned, record)) => {
+                    json!({"session": id, "state": record.lifecycle})
+                }
+                Err(error) => json!({"session": id, "error": error.to_string()}),
+            };
+            results.push(result);
+        }
+        let rendered = if results.len() == 1 {
+            results.into_iter().next().unwrap_or(Value::Null)
+        } else {
+            Value::Array(results)
+        };
+        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
+    }
+
+    fn delete(&self, args: DeleteArgs) -> Result<String, SessionError> {
+        let ids = Self::target_ids(args.session, args.sessions)?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self.sessions.delete_stopped(&id) {
+                Ok(record) => {
+                    self.local.remove(&id);
+                    results.push(json!({"session": id, "deleted": true, "kind": record.kind}));
+                }
+                Err(error) => results.push(json!({
+                    "session": id,
+                    "deleted": false,
+                    "error": error.to_string(),
+                    "recovery": "stop the session, poll until it settles, then retry delete"
+                })),
+            }
+        }
+        let rendered = if results.len() == 1 {
+            results.into_iter().next().unwrap_or(Value::Null)
+        } else {
+            Value::Array(results)
+        };
+        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
+    }
+
     async fn send(&self, args: SendArgs) -> Result<String, SessionError> {
         let ids = Self::target_ids(args.session, args.sessions)?;
         let mut results = Vec::with_capacity(ids.len());
@@ -537,6 +638,8 @@ impl SessionHub {
                 Some(record) => {
                     if !record.lifecycle.is_live() {
                         json!({"session":id,"error":"session is stopped"})
+                    } else if record.cancel_requested {
+                        json!({"session":id,"error":"session is stopping; no new input is accepted"})
                     } else {
                         let kind = self.kind(&record.kind)?;
                         if let Err(error) = (kind.validate_send)(&record, &args.input) {
@@ -633,6 +736,72 @@ impl SessionHub {
     }
 }
 
+/// Lifecycle verbs accept the canonical path returned by `read` as well as a
+/// legacy durable id. A child projection (for example `agent://goethe/todo`)
+/// is deliberately not a lifecycle resource and cannot be mistaken for one.
+fn canonical_session_id(target: &str) -> Result<String, SessionError> {
+    match ResourcePath::parse(target).map_err(|error| SessionError(error.to_string()))? {
+        ResourcePath::Real(_) => Ok(target.to_owned()),
+        ResourcePath::Virtual { scheme, segments }
+            if matches!(
+                scheme,
+                ResourceScheme::Agent
+                    | ResourceScheme::Bash
+                    | ResourceScheme::Ask
+                    | ResourceScheme::Canvas
+                    | ResourceScheme::Computer
+            ) && segments.len() == 1 =>
+        {
+            Ok(segments.into_iter().next().expect("one segment"))
+        }
+        ResourcePath::Virtual { scheme, .. } => Err(SessionError(format!(
+            "{target} is not a runnable session resource; use a direct {scheme}://<id> path or the resource's owning tool"
+        ))),
+    }
+}
+
+/// Canonical model text examined by a match-aware poll. Bash uses its semantic
+/// transcript; every other current resource uses its canonical JSON snapshot.
+fn poll_text(record: &SessionRecord) -> Option<String> {
+    if record.kind == "bash" {
+        return record
+            .snapshot
+            .get("screen")
+            .and_then(Value::as_str)
+            .or_else(|| record.snapshot.get("output").and_then(Value::as_str))
+            .map(str::to_owned);
+    }
+    serde_json::to_string(&record.snapshot).ok()
+}
+
+/// A selector is emitted only when a terminal match has an anchored text view.
+/// It names the final matching line; callers resume strictly after that anchor.
+fn transcript_continuation(record: &SessionRecord, matcher: &regex::Regex) -> Option<Value> {
+    if record.kind != "bash" {
+        return None;
+    }
+    // `poll(bash://...)` evaluates the emulator screen. Do not manufacture a
+    // transcript cursor merely because stale scrollback happens to match when
+    // the visible terminal does not.
+    if record
+        .snapshot
+        .get("screen")
+        .and_then(Value::as_str)
+        .is_some_and(|screen| !matcher.is_match(screen))
+    {
+        return None;
+    }
+    let transcript = record.snapshot.get("output")?.as_str()?;
+    let line_index = transcript.lines().position(|line| matcher.is_match(line))?;
+    let anchored = artist_tools::resource_path::render_anchored_virtual_text(transcript);
+    let anchor = anchored.lines().nth(line_index)?.split_once(": ")?.0;
+    Some(json!({
+        "path": format!("bash://{}", record.id),
+        "after": anchor,
+        "revision": artist_tools::resource_path::virtual_text_revision(transcript),
+    }))
+}
+
 fn registry_error(error: artist_registry::Error) -> SessionError {
     SessionError(error.to_string())
 }
@@ -652,6 +821,8 @@ impl From<SessionError> for ToolExecutionError {
 pub(crate) struct PollArgs {
     session: Option<String>,
     sessions: Option<Vec<String>>,
+    #[serde(rename = "match")]
+    match_pattern: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -665,11 +836,14 @@ impl PortableTool for PollTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Return an idempotent bounded snapshot for one session or an ordered list. Omit timeoutMs to wait for each kind's poll boundary; 0 returns immediately.".into()
+        "Return an idempotent bounded snapshot for one session or an ordered list. `match` is a regex evaluated atomically against current and future canonical output; on a terminal match the continuation begins strictly after its TECA anchor. Omit timeoutMs to wait indefinitely; 0 returns immediately.".into()
     }
 
     fn parameters(&self) -> Value {
-        target_schema(Some(json!({"timeoutMs":{"type":"integer","minimum":0}})))
+        target_schema(Some(json!({
+            "match":{"type":"string","description":"Optional regex evaluated against the resource's canonical output."},
+            "timeoutMs":{"type":"integer","minimum":0}
+        })))
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
@@ -706,6 +880,59 @@ impl PortableTool for AbortTool {
     }
 }
 
+/// The canonical lifecycle verb. `AbortTool` remains an internal compatibility
+/// adapter while profiles and callers migrate from the old spelling.
+#[derive(Clone)]
+pub(crate) struct StopTool(pub SessionHub);
+
+impl PortableTool for StopTool {
+    const NAME: &'static str = "stop";
+    type Error = SessionError;
+    type Args = AbortArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Request graceful cancellation for one or more sessions. Foreign cancellation is durable and asynchronous; use poll to observe settlement before delete.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        target_schema(None)
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.0.stop(args).await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteArgs {
+    session: Option<String>,
+    sessions: Option<Vec<String>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DeleteTool(pub SessionHub);
+
+impl PortableTool for DeleteTool {
+    const NAME: &'static str = "delete";
+    type Error = SessionError;
+    type Args = DeleteArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Permanently delete one or more stopped session resources, their queued input, and any retained artist-name reservation. Live sessions are never deleted; stop and poll them first.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        target_schema(None)
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.0.delete(args)
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SendArgs {
@@ -715,7 +942,19 @@ pub(crate) struct SendArgs {
 }
 
 #[derive(Clone)]
-pub(crate) struct SendTool(pub SessionHub);
+pub(crate) struct SendTool {
+    hub: SessionHub,
+    computer: Option<crate::computer_tool::ComputerTool>,
+}
+
+impl SendTool {
+    pub(crate) fn new(
+        hub: SessionHub,
+        computer: Option<crate::computer_tool::ComputerTool>,
+    ) -> Self {
+        Self { hub, computer }
+    }
+}
 
 impl PortableTool for SendTool {
     const NAME: &'static str = "send";
@@ -724,7 +963,7 @@ impl PortableTool for SendTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Durably deliver the same input to one or more live sessions or retained artist identities. Fire-and-forget; observe session effects with poll.".into()
+        "Durably deliver the same input to one or more live sessions or retained artist identities. For one live computer session, `{intent, args?}` selects and invokes a permitted `computer://use/...` capability; otherwise sending is fire-and-forget and effects are observed with poll.".into()
     }
 
     fn parameters(&self) -> Value {
@@ -732,7 +971,20 @@ impl PortableTool for SendTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.0.send(args).await
+        if let (Some(computer), Some(session)) = (&self.computer, args.session.as_deref())
+            && args.sessions.is_none()
+            && args.input.get("intent").is_some()
+        {
+            let record = self.hub.record(session)?;
+            if record.kind == "computer" {
+                return computer
+                    .dispatch_intent(session, args.input)
+                    .await
+                    .map(|output| output.render())
+                    .map_err(|error| SessionError(error.to_string()));
+            }
+        }
+        self.hub.send(args).await
     }
 }
 
@@ -797,6 +1049,29 @@ fn target_schema(extra: Option<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StubbornSession {
+        aborted: Arc<AtomicBool>,
+    }
+
+    impl OwnedSession for StubbornSession {
+        fn state(&self) -> BoxFuture<'_, Result<OwnedState, String>> {
+            Box::pin(async { Ok(OwnedState::live(json!({"state":"running"}))) })
+        }
+
+        fn send(&self, _: Value) -> BoxFuture<'_, Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn abort(&self) -> BoxFuture<'_, Result<(), String>> {
+            let aborted = Arc::clone(&self.aborted);
+            Box::pin(async move {
+                aborted.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
 
     #[test]
     fn target_schema_requires_exactly_one_target_shape() {
@@ -810,13 +1085,46 @@ mod tests {
         assert!(schema["properties"].get("maxBytes").is_none());
     }
 
+    #[tokio::test]
+    async fn send_routes_computer_intents_to_the_capability_router() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        hub.registry()
+            .create_exact(
+                "computer:surface",
+                "computer",
+                "Goethe",
+                None,
+                json!({"surface":"missing"}),
+            )
+            .unwrap();
+        let router = crate::computer_tool::ComputerTool::new(
+            artist_computer::SurfaceRegistry::new(),
+            artist_session::Recorder::noop(),
+            None,
+            hub.clone(),
+            root.path(),
+        );
+        let send = SendTool::new(hub, Some(router));
+        let error = send
+            .call(SendArgs {
+                session: Some("computer:surface".into()),
+                sessions: None,
+                input: json!({"intent":"not-a-capability"}),
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no permitted computer capability matches"));
+        assert!(error.contains("computer://use/observe"));
+    }
+
     #[test]
     fn send_schema_accepts_exactly_one_singular_or_plural_target() {
-        let schema = SendTool(SessionHub::new(
-            std::path::Path::new("/tmp"),
-            "Goethe",
+        let schema = SendTool::new(
+            SessionHub::new(std::path::Path::new("/tmp"), "Goethe", None),
             None,
-        ))
+        )
         .parameters();
         assert_eq!(schema["oneOf"].as_array().unwrap().len(), 2);
         assert!(schema["properties"].get("session").is_some());
@@ -843,6 +1151,7 @@ mod tests {
             .poll(PollArgs {
                 session: Some(record.id),
                 sessions: None,
+                match_pattern: None,
                 timeout_ms: Some(0),
             })
             .await
@@ -878,10 +1187,231 @@ mod tests {
             .poll(PollArgs {
                 session: Some("Goethe".into()),
                 sessions: None,
+                match_pattern: None,
                 timeout_ms: Some(0),
             })
             .await
             .unwrap();
         assert!(polled.contains("completed"));
+    }
+
+    #[tokio::test]
+    async fn poll_match_observes_current_terminal_output_and_returns_a_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact(
+                "bash:log",
+                "bash",
+                "Goethe",
+                None,
+                json!({"output":"before\\nneedle\\nafter"}),
+            )
+            .unwrap();
+        hub.registry()
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        let polled = hub
+            .poll(PollArgs {
+                session: Some(record.id),
+                sessions: None,
+                match_pattern: Some("needle".into()),
+                timeout_ms: None,
+            })
+            .await
+            .unwrap();
+        assert!(polled.contains("bash://bash:log"), "{polled}");
+        assert!(polled.contains("\"after\": \"#"), "{polled}");
+    }
+
+    #[tokio::test]
+    async fn bash_poll_uses_visible_screen_not_hidden_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact(
+                "bash:screen",
+                "bash",
+                "Goethe",
+                None,
+                json!({"output":"needle", "screen":"visible"}),
+            )
+            .unwrap();
+        hub.registry()
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        let polled = hub
+            .poll(PollArgs {
+                session: Some(record.id),
+                sessions: None,
+                match_pattern: Some("needle".into()),
+                timeout_ms: Some(0),
+            })
+            .await
+            .unwrap();
+        assert!(!polled.contains("\"continuation\""), "{polled}");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_tools_accept_canonical_session_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact("bash:log", "bash", "Goethe", None, json!({"output":"done"}))
+            .unwrap();
+        hub.registry()
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        let polled = hub
+            .poll(PollArgs {
+                session: Some("bash://bash:log".into()),
+                sessions: None,
+                match_pattern: None,
+                timeout_ms: Some(0),
+            })
+            .await
+            .unwrap();
+        assert!(polled.contains("bash:log"), "{polled}");
+        let deleted = hub
+            .delete(DeleteArgs {
+                session: Some("bash://bash:log".into()),
+                sessions: None,
+            })
+            .unwrap();
+        assert!(deleted.contains("\"deleted\": true"), "{deleted}");
+    }
+
+    #[tokio::test]
+    async fn delete_requires_stop_then_removes_the_record() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::new(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact("bash:one", "bash", "Goethe", None, Value::Null)
+            .unwrap();
+        let live = hub
+            .delete(DeleteArgs {
+                session: Some(record.id.clone()),
+                sessions: None,
+            })
+            .unwrap();
+        assert!(live.contains("stop the session"));
+        hub.registry()
+            .finish(&record.id, SessionStatus::Cancelled, None)
+            .unwrap();
+        let deleted = hub
+            .delete(DeleteArgs {
+                session: Some(record.id.clone()),
+                sessions: None,
+            })
+            .unwrap();
+        assert!(deleted.contains("\"deleted\": true"));
+        assert!(hub.registry().get(&record.id).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_agent_removes_its_retained_yield_snapshot_but_not_muse_records() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::new(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact(
+                "goethe",
+                "subagent",
+                "Goethe",
+                None,
+                json!({"yields":[{"sequence":1,"value":{"answer":"done"}}]}),
+            )
+            .unwrap();
+        hub.registry()
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        let muse = artist_session::muse_documents_dir(root.path()).join("retained.json");
+        std::fs::create_dir_all(muse.parent().unwrap()).unwrap();
+        std::fs::write(&muse, "{}\n").unwrap();
+
+        let deleted = hub
+            .delete(DeleteArgs {
+                session: Some(record.id.clone()),
+                sessions: None,
+            })
+            .unwrap();
+        assert!(deleted.contains("\"deleted\": true"));
+        assert!(hub.registry().get(&record.id).unwrap().is_none());
+        assert!(
+            muse.is_file(),
+            "Muse-derived records outlive Artist resources"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_persists_a_graceful_request_without_immediately_finishing() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact("bash:grace", "bash", "Goethe", None, Value::Null)
+            .unwrap();
+
+        let result = hub
+            .stop(AbortArgs {
+                session: Some(record.id.clone()),
+                sessions: None,
+            })
+            .await
+            .unwrap();
+        let retained = hub.registry().get(&record.id).unwrap().unwrap();
+
+        assert!(result.contains("forceAfterMs"));
+        assert!(retained.lifecycle.is_live());
+        assert!(retained.cancel_requested);
+        assert!(retained.cancel_requested_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_forces_a_stubborn_session_only_after_the_durable_grace_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "Goethe", None);
+        let record = hub
+            .registry()
+            .create_exact("bash:stubborn", "bash", "Goethe", None, Value::Null)
+            .unwrap();
+        let aborted = Arc::new(AtomicBool::new(false));
+        hub.own(
+            record.id.clone(),
+            Arc::new(StubbornSession {
+                aborted: Arc::clone(&aborted),
+            }),
+        );
+
+        hub.stop(AbortArgs {
+            session: Some(record.id.clone()),
+            sessions: None,
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!aborted.load(Ordering::SeqCst));
+
+        hub.registry()
+            .mutate(&record.id, |stored| {
+                stored.cancel_requested_at =
+                    Some(artist_registry::now().saturating_sub(STOP_GRACE.as_millis() as u64 + 1));
+                Ok(())
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(aborted.load(Ordering::SeqCst));
+        assert!(
+            !hub.registry()
+                .get(&record.id)
+                .unwrap()
+                .unwrap()
+                .lifecycle
+                .is_live()
+        );
     }
 }

@@ -199,6 +199,87 @@ async fn a_tool_result_is_paired_into_the_next_request() {
     );
 }
 
+/// Muse formalizes the canonical session event schema rather than provider
+/// wire traffic. A normal live tool round trip must therefore leave both halves
+/// of the pair (and exactly matching arguments) in that event log.
+#[tokio::test]
+async fn a_live_tool_round_trip_is_captured_for_muse() {
+    let harness = Harness::new().await;
+    std::fs::write(harness.project().join("captured.txt"), "Muse source").unwrap();
+    let (url, _) = scripted(vec![
+        calls_tool(
+            "resp_1",
+            "call_capture",
+            "read",
+            r#"{"path":"captured.txt"}"#,
+        ),
+        says("resp_2", "done"),
+    ])
+    .await;
+    let log_dir = tempfile::tempdir().unwrap();
+    let writer = artist_session::EventLogWriter::open(log_dir.path(), "capture").unwrap();
+    let (recorder, task) = artist_session::spawn_writer(writer, None);
+    let tool_registry = artist_agent::ToolRegistryHandle::new();
+    let handles = SessionHandles {
+        recorder: recorder.clone(),
+        conversation_id: "muse-capture".into(),
+        tools: tool_registry.clone(),
+        attachments: Some(artist_session::AttachmentStore::new(
+            log_dir.path().join("attachments"),
+        )),
+        ..SessionHandles::default()
+    };
+
+    let outcome = artist_agent::stream_chat(
+        &provider(&url),
+        &ChatInput::from("read the captured file".to_owned()),
+        harness.context(),
+        handles,
+        |_| Ok(()),
+    )
+    .await;
+    assert!(outcome.is_ok(), "{outcome:?}");
+    // The published tool snapshot owns recorder-backed tools until the next
+    // attempt. Clear this test's snapshot before closing its writer.
+    tool_registry.publish(Vec::new());
+    recorder.flush().await;
+    let events = artist_session::EventLogReader::new(log_dir.path())
+        .read_all()
+        .unwrap();
+    let call = events
+        .iter()
+        .find(|event| event.kind == "model.turn")
+        .expect("captured tool call");
+    assert_eq!(call.payload["content"][0]["type"], "tool_call");
+    assert_eq!(call.payload["content"][0]["name"], "read");
+    assert_eq!(
+        call.payload["content"][0]["arguments"]["path"],
+        "captured.txt"
+    );
+    let result = events
+        .iter()
+        .find(|event| event.kind == "tool.result")
+        .expect("captured tool result");
+    assert_eq!(result.payload["name"], "read");
+    assert_eq!(result.payload["arguments"]["path"], "captured.txt");
+    assert!(
+        result.payload["result"]
+            .as_str()
+            .unwrap()
+            .contains("Muse source")
+    );
+    let documents = artist_session::muse_documents_dir(harness.project());
+    assert!(
+        std::fs::read_dir(documents)
+            .unwrap()
+            .any(|entry| entry.is_ok_and(|entry| entry.path().is_file())),
+        "the successful read was not retained as a Muse occurrence document"
+    );
+
+    drop(recorder);
+    task.close().await.unwrap();
+}
+
 /// A model can name a tool we do not register — a hallucinated name, or the
 /// `multi_tool_use.parallel` wrapper OpenAI injects. That must be an ordinary
 /// tool failure the model can recover from, not the end of the run.

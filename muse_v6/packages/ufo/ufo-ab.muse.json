@@ -1,0 +1,1042 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "2dea82bbe75962d9094a9cc0cefaf0fcfb534d1ef1cad83be0422b506d87a6a2"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.ab",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "c9f8067633a0437e42357bfc285526672648b1f420dc3951336cb316650fba86"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-AB",
+          "description": "Executable A/B bridge for branching histories, temporal presence, occurrences, modality and causal succession.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo-ab"
+          ]
+        },
+        "concepts": {
+          "ab:ActualHistory": {
+            "id": "ab:ActualHistory",
+            "preferred_labels": {
+              "en": "actual history"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract temporal structure representing a coherent sequence of occurrences in UFO-AB.",
+              "genus": "ab:History",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:History"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:AlethicNecessity": {
+            "id": "ab:AlethicNecessity",
+            "preferred_labels": {
+              "en": "alethic necessity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of modal claim used to represent alethic necessity in UFO-AB.",
+              "genus": "ab:ModalClaim",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:ModalClaim"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:AlethicPossibility": {
+            "id": "ab:AlethicPossibility",
+            "preferred_labels": {
+              "en": "alethic possibility"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of modal claim used to represent alethic possibility in UFO-AB.",
+              "genus": "ab:ModalClaim",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:ModalClaim"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:BranchPoint": {
+            "id": "ab:BranchPoint",
+            "preferred_labels": {
+              "en": "branch point"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of time point used to represent branch point in UFO-AB.",
+              "genus": "ufo:TimePoint",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:TimePoint"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:CounterfactualHistory": {
+            "id": "ab:CounterfactualHistory",
+            "preferred_labels": {
+              "en": "counterfactual history"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract temporal structure representing a coherent sequence of occurrences in UFO-AB.",
+              "genus": "ab:History",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:History"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:CounterfactualLine": {
+            "id": "ab:CounterfactualLine",
+            "preferred_labels": {
+              "en": "counterfactual line"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract temporal structure representing a coherent sequence of occurrences in UFO-AB.",
+              "genus": "ab:WorldLine",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:WorldLine"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:History": {
+            "id": "ab:History",
+            "preferred_labels": {
+              "en": "history"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of abstract individual used to represent history in UFO-AB.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:ModalClaim": {
+            "id": "ab:ModalClaim",
+            "preferred_labels": {
+              "en": "modal claim"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A claim held by one party against another concerning the content identified by this UFO-AB category.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:ModalSituation": {
+            "id": "ab:ModalSituation",
+            "preferred_labels": {
+              "en": "modal situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing a state of affairs in which modal conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:Occurrence": {
+            "id": "ab:Occurrence",
+            "preferred_labels": {
+              "en": "occurrence"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of event occurrence used to represent occurrence in UFO-AB.",
+              "genus": "ufo:EventOccurrence",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:EventOccurrence"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:PossibleWorld": {
+            "id": "ab:PossibleWorld",
+            "preferred_labels": {
+              "en": "possible world"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of abstract individual used to represent possible world in UFO-AB.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:Presence": {
+            "id": "ab:Presence",
+            "preferred_labels": {
+              "en": "presence"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of situation used to represent presence in UFO-AB.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:TemporalBranch": {
+            "id": "ab:TemporalBranch",
+            "preferred_labels": {
+              "en": "temporal branch"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract temporal structure representing a coherent sequence of occurrences in UFO-AB.",
+              "genus": "ab:History",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:History"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:WorldLine": {
+            "id": "ab:WorldLine",
+            "preferred_labels": {
+              "en": "world line"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract temporal structure representing a coherent sequence of occurrences in UFO-AB.",
+              "genus": "ab:History",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ab:History"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          }
+        },
+        "relations": {
+          "ab:actualizes": {
+            "id": "ab:actualizes",
+            "preferred_labels": {
+              "en": "actualizes"
+            },
+            "definition": "Holds from a actual history to a possible world when the source actualizes the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:ActualHistory"
+            ],
+            "ranges": [
+              "ab:PossibleWorld"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:branchesAt": {
+            "id": "ab:branchesAt",
+            "preferred_labels": {
+              "en": "branches at"
+            },
+            "definition": "Holds from a temporal branch to a branch point when the source branches at the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:TemporalBranch"
+            ],
+            "ranges": [
+              "ab:BranchPoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:branchesFrom": {
+            "id": "ab:branchesFrom",
+            "preferred_labels": {
+              "en": "branches from"
+            },
+            "definition": "Holds from a history to a history when the source branches from the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:History"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:causalSuccessor": {
+            "id": "ab:causalSuccessor",
+            "preferred_labels": {
+              "en": "has causal successor"
+            },
+            "definition": "Holds from a event to a event when the source has causal successor the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:directlyCauses"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:containsOccurrence": {
+            "id": "ab:containsOccurrence",
+            "preferred_labels": {
+              "en": "contains occurrence"
+            },
+            "definition": "Holds from a history to a occurrence when the source contains occurrence the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:Occurrence"
+            ],
+            "super_relations": [],
+            "inverse": "ab:occursInHistory",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:containsTimePoint": {
+            "id": "ab:containsTimePoint",
+            "preferred_labels": {
+              "en": "contains time point"
+            },
+            "definition": "Holds from a history to a time point when the source contains time point the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:hasAlternative": {
+            "id": "ab:hasAlternative",
+            "preferred_labels": {
+              "en": "has alternative"
+            },
+            "definition": "Holds from a history to a counterfactual history when the source has alternative the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:CounterfactualHistory"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:incomparableWith": {
+            "id": "ab:incomparableWith",
+            "preferred_labels": {
+              "en": "is incomparable with"
+            },
+            "definition": "Holds from a history to a history when the source is incomparable with the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:History"
+            ],
+            "super_relations": [],
+            "inverse": "ab:incomparableWith",
+            "characteristics": [
+              "irreflexive",
+              "symmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:manifestsDisposition": {
+            "id": "ab:manifestsDisposition",
+            "preferred_labels": {
+              "en": "manifests disposition"
+            },
+            "definition": "Holds from a event to a disposition when the source manifests disposition the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Disposition"
+            ],
+            "super_relations": [
+              "ufo:isManifestationOf"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:necessarilySupports": {
+            "id": "ab:necessarilySupports",
+            "preferred_labels": {
+              "en": "necessarily supports"
+            },
+            "definition": "Holds from a possible world to a modal claim when the source necessarily supports the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:PossibleWorld"
+            ],
+            "ranges": [
+              "ab:ModalClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:obtainsAt": {
+            "id": "ab:obtainsAt",
+            "preferred_labels": {
+              "en": "obtains at"
+            },
+            "definition": "Holds from a situation to a time point when the source obtains at the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:occursAt": {
+            "id": "ab:occursAt",
+            "preferred_labels": {
+              "en": "occurs at"
+            },
+            "definition": "Holds from a event to a time point when the source occurs at the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:occursInHistory": {
+            "id": "ab:occursInHistory",
+            "preferred_labels": {
+              "en": "occurs in history"
+            },
+            "definition": "Holds from a occurrence to a history when the source occurs in history the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:Occurrence"
+            ],
+            "ranges": [
+              "ab:History"
+            ],
+            "super_relations": [],
+            "inverse": "ab:containsOccurrence",
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:possiblySupports": {
+            "id": "ab:possiblySupports",
+            "preferred_labels": {
+              "en": "possibly supports"
+            },
+            "definition": "Holds from a possible world to a modal claim when the source possibly supports the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:PossibleWorld"
+            ],
+            "ranges": [
+              "ab:ModalClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:precedesOnHistory": {
+            "id": "ab:precedesOnHistory",
+            "preferred_labels": {
+              "en": "precedes on history"
+            },
+            "definition": "Holds from a event to a event when the source precedes on history the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:before"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:presentAt": {
+            "id": "ab:presentAt",
+            "preferred_labels": {
+              "en": "is present at"
+            },
+            "definition": "Holds from a endurant to a time point when the source is present at the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:sharesPastWith": {
+            "id": "ab:sharesPastWith",
+            "preferred_labels": {
+              "en": "shares past with"
+            },
+            "definition": "Holds from a history to a history when the source shares past with the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:History"
+            ],
+            "super_relations": [],
+            "inverse": "ab:sharesPastWith",
+            "characteristics": [
+              "symmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:supports": {
+            "id": "ab:supports",
+            "preferred_labels": {
+              "en": "supports"
+            },
+            "definition": "Holds from a history to a modal claim when the source supports the target, as defined in UFO-AB.",
+            "domains": [
+              "ab:History"
+            ],
+            "ranges": [
+              "ab:ModalClaim"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          },
+          "ab:temporalSuccessor": {
+            "id": "ab:temporalSuccessor",
+            "preferred_labels": {
+              "en": "has temporal successor"
+            },
+            "definition": "Holds from a event to a event when the source has temporal successor the target, as defined in UFO-AB.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:before"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-ab"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "complete_partition",
+            "parent": "ab:History",
+            "members": [
+              "ab:ActualHistory",
+              "ab:CounterfactualHistory"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ab:ModalClaim",
+            "members": [
+              "ab:AlethicNecessity",
+              "ab:AlethicPossibility"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ab:Occurrence",
+            "relation": "ab:occursInHistory",
+            "object": "ab:History",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ab:TemporalBranch",
+            "relation": "ab:branchesAt",
+            "object": "ab:BranchPoint",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "ab:History",
+            "relation": "ab:containsTimePoint",
+            "object": "ufo:TimePoint"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?e1",
+                "?e2",
+                "?s"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:bringsAbout",
+                  "arguments": [
+                    "?e1",
+                    "?s"
+                  ]
+                },
+                {
+                  "predicate": "ufo:triggers",
+                  "arguments": [
+                    "?s",
+                    "?e2"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ab:causalSuccessor",
+                "arguments": [
+                  "?e1",
+                  "?e2"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?h0",
+                "?h1",
+                "?h2"
+              ],
+              "premises": [
+                {
+                  "predicate": "ab:branchesFrom",
+                  "arguments": [
+                    "?h1",
+                    "?h0"
+                  ]
+                },
+                {
+                  "predicate": "ab:branchesFrom",
+                  "arguments": [
+                    "?h2",
+                    "?h0"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ab:sharesPastWith",
+                "arguments": [
+                  "?h1",
+                  "?h2"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

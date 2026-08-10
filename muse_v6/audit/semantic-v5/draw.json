@@ -1,0 +1,237 @@
+{
+  "source_archive": "agentic-sessions-big-37(2).zip",
+  "cases": [
+    {
+      "id": "grok_question_options",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 94,
+      "class": "question_options",
+      "raw_line_bytes": 2865,
+      "sha256": "17de95c5b19a4388e0a9f18df060fca377acb7ba9ecff910e82ccf10ac2ab843",
+      "structure": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-9db3e51b-f0d4-4be5-b88a-42b0a9ecbdf3-24",
+        "title": "ask_user_question",
+        "rawInput_keys": [
+          "questions"
+        ],
+        "question_count": 4,
+        "option_counts": [
+          3,
+          4,
+          3,
+          4
+        ]
+      }
+    },
+    {
+      "id": "grok_todo_state",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 119,
+      "class": "task_state",
+      "raw_line_bytes": 1225,
+      "sha256": "8eea85ab5f13b1fd6cc8af3dbba0a61bdb5c015aa8ffcd33a0cdfeb2d7329b98",
+      "structure": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-0cc864ee-85ea-4a26-bca5-28a59226c356-29",
+        "title": "todo_write",
+        "rawInput_keys": [
+          "merge",
+          "todos"
+        ],
+        "todo_count": 5,
+        "statuses": [
+          "in_progress",
+          "pending",
+          "pending",
+          "pending",
+          "pending"
+        ]
+      }
+    },
+    {
+      "id": "grok_spawn_subagent",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 3217,
+      "class": "delegation_prompt",
+      "raw_line_bytes": 3264,
+      "sha256": "dd09c7d3c8b04284173903d1060c5c3cb1f6a297ebf79c008dd7efb258e84add",
+      "structure": {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-d9203963-31ea-4478-8973-130174bb5f40-48",
+        "title": "spawn_subagent",
+        "rawInput_keys": [
+          "background",
+          "description",
+          "prompt",
+          "subagent_type"
+        ],
+        "prompt_chars": 2312
+      }
+    },
+    {
+      "id": "grok_lifecycle_update",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 3218,
+      "class": "lifecycle_duplicate",
+      "raw_line_bytes": 3308,
+      "sha256": "37b24827b0370cf7e5c46129c0e64534008a3ecccee1626392380a00cacd97d9",
+      "structure": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "call-d9203963-31ea-4478-8973-130174bb5f40-48",
+        "title": "Hunt 6 in-scope findings",
+        "rawInput_keys": [
+          "capability_mode",
+          "description",
+          "prompt",
+          "run_in_background",
+          "subagent_type",
+          "task_id",
+          "variant"
+        ],
+        "prompt_chars": 2312
+      }
+    },
+    {
+      "id": "codex_json_string_questions",
+      "source": "codex/2026/08/01/rollout-2026-08-01T23-41-40-019fc0c7-16ac-7a80-8dbe-803df80efc07.jsonl",
+      "line": 4392,
+      "class": "json_encoded_string",
+      "raw_line_bytes": 2217,
+      "sha256": "d26ca5b505f9dcd5d26298c67b4f056b389f857348e0b9611d1cbefad973dd0d",
+      "structure": {
+        "payload_type": "function_call",
+        "name": "request_user_input",
+        "call_id": "call_jHBvmVlrIpQMEnGQ5h4h3ffO",
+        "arguments_chars": 1760,
+        "arguments_prefix": "{\"questions\":[{\"header\":\"Surfaces\",\"id\":\"surface_layout\",\"question\":\"When a stage or canvas is selec"
+      }
+    },
+    {
+      "id": "codex_nested_patch_program",
+      "source": "codex/2026/08/01/rollout-2026-08-01T23-41-40-019fc0c7-16ac-7a80-8dbe-803df80efc07.jsonl",
+      "line": 77,
+      "class": "program_contains_tool_syntax",
+      "raw_line_bytes": 810,
+      "sha256": "a8ec1c4f4052c1e7642d43423032026802681ee0b4b4b260838cc81dde4c251f",
+      "structure": {
+        "payload_type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call_mNanWH2jbvGRFlaFsvUwQH0E",
+        "input_chars": 450,
+        "input_prefix": "const patch = \"*** Begin Patch\\n*** Update File: /home/adam/Projects/artist/crates/artist-ui-core/sr"
+      }
+    },
+    {
+      "id": "codex_empty_scalar_control",
+      "source": "codex/2026/08/01/rollout-2026-08-01T23-41-40-019fc0c7-16ac-7a80-8dbe-803df80efc07.jsonl",
+      "line": 27,
+      "class": "scalar_control",
+      "raw_line_bytes": 474,
+      "sha256": "f0d603c34133145eb807c39d882e7accc5432b621c4f01fd6d11243f2f438391",
+      "structure": {
+        "payload_type": "custom_tool_call",
+        "name": "exec",
+        "call_id": "call_v2vYdR3RNFD7fDG8DDw1pDJI",
+        "input_chars": 123,
+        "input_prefix": "const r = await tools.write_stdin({session_id:95774,chars:\"\",yield_time_ms:30000,max_output_tokens:1"
+      }
+    },
+    {
+      "id": "claude_sendmessage_aliases",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 7298,
+      "class": "message_aliases",
+      "raw_line_bytes": 6234,
+      "sha256": "ff29ac5622e198a586fa12c7d77e2f1994925fe3e09451b510a6e654995af991",
+      "structure": {
+        "record_type": "assistant",
+        "message_role": "assistant",
+        "content_kind": "list",
+        "content_types": [
+          "tool_use"
+        ],
+        "tool_name": "SendMessage",
+        "tool_use_id": "toolu_018mv14RNMMA1kjDfvCeownW",
+        "input_keys": [
+          "content",
+          "message",
+          "recipient",
+          "summary",
+          "to",
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "claude_child_agent_report",
+      "source": "claude/-home-adam-Projects-theevilthatmendo/b1a3e5fe-5474-476c-bc0b-a656c328fc0b.jsonl",
+      "line": 3576,
+      "class": "reported_claims",
+      "raw_line_bytes": 25157,
+      "sha256": "d9663d188738e2ac5f6af8e2ba0b40f50e837e1aa8b61f70c2b142763c5c9e65",
+      "structure": {
+        "record_type": "user",
+        "message_role": "user",
+        "content_kind": "list",
+        "content_types": [
+          "tool_result"
+        ],
+        "tool_use_id": "toolu_01C5rKjFSMUcUAJ3u9qg1qgM",
+        "tool_result_content_kind": "list",
+        "tool_result_content_types": [
+          "text",
+          "text"
+        ],
+        "has_toolUseResult": true,
+        "toolUseResult_kind": "dict",
+        "toolUseResult_json_bytes": 13767
+      }
+    },
+    {
+      "id": "claude_base64_image",
+      "source": "claude/-home-adam-Projects-theevilthatmendo/b1a3e5fe-5474-476c-bc0b-a656c328fc0b.jsonl",
+      "line": 2318,
+      "class": "opaque_multimodal",
+      "raw_line_bytes": 1360639,
+      "sha256": "59f1ad530570214f6363c4f6b9a4b93649f995024d678f6739febbf643748d41",
+      "structure": {
+        "record_type": "user",
+        "message_role": "user",
+        "content_kind": "list",
+        "content_types": [
+          "tool_result"
+        ],
+        "tool_use_id": "toolu_01Tf8jkcdq19gMsPYYLAFAHY",
+        "tool_result_content_kind": "list",
+        "tool_result_content_types": [
+          "image"
+        ],
+        "has_toolUseResult": true,
+        "toolUseResult_kind": "dict",
+        "toolUseResult_json_bytes": 680026
+      }
+    },
+    {
+      "id": "claude_huge_internal_result",
+      "source": "claude/-home-adam-Projects-debateasr/50c98fbc-6ad7-47f5-974f-de563c52f1f4.jsonl",
+      "line": 10368,
+      "class": "huge_visibility_boundary",
+      "raw_line_bytes": 6470156,
+      "sha256": "9e3593e09d44c8fe9ebb5ab4d38f705b91dae569f9fb4395de1277b3c28aeb68",
+      "structure": {
+        "record_type": "user",
+        "message_role": "user",
+        "content_kind": "list",
+        "content_types": [
+          "tool_result"
+        ],
+        "tool_use_id": "toolu_019mSkw6dRuq4VEjemgUU81y",
+        "tool_result_content_kind": "str",
+        "has_toolUseResult": true,
+        "toolUseResult_kind": "dict",
+        "toolUseResult_json_bytes": 6469308
+      }
+    }
+  ]
+}

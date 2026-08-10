@@ -1,0 +1,277 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "9f8a691a4e19299f1d7674e3a6fad9af0e121247457a1c9704fc6a626d59db65"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.mlt",
+            "version": "0.1.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "d62791b1014ac878dbbd7322bf21e7ff08632e79351ef777550983eeb60d9198"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-MLT seed",
+          "description": "Source-derived executable seed for multi-level type order, characterization, partition, and powertype relations.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.core",
+              "version": "0.1.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "8404256f464a30868b04eb3725a0b854e20790e1e30f0ad258cb1bc0a6db3ef6"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.provenance",
+              "version": "0.1.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "f7565f3455ea4b84d0d399fd94b3594a2de5350cba7ef8481cede2b890c67e9e"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:mlt"
+          ]
+        },
+        "concepts": {
+          "mlt:FirstOrderType": {
+            "id": "mlt:FirstOrderType",
+            "preferred_labels": {
+              "en": "first-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are individuals.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {
+                "order": "1"
+              }
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:HigherOrderType": {
+            "id": "mlt:HigherOrderType",
+            "preferred_labels": {
+              "en": "higher-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are types.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Type"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {
+                "order": ">=2"
+              }
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:Powertype": {
+            "id": "mlt:Powertype",
+            "preferred_labels": {
+              "en": "powertype"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A higher-order type whose instances are exactly the subtypes of a base type.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:HigherOrderType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:SecondOrderType": {
+            "id": "mlt:SecondOrderType",
+            "preferred_labels": {
+              "en": "second-order type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A higher-order type whose instances are first-order types.",
+              "genus": null,
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "mlt:HigherOrderType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {
+                "order": "2"
+              }
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          }
+        },
+        "relations": {
+          "mlt:characterizes": {
+            "id": "mlt:characterizes",
+            "preferred_labels": {
+              "en": "characterizes"
+            },
+            "definition": "Relates a higher-order type to a lower-order type whose subtypes it classifies selectively.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:completelyCharacterizes": {
+            "id": "mlt:completelyCharacterizes",
+            "preferred_labels": {
+              "en": "completely characterizes"
+            },
+            "definition": "Characterization covering all relevant lower-order subtypes.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [
+              "mlt:characterizes"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:isPowertypeOf": {
+            "id": "mlt:isPowertypeOf",
+            "preferred_labels": {
+              "en": "is powertype of"
+            },
+            "definition": "Relates a powertype to the base type whose subtypes are exactly its instances.",
+            "domains": [
+              "mlt:Powertype"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          },
+          "mlt:partitions": {
+            "id": "mlt:partitions",
+            "preferred_labels": {
+              "en": "partitions"
+            },
+            "definition": "Relates a higher-order type to a lower-order type when every lower-order instance instantiates exactly one higher-order instance.",
+            "domains": [
+              "mlt:HigherOrderType"
+            ],
+            "ranges": [
+              "ufo:Type"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:mlt"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

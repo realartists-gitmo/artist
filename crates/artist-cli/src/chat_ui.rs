@@ -40,6 +40,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::IsTerminal,
     path::Path,
+    sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -2527,7 +2528,7 @@ async fn submit(
                 canvas: task_canvas.as_ref(),
                 native: &task_tools,
                 mcp: &task_mcp,
-                extensions: Some(&task_extensions),
+                extensions: Some(Arc::clone(&task_extensions)),
                 disabled: &task_disabled_tools,
             },
             task_handles,

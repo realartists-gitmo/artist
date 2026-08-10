@@ -1,0 +1,55 @@
+[package]
+name = "muse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["full"]
+core = ["dep:muse-core"]
+ontology = ["core", "dep:muse-provenance", "dep:muse-ontology"]
+lexicon = ["core", "dep:muse-provenance", "dep:muse-lexicon"]
+registry = ["ontology", "lexicon", "dep:muse-registry"]
+classification = ["registry", "dep:muse-classification"]
+reasoning = ["registry", "dep:muse-reasoning"]
+resolution = ["registry", "dep:muse-resolution"]
+interpretation = ["classification", "resolution", "dep:muse-interpretation"]
+occurrence = ["registry", "dep:muse-occurrence"]
+tooling = ["occurrence", "dep:muse-tooling"]
+superstrate = ["occurrence", "formal", "kernel", "dep:muse-superstrate"]
+training = ["superstrate", "dep:muse-training"]
+validation = ["interpretation", "reasoning", "dep:muse-validation"]
+io = ["validation", "dep:muse-io"]
+formal = ["dep:artist-formal"]
+kernel = ["formal", "dep:artist-kernel"]
+empirical = ["formal", "kernel", "dep:artist-empirical"]
+theories = ["kernel", "dep:artist-theories"]
+cognition = ["formal", "kernel", "empirical", "theories", "dep:artist-cognition"]
+full = ["io", "cognition", "tooling", "training"]
+
+[dependencies]
+muse-core = { workspace = true, optional = true }
+muse-provenance = { workspace = true, optional = true }
+muse-ontology = { workspace = true, optional = true }
+muse-lexicon = { workspace = true, optional = true }
+muse-registry = { workspace = true, optional = true }
+muse-classification = { workspace = true, optional = true }
+muse-reasoning = { workspace = true, optional = true }
+muse-resolution = { workspace = true, optional = true }
+muse-interpretation = { workspace = true, optional = true }
+muse-occurrence = { workspace = true, optional = true }
+muse-tooling = { workspace = true, optional = true }
+muse-superstrate = { workspace = true, optional = true }
+muse-training = { workspace = true, optional = true }
+muse-validation = { workspace = true, optional = true }
+muse-io = { workspace = true, optional = true }
+artist-formal = { workspace = true, optional = true }
+artist-kernel = { workspace = true, optional = true }
+artist-empirical = { workspace = true, optional = true }
+artist-theories = { workspace = true, optional = true }
+artist-cognition = { workspace = true, optional = true }
+thiserror.workspace = true

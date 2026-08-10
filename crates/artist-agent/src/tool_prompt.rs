@@ -325,7 +325,10 @@ mod tests {
                 .ok_or(BashError)?
                 .to_owned();
             let output = tokio::task::spawn_blocking(move || {
-                std::process::Command::new("sh").arg("-c").arg(command).output()
+                std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(command)
+                    .output()
             })
             .await
             .map_err(|_| BashError)?
@@ -395,11 +398,7 @@ mod tests {
             watch.clone(),
             crate::pagination::PageStore::memory(),
         );
-        let bash = guard(
-            dynamic(Bash),
-            watch,
-            crate::pagination::PageStore::memory(),
-        );
+        let bash = guard(dynamic(Bash), watch, crate::pagination::PageStore::memory());
 
         // The model reads the file, so it now holds anchors into it.
         let first = read
@@ -450,11 +449,7 @@ mod tests {
             watch.clone(),
             crate::pagination::PageStore::memory(),
         );
-        let bash = guard(
-            dynamic(Bash),
-            watch,
-            crate::pagination::PageStore::memory(),
-        );
+        let bash = guard(dynamic(Bash), watch, crate::pagination::PageStore::memory());
 
         read.execute(serde_json::json!({"path": path}))
             .await
@@ -492,11 +487,19 @@ mod tests {
             crate::pagination::PageStore::memory(),
         );
 
-        read.execute(serde_json::json!({"path": path}))
+        let read_output = read
+            .execute(serde_json::json!({"path": path}))
             .await
             .expect("read");
+        let read_text = text_of(&read_output);
+        let revision = read_text
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("[revision: "))
+            .and_then(|line| line.strip_suffix(']'))
+            .expect("read revision");
         let written = write
-            .execute(serde_json::json!({"path": path, "content": "after\n"}))
+            .execute(serde_json::json!({"path": path, "content": "after\n", "revision": revision}))
             .await
             .expect("write");
 

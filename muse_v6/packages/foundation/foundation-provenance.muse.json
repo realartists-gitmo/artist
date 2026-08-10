@@ -1,0 +1,491 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "2df076eca39e7182be4376abae9eb85ce1cfac3aa47fd6a46cec77d0b76294a8"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "provenance",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.foundation.provenance",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+            }
+          },
+          "kind": "provenance",
+          "title": "Muse software/agent foundation provenance",
+          "description": "Pinned source and design evidence for software, computing, software-agent, and coding-harness ontology packages.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [],
+          "evidence": []
+        },
+        "sources": {
+          "source:artist-gortnite-event-schema": {
+            "id": "source:artist-gortnite-event-schema",
+            "kind": "source_code",
+            "title": "Artist Gortnite session event schema",
+            "creators": [
+              "Artist project"
+            ],
+            "locator": "https://github.com/realartists-gitmo/artist/blob/656383b4906a796727b09a249ef5da7e60f51b81/crates/artist-session/src/event.rs",
+            "citation": "Artist Gortnite event.rs at commit 656383b4906a796727b09a249ef5da7e60f51b81; blob 903add9c1a33947423ed82820718edffe74ca35a.",
+            "issued": "2026-08-07",
+            "notes": [
+              "Authoritative implementation source for the frozen Artist session envelope and event payload kinds."
+            ]
+          },
+          "source:artist-gortnite-tool-capture": {
+            "id": "source:artist-gortnite-tool-capture",
+            "kind": "source_code",
+            "title": "Artist Gortnite structured tool-result capture",
+            "creators": [
+              "Artist project"
+            ],
+            "locator": "https://github.com/realartists-gitmo/artist/blob/656383b4906a796727b09a249ef5da7e60f51b81/crates/artist-agent/src/capture.rs",
+            "citation": "Artist Gortnite capture.rs at commit 656383b4906a796727b09a249ef5da7e60f51b81; blob aba5be88db5f305fa24d0334268fcaab12b5a22e.",
+            "issued": "2026-08-07",
+            "notes": [
+              "Authoritative implementation source for internal tool-call correlation, structured outcomes, and duration capture."
+            ]
+          },
+          "source:artist-gortnite-tool-registry": {
+            "id": "source:artist-gortnite-tool-registry",
+            "kind": "source_code",
+            "title": "Artist Gortnite exhaustive built-in tool registry",
+            "creators": [
+              "Artist project"
+            ],
+            "locator": "https://github.com/realartists-gitmo/artist/blob/656383b4906a796727b09a249ef5da7e60f51b81/crates/artist-agent/src/tool_set.rs",
+            "citation": "Artist Gortnite tool_set.rs at commit 656383b4906a796727b09a249ef5da7e60f51b81.",
+            "issued": "2026-08-07",
+            "notes": [
+              "Authoritative implementation source for Artist built-in tool availability and names."
+            ]
+          },
+          "source:codemeta-3.1": {
+            "id": "source:codemeta-3.1",
+            "kind": "documentation",
+            "title": "CodeMeta 3.1",
+            "creators": [
+              "CodeMeta Project"
+            ],
+            "locator": "https://w3id.org/codemeta/3.1",
+            "citation": "CodeMeta 3.1 vocabulary and context.",
+            "issued": null,
+            "notes": [
+              "Metadata interoperability only."
+            ]
+          },
+          "source:fipa-acl": {
+            "id": "source:fipa-acl",
+            "kind": "standard",
+            "title": "FIPA ACL Message Structure Specification",
+            "creators": [
+              "Foundation for Intelligent Physical Agents"
+            ],
+            "locator": "http://www.fipa.org/specs/fipa00061/",
+            "citation": "FIPA ACL Message Structure Specification, SC00061G.",
+            "issued": "2002-12-03",
+            "notes": [
+              "Used for message/conversation structure; does not identify software implementation state with human mental states."
+            ]
+          },
+          "source:jsonrpc-2": {
+            "id": "source:jsonrpc-2",
+            "kind": "standard",
+            "title": "JSON-RPC 2.0 Specification",
+            "creators": [
+              "JSON-RPC Working Group"
+            ],
+            "locator": "https://www.jsonrpc.org/specification",
+            "citation": "JSON-RPC 2.0 Specification.",
+            "issued": "2010-03-26",
+            "notes": [
+              "Protocol-neutral request/result/error interoperability evidence."
+            ]
+          },
+          "source:muse-design": {
+            "id": "source:muse-design",
+            "kind": "expert_decision",
+            "title": "Muse training critical-path semantic design",
+            "creators": [
+              "Muse project"
+            ],
+            "locator": "docs/TRAINING_CRITICAL_PATH.md",
+            "citation": "Muse project-authored semantic design decisions for the shared formalizer and training contract.",
+            "issued": "2026-08-06",
+            "notes": [
+              "Used only where no external source should determine Muse-specific identity or safety distinctions."
+            ]
+          },
+          "source:otel-genai": {
+            "id": "source:otel-genai",
+            "kind": "documentation",
+            "title": "OpenTelemetry GenAI Semantic Conventions",
+            "creators": [
+              "OpenTelemetry Authors"
+            ],
+            "locator": "https://github.com/open-telemetry/semantic-conventions-genai",
+            "citation": "OpenTelemetry semantic-conventions-genai repository; schema family 1.42.0 at audit time.",
+            "issued": "2026",
+            "notes": [
+              "Evidence for agent/model/tool telemetry vocabulary; not ontology authority."
+            ]
+          },
+          "source:otel-semconv-1.43": {
+            "id": "source:otel-semconv-1.43",
+            "kind": "documentation",
+            "title": "OpenTelemetry Semantic Conventions 1.43.0",
+            "creators": [
+              "OpenTelemetry Authors"
+            ],
+            "locator": "https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.43.0",
+            "citation": "OpenTelemetry Semantic Conventions v1.43.0.",
+            "issued": "2026-07-03",
+            "notes": [
+              "Telemetry interoperability evidence only."
+            ]
+          },
+          "source:prov-o": {
+            "id": "source:prov-o",
+            "kind": "standard",
+            "title": "PROV-O: The PROV Ontology",
+            "creators": [
+              "World Wide Web Consortium"
+            ],
+            "locator": "https://www.w3.org/TR/2013/REC-prov-o-20130430/",
+            "citation": "W3C Recommendation, PROV-O, 30 April 2013.",
+            "issued": "2013-04-30",
+            "notes": [
+              "Crosswalk source for entities, activities, agents, use, generation, and attribution."
+            ]
+          },
+          "source:seon-cmpo": {
+            "id": "source:seon-cmpo",
+            "kind": "documentation",
+            "title": "Configuration Management Process Ontology (CMPO)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/CMPO.html",
+            "citation": "SEON Configuration Management Process Ontology (CMPO), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": []
+          },
+          "source:seon-cpo": {
+            "id": "source:seon-cpo",
+            "kind": "documentation",
+            "title": "Coding Process Ontology (CPO)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/CPO.html",
+            "citation": "SEON Coding Process Ontology (CPO), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": [
+              "UFO-grounded source for coding activities, code development, documentation, and review."
+            ]
+          },
+          "source:seon-roost": {
+            "id": "source:seon-roost",
+            "kind": "documentation",
+            "title": "Reference Ontology on Software Testing (ROoST)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/ROoST.html",
+            "citation": "SEON Reference Ontology on Software Testing (ROoST), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": []
+          },
+          "source:seon-rro": {
+            "id": "source:seon-rro",
+            "kind": "documentation",
+            "title": "Runtime Requirements Ontology (RRO)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/RRO.html",
+            "citation": "SEON Runtime Requirements Ontology (RRO), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": [
+              "Source for preserving the program/program-execution distinction."
+            ]
+          },
+          "source:seon-rsro": {
+            "id": "source:seon-rsro",
+            "kind": "documentation",
+            "title": "Reference Software Requirements Ontology (RSRO)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/RSRO.html",
+            "citation": "SEON Reference Software Requirements Ontology (RSRO), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": []
+          },
+          "source:seon-swo": {
+            "id": "source:seon-swo",
+            "kind": "documentation",
+            "title": "Software Ontology (SwO)",
+            "creators": [
+              "NEMO/UFES Software Engineering Ontology Network"
+            ],
+            "locator": "https://dev.nemo.inf.ufes.br/seon/SwO.html",
+            "citation": "SEON Software Ontology (SwO), SEON 1.0.5.",
+            "issued": "2017-09-25",
+            "notes": [
+              "UFO-grounded source for software product, program, code, source code, and specification distinctions."
+            ]
+          },
+          "source:spdx-3.0.1": {
+            "id": "source:spdx-3.0.1",
+            "kind": "standard",
+            "title": "SPDX Specification 3.0.1",
+            "creators": [
+              "Linux Foundation SPDX Project"
+            ],
+            "locator": "https://spdx.github.io/spdx-spec/v3.0.1/",
+            "citation": "SPDX Specification 3.0.1.",
+            "issued": "2025",
+            "notes": [
+              "Used for software-artifact/build interoperability evidence; not imported as foundational identity criteria."
+            ]
+          }
+        },
+        "agents": {},
+        "activities": {},
+        "evidence": {
+          "evidence:artist-gortnite-capture": {
+            "id": "evidence:artist-gortnite-capture",
+            "status": "canonical",
+            "source": "source:artist-gortnite-tool-capture",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Exact Artist Gortnite tool-result correlation/outcome capture semantics."
+            ]
+          },
+          "evidence:artist-gortnite-events": {
+            "id": "evidence:artist-gortnite-events",
+            "status": "canonical",
+            "source": "source:artist-gortnite-event-schema",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Exact Artist Gortnite session/event implementation semantics."
+            ]
+          },
+          "evidence:artist-gortnite-tools": {
+            "id": "evidence:artist-gortnite-tools",
+            "status": "canonical",
+            "source": "source:artist-gortnite-tool-registry",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Exact Artist Gortnite built-in tool registry semantics."
+            ]
+          },
+          "evidence:codemeta": {
+            "id": "evidence:codemeta",
+            "status": "canonical",
+            "source": "source:codemeta-3.1",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "CodeMeta metadata interoperability mapping evidence."
+            ]
+          },
+          "evidence:fipa": {
+            "id": "evidence:fipa",
+            "status": "adopted_from_standard",
+            "source": "source:fipa-acl",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "FIPA message/conversation structural evidence."
+            ]
+          },
+          "evidence:jsonrpc": {
+            "id": "evidence:jsonrpc",
+            "status": "adopted_from_standard",
+            "source": "source:jsonrpc-2",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "JSON-RPC request/result/error interoperability evidence."
+            ]
+          },
+          "evidence:muse-design": {
+            "id": "evidence:muse-design",
+            "status": "expert_asserted",
+            "source": "source:muse-design",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Muse-authored identity and safety distinctions."
+            ]
+          },
+          "evidence:otel": {
+            "id": "evidence:otel",
+            "status": "canonical",
+            "source": "source:otel-semconv-1.43",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "OpenTelemetry runtime/RPC telemetry interoperability evidence."
+            ]
+          },
+          "evidence:otel-genai": {
+            "id": "evidence:otel-genai",
+            "status": "canonical",
+            "source": "source:otel-genai",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "OpenTelemetry GenAI agent/tool telemetry interoperability evidence."
+            ]
+          },
+          "evidence:prov-o": {
+            "id": "evidence:prov-o",
+            "status": "adopted_from_standard",
+            "source": "source:prov-o",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "PROV-O provenance crosswalk evidence."
+            ]
+          },
+          "evidence:seon-cmpo": {
+            "id": "evidence:seon-cmpo",
+            "status": "canonical",
+            "source": "source:seon-cmpo",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Configuration-management ontology source alignment."
+            ]
+          },
+          "evidence:seon-cpo": {
+            "id": "evidence:seon-cpo",
+            "status": "canonical",
+            "source": "source:seon-cpo",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Adopted/adapted coding-activity distinctions from CPO."
+            ]
+          },
+          "evidence:seon-roost": {
+            "id": "evidence:seon-roost",
+            "status": "canonical",
+            "source": "source:seon-roost",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Software-testing ontology source alignment."
+            ]
+          },
+          "evidence:seon-rro": {
+            "id": "evidence:seon-rro",
+            "status": "canonical",
+            "source": "source:seon-rro",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Runtime/program-execution ontology source alignment."
+            ]
+          },
+          "evidence:seon-rsro": {
+            "id": "evidence:seon-rsro",
+            "status": "canonical",
+            "source": "source:seon-rsro",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Requirements ontology source alignment."
+            ]
+          },
+          "evidence:seon-swo": {
+            "id": "evidence:seon-swo",
+            "status": "canonical",
+            "source": "source:seon-swo",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "Adopted/adapted UFO-grounded software distinctions from SwO."
+            ]
+          },
+          "evidence:spdx": {
+            "id": "evidence:spdx",
+            "status": "adopted_from_standard",
+            "source": "source:spdx-3.0.1",
+            "generated_by": null,
+            "attributed_to": [],
+            "confidence": 10000,
+            "excerpt": null,
+            "locator": null,
+            "notes": [
+              "SPDX artifact/build interoperability mapping evidence."
+            ]
+          }
+        },
+        "assertions": {}
+      }
+    }
+  }
+}

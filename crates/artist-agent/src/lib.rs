@@ -11,6 +11,7 @@ mod conversation;
 mod delegate;
 #[cfg(test)]
 mod delegate_tests;
+mod dictionary;
 mod fallback;
 pub mod gemini_cache;
 pub mod handoff;
@@ -19,18 +20,22 @@ mod lifecycle;
 pub mod mcp;
 pub mod memory;
 mod messaging;
+mod muse_hook;
 pub mod openai_responses;
 pub mod pagination;
 pub mod prefix;
+mod profile_hook;
 pub mod profiles;
 mod prompt_config;
 mod provider_retry;
 mod resources;
 mod rig_provider;
+mod run_tool;
 mod ttsr;
 #[cfg(test)]
 mod ttsr_tests;
 
+pub use dictionary::{Dictionary, DictionaryError};
 pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use resources::AvailableSkill;
 mod bash_tool;
@@ -44,11 +49,13 @@ pub mod todo;
 mod tool_prompt;
 pub mod tool_registry;
 pub mod tool_set;
+mod virtual_read;
 
 pub use statefulness::Statefulness;
 pub use steering::SteeringHandle;
 pub use tool_registry::ToolRegistryHandle;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
@@ -56,7 +63,8 @@ use artist_rules::matcher::RuleSet;
 use artist_rules::state::RulesHandle;
 use artist_rules::types::Firing;
 use artist_session::{
-    Recorder, RuleFired, RuleInjection, RunFinished, RunStarted, ToolOutcomeRecord,
+    ContentBlock, ModelTurn, Recorder, RuleFired, RuleInjection, RunFinished, RunStarted,
+    ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent,
 };
 use artist_tools::ToolBundle;
 use base64::Engine;
@@ -424,11 +432,11 @@ impl From<String> for ChatInput {
 
 /// The tool surfaces available to a run: native tools, MCP proxies,
 /// extension-provided tools, and the user's disabled-tool list.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ToolContext<'a> {
     pub native: &'a ToolBundle,
     pub mcp: &'a mcp::McpManager,
-    pub extensions: Option<&'a artist_extensions::Manager>,
+    pub extensions: Option<Arc<artist_extensions::Manager>>,
     pub disabled: &'a [String],
     /// The canvas server's handle. It has not necessarily bound anything: the
     /// server starts on the first call that needs one. Absent in one-shot and
@@ -495,7 +503,7 @@ pub async fn stream_chat_as(
             &current,
             provider_lineage(&handles.conversation_id, depth),
             turn,
-            tool_context,
+            tool_context.clone(),
             handles.clone(),
             &mut on_event,
         )
@@ -598,7 +606,7 @@ async fn run_profile(
             &run,
             &lineage,
             input,
-            tool_context,
+            tool_context.clone(),
             handles.clone(),
             on_event,
         )
@@ -655,7 +663,7 @@ async fn attempt(
                 resolved,
                 run,
                 input,
-                tool_context,
+                tool_context.clone(),
                 handles,
                 on_event,
             )
@@ -1059,6 +1067,7 @@ where
             bundle: tools.clone(),
             recorder: handles.recorder.clone(),
             resources: resources.clone(),
+            profiles: profiles.clone(),
             todos: handles.todos.clone(),
             todo_owner: handles.conversation_id.clone(),
             attachments: handles.attachments.clone(),
@@ -1090,13 +1099,20 @@ where
                 None,
             ),
             pages: pagination::PageStore::memory(),
+            extension_runs: tool_context
+                .extensions
+                .as_ref()
+                .map(|extensions| extensions.path_tools())
+                .unwrap_or_default(),
+            extension_manager: tool_context.extensions.clone(),
             dynamic: mcp_tools
                 .iter()
                 .cloned()
                 .chain(
                     tool_context
                         .extensions
-                        .map(artist_extensions::Manager::tools)
+                        .as_ref()
+                        .map(|extensions| extensions.tools())
                         .unwrap_or_default(),
                 )
                 .collect(),
@@ -1138,6 +1154,13 @@ where
             .add_hook(CaptureHook::new(tool_meta.clone()))
             .add_hook(TtsrHook(Arc::clone(&ttsr)))
             .add_hook(memory_hook.clone())
+            .add_hook(muse_hook::MuseFindingHook::new(
+                tools.project_root().to_path_buf(),
+            ))
+            .add_hook(profile_hook::ProfileUpdateHook::new(
+                tools.project_root().to_path_buf(),
+                profile,
+            ))
             .default_max_turns(usize::MAX)
             .build();
 
@@ -1155,6 +1178,11 @@ where
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
+        // Rig's provider conversation is durable, but Muse formalizes the
+        // session event schema. Capture the exact tool call/result pair as it
+        // crosses the stream boundary, keyed by Rig's internal id, so every
+        // result has the same arguments and identity the model invoked.
+        let mut captured_tool_calls = HashMap::<String, (String, serde_json::Value)>::new();
         let mut streamed_assistant_text = String::new();
         let mut streamed_turn = ttsr.turn();
         // Retrying after any visible model or tool event could duplicate output
@@ -1311,11 +1339,29 @@ where
                         tool_call,
                         internal_call_id,
                     },
-                )) => on_event(PromptEvent::ToolCall {
-                    id: internal_call_id,
-                    name: tool_call.function.name,
-                    arguments: tool_call.function.arguments,
-                })?,
+                )) => {
+                    let name = tool_call.function.name;
+                    let arguments = tool_call.function.arguments;
+                    captured_tool_calls
+                        .insert(internal_call_id.clone(), (name.clone(), arguments.clone()));
+                    run_recorder.record(ModelTurn {
+                        turn: ttsr.turn() as u32,
+                        content: vec![ContentBlock::ToolCall {
+                            id: internal_call_id.clone(),
+                            call_id: Some(tool_call.id),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                            signature: None,
+                        }],
+                        total_tokens: 0,
+                        partial: false,
+                    });
+                    on_event(PromptEvent::ToolCall {
+                        id: internal_call_id,
+                        name,
+                        arguments,
+                    })?
+                }
                 Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                     tool_call,
                     internal_call_id,
@@ -1368,14 +1414,45 @@ where
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
+                    let (outcome, duration_ms) = meta.unwrap_or((ToolOutcomeRecord::Success, 0));
+                    if let Some((name, arguments)) = captured_tool_calls.remove(&internal_call_id) {
+                        let ingest_file_operation =
+                            matches!(name.as_str(), "read" | "edit" | "write");
+                        let operation = name.clone();
+                        run_recorder.record(ToolResultEvent {
+                            internal_call_id: internal_call_id.clone(),
+                            tool_call_id: Some(tool_result.id.clone()),
+                            name,
+                            arguments,
+                            result: content.clone(),
+                            outcome: outcome.clone(),
+                            duration_ms: Some(duration_ms),
+                        });
+                        if !images.is_empty() {
+                            run_recorder.record(ToolResultImagesEvent {
+                                internal_call_id: internal_call_id.clone(),
+                                images: images
+                                    .iter()
+                                    .map(|image| ContentBlock::Image {
+                                        attachment: image.attachment.clone(),
+                                        media_type: image.media_type.clone(),
+                                    })
+                                    .collect(),
+                            });
+                        }
+                        if ingest_file_operation {
+                            ingest_muse_after_file_tool(&handles, tools.project_root(), &operation)
+                                .await;
+                        }
+                    }
                     handles.lifecycle.emit(LifecycleEvent::ToolFinished(format!(
                         "main:{internal_call_id}"
                     )));
                     on_event(PromptEvent::ToolResult {
                         id: internal_call_id,
                         content,
-                        outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
-                        duration_ms: meta.map(|(_, duration)| duration),
+                        outcome: Some(outcome),
+                        duration_ms: Some(duration_ms),
                         images,
                     })?;
                     // A handoff is terminal: end the run rather than let the
@@ -1588,6 +1665,40 @@ pub(crate) fn user_message(input: &ChatInput) -> Message {
 
 pub fn available_skills(project: &std::path::Path) -> Vec<AvailableSkill> {
     resources::Resources::discover(project).available_skills()
+}
+
+/// Best-effort semantic ingestion at the only allowed file-observation points.
+/// The log is flushed first so Muse receives captured original envelopes, never
+/// an editable transcript or a reconstructed display event. Any failure is
+/// retained under `memory://diagnostics` and deliberately cannot turn an
+/// already-successful Artist tool result into a failure.
+pub(crate) async fn ingest_muse_after_file_tool(
+    handles: &SessionHandles,
+    project: &std::path::Path,
+    operation: &str,
+) {
+    let Some(attachments) = &handles.attachments else {
+        return;
+    };
+    let Some(session_dir) = attachments.dir().parent() else {
+        return;
+    };
+    handles.recorder.flush().await;
+    let events = match artist_session::EventLogReader::new(session_dir).read_all() {
+        Ok(events) => events,
+        Err(error) => {
+            let _ = artist_session::write_muse_diagnostic(project, operation, error);
+            return;
+        }
+    };
+    let snapshot = match muse_registry::PackageRegistry::new().snapshot_all() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = artist_session::write_muse_diagnostic(project, operation, error);
+            return;
+        }
+    };
+    let _ = artist_session::ingest_for_muse(project, operation, &events, snapshot);
 }
 
 /// Executes a prompt without prior context.

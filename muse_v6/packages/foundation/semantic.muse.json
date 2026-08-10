@@ -1,0 +1,2161 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "098da67d4c5bc556c055fda6bd6c40eb5a14fd0901bb1113a7015931a9595496"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.semantic",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "8ae20b4d2b51a2319c0822213b5667228908f8ebf0c656872ec604d685e14a17"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse semantic-content ontology",
+          "description": "Ontology concepts for non-truth-valued discourse content and open semantic operators used by the learned semantic target.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.computing",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "09cbf3a3fe079c0d82ad4ed02b3375d5b070403bd70627d13f9cb85e4de74c7f"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.c",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:muse-design"
+          ]
+        },
+        "concepts": {
+          "sem:AdditiveFocusOperator": {
+            "id": "sem:AdditiveFocusOperator",
+            "preferred_labels": {
+              "en": "additive focus operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Focus operator adding the focused alternative, including source-grounded also/too readings.",
+              "genus": "sem:FocusOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:FocusOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:AdvisabilityOperator": {
+            "id": "sem:AdvisabilityOperator",
+            "preferred_labels": {
+              "en": "advisability operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Normative recommendation or advisability, including source-grounded advisory should readings.",
+              "genus": "sem:DeonticModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DeonticModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:AgainOperator": {
+            "id": "sem:AgainOperator",
+            "preferred_labels": {
+              "en": "again operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Repetition/restoration operator contributed by source-explicit 'again'.",
+              "genus": "sem:TemporalAspectOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:TemporalAspectOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:AlreadyOperator": {
+            "id": "sem:AlreadyOperator",
+            "preferred_labels": {
+              "en": "already operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Temporal/aspectual operator contributed by a source-explicit 'already' reading without inventing an unexpressed presupposition formula.",
+              "genus": "sem:TemporalAspectOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:TemporalAspectOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:AlternativeQuestionContent": {
+            "id": "sem:AlternativeQuestionContent",
+            "preferred_labels": {
+              "en": "alternative-question content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Interrogative content explicitly offering proposition/content alternatives.",
+              "genus": "sem:InterrogativeContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:InterrogativeContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:CapabilityOperator": {
+            "id": "sem:CapabilityOperator",
+            "preferred_labels": {
+              "en": "capability operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Dynamic modality expressing a participant's capability to realize the scoped proposition.",
+              "genus": "sem:DynamicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DynamicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:CommandContent": {
+            "id": "sem:CommandContent",
+            "preferred_labels": {
+              "en": "command content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Directive content presented as a command.",
+              "genus": "sem:DirectiveContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DirectiveContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:CommissiveContent": {
+            "id": "sem:CommissiveContent",
+            "preferred_labels": {
+              "en": "commissive content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Semantic content by which the presenter commits to a proposition/action rather than asserting its current truth.",
+              "genus": "sem:SemanticContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:DeonticModalOperator": {
+            "id": "sem:DeonticModalOperator",
+            "preferred_labels": {
+              "en": "deontic modal operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A modal operator concerning permission, obligation, prohibition, or normative advisability.",
+              "genus": "sem:ModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:ModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:DirectiveContent": {
+            "id": "sem:DirectiveContent",
+            "preferred_labels": {
+              "en": "directive content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Semantic content presented as a directive toward an addressee, distinct from asserting that its proposition already holds.",
+              "genus": "sem:SemanticContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:DynamicModalOperator": {
+            "id": "sem:DynamicModalOperator",
+            "preferred_labels": {
+              "en": "dynamic modal operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A modal operator grounded in properties or circumstances of a participant rather than information or norms.",
+              "genus": "sem:ModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:ModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicCertaintyOperator": {
+            "id": "sem:EpistemicCertaintyOperator",
+            "preferred_labels": {
+              "en": "epistemic certainty operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An epistemic operator expressing source-grounded certainty or confidence without collapsing it to logical necessity.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicExpectationOperator": {
+            "id": "sem:EpistemicExpectationOperator",
+            "preferred_labels": {
+              "en": "epistemic expectation operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Expectedness weaker than necessity, including source-grounded predictive should readings.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicModalOperator": {
+            "id": "sem:EpistemicModalOperator",
+            "preferred_labels": {
+              "en": "epistemic modal operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A modal operator concerning support, likelihood, or necessity relative to information or belief.",
+              "genus": "sem:ModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:ModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicNecessityOperator": {
+            "id": "sem:EpistemicNecessityOperator",
+            "preferred_labels": {
+              "en": "epistemic necessity operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Epistemic necessity, as in a source-grounded must/cannot reading supported by information or inference.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicPossibilityOperator": {
+            "id": "sem:EpistemicPossibilityOperator",
+            "preferred_labels": {
+              "en": "epistemic possibility operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Epistemic possibility, as in a source-grounded maybe/might reading.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicProbabilityOperator": {
+            "id": "sem:EpistemicProbabilityOperator",
+            "preferred_labels": {
+              "en": "epistemic probability operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Epistemic probability or likelihood, as in a source-grounded probably/likely reading.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:EpistemicQualificationOperator": {
+            "id": "sem:EpistemicQualificationOperator",
+            "preferred_labels": {
+              "en": "epistemic qualification operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An epistemic operator explicitly limiting an assertion to an information state, as in 'as far as we know'.",
+              "genus": "sem:EpistemicModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:EpistemicModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ExclusiveFocusOperator": {
+            "id": "sem:ExclusiveFocusOperator",
+            "preferred_labels": {
+              "en": "exclusive focus operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Focus operator expressing exclusion, including source-grounded only/merely/just readings.",
+              "genus": "sem:FocusOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:FocusOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:FewQuantifier": {
+            "id": "sem:FewQuantifier",
+            "preferred_labels": {
+              "en": "few quantifier"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Context-sensitive generalized quantifier expressing few domain members.",
+              "genus": "sem:GeneralizedQuantifier",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:GeneralizedQuantifier"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:FocusOperator": {
+            "id": "sem:FocusOperator",
+            "preferred_labels": {
+              "en": "focus operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A source-grounded operator affecting focus alternatives without being reduced to cardinality.",
+              "genus": "sem:SemanticOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:GeneralizedQuantifier": {
+            "id": "sem:GeneralizedQuantifier",
+            "preferred_labels": {
+              "en": "generalized quantifier"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A source-grounded quantifier operator whose force is not one of the closed exact logical/cardinality operators.",
+              "genus": "sem:SemanticOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:GenericOperator": {
+            "id": "sem:GenericOperator",
+            "preferred_labels": {
+              "en": "generic operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A propositional operator contributing generic or habitual force, distinct from universal quantification.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:InterrogativeContent": {
+            "id": "sem:InterrogativeContent",
+            "preferred_labels": {
+              "en": "interrogative content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Semantic content whose discourse force requests resolution of an open or closed question rather than asserting a proposition.",
+              "genus": "sem:SemanticContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ManyQuantifier": {
+            "id": "sem:ManyQuantifier",
+            "preferred_labels": {
+              "en": "many quantifier"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Context-sensitive generalized quantifier expressing many domain members.",
+              "genus": "sem:GeneralizedQuantifier",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:GeneralizedQuantifier"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:MaximizationOperator": {
+            "id": "sem:MaximizationOperator",
+            "preferred_labels": {
+              "en": "maximization operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Optimization force such as source-explicit 'as many as possible' or 'as high ... as possible'.",
+              "genus": "sem:OptimizationOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:OptimizationOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:MinimizationOperator": {
+            "id": "sem:MinimizationOperator",
+            "preferred_labels": {
+              "en": "minimization operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Optimization force such as source-explicit 'as few as possible' or 'as low ... as possible'.",
+              "genus": "sem:OptimizationOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:OptimizationOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ModalOperator": {
+            "id": "sem:ModalOperator",
+            "preferred_labels": {
+              "en": "modal operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A propositional operator contributing modal force without conflating epistemic, deontic, and dynamic modality.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:MostQuantifier": {
+            "id": "sem:MostQuantifier",
+            "preferred_labels": {
+              "en": "most quantifier"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Generalized quantifier expressing most of the source-grounded domain.",
+              "genus": "sem:GeneralizedQuantifier",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:GeneralizedQuantifier"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ObligationOperator": {
+            "id": "sem:ObligationOperator",
+            "preferred_labels": {
+              "en": "obligation operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Deontic obligation or requirement.",
+              "genus": "sem:DeonticModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DeonticModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:OptimizationOperator": {
+            "id": "sem:OptimizationOperator",
+            "preferred_labels": {
+              "en": "optimization operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A propositional operator requiring source-explicit maximization or minimization relative to an expressed target, distinct from ordinary comparison or modality.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:PerfectAspectOperator": {
+            "id": "sem:PerfectAspectOperator",
+            "preferred_labels": {
+              "en": "perfect aspect operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A propositional operator contributing source-explicit perfect aspect.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:PermissionOperator": {
+            "id": "sem:PermissionOperator",
+            "preferred_labels": {
+              "en": "permission operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Deontic permission.",
+              "genus": "sem:DeonticModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DeonticModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:PolarQuestionContent": {
+            "id": "sem:PolarQuestionContent",
+            "preferred_labels": {
+              "en": "polar-question content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Interrogative content asking whether a proposition holds.",
+              "genus": "sem:InterrogativeContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:InterrogativeContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ProgressiveAspectOperator": {
+            "id": "sem:ProgressiveAspectOperator",
+            "preferred_labels": {
+              "en": "progressive aspect operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A propositional operator contributing source-explicit progressive aspect.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ProhibitionOperator": {
+            "id": "sem:ProhibitionOperator",
+            "preferred_labels": {
+              "en": "prohibition operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Deontic prohibition.",
+              "genus": "sem:DeonticModalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DeonticModalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:PromiseContent": {
+            "id": "sem:PromiseContent",
+            "preferred_labels": {
+              "en": "promise content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Commissive content presented as a promise.",
+              "genus": "sem:CommissiveContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:CommissiveContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:PropositionalOperator": {
+            "id": "sem:PropositionalOperator",
+            "preferred_labels": {
+              "en": "propositional operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A semantic operator whose scope is a proposition and whose subtype determines the operator force.",
+              "genus": "sem:SemanticOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:QuotationContent": {
+            "id": "sem:QuotationContent",
+            "preferred_labels": {
+              "en": "quotation content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Semantic content that mentions or quotes exact source material without asserting the quoted material.",
+              "genus": "sem:SemanticContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:SemanticContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:RequestContent": {
+            "id": "sem:RequestContent",
+            "preferred_labels": {
+              "en": "request content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Directive content presented as a request.",
+              "genus": "sem:DirectiveContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DirectiveContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:ScalarFocusOperator": {
+            "id": "sem:ScalarFocusOperator",
+            "preferred_labels": {
+              "en": "scalar focus operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Scalar focus operator such as source-grounded even.",
+              "genus": "sem:FocusOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:FocusOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:SemanticContent": {
+            "id": "sem:SemanticContent",
+            "preferred_labels": {
+              "en": "semantic content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract content object presented by discourse without requiring that the content itself be truth-valued.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:SemanticOperator": {
+            "id": "sem:SemanticOperator",
+            "preferred_labels": {
+              "en": "semantic operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An abstract source-grounded semantic operator whose lexical identity is preserved when the distinction is not a closed logical connective.",
+              "genus": "ufo:AbstractIndividual",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:AbstractIndividual"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:SeveralQuantifier": {
+            "id": "sem:SeveralQuantifier",
+            "preferred_labels": {
+              "en": "several quantifier"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Context-sensitive generalized quantifier expressing several domain members.",
+              "genus": "sem:GeneralizedQuantifier",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:GeneralizedQuantifier"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:StillOperator": {
+            "id": "sem:StillOperator",
+            "preferred_labels": {
+              "en": "still operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Temporal/aspectual continuation operator contributed by source-explicit 'still'.",
+              "genus": "sem:TemporalAspectOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:TemporalAspectOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:SuggestionContent": {
+            "id": "sem:SuggestionContent",
+            "preferred_labels": {
+              "en": "suggestion content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Directive content presented as a suggestion or recommendation.",
+              "genus": "sem:DirectiveContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:DirectiveContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:TagQuestionContent": {
+            "id": "sem:TagQuestionContent",
+            "preferred_labels": {
+              "en": "tag-question content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Interrogative content expressed by a source-explicit tag question construction.",
+              "genus": "sem:InterrogativeContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:InterrogativeContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:TemporalAspectOperator": {
+            "id": "sem:TemporalAspectOperator",
+            "preferred_labels": {
+              "en": "temporal aspect operator"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A source-grounded propositional operator contributing temporal/aspectual meaning beyond tense.",
+              "genus": "sem:PropositionalOperator",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:PropositionalOperator"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:WhQuestionContent": {
+            "id": "sem:WhQuestionContent",
+            "preferred_labels": {
+              "en": "wh-question content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Interrogative content binding one or more source-grounded answer variables.",
+              "genus": "sem:InterrogativeContent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "sem:InterrogativeContent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          }
+        },
+        "relations": {
+          "sem:agentParticipant": {
+            "id": "sem:agentParticipant",
+            "preferred_labels": {
+              "en": "agent participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as agent/initiator.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:alternativeProposition": {
+            "id": "sem:alternativeProposition",
+            "preferred_labels": {
+              "en": "alternative proposition"
+            },
+            "definition": "Relates alternative-question content to one explicitly offered proposition alternative.",
+            "domains": [
+              "sem:AlternativeQuestionContent"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:beneficiaryParticipant": {
+            "id": "sem:beneficiaryParticipant",
+            "preferred_labels": {
+              "en": "beneficiary participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as beneficiary.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:contentAddressee": {
+            "id": "sem:contentAddressee",
+            "preferred_labels": {
+              "en": "content addressee"
+            },
+            "definition": "Relates semantic content to a source-established addressee/recipient without asserting the content proposition.",
+            "domains": [
+              "sem:SemanticContent"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:contentParticipant": {
+            "id": "sem:contentParticipant",
+            "preferred_labels": {
+              "en": "content participant"
+            },
+            "definition": "Relates an event or situation to explicitly expressed semantic or informational content when no narrower ontology relation applies.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:contentPresenter": {
+            "id": "sem:contentPresenter",
+            "preferred_labels": {
+              "en": "content presenter"
+            },
+            "definition": "Relates semantic content to a source-established presenter/sender without asserting the content proposition.",
+            "domains": [
+              "sem:SemanticContent"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:contentProposition": {
+            "id": "sem:contentProposition",
+            "preferred_labels": {
+              "en": "content proposition"
+            },
+            "definition": "Relates semantic content to a proposition constituting its propositional body without asserting that proposition.",
+            "domains": [
+              "sem:SemanticContent"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:epistemicSource": {
+            "id": "sem:epistemicSource",
+            "preferred_labels": {
+              "en": "epistemic source"
+            },
+            "definition": "Relates an epistemic operator to an explicitly expressed agent or source whose information state supplies the modal basis.",
+            "domains": [
+              "sem:EpistemicModalOperator"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:experiencerParticipant": {
+            "id": "sem:experiencerParticipant",
+            "preferred_labels": {
+              "en": "experiencer participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as experiencer.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:explains": {
+            "id": "sem:explains",
+            "preferred_labels": {
+              "en": "explains"
+            },
+            "definition": "Relates a proposition that supplies a source-explicit explanation or reason to the proposition it explains, without collapsing explanation into event causation.",
+            "domains": [
+              "ufo:Proposition"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:goalParticipant": {
+            "id": "sem:goalParticipant",
+            "preferred_labels": {
+              "en": "goal participant"
+            },
+            "definition": "Relates an event or situation to an explicitly expressed goal/destination participant.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:instrumentParticipant": {
+            "id": "sem:instrumentParticipant",
+            "preferred_labels": {
+              "en": "instrument participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as instrument.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:locationParticipant": {
+            "id": "sem:locationParticipant",
+            "preferred_labels": {
+              "en": "location participant"
+            },
+            "definition": "Relates an event or situation to an explicitly expressed location participant.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:operatorBearer": {
+            "id": "sem:operatorBearer",
+            "preferred_labels": {
+              "en": "operator bearer"
+            },
+            "definition": "Relates a scoped operator to an explicitly expressed bearer/subject when the operator's force is participant-relative, such as capability or obligation.",
+            "domains": [
+              "sem:PropositionalOperator"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:optimizationTarget": {
+            "id": "sem:optimizationTarget",
+            "preferred_labels": {
+              "en": "optimization target"
+            },
+            "definition": "Relates an optimization operator to the source-grounded entity, variable, quality, or value dimension being maximized or minimized.",
+            "domains": [
+              "sem:OptimizationOperator"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:patientParticipant": {
+            "id": "sem:patientParticipant",
+            "preferred_labels": {
+              "en": "patient participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as affected patient.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:questionAnswerVariable": {
+            "id": "sem:questionAnswerVariable",
+            "preferred_labels": {
+              "en": "question answer variable"
+            },
+            "definition": "Relates interrogative content to a source-grounded typed variable whose value resolves part of the question. The variable carries its ontology domain independently.",
+            "domains": [
+              "sem:InterrogativeContent"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:quotedText": {
+            "id": "sem:quotedText",
+            "preferred_labels": {
+              "en": "quoted text"
+            },
+            "definition": "Relates quotation/mention content to the exact source text value it quotes or mentions without asserting that text as a proposition.",
+            "domains": [
+              "sem:QuotationContent"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:recipientParticipant": {
+            "id": "sem:recipientParticipant",
+            "preferred_labels": {
+              "en": "recipient participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as recipient.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:sourceParticipant": {
+            "id": "sem:sourceParticipant",
+            "preferred_labels": {
+              "en": "source participant"
+            },
+            "definition": "Relates an event or situation to an explicitly expressed source/origin participant.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:stimulusParticipant": {
+            "id": "sem:stimulusParticipant",
+            "preferred_labels": {
+              "en": "stimulus participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as stimulus.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:surfaceObjectParticipant": {
+            "id": "sem:surfaceObjectParticipant",
+            "preferred_labels": {
+              "en": "surface-object participant"
+            },
+            "definition": "Lowest-precision fallback preserving which participant is realized as the source clause object when no narrower semantic role is justified.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:surfaceSubjectParticipant": {
+            "id": "sem:surfaceSubjectParticipant",
+            "preferred_labels": {
+              "en": "surface-subject participant"
+            },
+            "definition": "Lowest-precision fallback preserving which participant is realized as the source clause subject when no semantic role is justified.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "sem:themeParticipant": {
+            "id": "sem:themeParticipant",
+            "preferred_labels": {
+              "en": "theme participant"
+            },
+            "definition": "Relates an event or situation to a participant source-groundedly interpreted as theme.",
+            "domains": [
+              "ufo:Event",
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Entity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

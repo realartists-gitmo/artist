@@ -28,6 +28,14 @@ where
     output.render().trim_matches('"').replace("\\n", "\n")
 }
 
+fn revision_from_read(read: &str) -> &str {
+    read.lines()
+        .next()
+        .and_then(|line| line.strip_prefix("[revision: "))
+        .and_then(|line| line.strip_suffix(']'))
+        .expect("read must start with a revision")
+}
+
 /// Poll a managed session until it leaves the running state, so tests read
 /// output the same way the session host does instead of racing the child.
 async fn wait_for(bash: &BashTool, id: &str) -> BashResult {
@@ -97,19 +105,164 @@ async fn read_declines_to_inline_a_format_no_model_accepts() {
 }
 
 #[tokio::test]
+async fn directory_read_lists_only_immediate_children_with_a_revision() {
+    let (_root, _state, workspace) = workspace(&[
+        ("docs/guide.md", "guide\n"),
+        ("docs/nested/details.md", "details\n"),
+        ("docs/notes.txt", "notes\n"),
+    ]);
+    let tools = ToolBundle::new(workspace);
+    let output = call(&tools.read, json!({"path":"docs"})).await;
+    assert!(output.starts_with("[revision: "));
+    assert!(output.contains("docs/guide.md"));
+    assert!(output.contains("docs/notes.txt"));
+    assert!(output.contains("docs/nested/"));
+    assert!(!output.contains("details.md"));
+}
+
+#[tokio::test]
+async fn explicit_read_limit_has_no_hidden_line_or_byte_ceiling() {
+    let source = (0..250)
+        .map(|index| format!("{index}: ordinary logical line\n"))
+        .collect::<String>();
+    let (_root, _state, ws) = workspace(&[("large.txt", &source)]);
+    let tools = ToolBundle::new(ws);
+    let output = call(&tools.read, json!({"path":"large.txt", "limit":250})).await;
+    assert!(output.contains("0:"));
+    assert!(output.contains("249:"));
+    assert!(
+        !output.contains("[truncated:"),
+        "explicit limit was capped: {output}"
+    );
+
+    let long_line = "x".repeat(60 * 1024);
+    let (_root, _state, ws) = workspace(&[("wide.txt", &long_line)]);
+    let tools = ToolBundle::new(ws);
+    let output = call(&tools.read, json!({"path":"wide.txt", "limit":1})).await;
+    assert!(
+        output.contains(&long_line),
+        "logical line was split or capped"
+    );
+}
+
+#[tokio::test]
+async fn read_continuations_are_bound_to_the_first_read_revision() {
+    let source = (0..3)
+        .map(|index| format!("line {index}\n"))
+        .collect::<String>();
+    let (root, _state, workspace) = workspace(&[("notes.txt", &source)]);
+    let tools = ToolBundle::new(workspace);
+    let first = call(&tools.read, json!({"path":"notes.txt", "limit":1})).await;
+    let revision = revision_from_read(&first);
+    assert!(first.contains("offset=2"));
+    assert!(first.contains(&format!("revision=\"{revision}\"")));
+
+    let missing = tools
+        .read
+        .call(serde_json::from_value(json!({"path":"notes.txt", "offset":2})).unwrap())
+        .await
+        .unwrap_err();
+    assert!(missing.to_string().contains("stale_revision"));
+
+    let second = call(
+        &tools.read,
+        json!({"path":"notes.txt", "offset":2, "revision":revision}),
+    )
+    .await;
+    assert!(second.contains("line 1"));
+
+    std::fs::write(root.path().join("notes.txt"), "changed\ncontent\n").unwrap();
+    let stale = tools
+        .read
+        .call(
+            serde_json::from_value(json!({"path":"notes.txt", "offset":2, "revision":revision}))
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("stale_revision"));
+}
+
+#[tokio::test]
+async fn write_replacement_requires_and_honors_the_current_revision() {
+    let (root, _state, workspace) = workspace(&[("replace.txt", "first\n")]);
+    let tools = ToolBundle::new(workspace);
+    let read = call(&tools.read, json!({"path":"replace.txt"})).await;
+    let revision = revision_from_read(&read);
+
+    let missing = tools
+        .write
+        .call(
+            serde_json::from_value(json!({"path":"replace.txt", "content":"replacement\n"}))
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(missing.to_string().contains("supply its current revision"));
+
+    std::fs::write(root.path().join("replace.txt"), "external change\n").unwrap();
+    let stale = tools
+        .write
+        .call(
+            serde_json::from_value(
+                json!({"path":"replace.txt", "content":"replacement\n", "revision":revision}),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("stale_revision"));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("replace.txt")).unwrap(),
+        "external change\n"
+    );
+
+    let current = call(&tools.read, json!({"path":"replace.txt"})).await;
+    let current_revision = revision_from_read(&current);
+    let written = call(
+        &tools.write,
+        json!({"path":"replace.txt", "content":"replacement\n", "revision":current_revision}),
+    )
+    .await;
+    assert!(written.contains("overwritten"));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("replace.txt")).unwrap(),
+        "replacement\n"
+    );
+}
+
+#[tokio::test]
 async fn reads_then_edits_with_semantic_anchor() {
     let (_root, _state, workspace) = workspace(&[("src/lib.rs", "fn alpha() {}\nfn beta() {}\n")]);
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"src/lib.rs"})).await;
+    let revision = revision_from_read(&read);
     let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     let edited = call(
         &tools.edit,
-        json!({"path":"src/lib.rs","replacements":[{"start":anchor,"content":"fn renamed() {}"}]}),
+        json!({"path":"src/lib.rs","revision":revision,"replacements":[{"start":anchor,"content":"fn renamed() {}"}]}),
     )
     .await;
     assert!(edited.contains("fn renamed"));
     let reread = call(&tools.read, json!({"path":"src/lib.rs"})).await;
     assert!(reread.contains("fn renamed() {}"));
+}
+
+#[tokio::test]
+async fn edit_and_write_do_not_treat_typed_paths_as_host_files() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let tools = ToolBundle::new(workspace);
+    let edit = serde_json::from_value(json!({
+        "path":"agent://goethe/todo",
+        "revision":"deadbeef",
+        "replacements":[{"start":"#anchor","end":null,"content":"x"}]
+    }))
+    .unwrap();
+    let error = tools.edit.call(edit).await.unwrap_err();
+    assert!(error.to_string().contains("typed agent:// resource"));
+    let write = serde_json::from_value(json!({"path":"bash://job","content":"x"})).unwrap();
+    let error = tools.write.call(write).await.unwrap_err();
+    assert!(error.to_string().contains("typed bash:// resource"));
 }
 
 #[tokio::test]
@@ -124,24 +277,30 @@ async fn writes_finds_and_greps_project_files() {
             .await
             .contains("src/lib.rs")
     );
-    assert!(call(
-        &tools.grep,
-        json!({"query":"needle","glob":"**/*.rs","context":1})
-    )
-    .await
-    .contains("src/lib.rs:1"));
-    assert!(call(
-        &tools.find,
-        json!({"query":"lib rs","path":".","glob":"**/*.rs"})
-    )
-    .await
-    .contains("src/lib.rs"));
-    assert!(call(
-        &tools.grep,
-        json!({"query":"needle","path":".","glob":"**/*.rs"})
-    )
-    .await
-    .contains("src/lib.rs:1"));
+    assert!(
+        call(
+            &tools.grep,
+            json!({"query":"needle","glob":"**/*.rs","context":1})
+        )
+        .await
+        .contains("src/lib.rs:1")
+    );
+    assert!(
+        call(
+            &tools.find,
+            json!({"query":"lib rs","path":".","glob":"**/*.rs"})
+        )
+        .await
+        .contains("src/lib.rs")
+    );
+    assert!(
+        call(
+            &tools.grep,
+            json!({"query":"needle","path":".","glob":"**/*.rs"})
+        )
+        .await
+        .contains("src/lib.rs:1")
+    );
     assert_eq!(
         call(
             &tools.grep,
@@ -155,22 +314,47 @@ async fn writes_finds_and_greps_project_files() {
             .await
             .contains("src/lib.rs:1")
     );
-    assert!(call(
-        &tools.write,
-        json!({"path":"src/new.rs","content":"new file\n"})
-    )
-    .await
-    .contains("created"));
+    assert!(
+        call(
+            &tools.write,
+            json!({"path":"src/new.rs","content":"new file\n"})
+        )
+        .await
+        .contains("created")
+    );
     assert_eq!(
         std::fs::read_to_string(_root.path().join("src/new.rs")).unwrap(),
         "new file\n"
     );
-    assert!(call(&tools.find, json!({"query":"new rs"}))
-        .await
-        .contains("src/new.rs"));
-    assert!(call(&tools.grep, json!({"query":"new file"}))
-        .await
-        .contains("src/new.rs"));
+    assert!(
+        call(&tools.find, json!({"query":"new rs"}))
+            .await
+            .contains("src/new.rs")
+    );
+    assert!(
+        call(&tools.grep, json!({"query":"new file"}))
+            .await
+            .contains("src/new.rs")
+    );
+}
+
+#[tokio::test]
+async fn grep_auto_preserves_literal_syntax_before_fuzzy_fallback() {
+    let (_root, _state, workspace) = workspace(&[
+        ("literal.txt", "the exact token is literal.*value\n"),
+        ("fuzzy.txt", "needle\n"),
+    ]);
+    let tools = ToolBundle::new(workspace);
+
+    // `.*` is text in auto mode, not an implicit regex expression.
+    let literal = call(&tools.grep, json!({"query":"literal.*value"})).await;
+    assert!(literal.contains("literal.txt:1"), "{literal}");
+    // A miss falls back to the FFF fuzzy matcher.
+    assert!(
+        call(&tools.grep, json!({"query":"nedle"}))
+            .await
+            .contains("fuzzy.txt:1")
+    );
 }
 
 #[tokio::test]
@@ -183,15 +367,18 @@ async fn all_file_tools_accept_external_absolute_paths() {
     let tools = ToolBundle::new(workspace.clone());
 
     let read = call(&tools.read, json!({"path":existing})).await;
-    let anchor = read.lines().next().unwrap().split_once(": ").unwrap().0;
+    let revision = revision_from_read(&read);
+    let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     call(
         &tools.edit,
-        json!({"path":existing,"replacements":[{"start":anchor,"content":"fn edited_external_needle() {}"}]}),
+        json!({"path":existing,"revision":revision,"replacements":[{"start":anchor,"content":"fn edited_external_needle() {}"}]}),
     )
     .await;
-    assert!(std::fs::read_to_string(&existing)
-        .unwrap()
-        .contains("edited_external_needle"));
+    assert!(
+        std::fs::read_to_string(&existing)
+            .unwrap()
+            .contains("edited_external_needle")
+    );
 
     let created = outside.path().join("created.txt");
     call(
@@ -223,12 +410,19 @@ async fn all_file_tools_accept_external_absolute_paths() {
 
     let bash = BashTool::new(workspace);
     let id = bash
-        .managed_start("pwd; cat created.txt".into(), Some(scope.clone().into_owned()), None)
+        .managed_start(
+            "pwd; cat created.txt".into(),
+            Some(scope.clone().into_owned()),
+            None,
+        )
         .await
         .unwrap();
     let finished = wait_for(&bash, &id).await;
     assert!(finished.output.contains(&*scope), "{finished:?}");
-    assert!(finished.output.contains("absolute write needle"), "{finished:?}");
+    assert!(
+        finished.output.contains("absolute write needle"),
+        "{finished:?}"
+    );
 }
 
 #[tokio::test]
@@ -236,18 +430,28 @@ async fn stale_anchor_requires_a_fresh_read() {
     let (root, _state, workspace) = workspace(&[("file.rs", "one\ntwo\n")]);
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"file.rs"})).await;
+    let revision = revision_from_read(&read);
     let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     std::fs::write(root.path().join("file.rs"), "one\ntwo changed externally\n").unwrap();
     let args = serde_json::from_value(
-        json!({"path":"file.rs","replacements":[{"start":anchor,"content":"changed"}]}),
+        json!({"path":"file.rs","revision":revision,"replacements":[{"start":anchor,"content":"changed"}]}),
     )
     .unwrap();
-    assert!(tools.edit.call(args).await.is_err());
+    let stale = tools.edit.call(args).await.unwrap_err();
+    assert!(stale.to_string().contains("stale_revision"));
     let retry = serde_json::from_value(
-        json!({"path":"file.rs","replacements":[{"start":anchor,"content":"changed"}]}),
+        json!({"path":"file.rs","revision":revision,"replacements":[{"start":anchor,"content":"changed"}]}),
     )
     .unwrap();
-    assert!(tools.edit.call(retry).await.is_err());
+    assert!(
+        tools
+            .edit
+            .call(retry)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("stale_revision")
+    );
 }
 
 #[cfg(unix)]
@@ -260,10 +464,11 @@ async fn edit_temp_symlink_cannot_escape_workspace() {
     symlink(outside.path(), root.path().join("file.rs.tmp")).unwrap();
     let tools = ToolBundle::new(workspace);
     let read = call(&tools.read, json!({"path":"file.rs"})).await;
-    let anchor = read.lines().next().unwrap().split_once(": ").unwrap().0;
+    let revision = revision_from_read(&read);
+    let anchor = read.lines().nth(1).unwrap().split_once(": ").unwrap().0;
     call(
         &tools.edit,
-        json!({"path":"file.rs","replacements":[{"start":anchor,"content":"changed"}]}),
+        json!({"path":"file.rs","revision":revision,"replacements":[{"start":anchor,"content":"changed"}]}),
     )
     .await;
     assert_eq!(std::fs::read_to_string(outside.path()).unwrap(), "safe");
@@ -280,7 +485,7 @@ async fn managed_sessions_run_from_root_and_read_input() {
         .unwrap();
     let finished = wait_for(&bash, &id).await;
     assert!(finished.output.contains("ok"), "{finished:?}");
-    assert!(finished.output.contains("status: "), "{finished:?}");
+    assert_eq!(finished.status, BashStatus::Completed, "{finished:?}");
     let _ = bash.managed_abort(&id);
 
     let interactive = bash
@@ -314,4 +519,39 @@ async fn managed_sessions_run_from_root_and_read_input() {
     let following = bash.run_input("whoami").await.unwrap();
     assert!(!following.contains(typo));
     assert!(!following.contains("read>"));
+}
+
+#[tokio::test]
+async fn managed_terminal_transcript_retains_early_output() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let bash = BashTool::new(workspace);
+    let id = bash
+        .managed_start(
+            "printf BEGIN; yes x | head -c 2200000; printf END".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let finished = wait_for(&bash, &id).await;
+    assert_eq!(finished.status, BashStatus::Completed, "{finished:?}");
+    assert!(
+        finished.output.starts_with("BEGIN"),
+        "early output was discarded"
+    );
+    assert!(finished.output.ends_with("END"), "late output was lost");
+}
+
+#[tokio::test]
+async fn managed_terminal_transcript_excludes_control_sequences() {
+    let (_root, _state, workspace) = workspace(&[]);
+    let bash = BashTool::new(workspace);
+    let id = bash
+        .managed_start("printf '\\033[31mred\\033[0m\\a\\n'".into(), None, None)
+        .await
+        .unwrap();
+    let finished = wait_for(&bash, &id).await;
+    assert!(finished.output.contains("red"), "{finished:?}");
+    assert!(!finished.output.contains('\u{1b}'), "{finished:?}");
+    assert!(!finished.output.contains('\u{7}'), "{finished:?}");
 }

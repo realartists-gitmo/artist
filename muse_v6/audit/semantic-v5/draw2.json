@@ -1,0 +1,184 @@
+{
+  "source_archive": "agentic-sessions-big-37(2).zip",
+  "draw": "second_adversarial_draw",
+  "cases": [
+    {
+      "id": "claude_edit_request",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 691,
+      "class": "requested_edit_not_effect",
+      "raw_line_bytes": 1870,
+      "sha256": "b964d429ccad6d901ee0e68c30745b23b58adeffff57d0fc562435f95a4878d3",
+      "structure": {
+        "content_type": "tool_use",
+        "tool_name": "Edit",
+        "tool_use_id": "toolu_016JC8UFsKwfzhKYHnyNTyDt",
+        "is_error": null,
+        "input_keys": [
+          "file_path",
+          "new_string",
+          "old_string",
+          "replace_all"
+        ]
+      }
+    },
+    {
+      "id": "claude_agent_delegate",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 6378,
+      "class": "delegation_prompt_scope",
+      "raw_line_bytes": 2730,
+      "sha256": "ed12bb5e53b203f6b94a9d4886b6d59f5e1bdc95ec84b84579bf6f49ed70bdfb",
+      "structure": {
+        "content_type": "tool_use",
+        "tool_name": "Agent",
+        "tool_use_id": "toolu_01GfB4hu34MkqhTLVpCe6YNb",
+        "is_error": null,
+        "input_keys": [
+          "description",
+          "prompt",
+          "subagent_type"
+        ]
+      }
+    },
+    {
+      "id": "claude_task_update",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 6486,
+      "class": "requested_task_state",
+      "raw_line_bytes": 1341,
+      "sha256": "143a285aca23fcb4d6ebdc38a941af9395b8114c5bd9b1d1d87d63a81b96929f",
+      "structure": {
+        "content_type": "tool_use",
+        "tool_name": "TaskUpdate",
+        "tool_use_id": "toolu_01AVvFzaWfoUCxr4ZxCjNqG6",
+        "is_error": null,
+        "input_keys": [
+          "status",
+          "taskId"
+        ],
+        "status": "in_progress"
+      }
+    },
+    {
+      "id": "claude_webfetch_request",
+      "source": "claude/-home-adam-Projects-theevilthatmendo/b1a3e5fe-5474-476c-bc0b-a656c328fc0b.jsonl",
+      "line": 635,
+      "class": "network_prompt_scope",
+      "raw_line_bytes": 1770,
+      "sha256": "e35a86d846251a7c9b753e4d734d6514ac79545e75c34db94087e8f54e849f24",
+      "structure": {
+        "content_type": "tool_use",
+        "tool_name": "WebFetch",
+        "tool_use_id": "toolu_019Ap69nizRkQvin9NERXrJ9",
+        "is_error": null,
+        "input_keys": [
+          "prompt",
+          "url"
+        ]
+      }
+    },
+    {
+      "id": "claude_partial_failure_result",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 246,
+      "class": "failure_with_partial_observations",
+      "raw_line_bytes": 4785,
+      "sha256": "9b0acf061648a74216cd5637ecca1a549c400efd6dd74552524c9ec920fb6dc0",
+      "structure": {
+        "content_type": "tool_result",
+        "tool_name": null,
+        "tool_use_id": "toolu_018K2jSiFeR4ys89ZUDk8QLv",
+        "is_error": true,
+        "result_content_kind": "str",
+        "result_chars": 2023
+      }
+    },
+    {
+      "id": "claude_send_user_file",
+      "source": "claude/-home-adam-Projects-theevilthatmendo/b1a3e5fe-5474-476c-bc0b-a656c328fc0b.jsonl",
+      "line": 2188,
+      "class": "requested_delivery_not_success",
+      "raw_line_bytes": 1788,
+      "sha256": "1ae975afd6bb280a3ef5878c50868db750f990a25215f74ab1c25d2e2f594eaa",
+      "structure": {
+        "content_type": "tool_use",
+        "tool_name": "SendUserFile",
+        "tool_use_id": "toolu_01PnE3bi9J4k86W2pyesGXEw",
+        "is_error": null,
+        "input_keys": [
+          "caption",
+          "display",
+          "files",
+          "status"
+        ],
+        "status": "normal"
+      }
+    },
+    {
+      "id": "codex_apply_patch_call",
+      "source": "codex/2026/06/29/rollout-2026-06-29T04-47-15-019f12c6-a3d0-7310-ac6c-b48e6ada3d20.jsonl",
+      "line": 202,
+      "class": "provider_status_not_effect_status",
+      "raw_line_bytes": 931,
+      "sha256": "e8c31c15f8599177f6c89fae05772ea145ac84a13b377288593421867bf080cf",
+      "structure": {
+        "payload_type": "custom_tool_call",
+        "name": "apply_patch",
+        "status": "completed",
+        "call_id": "call_4iYzJ7vcjki8J0iApeJGMOU9",
+        "input_chars": 563
+      }
+    },
+    {
+      "id": "codex_nested_result_json",
+      "source": "codex/2026/08/01/rollout-2026-08-01T23-41-40-019fc0c7-16ac-7a80-8dbe-803df80efc07.jsonl",
+      "line": 24,
+      "class": "json_encoded_result_transport",
+      "raw_line_bytes": 79424,
+      "sha256": "72f514161d5a8fc196a16cb0b5cf5911538cacd2e2d23eb8b48fee44bb8bf981",
+      "structure": {
+        "payload_type": "function_call_output",
+        "name": null,
+        "status": null,
+        "call_id": "call_W3MRp5Ge3QxQk4bkDjh48SAc",
+        "output_items": 2
+      }
+    },
+    {
+      "id": "grok_cumulative_stream_snapshot",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8f4f-a45a-7331-8277-3626de4087ea/updates.jsonl",
+      "lines": [
+        88,
+        89
+      ],
+      "class": "stream_snapshot_visibility",
+      "records": [
+        {
+          "line": 88,
+          "status": "in_progress",
+          "raw_line_bytes": 53483,
+          "sha256": "cf8f365b74cd69a5a8d048e6961b105ffc0a973e36c1aaae7df0ef62b46974db",
+          "content_json_bytes": 9601,
+          "toolCallId": "call-2eab5541-8e59-489b-a754-03f3adf688a7-10"
+        },
+        {
+          "line": 89,
+          "status": "completed",
+          "raw_line_bytes": 53943,
+          "sha256": "34984a7bd5d81a1c480a37264e1859b741b4289c2cda6e82caf65123647a50df",
+          "content_json_bytes": 9601,
+          "toolCallId": "call-2eab5541-8e59-489b-a754-03f3adf688a7-10"
+        }
+      ],
+      "structure": {
+        "same_invocation_id": true,
+        "same_content_size": true,
+        "status_transition": [
+          "in_progress",
+          "completed"
+        ]
+      }
+    }
+  ]
+}

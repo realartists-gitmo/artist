@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use tokio::{
     fs,
@@ -265,6 +265,18 @@ impl FileCoordinator {
         actor: &AgentIdentity,
         request: EditRequest,
     ) -> Result<CoordinatedEditResult> {
+        self.edit_file_at_revision(actor, request, None).await
+    }
+
+    /// Apply an edit only if the whole resource still has the revision that
+    /// was read.  The comparison happens while holding the cross-process path
+    /// lock, so a stale view can never be retargeted by a concurrent writer.
+    pub async fn edit_file_at_revision(
+        &self,
+        actor: &AgentIdentity,
+        request: EditRequest,
+        expected_revision: Option<&str>,
+    ) -> Result<CoordinatedEditResult> {
         let _ = self.state.register_agent(actor).await;
         let manager = self.manager_for(actor).await?;
         let normalized = {
@@ -272,6 +284,22 @@ impl FileCoordinator {
             manager.normalized_path(&request.path)?
         };
         let _transaction = self.lock_path(&normalized).await?;
+        if let Some(expected) = expected_revision {
+            let current = fs::read(&normalized)
+                .await
+                .with_context(|| format!("failed to read {} for revision check", request.path))?;
+            let actual = content_hash(&current);
+            if actual != expected.to_ascii_lowercase() {
+                return Err(anyhow::Error::new(HashlineError::new(
+                    HashlineErrorCode::ContentChanged,
+                    format!(
+                        "stale revision for {}: expected {expected}, current revision is {actual}; re-read the resource and retry",
+                        request.path
+                    ),
+                    true,
+                )));
+            }
+        }
         let mut manager = manager.lock().await;
         let result = manager.edit_file(request).await?;
         let bytes = fs::read(&normalized)
@@ -562,6 +590,44 @@ mod tests {
             .expect("read");
     }
 
+    #[tokio::test]
+    async fn stale_revision_cannot_retarget_an_edit() {
+        let (files, root) = coordinator("stale-revision");
+        let file = root.join("shared.txt");
+        std::fs::write(&file, "one\ntwo\n").expect("seed");
+        let path = file.to_string_lossy().into_owned();
+        let actor = agent("alpha");
+        let read = files
+            .read_file(
+                &actor,
+                ReadFileRequest {
+                    path: path.clone(),
+                    start_line: 1,
+                    max_lines: None,
+                },
+            )
+            .await
+            .expect("read");
+        std::fs::write(&file, "one\nexternal\n").expect("external write");
+        let error = files
+            .edit_file_at_revision(
+                &actor,
+                EditRequest {
+                    path: path.clone(),
+                    operations: vec![crate::EditOperation::Replace {
+                        anchor: read.result.lines[1].anchor.clone(),
+                        end_anchor: None,
+                        content: "agent".into(),
+                    }],
+                },
+                Some(&read.content_hash),
+            )
+            .await
+            .expect_err("stale edit must fail");
+        assert!(error.to_string().contains("stale revision"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "one\nexternal\n");
+    }
+
     /// The melting-pot case: two sessions, one worktree. What one writes, the
     /// other has to hear about — and hear *who*, because another agent working
     /// the same file is a coordination signal rather than just a stale view.
@@ -752,11 +818,13 @@ mod tests {
             Some("session-doomed")
         );
         state.forget_agent("session-doomed").await.expect("forget");
-        assert!(state
-            .writers_for(&[path])
-            .await
-            .expect("writers")
-            .is_empty());
+        assert!(
+            state
+                .writers_for(&[path])
+                .await
+                .expect("writers")
+                .is_empty()
+        );
     }
 
     /// Each agent keeps its own view, so one reading a file must not make the

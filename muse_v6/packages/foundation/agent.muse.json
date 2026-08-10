@@ -1,0 +1,2021 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "8cf7e557a3d8e00524196c1220912bb2099bef3c58515cc3299fb967c9536dc3"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.agent",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "6dd9938e8bb60e0ba55cbb4ff26a36843eff6087eef5cc3f5a6d0ded7982a6fa"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse AI and software-agent ontology",
+          "description": "Framework-neutral software-agent, model, message, context, tool, delegation, and representational-state concepts.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.software",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "059dbe013f45b2cf77374c75c194d8eb3dac7252b3ca2518c6b2788171709d0e"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.computing",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "09cbf3a3fe079c0d82ad4ed02b3375d5b070403bd70627d13f9cb85e4de74c7f"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.semantic",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "8ae20b4d2b51a2319c0822213b5667228908f8ebf0c656872ec604d685e14a17"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.c",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:fipa",
+            "evidence:jsonrpc",
+            "evidence:muse-design",
+            "evidence:otel-genai"
+          ]
+        },
+        "concepts": {
+          "agent:AgentRun": {
+            "id": "agent:AgentRun",
+            "preferred_labels": {
+              "en": "agent run"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A temporally bounded event/interaction episode in which a software agent performs work under a run identity.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ArtificialAgent": {
+            "id": "agent:ArtificialAgent",
+            "preferred_labels": {
+              "en": "artificial agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An agent whose capacity for action is realized through an engineered artificial system.",
+              "genus": "ufo:Agent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Agent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:BeliefLikeState": {
+            "id": "agent:BeliefLikeState",
+            "preferred_labels": {
+              "en": "agent belief-like state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A representational state recording content treated by the software agent as currently accepted or relied upon, without asserting phenomenological equivalence to human belief.",
+              "genus": "agent:RepresentationalState",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:RepresentationalState"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:ChoiceOption": {
+            "id": "agent:ChoiceOption",
+            "preferred_labels": {
+              "en": "choice option"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact representing one explicitly offered candidate answer or action for a question prompt; its presence does not assert that the candidate is true or selected.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:Context": {
+            "id": "agent:Context",
+            "preferred_labels": {
+              "en": "agent context"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact representing information supplied or retained as context for an agent or model invocation.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ContextWindow": {
+            "id": "agent:ContextWindow",
+            "preferred_labels": {
+              "en": "context window"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A bounded context artifact supplied to a specific model invocation, including its ordered model-visible content.",
+              "genus": "agent:Context",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:Context"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ConversationalTurn": {
+            "id": "agent:ConversationalTurn",
+            "preferred_labels": {
+              "en": "conversational turn"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A communicative event contributing one participant's message/content to a conversation sequence.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:Delegation": {
+            "id": "agent:Delegation",
+            "preferred_labels": {
+              "en": "delegation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An action by which an agent or harness assigns a task/subtask to another agent or execution scope.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:GeneratedContent": {
+            "id": "agent:GeneratedContent",
+            "preferred_labels": {
+              "en": "generated content"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact generated by a model-backed agent or model invocation.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:HypothesisState": {
+            "id": "agent:HypothesisState",
+            "preferred_labels": {
+              "en": "agent hypothesis state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A representational state in which propositional content is treated as a hypothesis/candidate rather than as an unqualified assertion.",
+              "genus": "agent:RepresentationalState",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:RepresentationalState"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:LanguageModel": {
+            "id": "agent:LanguageModel",
+            "preferred_labels": {
+              "en": "language model"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A model artifact whose inference interface maps linguistic or tokenized context to distributions or generated linguistic/token content.",
+              "genus": "agent:ModelArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ModelArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:Message": {
+            "id": "agent:Message",
+            "preferred_labels": {
+              "en": "agent message"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact containing communicative content with source-specified sender/addressee semantics; existence of the artifact does not by itself establish successful delivery.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:MessageDelivery": {
+            "id": "agent:MessageDelivery",
+            "preferred_labels": {
+              "en": "message delivery"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A communicative act in which a message artifact is delivered or otherwise communicated to an addressee; a requested send operation does not establish that this act occurred.",
+              "genus": "ufo:CommunicativeAct",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:CommunicativeAct"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:ModelArtifact": {
+            "id": "agent:ModelArtifact",
+            "preferred_labels": {
+              "en": "model artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact encoding learned parameters and associated model structure/configuration used for inference.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ModelBackedAgent": {
+            "id": "agent:ModelBackedAgent",
+            "preferred_labels": {
+              "en": "model-backed agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software agent whose behavior generation materially depends on invocation of one or more learned model artifacts.",
+              "genus": "agent:SoftwareAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:SoftwareAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ModelInvocation": {
+            "id": "agent:ModelInvocation",
+            "preferred_labels": {
+              "en": "model invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event in which a model artifact is invoked with an input/context to produce model output or an error.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:Observation": {
+            "id": "agent:Observation",
+            "preferred_labels": {
+              "en": "agent observation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact supplied to an agent as an observation of tool, environment, user, or system state.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:QuestionPrompt": {
+            "id": "agent:QuestionPrompt",
+            "preferred_labels": {
+              "en": "question prompt"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying interrogative content to be presented to an addressee, including structured choice prompts used by agent tools.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:RepresentationalState": {
+            "id": "agent:RepresentationalState",
+            "preferred_labels": {
+              "en": "agent representational state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A computational state that explicitly represents propositional or task-relevant content for a software agent; it is not thereby identified with a human mental moment.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:SoftwareAgent": {
+            "id": "agent:SoftwareAgent",
+            "preferred_labels": {
+              "en": "software agent"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artificial agent whose operational realization is software executing in a computing environment.",
+              "genus": "agent:ArtificialAgent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:ArtificialAgent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:Subtask": {
+            "id": "agent:Subtask",
+            "preferred_labels": {
+              "en": "agent subtask"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A task whose intended execution is subordinate to another task.",
+              "genus": "agent:Task",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "agent:Task"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:Task": {
+            "id": "agent:Task",
+            "preferred_labels": {
+              "en": "agent task"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A plan/goal description specifying work requested or adopted for an agent run.",
+              "genus": "ufo:PlanDescription",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:PlanDescription"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:TaskState": {
+            "id": "agent:TaskState",
+            "preferred_labels": {
+              "en": "task state"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A source-attributed situation describing the lifecycle/status state of an agent task without implying that the task's planned work has been completed.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:Tool": {
+            "id": "agent:Tool",
+            "preferred_labels": {
+              "en": "tool"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact exposed to an agent through a callable operation interface.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ToolInvocation": {
+            "id": "agent:ToolInvocation",
+            "preferred_labels": {
+              "en": "tool invocation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event in which an agent/harness requests execution of a tool operation with structured arguments.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ToolInvocationUpdate": {
+            "id": "agent:ToolInvocationUpdate",
+            "preferred_labels": {
+              "en": "tool invocation update"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A source-visible information artifact reporting lifecycle state or revised metadata for an already identified tool invocation; observing this artifact does not constitute another invocation event.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ToolResult": {
+            "id": "agent:ToolResult",
+            "preferred_labels": {
+              "en": "tool result"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact returned or recorded as the result/error payload of a tool invocation.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:ToolSpecification": {
+            "id": "agent:ToolSpecification",
+            "preferred_labels": {
+              "en": "tool specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying a tool's callable identity, arguments, result/error contract, and relevant semantics.",
+              "genus": "se:SoftwareSpecification",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareSpecification"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          }
+        },
+        "relations": {
+          "agent:choiceOptionDescription": {
+            "id": "agent:choiceOptionDescription",
+            "preferred_labels": {
+              "en": "choice option description"
+            },
+            "definition": "Relates a choice option to its exact source-visible descriptive text.",
+            "domains": [
+              "agent:ChoiceOption"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:choiceOptionExpressesContent": {
+            "id": "agent:choiceOptionExpressesContent",
+            "preferred_labels": {
+              "en": "choice option expresses content"
+            },
+            "definition": "Relates a choice option to semantic content expressed by that option; the relation does not assert or select that content.",
+            "domains": [
+              "agent:ChoiceOption"
+            ],
+            "ranges": [
+              "sem:SemanticContent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:choiceOptionLabel": {
+            "id": "agent:choiceOptionLabel",
+            "preferred_labels": {
+              "en": "choice option label"
+            },
+            "definition": "Relates a choice option to its exact source-visible short label.",
+            "domains": [
+              "agent:ChoiceOption"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:delegatedTo": {
+            "id": "agent:delegatedTo",
+            "preferred_labels": {
+              "en": "delegated to"
+            },
+            "definition": "Relates a delegation action to the receiving software agent.",
+            "domains": [
+              "agent:Delegation"
+            ],
+            "ranges": [
+              "agent:SoftwareAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:delegatesTask": {
+            "id": "agent:delegatesTask",
+            "preferred_labels": {
+              "en": "delegates task"
+            },
+            "definition": "Relates a delegation action to the task/subtask delegated.",
+            "domains": [
+              "agent:Delegation"
+            ],
+            "ranges": [
+              "agent:Task"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:deliversMessage": {
+            "id": "agent:deliversMessage",
+            "preferred_labels": {
+              "en": "delivers message"
+            },
+            "definition": "Relates a message-delivery communicative act to the message artifact delivered or communicated by that act.",
+            "domains": [
+              "agent:MessageDelivery"
+            ],
+            "ranges": [
+              "agent:Message"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:generatedByInvocation": {
+            "id": "agent:generatedByInvocation",
+            "preferred_labels": {
+              "en": "generated by invocation"
+            },
+            "definition": "Relates generated content to the model invocation that generated it.",
+            "domains": [
+              "agent:GeneratedContent"
+            ],
+            "ranges": [
+              "agent:ModelInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:hasTask": {
+            "id": "agent:hasTask",
+            "preferred_labels": {
+              "en": "has task"
+            },
+            "definition": "Relates an agent run to a task it is attempting or performing.",
+            "domains": [
+              "agent:AgentRun"
+            ],
+            "ranges": [
+              "agent:Task"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:invokesModel": {
+            "id": "agent:invokesModel",
+            "preferred_labels": {
+              "en": "invokes model"
+            },
+            "definition": "Relates a model invocation event to the model artifact invoked.",
+            "domains": [
+              "agent:ModelInvocation"
+            ],
+            "ranges": [
+              "agent:ModelArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:invokesTool": {
+            "id": "agent:invokesTool",
+            "preferred_labels": {
+              "en": "invokes tool"
+            },
+            "definition": "Relates a tool invocation event to the tool being invoked.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "agent:Tool"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:messageCarriesArtifact": {
+            "id": "agent:messageCarriesArtifact",
+            "preferred_labels": {
+              "en": "message carries artifact"
+            },
+            "definition": "Relates a message to an information artifact included or referenced as communicated content.",
+            "domains": [
+              "agent:Message"
+            ],
+            "ranges": [
+              "se:InformationArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:messageExpressesProposition": {
+            "id": "agent:messageExpressesProposition",
+            "preferred_labels": {
+              "en": "message expresses proposition"
+            },
+            "definition": "Relates a message to propositional content it expresses; this does not establish that the message was successfully delivered.",
+            "domains": [
+              "agent:Message"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:messageReceiver": {
+            "id": "agent:messageReceiver",
+            "preferred_labels": {
+              "en": "message receiver"
+            },
+            "definition": "Relates a message to an identified receiver/addressee.",
+            "domains": [
+              "agent:Message"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa"
+            ]
+          },
+          "agent:messageSender": {
+            "id": "agent:messageSender",
+            "preferred_labels": {
+              "en": "message sender"
+            },
+            "definition": "Relates a message to the agent or other participant identified as its sender.",
+            "domains": [
+              "agent:Message"
+            ],
+            "ranges": [
+              "ufo:Agent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa"
+            ]
+          },
+          "agent:messageSummary": {
+            "id": "agent:messageSummary",
+            "preferred_labels": {
+              "en": "message summary"
+            },
+            "definition": "Relates a message to an explicitly supplied short summary string without treating the summary as a separate asserted message.",
+            "domains": [
+              "agent:Message"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:modelInvocationUsesContext": {
+            "id": "agent:modelInvocationUsesContext",
+            "preferred_labels": {
+              "en": "model invocation uses context"
+            },
+            "definition": "Relates a model invocation to context supplied to that invocation.",
+            "domains": [
+              "agent:ModelInvocation"
+            ],
+            "ranges": [
+              "agent:Context"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:observationForAgent": {
+            "id": "agent:observationForAgent",
+            "preferred_labels": {
+              "en": "observation for agent"
+            },
+            "definition": "Relates an observation artifact to the software agent to which it was supplied.",
+            "domains": [
+              "agent:Observation"
+            ],
+            "ranges": [
+              "agent:SoftwareAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:observationForRun": {
+            "id": "agent:observationForRun",
+            "preferred_labels": {
+              "en": "observation for run"
+            },
+            "definition": "Relates an observation artifact to the agent run in which it was supplied.",
+            "domains": [
+              "agent:Observation"
+            ],
+            "ranges": [
+              "agent:AgentRun"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:questionPromptExpressesContent": {
+            "id": "agent:questionPromptExpressesContent",
+            "preferred_labels": {
+              "en": "question prompt expresses content"
+            },
+            "definition": "Relates a structured question prompt to interrogative semantic content without asserting any embedded proposition as true.",
+            "domains": [
+              "agent:QuestionPrompt"
+            ],
+            "ranges": [
+              "sem:InterrogativeContent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:questionPromptHasOption": {
+            "id": "agent:questionPromptHasOption",
+            "preferred_labels": {
+              "en": "question prompt has option"
+            },
+            "definition": "Relates a structured question prompt to one explicitly offered choice option.",
+            "domains": [
+              "agent:QuestionPrompt"
+            ],
+            "ranges": [
+              "agent:ChoiceOption"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:questionPromptHeader": {
+            "id": "agent:questionPromptHeader",
+            "preferred_labels": {
+              "en": "question prompt header"
+            },
+            "definition": "Relates a structured question prompt to its explicitly supplied short header/title string.",
+            "domains": [
+              "agent:QuestionPrompt"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:questionPromptMultiSelect": {
+            "id": "agent:questionPromptMultiSelect",
+            "preferred_labels": {
+              "en": "question prompt multi-select"
+            },
+            "definition": "Relates a structured question prompt to its source-specified multi-select flag.",
+            "domains": [
+              "agent:QuestionPrompt"
+            ],
+            "ranges": [
+              "comp:BooleanValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:representsProposition": {
+            "id": "agent:representsProposition",
+            "preferred_labels": {
+              "en": "represents proposition"
+            },
+            "definition": "Relates an agent representational state to propositional content it computationally represents.",
+            "domains": [
+              "agent:RepresentationalState"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:runOf": {
+            "id": "agent:runOf",
+            "preferred_labels": {
+              "en": "run of"
+            },
+            "definition": "Relates an agent run to the software agent performing work in that run.",
+            "domains": [
+              "agent:AgentRun"
+            ],
+            "ranges": [
+              "agent:SoftwareAgent"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:runUsesContext": {
+            "id": "agent:runUsesContext",
+            "preferred_labels": {
+              "en": "run uses context"
+            },
+            "definition": "Relates an agent run to context retained or supplied within that run.",
+            "domains": [
+              "agent:AgentRun"
+            ],
+            "ranges": [
+              "agent:Context"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:subtaskOf": {
+            "id": "agent:subtaskOf",
+            "preferred_labels": {
+              "en": "subtask of"
+            },
+            "definition": "Relates a subtask to the task under which it is scoped.",
+            "domains": [
+              "agent:Subtask"
+            ],
+            "ranges": [
+              "agent:Task"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:taskStateOf": {
+            "id": "agent:taskStateOf",
+            "preferred_labels": {
+              "en": "task state of"
+            },
+            "definition": "Relates a source-attributed task-state situation to the task whose lifecycle/status it describes.",
+            "domains": [
+              "agent:TaskState"
+            ],
+            "ranges": [
+              "agent:Task"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:taskStateValue": {
+            "id": "agent:taskStateValue",
+            "preferred_labels": {
+              "en": "task state value"
+            },
+            "definition": "Relates a task-state situation to its exact source-reported status token represented as a string value.",
+            "domains": [
+              "agent:TaskState"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationDurationMillis": {
+            "id": "agent:toolInvocationDurationMillis",
+            "preferred_labels": {
+              "en": "tool invocation duration milliseconds"
+            },
+            "definition": "Relates a tool invocation to a source-reported elapsed duration in milliseconds represented as an integer data value.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "comp:IntegerValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationHasArgument": {
+            "id": "agent:toolInvocationHasArgument",
+            "preferred_labels": {
+              "en": "tool invocation has argument"
+            },
+            "definition": "Relates a tool invocation to an explicitly supplied argument artifact.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "comp:Argument"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationInRun": {
+            "id": "agent:toolInvocationInRun",
+            "preferred_labels": {
+              "en": "tool invocation in run"
+            },
+            "definition": "Relates a tool invocation to the agent run within which it occurred.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "agent:AgentRun"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationObservedEffect": {
+            "id": "agent:toolInvocationObservedEffect",
+            "preferred_labels": {
+              "en": "tool invocation observed effect"
+            },
+            "definition": "Relates a tool invocation to an effect event independently established by structured source evidence; result success alone is insufficient evidence for this relation.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationParent": {
+            "id": "agent:toolInvocationParent",
+            "preferred_labels": {
+              "en": "tool invocation parent"
+            },
+            "definition": "Relates a nested tool invocation to the enclosing/parent tool invocation explicitly identified by the source.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationPrincipal": {
+            "id": "agent:toolInvocationPrincipal",
+            "preferred_labels": {
+              "en": "tool invocation principal"
+            },
+            "definition": "Relates a tool invocation to the agent or harness object that initiated the invocation according to the structured source record.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "ufo:Object"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationRequestedEffect": {
+            "id": "agent:toolInvocationRequestedEffect",
+            "preferred_labels": {
+              "en": "tool invocation requested effect"
+            },
+            "definition": "Relates a tool invocation to propositional effect content requested by the invocation. The proposition is intensional content and is not independently asserted as an observed world change.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "ufo:Proposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationResult": {
+            "id": "agent:toolInvocationResult",
+            "preferred_labels": {
+              "en": "tool invocation result"
+            },
+            "definition": "Relates a tool invocation to its returned/recorded result artifact without asserting independent external effects.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "agent:ToolResult"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationRetryOf": {
+            "id": "agent:toolInvocationRetryOf",
+            "preferred_labels": {
+              "en": "tool invocation retry of"
+            },
+            "definition": "Relates a tool invocation to a prior tool invocation that the source explicitly identifies as the attempt being retried.",
+            "domains": [
+              "agent:ToolInvocation"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolInvocationUpdateCarriesResult": {
+            "id": "agent:toolInvocationUpdateCarriesResult",
+            "preferred_labels": {
+              "en": "tool invocation update carries result"
+            },
+            "definition": "Relates a lifecycle/update artifact to a tool-result artifact explicitly carried in that update; this does not independently verify external effects described by the result.",
+            "domains": [
+              "agent:ToolInvocationUpdate"
+            ],
+            "ranges": [
+              "agent:ToolResult"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationUpdateFor": {
+            "id": "agent:toolInvocationUpdateFor",
+            "preferred_labels": {
+              "en": "tool invocation update for"
+            },
+            "definition": "Relates a lifecycle/update artifact to the tool invocation whose state or metadata it reports; this relation may be added only when exact source identity establishes the join.",
+            "domains": [
+              "agent:ToolInvocationUpdate"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolInvocationUpdateStatus": {
+            "id": "agent:toolInvocationUpdateStatus",
+            "preferred_labels": {
+              "en": "tool invocation update status"
+            },
+            "definition": "Relates a lifecycle/update artifact to its exact source-reported status token represented as a string value.",
+            "domains": [
+              "agent:ToolInvocationUpdate"
+            ],
+            "ranges": [
+              "comp:StringValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolResultDiagnostic": {
+            "id": "agent:toolResultDiagnostic",
+            "preferred_labels": {
+              "en": "tool result diagnostic"
+            },
+            "definition": "Relates a tool-result artifact to a diagnostic information artifact explicitly returned or recorded with it.",
+            "domains": [
+              "agent:ToolResult"
+            ],
+            "ranges": [
+              "se:Diagnostic"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolResultOfInvocation": {
+            "id": "agent:toolResultOfInvocation",
+            "preferred_labels": {
+              "en": "tool result of invocation"
+            },
+            "definition": "Relates a tool-result artifact to the exact tool invocation whose returned/result record it is, only when source identity establishes the join.",
+            "domains": [
+              "agent:ToolResult"
+            ],
+            "ranges": [
+              "agent:ToolInvocation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolResultOutcome": {
+            "id": "agent:toolResultOutcome",
+            "preferred_labels": {
+              "en": "tool result outcome"
+            },
+            "definition": "Relates a tool-result artifact to the execution outcome that the structured result explicitly reports for the tool operation. A failure outcome classifies the operation/result status; it does not negate or invalidate other payload observations that completed before the failure.",
+            "domains": [
+              "agent:ToolResult"
+            ],
+            "ranges": [
+              "comp:ExecutionOutcome"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:toolResultPayload": {
+            "id": "agent:toolResultPayload",
+            "preferred_labels": {
+              "en": "tool result payload"
+            },
+            "definition": "Relates a tool-result artifact to its exact source-visible payload represented as a literal; this records returned content and does not independently establish external effects.",
+            "domains": [
+              "agent:ToolResult"
+            ],
+            "ranges": [
+              "comp:DataValue"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:toolSpecifiedBy": {
+            "id": "agent:toolSpecifiedBy",
+            "preferred_labels": {
+              "en": "tool specified by"
+            },
+            "definition": "Relates a tool to its callable specification.",
+            "domains": [
+              "agent:Tool"
+            ],
+            "ranges": [
+              "agent:ToolSpecification"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:jsonrpc",
+              "evidence:otel-genai"
+            ]
+          },
+          "agent:turnCarriesMessage": {
+            "id": "agent:turnCarriesMessage",
+            "preferred_labels": {
+              "en": "turn carries message"
+            },
+            "definition": "Relates a conversational turn to the message/content artifact contributed by that turn.",
+            "domains": [
+              "agent:ConversationalTurn"
+            ],
+            "ranges": [
+              "agent:Message"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:fipa",
+              "evidence:muse-design"
+            ]
+          },
+          "agent:usesModel": {
+            "id": "agent:usesModel",
+            "preferred_labels": {
+              "en": "uses model"
+            },
+            "definition": "Relates a model-backed agent to a model artifact it invokes as part of its operation.",
+            "domains": [
+              "agent:ModelBackedAgent"
+            ],
+            "ranges": [
+              "agent:ModelArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:otel-genai"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

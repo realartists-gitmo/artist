@@ -11,6 +11,7 @@
 
 use globset::{Glob, GlobMatcher};
 use serde::Deserialize;
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -112,13 +113,15 @@ pub struct Profile {
     pub name: String,
     pub description: String,
     pub instructions: String,
+    /// Optional JSON Schema for a completed Artist work-unit yield.
+    pub yield_schema: Option<Value>,
     /// Ordered; index 0 is preferred while healthy. Never empty — a profile
     /// with no declared routing gets one fully-inheriting candidate.
     pub candidates: Vec<Candidate>,
-    allow: Option<Vec<GlobMatcher>>,
-    deny: Vec<GlobMatcher>,
-    skill_allow: Option<Vec<GlobMatcher>>,
-    skill_deny: Vec<GlobMatcher>,
+    allow: Option<Vec<PolicyPattern>>,
+    deny: Vec<PolicyPattern>,
+    skill_allow: Option<Vec<PolicyPattern>>,
+    skill_deny: Vec<PolicyPattern>,
     pub source: Option<PathBuf>,
 }
 
@@ -131,23 +134,57 @@ impl Profile {
     ///
     /// Profile `permits` is the single model-facing tool visibility gate.
     pub fn permits(&self, tool: &str) -> bool {
-        let allowed = self
-            .allow
-            .as_ref()
-            .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(tool)));
-        allowed && !self.deny.iter().any(|pattern| pattern.is_match(tool))
+        permits(&self.allow, &self.deny, tool)
     }
 
     pub fn permits_skill(&self, skill: &str) -> bool {
-        let allowed = self
-            .skill_allow
-            .as_ref()
-            .is_none_or(|patterns| patterns.iter().any(|pattern| pattern.is_match(skill)));
-        allowed
-            && !self
-                .skill_deny
-                .iter()
-                .any(|pattern| pattern.is_match(skill))
+        permits(&self.skill_allow, &self.skill_deny, skill)
+    }
+
+    pub fn validate_yield(&self, value: &Value) -> Result<(), String> {
+        let Some(schema) = &self.yield_schema else {
+            return Ok(());
+        };
+        let compiled = jsonschema::JSONSchema::compile(schema)
+            .map_err(|error| format!("profile {} has invalid yieldSchema: {error}", self.name))?;
+        if let Err(errors) = compiled.validate(value) {
+            return Err(errors
+                .take(6)
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PolicyPattern {
+    matcher: GlobMatcher,
+    /// Literal characters are a stable, transparent measure of a glob's
+    /// specificity. A literal path therefore outranks its wildcard parent;
+    /// equal specificity remains a deliberate deny-wins tie.
+    specificity: usize,
+}
+
+fn permits(allow: &Option<Vec<PolicyPattern>>, deny: &[PolicyPattern], value: &str) -> bool {
+    let strongest = |patterns: &[PolicyPattern]| {
+        patterns
+            .iter()
+            .filter(|pattern| pattern.matcher.is_match(value))
+            .map(|pattern| pattern.specificity)
+            .max()
+    };
+    // Preserve the distinction between an absent allow list (allow all) and
+    // a present list with no matching rule (allow nothing).
+    let allow = allow.as_deref().map(strongest);
+    let deny = strongest(deny);
+    match (allow, deny) {
+        (Some(Some(allow)), Some(deny)) => allow > deny,
+        (Some(Some(_)), None) => true,
+        (Some(None), _) => false,
+        (None, None) => true,
+        (None, Some(_)) => false,
     }
 }
 
@@ -185,6 +222,8 @@ struct Frontmatter {
     candidates: Option<Vec<Candidate>>,
     tools: Option<Tools>,
     skills: Option<Tools>,
+    #[serde(rename = "yieldSchema")]
+    yield_schema: Option<Value>,
 }
 
 #[derive(Default, Deserialize)]
@@ -205,6 +244,7 @@ struct Raw {
     deny: Vec<String>,
     skill_allow: Option<Vec<String>>,
     skill_deny: Vec<String>,
+    yield_schema: Option<Value>,
     instructions: String,
     source: Option<PathBuf>,
 }
@@ -378,6 +418,7 @@ fn parse(path: &Path) -> Result<Raw, String> {
         deny: tools.deny,
         skill_allow: skills.allow,
         skill_deny: skills.deny,
+        yield_schema: front.yield_schema,
         instructions: body.trim().to_owned(),
         source: Some(path.to_owned()),
     })
@@ -447,11 +488,17 @@ fn resolve(
     } else {
         definition.instructions.clone()
     };
+    let yield_schema = definition.yield_schema.clone().or_else(|| {
+        parent
+            .as_ref()
+            .and_then(|parent| parent.yield_schema.clone())
+    });
 
     Ok(Profile {
         name: definition.name.clone(),
         description,
         instructions,
+        yield_schema,
         candidates,
         allow,
         deny,
@@ -461,12 +508,18 @@ fn resolve(
     })
 }
 
-fn compile(patterns: &[String], profile: &str) -> Result<Vec<GlobMatcher>, String> {
+fn compile(patterns: &[String], profile: &str) -> Result<Vec<PolicyPattern>, String> {
     patterns
         .iter()
         .map(|pattern| {
             Glob::new(pattern)
-                .map(|glob| glob.compile_matcher())
+                .map(|glob| PolicyPattern {
+                    matcher: glob.compile_matcher(),
+                    specificity: pattern
+                        .chars()
+                        .filter(|character| !matches!(character, '*' | '?' | '[' | ']'))
+                        .count(),
+                })
                 .map_err(|error| format!("profile {profile} has an invalid tool pattern: {error}"))
         })
         .collect()
@@ -535,6 +588,7 @@ fn builtins() -> Vec<Raw> {
                 deny,
                 skill_allow: None,
                 skill_deny: Vec::new(),
+                yield_schema: None,
                 instructions: crate::prompt_config::profile_prompt(name).trim().to_owned(),
                 source: None,
             }
@@ -578,6 +632,7 @@ fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
                     Tool::Ask.name(),
                     Tool::Handoff.name(),
                     Tool::Poll.name(),
+                    Tool::Stop.name(),
                     Tool::Abort.name(),
                     Tool::Send.name(),
                     Tool::List.name(),
@@ -840,6 +895,57 @@ mod tests {
         assert!(profiles.catalog().contains("circular"));
         // A broken definition never takes out the built-ins.
         assert!(profiles.get("default").is_ok());
+    }
+
+    #[test]
+    fn most_specific_policy_match_wins_and_deny_breaks_ties() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join(".artist/profiles/precedence.md"),
+            "---\ndescription: precedence\ntools:\n  allow: [\"mcp:github/*\", \"mcp:github/create_issue\"]\n  deny: [\"mcp:github/create_*\", \"mcp:github/delete_*\"]\n---\nprompt\n",
+        );
+        let profile = Profiles::discover_from(dir.path(), None)
+            .get("precedence")
+            .unwrap();
+
+        assert!(profile.permits("mcp:github/create_issue"));
+        assert!(!profile.permits("mcp:github/create_comment"));
+        assert!(!profile.permits("mcp:github/delete_issue"));
+
+        write(
+            &dir.path().join(".artist/profiles/tie.md"),
+            "---\ndescription: tie\ntools:\n  allow: [\"mcp:github/*\"]\n  deny: [\"mcp:github/*\"]\n---\nprompt\n",
+        );
+        let tie = Profiles::discover_from(dir.path(), None)
+            .get("tie")
+            .unwrap();
+        assert!(!tie.permits("mcp:github/list_issues"));
+    }
+
+    #[test]
+    fn profile_yield_schema_is_inherited_and_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join(".artist/profiles/yield-parent.md"),
+            "---\ndescription: yield parent\nyieldSchema:\n  type: object\n  required: [answer]\n  properties:\n    answer:\n      type: string\n---\nprompt\n",
+        );
+        write(
+            &dir.path().join(".artist/profiles/yield-child.md"),
+            "---\ndescription: yield child\nextends: yield-parent\n---\nprompt\n",
+        );
+        let profile = Profiles::discover_from(dir.path(), None)
+            .get("yield-child")
+            .unwrap();
+        assert!(
+            profile
+                .validate_yield(&serde_json::json!({"answer":"done"}))
+                .is_ok()
+        );
+        assert!(
+            profile
+                .validate_yield(&serde_json::json!({"wrong":true}))
+                .is_err()
+        );
     }
 
     #[test]

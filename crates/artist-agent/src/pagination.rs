@@ -10,10 +10,12 @@ use artist_tool_api::{
     ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, PageInfo, ToolCategory,
     schema_for,
 };
+use fs2::FileExt;
 use rig_core::tool::{ToolExecutionError, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const MAX_INLINE_RESULT_BYTES: usize = 64 * 1024;
@@ -37,6 +39,19 @@ struct Artifact {
     content_type: String,
     content: String,
     created_at_ms: u64,
+}
+
+/// Safe, model-visible metadata for a durable paginated artifact. The payload
+/// itself stays behind the pagination cursor and is never duplicated into an
+/// `artifact://` read.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactInfo {
+    pub id: String,
+    pub tool: String,
+    pub content_type: String,
+    pub total_bytes: usize,
+    pub created_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -146,7 +161,6 @@ impl PageStore {
             return Ok(None);
         }
 
-        let artifact_id = Uuid::new_v4().simple().to_string();
         let cursor = Uuid::new_v4().simple().to_string();
         let artifact = Artifact {
             tool: tool.to_owned(),
@@ -154,12 +168,16 @@ impl PageStore {
             content: payload,
             created_at_ms: now_ms(),
         };
+        // The base is derived from the exact canonical occurrence envelope;
+        // a serial is allocated only when that occurrence appears again. This
+        // keeps identical bytes from distinct tool-result occurrences distinct
+        // without introducing a random resource identity.
+        let artifact_id = self.store_artifact(&artifact)?;
         let record = CursorRecord {
-            artifact_id: artifact_id.clone(),
+            artifact_id,
             offset: 0,
             expires_at_ms: now_ms().saturating_add(CURSOR_TTL_MS),
         };
-        self.write_artifact(&artifact_id, &artifact)?;
         self.write_cursor(&cursor, &record)?;
 
         let preview_source = if rendered.is_empty() {
@@ -180,6 +198,51 @@ impl PageStore {
             ),
             preview,
         }))
+    }
+
+    /// Enumerate retained artifact metadata in a stable order.
+    pub fn artifacts(&self) -> Result<Vec<ArtifactInfo>, ToolExecutionError> {
+        let mut artifacts = if let Some(root) = &self.root {
+            std::fs::read_dir(root.join("artifacts"))
+                .map_err(|error| ToolExecutionError::other(error.to_string()))?
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    (path.is_file()
+                        && path
+                            .extension()
+                            .is_some_and(|extension| extension == "json"))
+                    .then_some(path)
+                })
+                .filter_map(|path| {
+                    let id = path.file_stem()?.to_str()?.to_owned();
+                    read_json::<Artifact>(&path)
+                        .ok()
+                        .flatten()
+                        .map(|artifact| artifact_info(id, artifact))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.memory
+                .artifacts
+                .lock()
+                .expect("page artifact mutex poisoned")
+                .iter()
+                .map(|(id, artifact)| artifact_info(id.clone(), artifact.clone()))
+                .collect()
+        };
+        artifacts.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(artifacts)
+    }
+
+    /// Retrieve metadata for one opaque artifact id.
+    pub fn artifact(&self, id: &str) -> Result<Option<ArtifactInfo>, ToolExecutionError> {
+        if !valid_artifact_id(id) {
+            return Ok(None);
+        }
+        Ok(self
+            .read_artifact(id)?
+            .map(|artifact| artifact_info(id.to_owned(), artifact)))
     }
 
     pub fn read(&self, cursor: &str, max_bytes: usize) -> Result<PageChunk, ToolExecutionError> {
@@ -251,17 +314,37 @@ impl PageStore {
         })
     }
 
-    fn write_artifact(&self, id: &str, artifact: &Artifact) -> Result<(), ToolExecutionError> {
+    fn store_artifact(&self, artifact: &Artifact) -> Result<String, ToolExecutionError> {
+        let base = artifact_base_id(artifact)?;
         if let Some(root) = &self.root {
-            write_json_atomic(&root.join("artifacts").join(format!("{id}.json")), artifact)
-                .map_err(|error| ToolExecutionError::other(error.to_string()))
+            let directory = root.join("artifacts");
+            std::fs::create_dir_all(&directory)
+                .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+            let lock_path = directory.join(".lock");
+            let lock = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+            lock.lock_exclusive()
+                .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+            let id = next_artifact_id(&base, |candidate| {
+                directory.join(format!("{candidate}.json")).exists()
+            });
+            let result = write_json_atomic(&directory.join(format!("{id}.json")), artifact)
+                .map_err(|error| ToolExecutionError::other(error.to_string()));
+            let _ = FileExt::unlock(&lock);
+            result.map(|()| id)
         } else {
-            self.memory
+            let mut artifacts = self
+                .memory
                 .artifacts
                 .lock()
-                .expect("page artifact mutex poisoned")
-                .insert(id.to_owned(), artifact.clone());
-            Ok(())
+                .expect("page artifact mutex poisoned");
+            let id = next_artifact_id(&base, |candidate| artifacts.contains_key(candidate));
+            artifacts.insert(id.clone(), artifact.clone());
+            Ok(id)
         }
     }
 
@@ -344,6 +427,9 @@ impl PageStore {
         if let Ok(entries) = std::fs::read_dir(root.join("artifacts")) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                if path.extension().is_none_or(|extension| extension != "json") {
+                    continue;
+                }
                 let expired = read_json::<Artifact>(&path)
                     .ok()
                     .flatten()
@@ -355,6 +441,63 @@ impl PageStore {
                 }
             }
         }
+    }
+}
+
+fn valid_artifact_id(id: &str) -> bool {
+    // Pre-migration UUID artifacts remain readable. New IDs are a canonical
+    // `a-<sha256-prefix>` with an optional occurrence serial.
+    if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return true;
+    }
+    let Some(rest) = id.strip_prefix("a-") else {
+        return false;
+    };
+    let (digest, serial) = rest.split_once('-').unwrap_or((rest, ""));
+    digest.len() == 24
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && (serial.is_empty()
+            || (serial.bytes().all(|byte| byte.is_ascii_digit())
+                && serial.parse::<u64>().is_ok_and(|serial| serial >= 2)))
+}
+
+fn artifact_base_id(artifact: &Artifact) -> Result<String, ToolExecutionError> {
+    let envelope = serde_json::to_vec(&serde_json::json!({
+        "tool": artifact.tool,
+        "contentType": artifact.content_type,
+        "content": artifact.content,
+    }))
+    .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+    let digest = Sha256::digest(envelope);
+    let token = digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("a-{token}"))
+}
+
+fn next_artifact_id(base: &str, occupied: impl Fn(&str) -> bool) -> String {
+    let mut serial = 1_u64;
+    loop {
+        let candidate = if serial == 1 {
+            base.to_owned()
+        } else {
+            format!("{base}-{serial}")
+        };
+        if !occupied(&candidate) {
+            return candidate;
+        }
+        serial = serial.saturating_add(1);
+    }
+}
+
+fn artifact_info(id: String, artifact: Artifact) -> ArtifactInfo {
+    ArtifactInfo {
+        id,
+        tool: artifact.tool,
+        content_type: artifact.content_type,
+        total_bytes: artifact.content.len(),
+        created_at_ms: artifact.created_at_ms,
     }
 }
 
@@ -441,5 +584,66 @@ mod tests {
         let store = PageStore::open(None).unwrap();
         let error = store.read("../secret", 10).unwrap_err();
         assert_eq!(error.code(), Some("cursor_invalid"));
+    }
+
+    #[test]
+    fn artifact_metadata_survives_reopen_without_exposing_payload() {
+        let state = tempfile::tempdir().unwrap();
+        let store = PageStore::open(Some(state.path())).unwrap();
+        let secret = "private artifact payload".repeat(5_000);
+        let page = store
+            .paginate("read", &serde_json::json!({"text": secret}), &secret)
+            .unwrap()
+            .unwrap();
+        let artifact_id = store
+            .read_cursor(&page.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+        let artifact_path = state
+            .path()
+            .join("pages/artifacts")
+            .join(format!("{artifact_id}.json"));
+        assert!(artifact_path.exists());
+        assert!(read_json::<Artifact>(&artifact_path).unwrap().is_some());
+        drop(store);
+
+        let store = PageStore::open(Some(state.path())).unwrap();
+        assert!(
+            artifact_path.exists(),
+            "artifact removed during reopen cleanup"
+        );
+        let info = store.artifact(&artifact_id).unwrap().unwrap();
+        assert_eq!(info.id, artifact_id);
+        assert_eq!(info.tool, "read");
+        assert!(info.total_bytes > MAX_INLINE_RESULT_BYTES);
+        assert_eq!(store.artifacts().unwrap(), vec![info]);
+    }
+
+    #[test]
+    fn artifact_ids_are_canonical_envelope_hashes_with_occurrence_serials() {
+        let store = PageStore::memory();
+        let text = "same occurrence bytes".repeat(5_000);
+        let first = store
+            .paginate("read", &serde_json::json!({"text": text}), &text)
+            .unwrap()
+            .unwrap();
+        let second = store
+            .paginate("read", &serde_json::json!({"text": text}), &text)
+            .unwrap()
+            .unwrap();
+        let first_id = store
+            .read_cursor(&first.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+        let second_id = store
+            .read_cursor(&second.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+
+        assert!(first_id.starts_with("a-"));
+        assert_eq!(second_id, format!("{first_id}-2"));
     }
 }

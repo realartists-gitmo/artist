@@ -1,5 +1,5 @@
 use crate::{ToolError, Workspace, output};
-use fff_search::{GrepMode, GrepSearchOptions, QueryParser};
+use fff_search::{GrepMode, GrepSearchOptions, parse_grep_query};
 use globset::Glob;
 use rig_core::tool::PortableTool;
 use serde::Deserialize;
@@ -11,14 +11,14 @@ pub struct GrepTool(pub Workspace);
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrepArgs {
-    query: String,
-    path: Option<String>,
-    glob: Option<String>,
+    pub query: String,
+    pub path: Option<String>,
+    pub glob: Option<String>,
     #[serde(rename = "match")]
-    match_mode: Option<String>,
-    case: Option<String>,
-    context: Option<usize>,
-    limit: Option<usize>,
+    pub match_mode: Option<String>,
+    pub case: Option<String>,
+    pub context: Option<usize>,
+    pub limit: Option<usize>,
 }
 impl PortableTool for GrepTool {
     const NAME: &'static str = "grep";
@@ -30,7 +30,7 @@ impl PortableTool for GrepTool {
             .into()
     }
     fn parameters(&self) -> Value {
-        json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string","description":"Optional project-relative or absolute search scope."},"glob":{"type":"string"},"match":{"enum":["smart","literal","regex"]},"case":{"enum":["smart","sensitive","insensitive"]},"context":{"type":"integer","minimum":0,"maximum":5},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false})
+        json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string","description":"Optional project-relative or absolute search scope."},"glob":{"type":"string"},"match":{"enum":["auto","literal","regex","fuzzy"],"default":"auto","description":"auto tries literal matching first and falls back to FFF fuzzy matching only when there is no literal result."},"case":{"enum":["smart","sensitive","insensitive"]},"context":{"type":"integer","minimum":0,"maximum":5},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["query"],"additionalProperties":false})
     }
     async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
         let limit = args.limit.unwrap_or(20).min(100);
@@ -40,13 +40,11 @@ impl PortableTool for GrepTool {
         let mode = match args.match_mode.as_deref().unwrap_or("smart") {
             "regex" => GrepMode::Regex,
             "literal" => GrepMode::PlainText,
-            "smart" => {
-                if looks_regex(&args.query) {
-                    GrepMode::Regex
-                } else {
-                    GrepMode::PlainText
-                }
-            }
+            "fuzzy" => GrepMode::Fuzzy,
+            // `smart` was the pre-path-first spelling. Keep it as an input
+            // compatibility alias, but never infer regex syntax: auto must
+            // first preserve the caller's bytes as a literal query.
+            "auto" | "smart" => GrepMode::PlainText,
             other => return Err(ToolError::Message(format!("invalid match mode: {other}"))),
         };
         if mode == GrepMode::Regex {
@@ -59,7 +57,10 @@ impl PortableTool for GrepTool {
             "sensitive" => (args.query.clone(), false),
             other => return Err(ToolError::Message(format!("invalid case mode: {other}"))),
         };
-        let query = QueryParser::default().parse(&search_query);
+        // Grep has its own parser configuration. In particular it keeps code
+        // punctuation such as `.*` as search text rather than accidentally
+        // treating it as a filename/search constraint.
+        let query = parse_grep_query(&search_query);
         let picker = scope
             .index
             .read()
@@ -67,19 +68,38 @@ impl PortableTool for GrepTool {
         let picker = picker
             .as_ref()
             .ok_or_else(|| ToolError::Message("FFF index is unavailable".into()))?;
-        let result = picker.grep(
-            &query,
-            &GrepSearchOptions {
-                page_limit: 1000,
-                max_matches_per_file: 1000,
-                mode,
-                smart_case,
-                before_context: context,
-                after_context: context,
-                time_budget_ms: 10_000,
-                ..Default::default()
-            },
+        let search = |mode| {
+            picker.grep(
+                &query,
+                &GrepSearchOptions {
+                    page_limit: 1000,
+                    max_matches_per_file: 1000,
+                    mode,
+                    smart_case,
+                    before_context: context,
+                    after_context: context,
+                    time_budget_ms: 10_000,
+                    ..Default::default()
+                },
+            )
+        };
+        let auto = matches!(
+            args.match_mode.as_deref().unwrap_or("auto"),
+            "auto" | "smart"
         );
+        let mut result = search(mode);
+        // Auto has a deliberately strict ordering: literal evidence wins, and
+        // fuzzy is considered only when no literal hit survives scope and glob
+        // filtering. This is not regex guessing.
+        if auto
+            && !result.matches.iter().any(|found| {
+                let file = result.files[found.file_index];
+                let relative = file.relative_path(picker).replace('\\', "/");
+                scope.matches(&relative) && matches_glob(&relative, glob.as_ref())
+            })
+        {
+            result = search(GrepMode::Fuzzy);
+        }
         if let Some(error) = &result.regex_fallback_error {
             return Err(ToolError::Message(error.clone()));
         }
@@ -141,7 +161,4 @@ fn compile_glob(value: Option<&str>) -> Result<Option<globset::GlobMatcher>, Too
 }
 fn matches_glob(path: &str, glob: Option<&globset::GlobMatcher>) -> bool {
     glob.is_none_or(|matcher| matcher.is_match(Path::new(path)))
-}
-fn looks_regex(query: &str) -> bool {
-    query.chars().any(|c| "[](){}.*+?|^$\\".contains(c))
 }

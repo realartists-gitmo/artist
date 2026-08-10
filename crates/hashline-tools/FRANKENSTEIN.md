@@ -27,8 +27,7 @@ hashline-tools/
     ├── lib.rs               ← public re-exports
     ├── agent.rs             ← AgentId / AgentIdentity
     ├── error.rs             ← HashlineError (+ codes)
-    ├── anchor_address_v1.rs ← frozen generated F_68399 address function (do not edit)
-    ├── anchor_tokens_68399.txt ← frozen row-indexed v1 token vocabulary (do not edit)
+    ├── semantic_anchors.rs ← TECA-backed, stateless anchor rendering
     ├── scheme_v1.json       ← frozen generated v1 scheme metadata
     ├── semantic_anchors.rs  ← direct row mapping + shortest live rendered prefixes
     ├── anchor_table.rs      ← deterministic live binding addresses for non-file surfaces
@@ -86,7 +85,7 @@ If you refuse a separate crate, the minimal file set is:
 
 | Must copy | Optional |
 |-----------|----------|
-| `file_tools.rs`, `semantic_anchors.rs`, `anchor_address_v1.rs`, `anchor_tokens_68399.txt`, `scheme_v1.json` plus the `artist-ast` dependency | `coordinator.rs`, `state.rs`, `agent.rs`, `error.rs` |
+| `file_tools.rs`, `semantic_anchors.rs`, and the `artist-ast`/`teca` dependencies | `coordinator.rs`, `state.rs`, `agent.rs`, `error.rs` |
 
 Without coordinator/state you lose cross-process path locks, writer attribution, and the high-level conditional-write API — but single-process `FileToolManager` still computes the same v1 anchors because anchor identity/addressing has no persisted state.
 
@@ -171,7 +170,7 @@ use hashline_tools::{FileToolManager, FileToolConfig, ReadFileRequest, WriteFile
 
 let mut mgr = FileToolManager::with_config(FileToolConfig::default());
 let view = mgr.read_file(ReadFileRequest { path, start_line: 1, max_lines: None }).await?;
-// No anchor state is imported/exported: the same live text recomputes the same v1 addresses.
+// No anchor state is imported/exported: the same live text recomputes the same TECA addresses.
 ```
 
 ---
@@ -229,7 +228,7 @@ Address collisions never mutate occurrence identity. They only extend the render
 - [ ] Surface `ANCHOR_USAGE` in every file-tool result the model sees.
 - [ ] Pass anchors byte-for-byte; never trim, case-fold, normalize, or fuzzy-match them.
 - [ ] Prefer `edit_file` for surgical changes; use `write_file` + `ContentHash` for full rewrites.
-- [ ] Keep `anchor_address_v1.rs`, `anchor_tokens_68399.txt`, and `scheme_v1.json` byte-identical to the frozen v1 artifacts.
+- [x] Address logical-line identities through the published `teca` crate.
 
 ---
 
@@ -252,8 +251,8 @@ Address collisions never mutate occurrence identity. They only extend the render
 - Structured occurrence identity is binary TLV under `artist.anchor.identity.v1\0`: language, node kind, field/role, governing named-node ancestry with available semantic keys, canonical leaf content, then equivalent-occurrence rank.
 - Unknown/unparseable text uses exact logical-line bytes plus equivalent-exact-line rank.
 - Path/filename, line number, byte offset, neighbors, duplicate count, read history, and address collisions are never serialized into identity.
-- Canonical identity bytes go directly into the frozen `anchor_address_v1` F_68399 function; there is no cryptographic pre-hash.
-- Each field element `u` maps directly to row `u` of `anchor_tokens_68399.txt`.
+- Canonical identity bytes go directly into the published TECA address stream; there is no cryptographic pre-hash.
+- Artist selects a shortest unique prefix over TECA structural atoms and uses TECA's boundary-preserving renderer.
 - Visible grammar is `#TOKEN` or `#TOKEN‖TOKEN...`; the shortest rendered prefix unique among live occurrences is shown.
 - Whole-file BLAKE3 via `content_hash(&[u8])` remains only a conditional write/delete guard and is not an anchor input.
 

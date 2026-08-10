@@ -18,6 +18,9 @@ artist-ast = { path = "../artist-ast", default-features = false, features = [
 artist-registry = { path = "../artist-registry" }
 artist-rules = { path = "../artist-rules" }
 artist-session = { path = "../artist-session" }
+muse-registry = { path = "../../muse_v6/crates/muse-registry" }
+muse-core = { path = "../../muse_v6/crates/muse-core" }
+muse-ontology = { path = "../../muse_v6/crates/muse-ontology" }
 artist-tools = { path = "../artist-tools" }
 artist-canvas = { path = "../artist-canvas" }
 artist-computer = { path = "../artist-computer" }
@@ -26,6 +29,7 @@ base64 = "0.23"
 dashmap = "6"
 dirs = "6"
 futures = "0.3"
+fs2 = "0.4"
 fff-search = "0.10.1"
 neo_frizbee = "0.11.0"
 globset = "0.4"

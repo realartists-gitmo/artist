@@ -49,6 +49,9 @@ pub(crate) struct ToolEnv {
     pub bundle: ToolBundle,
     pub recorder: Recorder,
     pub resources: Resources,
+    /// The complete resolved profile roster, used by the profile virtual-path
+    /// resolver as well as handoff/delegation.
+    pub profiles: Profiles,
     pub todos: crate::todo::TodoStore,
     /// Whose list `todo` reads and writes, and whose it may read but not write.
     /// A child owns its own and may read its parent's; concurrent siblings
@@ -93,6 +96,14 @@ pub(crate) struct ToolEnv {
     /// MCP and extension tools. Not enumerable at compile time, but subject to
     /// exactly the same policy pass as everything else.
     pub dynamic: Vec<ArtistDynamicTool>,
+    /// Active extension callbacks keyed by their canonical `tools://` path.
+    /// Kept separate from generic dynamic tools because only extensions own a
+    /// stable local resource address.
+    pub extension_runs: Vec<(String, ArtistDynamicTool)>,
+    /// Shared live extension registry. When available, canonical `tools://`
+    /// reads and runs resolve it at call time rather than retaining the tool
+    /// declarations from the start of this model turn.
+    pub extension_manager: Option<Arc<artist_extensions::Manager>>,
     /// The session's live tool toggles. Applied after profile policy because
     /// they are the user's override rather than the profile author's intent.
     pub disabled: Vec<String>,
@@ -129,6 +140,7 @@ pub(crate) struct DelegationEnv {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tool {
     Bash,
+    Run,
     Read,
     Find,
     Grep,
@@ -153,9 +165,12 @@ pub(crate) enum Tool {
     Computer,
     Canvas,
     Handoff,
+    Agent,
     Subagent,
     Poll,
+    Stop,
     Abort,
+    Delete,
     Send,
     List,
     Page,
@@ -163,8 +178,9 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 32] = [
+    pub(crate) const ALL: [Tool; 36] = [
         Tool::Bash,
+        Tool::Run,
         Tool::Read,
         Tool::Find,
         Tool::Grep,
@@ -189,9 +205,12 @@ impl Tool {
         Tool::Computer,
         Tool::Canvas,
         Tool::Handoff,
+        Tool::Agent,
         Tool::Subagent,
         Tool::Poll,
+        Tool::Stop,
         Tool::Abort,
+        Tool::Delete,
         Tool::Send,
         Tool::List,
         Tool::Page,
@@ -206,6 +225,7 @@ impl Tool {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Tool::Bash => "bash",
+            Tool::Run => "run",
             Tool::Read => "read",
             Tool::Find => "find",
             Tool::Grep => "grep",
@@ -230,9 +250,12 @@ impl Tool {
             Tool::Computer => "computer",
             Tool::Canvas => "canvas",
             Tool::Handoff => "handoff",
+            Tool::Agent => "agent",
             Tool::Subagent => "subagent",
             Tool::Poll => "poll",
+            Tool::Stop => "stop",
             Tool::Abort => "abort",
+            Tool::Delete => "delete",
             Tool::Send => "send",
             Tool::List => "list",
             Tool::Page => "page",
@@ -251,9 +274,42 @@ impl Tool {
                 bundle.bash.clone(),
                 env.sessions.clone(),
             )),
-            Tool::Read => tool_prompt::dynamic(bundle.read.clone()),
-            Tool::Find => tool_prompt::dynamic(bundle.find.clone()),
-            Tool::Grep => tool_prompt::dynamic(bundle.grep.clone()),
+            Tool::Run => tool_prompt::dynamic(
+                crate::run_tool::RunTool::new(
+                    bundle.bash.clone(),
+                    env.sessions.clone(),
+                    env.extension_runs.clone(),
+                )
+                .with_extension_manager(env.extension_manager.clone())
+                .with_canvas(env.canvas.as_ref().map(|canvas| {
+                    crate::canvas::CanvasTool::new(
+                        env.project_root(),
+                        Arc::clone(canvas),
+                        env.recorder.clone(),
+                        env.sessions.clone(),
+                    )
+                })),
+            ),
+            Tool::Read => tool_prompt::dynamic(
+                crate::virtual_read::VirtualReadTool::new(
+                    bundle.read.clone(),
+                    env.sessions.clone(),
+                    env.todos.clone(),
+                    env.resources.clone(),
+                    env.profiles.clone(),
+                    profile.clone(),
+                    env.pages.clone(),
+                )
+                .with_extension_manager(env.extension_manager.clone()),
+            ),
+            Tool::Find => tool_prompt::dynamic(crate::virtual_read::VirtualFindTool::new(
+                bundle.find.clone(),
+                env.sessions.clone(),
+            )),
+            Tool::Grep => tool_prompt::dynamic(crate::virtual_read::VirtualGrepTool::new(
+                bundle.grep.clone(),
+                env.sessions.clone(),
+            )),
             Tool::Edit => tool_prompt::dynamic(bundle.edit.clone()),
             Tool::Write => tool_prompt::dynamic(bundle.write.clone()),
             Tool::Skill => tool_prompt::dynamic(crate::resources::SkillTool::new(
@@ -313,6 +369,9 @@ impl Tool {
                     handoff.current.clone(),
                 ))
             }
+            Tool::Agent => tool_prompt::dynamic(crate::delegate::AgentCreation(
+                crate::delegate::Delegate::new(env, env.delegation.as_ref()?),
+            )),
             Tool::Subagent => tool_prompt::dynamic(crate::delegate::Delegate::new(
                 env,
                 env.delegation.as_ref()?,
@@ -320,12 +379,27 @@ impl Tool {
             Tool::Poll => {
                 tool_prompt::dynamic(crate::session_tools::PollTool(env.sessions.clone()))
             }
+            Tool::Stop => {
+                tool_prompt::dynamic(crate::session_tools::StopTool(env.sessions.clone()))
+            }
             Tool::Abort => {
                 tool_prompt::dynamic(crate::session_tools::AbortTool(env.sessions.clone()))
             }
-            Tool::Send => {
-                tool_prompt::dynamic(crate::session_tools::SendTool(env.sessions.clone()))
+            Tool::Delete => {
+                tool_prompt::dynamic(crate::session_tools::DeleteTool(env.sessions.clone()))
             }
+            Tool::Send => tool_prompt::dynamic(crate::session_tools::SendTool::new(
+                env.sessions.clone(),
+                env.computer.clone().map(|registry| {
+                    crate::computer_tool::ComputerTool::new(
+                        registry,
+                        env.recorder.clone(),
+                        env.attachments.clone(),
+                        env.sessions.clone(),
+                        &env.project_root(),
+                    )
+                }),
+            )),
             Tool::List => {
                 tool_prompt::dynamic(crate::session_tools::ListTool(env.sessions.clone()))
             }
@@ -424,6 +498,7 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             .clone()
             .unwrap_or_else(artist_session::Recorder::noop),
         resources: Resources::discover(surface.workspace.root()),
+        profiles: Profiles::discover(surface.workspace.root()),
         todos: crate::todo::TodoStore::for_project(surface.workspace.root()),
         todo_owner: artist_name.clone(),
         attachments: surface.attachments.clone(),
@@ -447,6 +522,8 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
         ),
         pages: surface.pages.clone(),
         dynamic: Vec::new(),
+        extension_runs: Vec::new(),
+        extension_manager: None,
         disabled: Vec::new(),
     };
     build(&surface.profile, &env)
@@ -489,6 +566,7 @@ pub(crate) mod tests {
             bundle: ToolBundle::new(workspace),
             recorder: Recorder::noop(),
             resources: Resources::discover(root),
+            profiles: Profiles::discover(root),
             todos: crate::todo::TodoStore::default(),
             todo_owner: actor.to_owned(),
             attachments: None,
@@ -502,6 +580,8 @@ pub(crate) mod tests {
             sessions: crate::session_tools::SessionHub::standard(root, actor, None),
             pages: crate::pagination::PageStore::memory(),
             dynamic: Vec::new(),
+            extension_runs: Vec::new(),
+            extension_manager: None,
             disabled: Vec::new(),
         }
     }

@@ -33,11 +33,16 @@ rig-core = "0.41.0"
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 similar = "3"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "process", "rt", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
+# The terminal's visible screen is an emulator state, not a regex-cleaned
+# transcript. Pin upstream `main` so the PTY renderer tracks wezterm-term's
+# production parser semantics reproducibly.
+wezterm-term = { git = "https://github.com/wezterm/wezterm.git", rev = "e723cf5005098fde4ef05cf73d7f40d29d85ad5f", package = "wezterm-term" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,122 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/muse-core",
+  "crates/muse-provenance",
+  "crates/muse-ontology",
+  "crates/muse-lexicon",
+  "crates/muse-registry",
+  "crates/muse-classification",
+  "crates/muse-reasoning",
+  "crates/muse-resolution",
+  "crates/muse-interpretation",
+  "crates/muse-occurrence",
+  "crates/muse-tooling",
+  "crates/muse-artist-adapter",
+  "crates/muse-superstrate",
+  "crates/muse-training",
+  "crates/muse-validation",
+  "crates/muse-io",
+  "crates/muse",
+  "crates/muse-cli",
+  "crates/artist-formal",
+  "crates/artist-kernel",
+  "crates/artist-empirical",
+  "crates/artist-theories",
+  "crates/artist-cognition",
+  "crates/artist-cog",
+]
+default-members = [
+  "crates/muse-core",
+  "crates/muse-provenance",
+  "crates/muse-ontology",
+  "crates/muse-lexicon",
+  "crates/muse-registry",
+  "crates/muse-classification",
+  "crates/muse-reasoning",
+  "crates/muse-resolution",
+  "crates/muse-interpretation",
+  "crates/muse-occurrence",
+  "crates/muse-tooling",
+  "crates/muse-artist-adapter",
+  "crates/muse-superstrate",
+  "crates/muse-training",
+  "crates/muse-validation",
+  "crates/muse-io",
+  "crates/muse",
+  "crates/muse-cli",
+  "crates/artist-formal",
+  "crates/artist-kernel",
+  "crates/artist-empirical",
+  "crates/artist-theories",
+  "crates/artist-cognition",
+  "crates/artist-cog",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Muse contributors"]
+repository = ""
+
+[workspace.dependencies]
+muse-core = { path = "crates/muse-core" }
+muse-provenance = { path = "crates/muse-provenance" }
+muse-ontology = { path = "crates/muse-ontology" }
+muse-lexicon = { path = "crates/muse-lexicon" }
+muse-registry = { path = "crates/muse-registry" }
+muse-classification = { path = "crates/muse-classification" }
+muse-reasoning = { path = "crates/muse-reasoning" }
+muse-resolution = { path = "crates/muse-resolution" }
+muse-interpretation = { path = "crates/muse-interpretation" }
+muse-occurrence = { path = "crates/muse-occurrence" }
+muse-tooling = { path = "crates/muse-tooling" }
+muse-artist-adapter = { path = "crates/muse-artist-adapter" }
+muse-superstrate = { path = "crates/muse-superstrate" }
+muse-training = { path = "crates/muse-training" }
+muse-validation = { path = "crates/muse-validation" }
+muse-io = { path = "crates/muse-io" }
+artist-formal = { path = "crates/artist-formal" }
+artist-kernel = { path = "crates/artist-kernel" }
+artist-empirical = { path = "crates/artist-empirical" }
+artist-theories = { path = "crates/artist-theories" }
+artist-cognition = { path = "crates/artist-cognition" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+thiserror = "2.0"
+blake3 = "1.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "allow"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+match_same_arms = "allow"
+unused_self = "allow"
+collapsible_match = "allow"
+match_wildcard_for_single_variants = "allow"
+semicolon_if_nothing_returned = "allow"
+unnecessary_wraps = "allow"
+nonminimal_bool = "allow"
+many_single_char_names = "allow"
+match_like_matches_macro = "allow"
+items_after_statements = "allow"
+cast_possible_truncation = "allow"
+manual_let_else = "allow"
+struct_excessive_bools = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+similar_names = "allow"
+needless_pass_by_value = "allow"
+redundant_closure_for_method_calls = "allow"

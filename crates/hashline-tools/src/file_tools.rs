@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use xxhash_rust::xxh3::xxh3_64;
 
 fn drift_fingerprint(data: &[u8]) -> u64 {
@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn file_view_renders_v1_addresses_for_text_and_rust() {
+    fn file_view_renders_teca_addresses_for_text_and_rust() {
         for (path, text) in [
             (Path::new("test.txt"), "hello\nworld\nfoo\n"),
             (Path::new("test.rs"), "fn main() {\n    let x = 1;\n}\n"),

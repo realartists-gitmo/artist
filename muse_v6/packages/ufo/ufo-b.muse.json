@@ -1,0 +1,1689 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "7809f394958c88b38c162a4e22be2b179e883036c9b68c0dd851fc57cb2109fb"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.ufo.b",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse UFO-B",
+          "description": "Executable source-derived UFO-B event, participation, temporal, manifestation, change and causation package.",
+          "license": "CC-BY-4.0",
+          "imports": [
+            {
+              "id": "muse.ufo.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "a38002724d4f93bf8044064a90a59500e0af1dcb73855ff040d0dc2474661e84"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:ufo-b"
+          ]
+        },
+        "concepts": {
+          "ufo:AgentParticipation": {
+            "id": "ufo:AgentParticipation",
+            "preferred_labels": {
+              "en": "agent participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a agent participant in an event.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:AtomicEvent": {
+            "id": "ufo:AtomicEvent",
+            "preferred_labels": {
+              "en": "atomic event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A event representing the occurrence of atomic event in UFO-B.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:CausalSituation": {
+            "id": "ufo:CausalSituation",
+            "preferred_labels": {
+              "en": "causal situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing a state of affairs in which causal conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Change": {
+            "id": "ufo:Change",
+            "preferred_labels": {
+              "en": "change"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of participation used to represent change in UFO-B.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:ComplexEvent": {
+            "id": "ufo:ComplexEvent",
+            "preferred_labels": {
+              "en": "complex event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A event representing the occurrence of complex event in UFO-B.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Creation": {
+            "id": "ufo:Creation",
+            "preferred_labels": {
+              "en": "creation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of participation used to represent creation in UFO-B.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Event": {
+            "id": "ufo:Event",
+            "preferred_labels": {
+              "en": "event"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of perdurant used to represent event in UFO-B.",
+              "genus": "ufo:Perdurant",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Perdurant"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:EventOccurrence": {
+            "id": "ufo:EventOccurrence",
+            "preferred_labels": {
+              "en": "event occurrence"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A temporally located occurrence of an event within the histories represented by UFO-B.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:EventType": {
+            "id": "ufo:EventType",
+            "preferred_labels": {
+              "en": "event type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are event entities as characterized in UFO-B.",
+              "genus": "ufo:PerdurantType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:PerdurantType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:HistoricalDependence": {
+            "id": "ufo:HistoricalDependence",
+            "preferred_labels": {
+              "en": "historical dependence"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of externally dependent mode used to represent historical dependence in UFO-B.",
+              "genus": "ufo:ExternallyDependentMode",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ExternallyDependentMode"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:ObjectParticipation": {
+            "id": "ufo:ObjectParticipation",
+            "preferred_labels": {
+              "en": "object participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An event part representing the participation of a object participant in an event.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Participation": {
+            "id": "ufo:Participation",
+            "preferred_labels": {
+              "en": "participation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of event used to represent participation in UFO-B.",
+              "genus": "ufo:Event",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Event"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:ResultSituation": {
+            "id": "ufo:ResultSituation",
+            "preferred_labels": {
+              "en": "result situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing a state of affairs in which result conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Situation": {
+            "id": "ufo:Situation",
+            "preferred_labels": {
+              "en": "situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of endurant used to represent situation in UFO-B.",
+              "genus": "ufo:Endurant",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": [
+                "UFO-B treats situations as endurants; the A package deliberately does not close Endurant into Substantial/Moment."
+              ]
+            },
+            "parents": [
+              "ufo:Endurant"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:SituationType": {
+            "id": "ufo:SituationType",
+            "preferred_labels": {
+              "en": "situation type"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A type whose instances are situation entities as characterized in UFO-B.",
+              "genus": "ufo:EndurantType",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:EndurantType"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "type",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:StateTransition": {
+            "id": "ufo:StateTransition",
+            "preferred_labels": {
+              "en": "state transition"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of complex event used to represent state transition in UFO-B.",
+              "genus": "ufo:ComplexEvent",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:ComplexEvent"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Termination": {
+            "id": "ufo:Termination",
+            "preferred_labels": {
+              "en": "termination"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of participation used to represent termination in UFO-B.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:TimePoint": {
+            "id": "ufo:TimePoint",
+            "preferred_labels": {
+              "en": "time point"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of temporal instant used to represent time point in UFO-B.",
+              "genus": "ufo:TemporalInstant",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:TemporalInstant"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:TriggerSituation": {
+            "id": "ufo:TriggerSituation",
+            "preferred_labels": {
+              "en": "trigger situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation representing a state of affairs in which trigger conditions obtain.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:Usage": {
+            "id": "ufo:Usage",
+            "preferred_labels": {
+              "en": "usage"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A specialization of participation used to represent usage in UFO-B.",
+              "genus": "ufo:Participation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Participation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          }
+        },
+        "relations": {
+          "ufo:activates": {
+            "id": "ufo:activates",
+            "preferred_labels": {
+              "en": "activates"
+            },
+            "definition": "Holds from a situation to a disposition when the source activates the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Disposition"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:after": {
+            "id": "ufo:after",
+            "preferred_labels": {
+              "en": "is after"
+            },
+            "definition": "Holds from a event to a event when the source is after the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:before",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:before": {
+            "id": "ufo:before",
+            "preferred_labels": {
+              "en": "is before"
+            },
+            "definition": "Holds from a event to a event when the source is before the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:after",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:bringsAbout": {
+            "id": "ufo:bringsAbout",
+            "preferred_labels": {
+              "en": "brings about"
+            },
+            "definition": "Holds from a event to a situation when the source brings about the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Situation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:causes": {
+            "id": "ufo:causes",
+            "preferred_labels": {
+              "en": "causes"
+            },
+            "definition": "Holds from a event to a event when the source causes the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:changes": {
+            "id": "ufo:changes",
+            "preferred_labels": {
+              "en": "changes"
+            },
+            "definition": "Holds from a event to a endurant when the source changes the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:containsEvent": {
+            "id": "ufo:containsEvent",
+            "preferred_labels": {
+              "en": "contains event"
+            },
+            "definition": "Holds from a event to a event when the source contains event the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:during",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:creates": {
+            "id": "ufo:creates",
+            "preferred_labels": {
+              "en": "creates"
+            },
+            "definition": "Holds from a event to a endurant when the source creates the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:directlyCauses": {
+            "id": "ufo:directlyCauses",
+            "preferred_labels": {
+              "en": "directly causes"
+            },
+            "definition": "Holds from a event to a event when the source directly causes the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:causes"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "irreflexive",
+              "asymmetric"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:during": {
+            "id": "ufo:during",
+            "preferred_labels": {
+              "en": "is during"
+            },
+            "definition": "Holds from a event to a event when the source is during the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:containsEvent",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:eventPartOf": {
+            "id": "ufo:eventPartOf",
+            "preferred_labels": {
+              "en": "is event part of"
+            },
+            "definition": "Holds from a event to a event when the source is event part of the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:properPartOf"
+            ],
+            "inverse": "ufo:hasEventPart",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:exclusivelyDependsOn": {
+            "id": "ufo:exclusivelyDependsOn",
+            "preferred_labels": {
+              "en": "exclusively depends on"
+            },
+            "definition": "Holds from a participation to a endurant when the source exclusively depends on the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Participation"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [
+              "ufo:existentiallyDependsOn"
+            ],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:finishedBy": {
+            "id": "ufo:finishedBy",
+            "preferred_labels": {
+              "en": "is finished by"
+            },
+            "definition": "Holds from a event to a event when the source is finished by the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:finishes",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:finishes": {
+            "id": "ufo:finishes",
+            "preferred_labels": {
+              "en": "finishes"
+            },
+            "definition": "Holds from a event to a event when the source finishes the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:finishedBy",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasBeginPoint": {
+            "id": "ufo:hasBeginPoint",
+            "preferred_labels": {
+              "en": "has begin point"
+            },
+            "definition": "Holds from a event to a time point when the source has begin point the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasEndPoint": {
+            "id": "ufo:hasEndPoint",
+            "preferred_labels": {
+              "en": "has end point"
+            },
+            "definition": "Holds from a event to a time point when the source has end point the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:TimePoint"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasEventPart": {
+            "id": "ufo:hasEventPart",
+            "preferred_labels": {
+              "en": "has event part"
+            },
+            "definition": "Holds from a event to a event when the source has event part the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:hasProperPart"
+            ],
+            "inverse": "ufo:eventPartOf",
+            "characteristics": [
+              "irreflexive",
+              "asymmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasManifestation": {
+            "id": "ufo:hasManifestation",
+            "preferred_labels": {
+              "en": "has manifestation"
+            },
+            "definition": "Holds from a disposition to a event when the source has manifestation the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Disposition"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:isManifestationOf",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasParticipant": {
+            "id": "ufo:hasParticipant",
+            "preferred_labels": {
+              "en": "has participant"
+            },
+            "definition": "Holds from a participation to a endurant when the source has participant the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Participation"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:participatesThrough",
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:hasParticipation": {
+            "id": "ufo:hasParticipation",
+            "preferred_labels": {
+              "en": "has participation"
+            },
+            "definition": "Holds from a event to a participation when the source has participation the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Participation"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:participationIn",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:historicallyDependsOn": {
+            "id": "ufo:historicallyDependsOn",
+            "preferred_labels": {
+              "en": "historically depends on"
+            },
+            "definition": "Holds from a endurant to a event when the source historically depends on the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:isManifestationOf": {
+            "id": "ufo:isManifestationOf",
+            "preferred_labels": {
+              "en": "is manifestation of"
+            },
+            "definition": "Holds from a event to a disposition when the source is manifestation of the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Disposition"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:hasManifestation",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:isResultSituationOf": {
+            "id": "ufo:isResultSituationOf",
+            "preferred_labels": {
+              "en": "is result situation of"
+            },
+            "definition": "Holds from a situation to a event when the source is result situation of the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:isTriggerSituationOf": {
+            "id": "ufo:isTriggerSituationOf",
+            "preferred_labels": {
+              "en": "is trigger situation of"
+            },
+            "definition": "Holds from a situation to a event when the source is trigger situation of the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:triggers"
+            ],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:meets": {
+            "id": "ufo:meets",
+            "preferred_labels": {
+              "en": "meets"
+            },
+            "definition": "Holds from a event to a event when the source meets the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:metBy",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:metBy": {
+            "id": "ufo:metBy",
+            "preferred_labels": {
+              "en": "is met by"
+            },
+            "definition": "Holds from a event to a event when the source is met by the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:meets",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:overlappedBy": {
+            "id": "ufo:overlappedBy",
+            "preferred_labels": {
+              "en": "is overlapped by"
+            },
+            "definition": "Holds from a event to a event when the source is overlapped by the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:overlapsEvent",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:overlapsEvent": {
+            "id": "ufo:overlapsEvent",
+            "preferred_labels": {
+              "en": "overlaps event"
+            },
+            "definition": "Holds from a event to a event when the source overlaps event the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:overlappedBy",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:participatesIn": {
+            "id": "ufo:participatesIn",
+            "preferred_labels": {
+              "en": "participates in"
+            },
+            "definition": "Holds from a endurant to a event when the source participates in the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:participatesThrough": {
+            "id": "ufo:participatesThrough",
+            "preferred_labels": {
+              "en": "participates through"
+            },
+            "definition": "Holds from a endurant to a participation when the source participates through the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Endurant"
+            ],
+            "ranges": [
+              "ufo:Participation"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:hasParticipant",
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:participationIn": {
+            "id": "ufo:participationIn",
+            "preferred_labels": {
+              "en": "is participation in"
+            },
+            "definition": "Holds from a participation to a event when the source is participation in the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Participation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [
+              "ufo:eventPartOf"
+            ],
+            "inverse": "ufo:hasParticipation",
+            "characteristics": [
+              "functional"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:startedBy": {
+            "id": "ufo:startedBy",
+            "preferred_labels": {
+              "en": "is started by"
+            },
+            "definition": "Holds from a event to a event when the source is started by the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:starts",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:starts": {
+            "id": "ufo:starts",
+            "preferred_labels": {
+              "en": "starts"
+            },
+            "definition": "Holds from a event to a event when the source starts the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:startedBy",
+            "characteristics": [
+              "irreflexive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:temporallyEquals": {
+            "id": "ufo:temporallyEquals",
+            "preferred_labels": {
+              "en": "temporally equals"
+            },
+            "definition": "Holds from a event to a event when the source temporally equals the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": "ufo:temporallyEquals",
+            "characteristics": [
+              "reflexive",
+              "symmetric",
+              "transitive"
+            ],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:terminates": {
+            "id": "ufo:terminates",
+            "preferred_labels": {
+              "en": "terminates"
+            },
+            "definition": "Holds from a event to a endurant when the source terminates the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Event"
+            ],
+            "ranges": [
+              "ufo:Endurant"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          },
+          "ufo:triggers": {
+            "id": "ufo:triggers",
+            "preferred_labels": {
+              "en": "triggers"
+            },
+            "definition": "Holds from a situation to a event when the source triggers the target, as defined in UFO-B.",
+            "domains": [
+              "ufo:Situation"
+            ],
+            "ranges": [
+              "ufo:Event"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:ufo-b"
+            ]
+          }
+        },
+        "axioms": [
+          {
+            "kind": "disjoint",
+            "members": [
+              "ufo:AtomicEvent",
+              "ufo:ComplexEvent"
+            ]
+          },
+          {
+            "kind": "complete_partition",
+            "parent": "ufo:Participation",
+            "members": [
+              "ufo:AgentParticipation",
+              "ufo:Change",
+              "ufo:Creation",
+              "ufo:ObjectParticipation",
+              "ufo:Termination",
+              "ufo:Usage"
+            ]
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:Event",
+            "relation": "ufo:hasBeginPoint",
+            "object": "ufo:TimePoint",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:Event",
+            "relation": "ufo:hasEndPoint",
+            "object": "ufo:TimePoint",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:Participation",
+            "relation": "ufo:participationIn",
+            "object": "ufo:Event",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "cardinality",
+            "subject": "ufo:Participation",
+            "relation": "ufo:hasParticipant",
+            "object": "ufo:Endurant",
+            "constraint": {
+              "minimum": 1,
+              "maximum": 1
+            }
+          },
+          {
+            "kind": "existential_restriction",
+            "subject": "ufo:Event",
+            "relation": "ufo:hasParticipation",
+            "object": "ufo:Participation"
+          },
+          {
+            "kind": "universal_restriction",
+            "subject": "ufo:Event",
+            "relation": "ufo:hasEventPart",
+            "object": "ufo:Event"
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?e1",
+                "?e2",
+                "?s"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:bringsAbout",
+                  "arguments": [
+                    "?e1",
+                    "?s"
+                  ]
+                },
+                {
+                  "predicate": "ufo:triggers",
+                  "arguments": [
+                    "?s",
+                    "?e2"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:directlyCauses",
+                "arguments": [
+                  "?e1",
+                  "?e2"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?d",
+                "?e"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:isManifestationOf",
+                  "arguments": [
+                    "?e",
+                    "?d"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:manifests",
+                "arguments": [
+                  "?d",
+                  "?e"
+                ]
+              }
+            }
+          },
+          {
+            "kind": "rule",
+            "rule": {
+              "variables": [
+                "?e",
+                "?p",
+                "?x"
+              ],
+              "premises": [
+                {
+                  "predicate": "ufo:hasParticipant",
+                  "arguments": [
+                    "?p",
+                    "?x"
+                  ]
+                },
+                {
+                  "predicate": "ufo:participationIn",
+                  "arguments": [
+                    "?p",
+                    "?e"
+                  ]
+                }
+              ],
+              "conclusion": {
+                "predicate": "ufo:participatesIn",
+                "arguments": [
+                  "?x",
+                  "?e"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

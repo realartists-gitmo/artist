@@ -7,6 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 artist-registry = { path = "../artist-registry" }
+artist-empirical = { path = "../../muse_v6/crates/artist-empirical" }
+muse-artist-adapter = { path = "../../muse_v6/crates/muse-artist-adapter" }
+muse-core = { path = "../../muse_v6/crates/muse-core" }
+muse-occurrence = { path = "../../muse_v6/crates/muse-occurrence" }
+muse-ontology = { path = "../../muse_v6/crates/muse-ontology" }
+muse-reasoning = { path = "../../muse_v6/crates/muse-reasoning" }
+muse-registry = { path = "../../muse_v6/crates/muse-registry" }
 anyhow = "1"
 base64 = "0.23"
 fs2 = "0.4"

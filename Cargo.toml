@@ -24,12 +24,15 @@ members = [
     "crates/artist-mcp-server",
     "crates/artist-tool-api",
 ]
-exclude = ["vendor/zed-gpui", "vendor/wgpu-core", "vendor/wgpu-hal"]
+exclude = ["muse_v6", "vendor/zed-gpui", "vendor/wgpu-core", "vendor/wgpu-hal"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-license = "MIT OR Apache-2.0"
+# `hashline-tools` links the published AGPL-3.0-only `teca` crate into the
+# shipped anchor implementation.  The workspace distribution metadata must
+# describe the effective license, not just Artist-authored source files.
+license = "AGPL-3.0-only"
 rust-version = "1.97"
 
 [profile.dev]

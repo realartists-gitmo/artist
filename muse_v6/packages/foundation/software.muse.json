@@ -1,0 +1,1293 @@
+{
+  "format_version": "muse-json-1",
+  "document_digest": {
+    "algorithm": "sha256",
+    "value": "0d5f744e6cd40591432d0d294b4215c98351bc5ddf784e55a7ab0794c64b4e90"
+  },
+  "payload": {
+    "document_kind": "package",
+    "document": {
+      "kind": "ontology",
+      "package": {
+        "header": {
+          "package": {
+            "id": "muse.software",
+            "version": "1.0.0",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "059dbe013f45b2cf77374c75c194d8eb3dac7252b3ca2518c6b2788171709d0e"
+            }
+          },
+          "kind": "ontology",
+          "title": "Muse software engineering ontology",
+          "description": "UFO-grounded software artifacts, specifications, requirements, and development activities for Muse.",
+          "license": "MIT OR Apache-2.0",
+          "imports": [
+            {
+              "id": "muse.foundation.provenance",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "5c9b612f2015587147630d075c685467fde8a3276e4c6ddc294b16337cb0aa90"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.a",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "393e96847c9cd3ae87c42540049643d592db2537798fe08ca227a263813bad53"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.b",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "65b8e01afe7f708b5a85ed6ec85976d61f00f73f5f5a17b61b8a7e6a3823d5bd"
+              },
+              "optional": false
+            },
+            {
+              "id": "muse.ufo.c",
+              "version": "1.0.0",
+              "digest": {
+                "algorithm": "sha256",
+                "value": "1a15d95064f10883c397c8d1094a231a4112197172a18a772c0c0308f3c3400b"
+              },
+              "optional": false
+            }
+          ],
+          "evidence": [
+            "evidence:codemeta",
+            "evidence:muse-design",
+            "evidence:prov-o",
+            "evidence:seon-cmpo",
+            "evidence:seon-cpo",
+            "evidence:seon-roost",
+            "evidence:seon-rsro",
+            "evidence:seon-swo",
+            "evidence:spdx"
+          ]
+        },
+        "concepts": {
+          "se:Artifact": {
+            "id": "se:Artifact",
+            "preferred_labels": {
+              "en": "artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An object intentionally made or maintained to serve a purpose in software work.",
+              "genus": "ufo:Object",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Object"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:ArtifactBearer": {
+            "id": "se:ArtifactBearer",
+            "preferred_labels": {
+              "en": "artifact bearer"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A concrete artifact that bears or realizes an information artifact while remaining distinct from its information content.",
+              "genus": "se:Artifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Artifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:BuildActivity": {
+            "id": "se:BuildActivity",
+            "preferred_labels": {
+              "en": "build activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software-development activity that transforms software inputs into build artifacts using build tools and configuration.",
+              "genus": "se:SoftwareDevelopmentActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:BuildArtifact": {
+            "id": "se:BuildArtifact",
+            "preferred_labels": {
+              "en": "build artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact produced as an output of a software build or compilation activity.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo",
+              "evidence:spdx"
+            ]
+          },
+          "se:Code": {
+            "id": "se:Code",
+            "preferred_labels": {
+              "en": "code"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software information artifact representing computer instructions and data definitions.",
+              "genus": "se:SoftwareInformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareInformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:CodingActivity": {
+            "id": "se:CodingActivity",
+            "preferred_labels": {
+              "en": "coding activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software-development activity that creates, changes, documents, or reviews software code.",
+              "genus": "se:SoftwareDevelopmentActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cpo"
+            ]
+          },
+          "se:CompilationActivity": {
+            "id": "se:CompilationActivity",
+            "preferred_labels": {
+              "en": "compilation activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A build activity that translates source or intermediate code into another executable or intermediate code form.",
+              "genus": "se:BuildActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:BuildActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:Configuration": {
+            "id": "se:Configuration",
+            "preferred_labels": {
+              "en": "software configuration"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying selected values, components, or dependencies that constrain software construction or execution.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cmpo"
+            ]
+          },
+          "se:ConfigurationManagementActivity": {
+            "id": "se:ConfigurationManagementActivity",
+            "preferred_labels": {
+              "en": "configuration-management activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software-development activity that identifies, controls, records, or changes software configuration items and versions.",
+              "genus": "se:SoftwareDevelopmentActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cmpo"
+            ]
+          },
+          "se:DefectSituation": {
+            "id": "se:DefectSituation",
+            "preferred_labels": {
+              "en": "defect situation"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A situation in which software violates or fails to satisfy a relevant expected property or requirement.",
+              "genus": "ufo:Situation",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Situation"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-roost"
+            ]
+          },
+          "se:DependencySpecification": {
+            "id": "se:DependencySpecification",
+            "preferred_labels": {
+              "en": "dependency specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying a software dependency and any version, feature, platform, or source constraints attached to it.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:codemeta",
+              "evidence:spdx"
+            ]
+          },
+          "se:Diagnostic": {
+            "id": "se:Diagnostic",
+            "preferred_labels": {
+              "en": "software diagnostic"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact reporting a detected software condition, defect, warning, error, or analysis result.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:seon-roost"
+            ]
+          },
+          "se:DigitalArtifact": {
+            "id": "se:DigitalArtifact",
+            "preferred_labels": {
+              "en": "digital artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artifact bearer whose relevant realization is stored or transmitted digitally.",
+              "genus": "se:ArtifactBearer",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:ArtifactBearer"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:InformationArtifact": {
+            "id": "se:InformationArtifact",
+            "preferred_labels": {
+              "en": "information artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artifact whose relevant identity is tied to information content rather than merely to one physical or digital bearer.",
+              "genus": "se:Artifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Artifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:MachineCode": {
+            "id": "se:MachineCode",
+            "preferred_labels": {
+              "en": "machine code"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Code expressed in a machine-recognizable form produced for direct processing by a computer system.",
+              "genus": "se:Code",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Code"
+            ],
+            "disjoint_with": [
+              "se:SourceCode"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:Program": {
+            "id": "se:Program",
+            "preferred_labels": {
+              "en": "program"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software information artifact intended to produce a specified result through execution; it is constituted by code but is not identical to that code.",
+              "genus": "se:SoftwareInformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareInformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:ProgramSpecification": {
+            "id": "se:ProgramSpecification",
+            "preferred_labels": {
+              "en": "program specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software specification describing a program's intended purpose, structure, or functions sufficiently to constrain its identity and implementation.",
+              "genus": "se:SoftwareSpecification",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareSpecification"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:Requirement": {
+            "id": "se:Requirement",
+            "preferred_labels": {
+              "en": "software requirement"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A proposition expressing a required property, behavior, constraint, or quality of software or its development.",
+              "genus": "ufo:Proposition",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Proposition"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": "abstract",
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-rsro"
+            ]
+          },
+          "se:RequirementSpecification": {
+            "id": "se:RequirementSpecification",
+            "preferred_labels": {
+              "en": "requirements specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact that records, organizes, or communicates software requirements.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-rsro"
+            ]
+          },
+          "se:SoftwareArtifact": {
+            "id": "se:SoftwareArtifact",
+            "preferred_labels": {
+              "en": "software artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artifact produced, used, or maintained as part of software engineering or software execution.",
+              "genus": "se:Artifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Artifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:SoftwareDevelopmentActivity": {
+            "id": "se:SoftwareDevelopmentActivity",
+            "preferred_labels": {
+              "en": "software-development activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An intentional action performed as part of developing or maintaining software.",
+              "genus": "ufo:Action",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "ufo:Action"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cpo"
+            ]
+          },
+          "se:SoftwareInformationArtifact": {
+            "id": "se:SoftwareInformationArtifact",
+            "preferred_labels": {
+              "en": "software information artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact whose relevant identity is informational content.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact",
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:SoftwareProduct": {
+            "id": "se:SoftwareProduct",
+            "preferred_labels": {
+              "en": "software product"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software artifact delivered as a named usable product and potentially constituted by programs and auxiliary artifacts.",
+              "genus": "se:SoftwareArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:SoftwareSpecification": {
+            "id": "se:SoftwareSpecification",
+            "preferred_labels": {
+              "en": "software specification"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An information artifact specifying required or intended properties of software.",
+              "genus": "se:InformationArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:InformationArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:SourceCode": {
+            "id": "se:SourceCode",
+            "preferred_labels": {
+              "en": "source code"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "Code expressed in a programming language in a form suitable as input to an assembler, compiler, interpreter, or other translator/executor.",
+              "genus": "se:Code",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Code"
+            ],
+            "disjoint_with": [
+              "se:MachineCode"
+            ],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:SourceCodeArtifact": {
+            "id": "se:SourceCodeArtifact",
+            "preferred_labels": {
+              "en": "source-code artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A digital artifact bearer that realizes or stores source-code information content.",
+              "genus": "se:DigitalArtifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:DigitalArtifact",
+              "se:SoftwareArtifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:TestArtifact": {
+            "id": "se:TestArtifact",
+            "preferred_labels": {
+              "en": "test artifact"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "An artifact used or produced in software testing, including test cases, fixtures, reports, and generated test outputs.",
+              "genus": "se:Artifact",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:Artifact"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-roost"
+            ]
+          },
+          "se:TestingActivity": {
+            "id": "se:TestingActivity",
+            "preferred_labels": {
+              "en": "testing activity"
+            },
+            "alternate_labels": {},
+            "definition": {
+              "text": "A software-development activity that evaluates software against test conditions or expected behavior and produces test observations or artifacts.",
+              "genus": "se:SoftwareDevelopmentActivity",
+              "differentia": [],
+              "necessary_conditions": [],
+              "sufficient_conditions": [],
+              "scope": null,
+              "notes": []
+            },
+            "parents": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "disjoint_with": [],
+            "profile": {
+              "entity_mode": "individual",
+              "rigidity": null,
+              "sortality": null,
+              "identity": null,
+              "abstractness": null,
+              "metaproperties": {}
+            },
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-roost"
+            ]
+          }
+        },
+        "relations": {
+          "se:activityConfiguredBy": {
+            "id": "se:activityConfiguredBy",
+            "preferred_labels": {
+              "en": "activity configured by"
+            },
+            "definition": "Relates a software-development activity to configuration information that constrains how the activity is performed.",
+            "domains": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "ranges": [
+              "se:Configuration"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cmpo"
+            ]
+          },
+          "se:bearsInformation": {
+            "id": "se:bearsInformation",
+            "preferred_labels": {
+              "en": "bears information"
+            },
+            "definition": "Relates an artifact bearer to information content it realizes or stores without identifying the bearer with that content.",
+            "domains": [
+              "se:ArtifactBearer"
+            ],
+            "ranges": [
+              "se:InformationArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:constitutedByCode": {
+            "id": "se:constitutedByCode",
+            "preferred_labels": {
+              "en": "constituted by code"
+            },
+            "definition": "Relates a program to code that constitutes an implementation of that program while preserving distinct identities.",
+            "domains": [
+              "se:Program"
+            ],
+            "ranges": [
+              "se:Code"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:createsArtifact": {
+            "id": "se:createsArtifact",
+            "preferred_labels": {
+              "en": "creates artifact"
+            },
+            "definition": "Relates a software-development activity to an artifact whose relevant identity begins as a result of that activity.",
+            "domains": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "ranges": [
+              "se:Artifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cpo"
+            ]
+          },
+          "se:dependsOn": {
+            "id": "se:dependsOn",
+            "preferred_labels": {
+              "en": "depends on"
+            },
+            "definition": "Relates a software artifact to another software artifact required for its construction, execution, or intended behavior.",
+            "domains": [
+              "se:SoftwareArtifact"
+            ],
+            "ranges": [
+              "se:SoftwareArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:codemeta",
+              "evidence:spdx"
+            ]
+          },
+          "se:encodesSourceCode": {
+            "id": "se:encodesSourceCode",
+            "preferred_labels": {
+              "en": "encodes source code"
+            },
+            "definition": "Relates a source-code artifact bearer to the source-code information content it realizes.",
+            "domains": [
+              "se:SourceCodeArtifact"
+            ],
+            "ranges": [
+              "se:SourceCode"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:spdx"
+            ]
+          },
+          "se:modifiesArtifact": {
+            "id": "se:modifiesArtifact",
+            "preferred_labels": {
+              "en": "modifies artifact"
+            },
+            "definition": "Relates a software-development activity to a pre-existing artifact whose state/content it changes.",
+            "domains": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "ranges": [
+              "se:Artifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cpo"
+            ]
+          },
+          "se:producedBy": {
+            "id": "se:producedBy",
+            "preferred_labels": {
+              "en": "produced by"
+            },
+            "definition": "Relates an artifact to the software-development activity that produced the represented artifact occurrence/version.",
+            "domains": [
+              "se:Artifact"
+            ],
+            "ranges": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:muse-design",
+              "evidence:prov-o"
+            ]
+          },
+          "se:recordsRequirement": {
+            "id": "se:recordsRequirement",
+            "preferred_labels": {
+              "en": "records requirement"
+            },
+            "definition": "Relates a requirements specification to a requirement proposition it records.",
+            "domains": [
+              "se:RequirementSpecification"
+            ],
+            "ranges": [
+              "se:Requirement"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-rsro"
+            ]
+          },
+          "se:reportsDefect": {
+            "id": "se:reportsDefect",
+            "preferred_labels": {
+              "en": "reports defect"
+            },
+            "definition": "Relates a diagnostic to a defect situation it reports or describes.",
+            "domains": [
+              "se:Diagnostic"
+            ],
+            "ranges": [
+              "se:DefectSituation"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-roost"
+            ]
+          },
+          "se:softwareConfiguredBy": {
+            "id": "se:softwareConfiguredBy",
+            "preferred_labels": {
+              "en": "software configured by"
+            },
+            "definition": "Relates a software artifact to configuration information that constrains its construction or execution.",
+            "domains": [
+              "se:SoftwareArtifact"
+            ],
+            "ranges": [
+              "se:Configuration"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cmpo"
+            ]
+          },
+          "se:specifiedBy": {
+            "id": "se:specifiedBy",
+            "preferred_labels": {
+              "en": "specified by"
+            },
+            "definition": "Relates software to a specification that constrains its intended identity or behavior.",
+            "domains": [
+              "se:SoftwareArtifact"
+            ],
+            "ranges": [
+              "se:SoftwareSpecification"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-swo"
+            ]
+          },
+          "se:testsArtifact": {
+            "id": "se:testsArtifact",
+            "preferred_labels": {
+              "en": "tests artifact"
+            },
+            "definition": "Relates a testing activity to the software artifact under test.",
+            "domains": [
+              "se:TestingActivity"
+            ],
+            "ranges": [
+              "se:SoftwareArtifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-roost"
+            ]
+          },
+          "se:usesArtifact": {
+            "id": "se:usesArtifact",
+            "preferred_labels": {
+              "en": "uses artifact"
+            },
+            "definition": "Relates a software-development activity to an artifact it consumes, consults, or operates upon.",
+            "domains": [
+              "se:SoftwareDevelopmentActivity"
+            ],
+            "ranges": [
+              "se:Artifact"
+            ],
+            "super_relations": [],
+            "inverse": null,
+            "characteristics": [],
+            "cardinality": null,
+            "deprecated": false,
+            "evidence": [
+              "evidence:seon-cpo"
+            ]
+          }
+        },
+        "axioms": []
+      }
+    }
+  }
+}

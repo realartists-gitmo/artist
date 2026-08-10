@@ -55,6 +55,10 @@ pub struct SessionRecord {
     pub lifecycle: SessionLifecycle,
     #[serde(default)]
     pub cancel_requested: bool,
+    /// Durable start of a graceful-stop interval. Retaining it across owner
+    /// restart prevents cancellation from receiving a fresh grace period.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_requested_at: Option<u64>,
     /// Kind-authored durable current snapshot. The universal registry never
     /// interprets its shape.
     #[serde(default)]
@@ -125,6 +129,7 @@ impl Sessions {
             last_seen: now,
             lifecycle: SessionLifecycle::Live,
             cancel_requested: false,
+            cancel_requested_at: None,
             snapshot,
             poll_requested: 0,
             poll_completed: 0,
@@ -144,6 +149,22 @@ impl Sessions {
         parent_artist: Option<&str>,
         snapshot: Value,
     ) -> Result<SessionRecord> {
+        self.create_content_as(kind, kind, content, artist, parent_artist, snapshot)
+    }
+
+    /// Allocate a content-derived id prefix independently of the retained
+    /// session kind. Native processes remain terminal-observable (`bash` kind)
+    /// while receiving a distinct `process:<slug>` resource identity.
+    pub fn create_content_as(
+        &self,
+        id_kind: &str,
+        kind: &str,
+        content: &str,
+        artist: &str,
+        parent_artist: Option<&str>,
+        snapshot: Value,
+    ) -> Result<SessionRecord> {
+        validate_kind(id_kind)?;
         validate_kind(kind)?;
         let base = content_slug(content);
         let _lock = Lock::take(&self.dir)?;
@@ -154,7 +175,7 @@ impl Sessions {
             } else {
                 format!("-{ordinal}")
             };
-            let id = format!("{kind}:{base}{suffix}");
+            let id = format!("{id_kind}:{base}{suffix}");
             if !self.path(&id).exists() {
                 let now = now();
                 let record = SessionRecord {
@@ -167,6 +188,7 @@ impl Sessions {
                     last_seen: now,
                     lifecycle: SessionLifecycle::Live,
                     cancel_requested: false,
+                    cancel_requested_at: None,
                     snapshot,
                     poll_requested: 0,
                     poll_completed: 0,
@@ -205,6 +227,7 @@ impl Sessions {
                 last_seen: now,
                 lifecycle: SessionLifecycle::Live,
                 cancel_requested: false,
+                cancel_requested_at: None,
                 snapshot,
                 poll_requested: 0,
                 poll_completed: 0,
@@ -237,6 +260,7 @@ impl Sessions {
         record.last_seen = now();
         record.lifecycle = SessionLifecycle::Live;
         record.cancel_requested = false;
+        record.cancel_requested_at = None;
         record.snapshot = snapshot;
         record.poll_requested = record.poll_completed;
         self.write(&record)?;
@@ -287,18 +311,18 @@ impl Sessions {
                 continue;
             };
             if record.lifecycle.is_live() {
-                if record.owner.is_alive() {
-                    record.last_seen = now();
-                } else {
+                if !record.owner.is_alive() {
                     record.lifecycle = SessionLifecycle::Stopped {
                         status: SessionStatus::Abandoned,
                     };
+                    self.write(&record)?;
                 }
-                self.write(&record)?;
             }
             records.push(record);
         }
-        records.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+        // Listing is discovery, not an open: preserve the last explicit
+        // interaction as the recency signal without mutating it here.
+        records.sort_by(|a, b| b.last_seen.cmp(&a.last_seen).then(a.id.cmp(&b.id)));
         Ok(records)
     }
 
@@ -359,8 +383,37 @@ impl Sessions {
             }
             record.lifecycle = SessionLifecycle::Stopped { status };
             record.cancel_requested = false;
+            record.cancel_requested_at = None;
             Ok(())
         })
+    }
+
+    /// Permanently remove a stopped resource and its queued input. Live
+    /// resources are deliberately rejected: callers must first request a
+    /// graceful stop and observe settlement, rather than making an owner race
+    /// a disappearing durable record. A deleted artist session also releases
+    /// its global roster reservation.
+    pub fn delete_stopped(&self, id: &str) -> Result<SessionRecord> {
+        validate_id(id)?;
+        let _lock = Lock::take(&self.dir)?;
+        let path = self.path(id);
+        let Some(record) = read_record(&path)? else {
+            return Err(Error::Corrupt(format!("unknown session `{id}`")));
+        };
+        if record.lifecycle.is_live() {
+            return Err(Error::Corrupt(format!(
+                "session `{id}` is live; stop it and poll until it settles before deleting"
+            )));
+        }
+        if let Some(lease) = &record.name_lease {
+            crate::names().release(lease)?;
+        }
+        fs::remove_file(path)?;
+        let input = self.input_dir(id);
+        if input.exists() {
+            fs::remove_dir_all(input)?;
+        }
+        Ok(record)
     }
 
     pub fn cancel_requested(&self, id: &str) -> Result<bool> {
@@ -386,13 +439,16 @@ impl Sessions {
                 status: SessionStatus::Abandoned,
             };
             record.cancel_requested = false;
+            record.cancel_requested_at = None;
             record.last_seen = now();
             self.write(&record)?;
             return Ok((CancelDisposition::Abandoned, record));
         }
         if !record.cancel_requested {
             record.cancel_requested = true;
-            record.last_seen = now();
+            let requested_at = now();
+            record.cancel_requested_at = Some(requested_at);
+            record.last_seen = requested_at;
             self.write(&record)?;
         }
         let disposition = if record.owner == Owner::current() {

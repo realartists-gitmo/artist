@@ -10,10 +10,10 @@ use std::path::Path;
 pub struct FindTool(pub Workspace);
 #[derive(Deserialize)]
 pub struct FindArgs {
-    query: String,
-    path: Option<String>,
-    glob: Option<String>,
-    limit: Option<usize>,
+    pub query: String,
+    pub path: Option<String>,
+    pub glob: Option<String>,
+    pub limit: Option<usize>,
 }
 impl PortableTool for FindTool {
     const NAME: &'static str = "find";

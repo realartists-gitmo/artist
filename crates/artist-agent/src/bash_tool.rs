@@ -18,6 +18,83 @@ impl BashTool {
     pub fn new(backend: artist_tools::BashTool, sessions: SessionHub) -> Self {
         Self { backend, sessions }
     }
+
+    /// Start a durable bash resource through the one canonical lifecycle path.
+    /// `run` uses this rather than manufacturing a second process/session
+    /// representation for executable paths.
+    pub(crate) async fn start_session(
+        &self,
+        command: String,
+        cwd: Option<String>,
+        env: Option<BTreeMap<String, String>>,
+        interactive: bool,
+    ) -> Result<String, BashError> {
+        self.start_session_as("bash", "bash", command, cwd, env, interactive)
+            .await
+    }
+
+    /// Spawn a native executable as a one-shot process resource. It shares the
+    /// terminal backend with bash but not the semantic resource identity.
+    pub(crate) async fn start_process_session(
+        &self,
+        command: String,
+        cwd: Option<String>,
+        env: Option<BTreeMap<String, String>>,
+    ) -> Result<String, BashError> {
+        self.start_session_as("process", "process", command, cwd, env, false)
+            .await
+    }
+
+    async fn start_session_as(
+        &self,
+        id_kind: &str,
+        resource_type: &str,
+        command: String,
+        cwd: Option<String>,
+        env: Option<BTreeMap<String, String>>,
+        interactive: bool,
+    ) -> Result<String, BashError> {
+        let record = self
+            .sessions
+            .registry()
+            .create_content_as(
+                id_kind,
+                "bash",
+                &command,
+                self.sessions.artist(),
+                None,
+                json!({
+                    "resourceType": resource_type,
+                    "interactive": interactive,
+                    "readiness": if interactive { Value::String("running".into()) } else { Value::Null },
+                    "output": ""
+                }),
+            )
+            .map_err(|error| BashError(error.to_string()))?;
+
+        let backend_id = match self.backend.managed_start(command, cwd, env).await {
+            Ok(id) => id,
+            Err(error) => {
+                let _ = self.sessions.registry().finish(
+                    &record.id,
+                    artist_registry::SessionStatus::Failed,
+                    Some(json!({"interactive":interactive,"error":error.to_string()})),
+                );
+                return Err(BashError(format!("{} (session {})", error, record.id)));
+            }
+        };
+
+        self.sessions.own(
+            record.id.clone(),
+            Arc::new(BashSession {
+                backend: self.backend.clone(),
+                backend_id,
+                interactive,
+                resource_type: resource_type.to_owned(),
+            }),
+        );
+        Ok(record.id)
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -43,6 +120,7 @@ struct BashSession {
     backend: artist_tools::BashTool,
     backend_id: String,
     interactive: bool,
+    resource_type: String,
 }
 
 impl BashSession {
@@ -68,10 +146,15 @@ impl BashSession {
                 None
             };
         let snapshot = json!({
+            "resourceType": self.resource_type,
             "interactive": self.interactive,
             "readiness": readiness,
             "exitCode": result.exit_code,
             "output": result.output,
+            "screen": self
+                .backend
+                .managed_screen(&self.backend_id)
+                .map_err(|error| error.to_string())?,
             "truncated": result.truncated,
         });
         match result.status {
@@ -145,47 +228,8 @@ impl PortableTool for BashTool {
 
     async fn call(&self, args: BashArgs) -> Result<String, BashError> {
         let interactive = args.interactive.unwrap_or(false);
-        let record = self
-            .sessions
-            .registry()
-            .create_content(
-                "bash",
-                &args.command,
-                self.sessions.artist(),
-                None,
-                json!({
-                    "interactive": interactive,
-                    "readiness": if interactive { Value::String("running".into()) } else { Value::Null },
-                    "output": ""
-                }),
-            )
-            .map_err(|error| BashError(error.to_string()))?;
-
-        let backend_id = match self
-            .backend
-            .managed_start(args.command, args.cwd, args.env)
+        self.start_session(args.command, args.cwd, args.env, interactive)
             .await
-        {
-            Ok(id) => id,
-            Err(error) => {
-                let _ = self.sessions.registry().finish(
-                    &record.id,
-                    artist_registry::SessionStatus::Failed,
-                    Some(json!({"interactive":interactive,"error":error.to_string()})),
-                );
-                return Err(BashError(format!("{} (session {})", error, record.id)));
-            }
-        };
-
-        self.sessions.own(
-            record.id.clone(),
-            Arc::new(BashSession {
-                backend: self.backend.clone(),
-                backend_id,
-                interactive,
-            }),
-        );
-        Ok(record.id)
     }
 }
 

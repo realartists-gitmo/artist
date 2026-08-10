@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
     LifecycleEvent, PromptEvent, SessionHandles,
@@ -9,7 +12,8 @@ use crate::{
     ttsr::{TtsrHook, TtsrShared, reminder_message},
 };
 use artist_session::{
-    ConversationMessages, DelegateFinished, DelegateStarted, RunFinished, RunStarted,
+    ContentBlock, ConversationMessages, DelegateFinished, DelegateStarted, ModelTurn, RunFinished,
+    RunStarted, ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent,
 };
 use artist_tool_api::ArtistDynamicTool;
 use artist_tools::ToolBundle;
@@ -136,6 +140,8 @@ pub(crate) struct Delegate {
     memory: Option<crate::memory::MemoryWriter>,
     canvas: Option<Arc<artist_canvas::server::Lazy>>,
     dynamic: Vec<ArtistDynamicTool>,
+    extension_runs: Vec<(String, ArtistDynamicTool)>,
+    extension_manager: Option<Arc<artist_extensions::Manager>>,
     /// The spawning agent's *display* name, recorded on each child so the
     /// directory can answer "everyone under Monet". `None` where the spawner
     /// has no identity, which is only the case in tests.
@@ -213,6 +219,8 @@ impl Delegate {
             memory: env.memory.clone(),
             canvas: env.canvas.clone(),
             dynamic: env.dynamic.clone(),
+            extension_runs: env.extension_runs.clone(),
+            extension_manager: env.extension_manager.clone(),
             spawner_name: env.inbox.as_ref().map(|inbox| inbox.name.to_string()),
         }
     }
@@ -253,12 +261,42 @@ impl Delegate {
     }
 }
 
+#[cfg(test)]
+mod agent_creation_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_agent_arguments_use_brief_not_legacy_prompt() {
+        let args: AgentArgs = serde_json::from_value(json!({
+            "brief": "audit the retained state",
+            "profile": "reviewer"
+        }))
+        .unwrap();
+        assert_eq!(args.brief, "audit the retained state");
+        assert_eq!(args.profile.as_deref(), Some("reviewer"));
+        assert!(serde_json::from_value::<AgentArgs>(json!({"prompt":"legacy"})).is_err());
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DelegateArgs {
     prompt: String,
     profile: Option<String>,
 }
+
+/// The canonical path-first creation surface for a retained Artist.  `Delegate`
+/// remains available as the legacy `subagent` tool while profiles and callers
+/// migrate; both enter exactly the same durable roster/name lifecycle.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentArgs {
+    pub(crate) brief: String,
+    pub(crate) profile: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct AgentCreation(pub(crate) Delegate);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DelegateError {
@@ -297,10 +335,44 @@ impl PortableTool for Delegate {
     }
 }
 
+impl PortableTool for AgentCreation {
+    const NAME: &'static str = "agent";
+    type Error = DelegateError;
+    type Args = AgentArgs;
+    type Output = String;
+
+    fn description(&self) -> String {
+        "Claim a retained Artist roster name and start it immediately; returns the canonical agent id."
+            .into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type":"object",
+            "properties":{
+                "brief":{"type":"string","description":"Focused work unit for the new Artist."},
+                "profile":{"type":"string","enum":self.0.profiles.names(),"description":"Artist profile; defaults to default."}
+            },
+            "required":["brief"],
+            "additionalProperties":false
+        })
+    }
+
+    async fn call(&self, args: AgentArgs) -> Result<String, DelegateError> {
+        self.0
+            .spawn(DelegateArgs {
+                prompt: args.brief,
+                profile: args.profile,
+            })
+            .await
+    }
+}
+
 impl Delegate {
     async fn spawn(&self, args: DelegateArgs) -> Result<String, DelegateError> {
         let profile_name = args.profile.unwrap_or_else(|| "default".into());
-        self.profiles
+        let yield_profile = self
+            .profiles
             .get(&profile_name)
             .map_err(DelegateError::Failed)?;
 
@@ -362,10 +434,36 @@ impl Delegate {
                 .run_agent(args.prompt, task_profile.clone(), actor, identity)
                 .await
             {
-                Ok(output) => OwnedState::stopped(
-                    artist_registry::SessionStatus::Completed,
-                    json!({"profile":task_profile,"output":output}),
-                ),
+                Ok(output) => {
+                    // A work-unit result is retained as structured JSON even
+                    // when the model returned prose (which is then a JSON
+                    // string). `agent://<artist>/yields/1` is consequently a
+                    // real canonical resource, not a transcript convention.
+                    let value = serde_json::from_str(&output)
+                        .unwrap_or_else(|_| Value::String(output.clone()));
+                    match yield_profile.validate_yield(&value) {
+                        Ok(()) => OwnedState::stopped(
+                            artist_registry::SessionStatus::Completed,
+                            json!({
+                                "profile": task_profile,
+                                "output": output,
+                                "yields": [{
+                                    "sequence": 1,
+                                    "profile": task_profile,
+                                    "value": value,
+                                }],
+                            }),
+                        ),
+                        Err(error) => OwnedState::stopped(
+                            artist_registry::SessionStatus::Failed,
+                            json!({
+                                "profile": task_profile,
+                                "output": output,
+                                "yieldValidationError": error,
+                            }),
+                        ),
+                    }
+                }
                 Err(error) if error.to_string().contains("cancelled") => OwnedState::stopped(
                     artist_registry::SessionStatus::Cancelled,
                     json!({"profile":task_profile,"error":error.to_string()}),
@@ -677,6 +775,7 @@ impl Delegate {
                 // attributes a subagent's actions to the subagent.
                 recorder: recorder.clone(),
                 resources: self.resources.clone(),
+                profiles: self.profiles.clone(),
                 todos: self.handles.todos.clone(),
                 // A child owns its own list and may read its parent's, but not
                 // write to it: concurrent siblings sharing one list would race
@@ -717,6 +816,8 @@ impl Delegate {
                 ),
                 pages: crate::pagination::PageStore::memory(),
                 dynamic: self.dynamic.clone(),
+                extension_runs: self.extension_runs.clone(),
+                extension_manager: self.extension_manager.clone(),
                 disabled: self.disabled_tools.clone(),
             };
             let agent = builder
@@ -735,6 +836,10 @@ impl Delegate {
                     inbox: Some(crate::messaging::Inbox::new(identity.name.clone())),
                 })
                 .add_hook(TtsrHook(Arc::clone(&ttsr)))
+                .add_hook(crate::profile_hook::ProfileUpdateHook::new(
+                    child_tools.project_root().to_path_buf(),
+                    role,
+                ))
                 .default_max_turns(usize::MAX)
                 .build();
             run_recorder.record(RunStarted {
@@ -752,6 +857,7 @@ impl Delegate {
             let mut stream = agent
                 .stream_chat(seed_prompt.clone(), seed_history.clone())
                 .await;
+            let mut captured_tool_calls = HashMap::<String, (String, serde_json::Value)>::new();
             // Text of the current model turn; the last turn's text is the
             // delegate's answer (matching the non-streaming `chat` output).
             let mut turn_text = String::new();
@@ -872,14 +978,32 @@ impl Delegate {
                             tool_call,
                             internal_call_id,
                         },
-                    )) => self.emit_child(
-                        &display_id,
-                        PromptEvent::ToolCall {
-                            id: internal_call_id,
-                            name: tool_call.function.name,
-                            arguments: tool_call.function.arguments,
-                        },
-                    ),
+                    )) => {
+                        let name = tool_call.function.name;
+                        let arguments = tool_call.function.arguments;
+                        captured_tool_calls
+                            .insert(internal_call_id.clone(), (name.clone(), arguments.clone()));
+                        run_recorder.record(ModelTurn {
+                            turn: ttsr.turn() as u32,
+                            content: vec![ContentBlock::ToolCall {
+                                id: internal_call_id.clone(),
+                                call_id: Some(tool_call.id),
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                                signature: None,
+                            }],
+                            total_tokens: 0,
+                            partial: false,
+                        });
+                        self.emit_child(
+                            &display_id,
+                            PromptEvent::ToolCall {
+                                id: internal_call_id,
+                                name,
+                                arguments,
+                            },
+                        )
+                    }
                     Ok(MultiTurnStreamItem::ToolExecutionCommitted {
                         tool_call,
                         internal_call_id,
@@ -912,13 +1036,51 @@ impl Delegate {
                             .collect::<Vec<_>>()
                             .join("\n");
                         let meta = tool_meta.take(&internal_call_id);
+                        let (outcome, duration_ms) =
+                            meta.unwrap_or((ToolOutcomeRecord::Success, 0));
+                        if let Some((name, arguments)) =
+                            captured_tool_calls.remove(&internal_call_id)
+                        {
+                            let ingest_file_operation =
+                                matches!(name.as_str(), "read" | "edit" | "write");
+                            let operation = name.clone();
+                            run_recorder.record(ToolResultEvent {
+                                internal_call_id: internal_call_id.clone(),
+                                tool_call_id: Some(tool_result.id.clone()),
+                                name,
+                                arguments,
+                                result: content.clone(),
+                                outcome: outcome.clone(),
+                                duration_ms: Some(duration_ms),
+                            });
+                            if !images.is_empty() {
+                                run_recorder.record(ToolResultImagesEvent {
+                                    internal_call_id: internal_call_id.clone(),
+                                    images: images
+                                        .iter()
+                                        .map(|image| ContentBlock::Image {
+                                            attachment: image.attachment.clone(),
+                                            media_type: image.media_type.clone(),
+                                        })
+                                        .collect(),
+                                });
+                            }
+                            if ingest_file_operation {
+                                crate::ingest_muse_after_file_tool(
+                                    &self.handles,
+                                    child_tools.project_root(),
+                                    &operation,
+                                )
+                                .await;
+                            }
+                        }
                         self.emit_child(
                             &display_id,
                             PromptEvent::ToolResult {
                                 id: internal_call_id,
                                 content,
-                                outcome: meta.as_ref().map(|(outcome, _)| outcome.clone()),
-                                duration_ms: meta.map(|(_, duration)| duration),
+                                outcome: Some(outcome),
+                                duration_ms: Some(duration_ms),
                                 images,
                             },
                         );

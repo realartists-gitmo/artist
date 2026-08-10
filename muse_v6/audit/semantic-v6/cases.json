@@ -1,0 +1,164 @@
+{
+  "schema": "muse-semantic-v6-adversarial-1",
+  "source_archive": "agentic-sessions-big-37(2).zip",
+  "cases": [
+    {
+      "id": "language_modal_optimization_plural_scale",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fdebateasr/019f829e-1715-7be1-a4d6-2c66fe408203/updates.jsonl",
+      "line": 1,
+      "raw_line_bytes": 2354,
+      "sha256": "c9489639016c67623b9ed815b443a7dfe5bcb4830c19e227a003be86dfb715ef",
+      "needle": "As far as we know",
+      "excerpt": "ents on both the left and the right and some archives have already been completely lost to history. As far as we know this assault is continuing, and many of these channels are old, discontinued, or defunct---i.e., they dont have active maintainers and people who run them have either lost the acc",
+      "invariants": [
+        "epistemic qualification is scoped force, not logical necessity",
+        "1000s is plural-scale cardinality, not Approximately(1000)",
+        "as many as possible uses MaximizationOperator + optimizationTarget"
+      ]
+    },
+    {
+      "id": "language_generic_capability_approx_focus",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fdebateasr/019f829e-1715-7be1-a4d6-2c66fe408203/updates.jsonl",
+      "line": 54,
+      "raw_line_bytes": 1341,
+      "sha256": "ab8449ac09d9848fd7dfa2f788e350198ad67cc5b30fa1754bec9da290d28609",
+      "needle": "5 or so personal youtube accounts",
+      "excerpt": "can spawn a mobile hotspot on my phone for THIS machine. Storage target is the dropbox dump. I have 5 or so personal youtube accounts, but im sure google knows they're all mine as I dont have any barriers of anonymity between them. By the way---Claude just got done accounting our list (so you dont have to dedupe",
+      "invariants": [
+        "as a rule is GenericOperator",
+        "can is CapabilityOperator when source licenses ability",
+        "5 or so is approximate cardinality with separate cue",
+        "only 500 is ExclusiveFocusOperator over exact cardinality, not just Exactly(500)"
+      ]
+    },
+    {
+      "id": "language_measurement_interval",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fdebateasr/019f829e-1715-7be1-a4d6-2c66fe408203/updates.jsonl",
+      "line": 26,
+      "raw_line_bytes": 13221,
+      "sha256": "c557e33e877a3f52e3c32b93a6653731e5ac829894466cdf5f338cdedefeec96",
+      "needle": "~1.5 s/query",
+      "excerpt": "io queued for download.\"},{\"line_number\":9,\"content\":\"Search uses yt-dlp's ytsearch (no API quota); ~1.5 s/query throttled.\"},{\"line_number\":155,\"content\":\"            \\\"extract_flat\\\": False, \\\"skip_download\\\": True,\"},{\"line_number\":158,\"content\":\"        opts[\\\"cookiefile\\\"] = cookies  # ",
+      "invariants": [
+        "approximate measurement preserves unit",
+        "20-60 s is NumericInterval measurement, not two unrelated numbers"
+      ]
+    },
+    {
+      "id": "tool_question_options",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 94,
+      "raw_line_bytes": 2865,
+      "sha256": "17de95c5b19a4388e0a9f18df060fca377acb7ba9ecff910e82ccf10ac2ab843",
+      "needle": "What autonomy level do you want",
+      "excerpt": "b-f0d4-4be5-b88a-42b0a9ecbdf3-24\",\"title\":\"ask_user_question\",\"rawInput\":{\"questions\":[{\"question\":\"What autonomy level do you want for multi-hour hunting once setup is done?\",\"options\":[{\"label\":\"Semi-auto durable ticks (Recommended)\",\"description\":\"Scheduler/disk-state loop: rank, scope, careful probes, draf",
+      "invariants": [
+        "question/options are learned structured content",
+        "choice options are alternatives, not assertions"
+      ]
+    },
+    {
+      "id": "tool_lifecycle_update",
+      "source": "grok/%2Fhome%2Fadam%2FProjects%2Fbountyhunting/019f8e56-b3d4-7743-a2a0-c0f07599974f/updates.jsonl",
+      "line": 3218,
+      "raw_line_bytes": 3308,
+      "sha256": "37b24827b0370cf7e5c46129c0e64534008a3ecccee1626392380a00cacd97d9",
+      "needle": "tool_call_update",
+      "excerpt": "ion/update\",\"params\":{\"sessionId\":\"019f8e56-b3d4-7743-a2a0-c0f07599974f\",\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"call-d9203963-31ea-4478-8973-130174bb5f40-48\",\"kind\":\"other\",\"title\":\"Hunt 6 in-scope findings\",\"locations\":[],\"rawInput\":{\"variant\":\"Task\",\"prompt\":\"You are huntin",
+      "invariants": [
+        "update is not a second invocation",
+        "compiler-owned invocation identity links update downstream"
+      ]
+    },
+    {
+      "id": "tool_requested_edit",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 691,
+      "raw_line_bytes": 1870,
+      "sha256": "b964d429ccad6d901ee0e68c30745b23b58adeffff57d0fc562435f95a4878d3",
+      "needle": "\"name\":\"Edit\"",
+      "excerpt": "e\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_016JC8UFsKwfzhKYHnyNTyDt\",\"name\":\"Edit\",\"input\":{\"replace_all\":false,\"file_path\":\"/tmp/claude-1000/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc/scratchpad/proto.py\",\"old_string\":\"teams = {}\\nfor row",
+      "invariants": [
+        "requested write is intensional requested effect",
+        "call does not assert file mutation occurred"
+      ]
+    },
+    {
+      "id": "tool_delegation_prompt",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 6378,
+      "raw_line_bytes": 2730,
+      "sha256": "ed12bb5e53b203f6b94a9d4886b6d59f5e1bdc95ec84b84579bf6f49ed70bdfb",
+      "needle": "\"name\":\"Agent\"",
+      "excerpt": "e\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01GfB4hu34MkqhTLVpCe6YNb\",\"name\":\"Agent\",\"input\":{\"description\":\"Explore classify scaffold + ingest schema\",\"subagent_type\":\"Explore\",\"prompt\":\"I'm planning to build out the debateDB provenance/classification layer. Expl",
+      "invariants": [
+        "embedded prompt semantics stay scoped inside communicated/requested content",
+        "prompt assertions do not leak to top-level truth"
+      ]
+    },
+    {
+      "id": "tool_task_status",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 6486,
+      "raw_line_bytes": 1341,
+      "sha256": "143a285aca23fcb4d6ebdc38a941af9395b8114c5bd9b1d1d87d63a81b96929f",
+      "needle": "\"status\":\"in_progress\"",
+      "excerpt": "[{\"type\":\"tool_use\",\"id\":\"toolu_01AVvFzaWfoUCxr4ZxCjNqG6\",\"name\":\"TaskUpdate\",\"input\":{\"taskId\":\"1\",\"status\":\"in_progress\"},\"caller\":{\"type\":\"direct\"}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":1650,\"cache_read_input_toke",
+      "invariants": [
+        "tool-specific requested state is not a generic observed status fact"
+      ]
+    },
+    {
+      "id": "tool_partial_failure",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 246,
+      "raw_line_bytes": 4785,
+      "sha256": "9b0acf061648a74216cd5637ecca1a549c400efd6dd74552524c9ec920fb6dc0",
+      "needle": "Exit code 143",
+      "excerpt": "8a-2fed9c43cd3d\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"Exit code 143\\nCommand timed out after 2m 0s\\n=== free disk ===\\n/dev/nvme0n1p2  469G  223G  223G  50% /\\n\\n=== master/ quality report (schema/quality) ===\\n# OpenDebateEvidence `good` DuckDB —",
+      "invariants": [
+        "execution outcome is separate from payload propositions",
+        "partial observations remain representable despite failure"
+      ]
+    },
+    {
+      "id": "tool_message_aliases",
+      "source": "claude/-home-adam-Projects-debateDB/494f31c9-1c53-4330-861e-1c52e96f2ecc.jsonl",
+      "line": 7298,
+      "raw_line_bytes": 6234,
+      "sha256": "ff29ac5622e198a586fa12c7d77e2f1994925fe3e09451b510a6e654995af991",
+      "needle": "\"name\":\"SendMessage\"",
+      "excerpt": "e\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_018mv14RNMMA1kjDfvCeownW\",\"name\":\"SendMessage\",\"input\":{\"to\":\"a4f5a8163c68b12a9\",\"message\":\"Follow-up deep-dive on SeekStorm specifically — read the ACTUAL SOURCE (github.com/SeekStorm/SeekStorm, the `seekstorm` crate) and its",
+      "invariants": [
+        "schema-declared aliases canonicalize only after equality proof",
+        "message artifact/requested delivery does not assert successful delivery"
+      ]
+    },
+    {
+      "id": "tool_provider_status",
+      "source": "codex/2026/06/29/rollout-2026-06-29T04-47-15-019f12c6-a3d0-7310-ac6c-b48e6ada3d20.jsonl",
+      "line": 202,
+      "raw_line_bytes": 931,
+      "sha256": "e8c31c15f8599177f6c89fae05772ea145ac84a13b377288593421867bf080cf",
+      "needle": "\"status\":\"completed\"",
+      "excerpt": ",\"payload\":{\"type\":\"custom_tool_call\",\"id\":\"ctc_086d9356889e20c4016a4241e4cfcc8195b34be4de55d75165\",\"status\":\"completed\",\"call_id\":\"call_4iYzJ7vcjki8J0iApeJGMOU9\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\\n*** Update File: /home/adam/Projects/realartist/crates/core/src/lib.rs\\n@@\\n-mod shell_she",
+      "invariants": [
+        "provider lifecycle status does not imply patch effect success",
+        "patch body is learned tool content"
+      ]
+    },
+    {
+      "id": "tool_large_encoded_result",
+      "source": "codex/2026/08/01/rollout-2026-08-01T23-41-40-019fc0c7-16ac-7a80-8dbe-803df80efc07.jsonl",
+      "line": 24,
+      "raw_line_bytes": 79424,
+      "sha256": "72f514161d5a8fc196a16cb0b5cf5911538cacd2e2d23eb8b48fee44bb8bf981",
+      "needle": "function_call_output",
+      "excerpt": "{\"timestamp\":\"2026-08-02T04:42:54.081Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"call_W3MRp5Ge3QxQk4bkDjh48SAc\",\"output\":[{\"type\":\"input_text\",\"text\":\"Script completed\\nWall time 15.9 seconds\\nOutput:\\n\"},{\"type\":\"input_text\",\"text\":\"{\\\"chunk_id\\\":",
+      "invariants": [
+        "structured payload is normalized by pinned visibility contract",
+        "JSON-looking strings are not recursively parsed without a reversible contract"
+      ]
+    }
+  ]
+}
