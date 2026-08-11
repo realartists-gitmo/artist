@@ -399,7 +399,7 @@ This is a required architecture decision/implementation.
 - [ ] Complete TECA artifact-path migration from Section 1.3.
 - [ ] Support visual attachment rendering on `read(artifact://...)` where supported.
 - [ ] Define binary/media programmatic access separately from model-facing text.
-- [ ] Route screenshots/computer/canvas/terminal images through artifact semantics.
+- [x] Route screenshots/computer/canvas/terminal images through artifact semantics.
 - [ ] Ensure yield-produced artifacts are captured automatically by the harness.
 
 ## 7.2 Dictionary presentation and lifecycle
