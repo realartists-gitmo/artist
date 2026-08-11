@@ -10,6 +10,7 @@ use artist_tool_api::{
     ArtistDynamicTool, ArtistToolAnnotations, ArtistToolDefinition, PageInfo, ToolCategory,
     schema_for,
 };
+use base64::Engine as _;
 use fs2::FileExt;
 use rig_core::tool::{ToolExecutionError, ToolOutput};
 use schemars::JsonSchema;
@@ -41,11 +42,39 @@ struct Artifact {
     content_type: String,
     content: String,
     created_at_ms: u64,
+    /// Present when this artifact carries a binary/multimodal payload
+    /// (screenshot, image, yield blob). Raw bytes stay out of model text and
+    /// are only decoded on demand through the metadata or raw projections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media: Option<ArtifactMedia>,
 }
 
-/// Safe, model-visible metadata for a durable paginated artifact. The payload
-/// itself stays behind the pagination cursor and is never duplicated into an
-/// `artifact://` read.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtifactMedia {
+    /// MIME type, e.g. `image/png`.
+    media_type: String,
+    /// Base64-encoded exact payload bytes.
+    bytes: String,
+    /// Deterministic content address of the payload bytes alone (TECA render),
+    /// independent of the occurrence serial, so a payload revision stays
+    /// addressable even when only metadata is projected.
+    revision: String,
+}
+
+impl Artifact {
+    fn payload_bytes(&self) -> usize {
+        self.media
+            .as_ref()
+            .map(|media| decoded_len(&media.bytes))
+            .unwrap_or_else(|| self.content.len())
+    }
+}
+
+/// Safe, model-visible metadata for a durable artifact. The payload itself
+/// stays behind the pagination cursor and is never duplicated into an
+/// `artifact://` read; for media artifacts the exact bytes are likewise kept
+/// out of model text and decoded only through the raw projection.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactInfo {
@@ -54,6 +83,12 @@ pub struct ArtifactInfo {
     pub content_type: String,
     pub total_bytes: usize,
     pub created_at_ms: u64,
+    /// Present when the artifact carries a binary/multimodal payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Content address of the payload bytes alone; the payload revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -168,6 +203,7 @@ impl PageStore {
             tool: tool.to_owned(),
             content_type: "application/json".into(),
             content: payload,
+            media: None,
             created_at_ms: now_ms(),
         };
         // The id is derived from the exact canonical occurrence envelope plus
@@ -364,6 +400,46 @@ impl PageStore {
         }
     }
 
+    /// Capture a binary/multimodal payload (screenshot, image, yield blob) as a
+    /// durable artifact, returning its TECA-derived id. Occurrence distinction
+    /// lives in the TECA input material: identical bytes from a distinct
+    /// occurrence render a different id. The payload revision is the TECA
+    /// content address of the raw bytes alone.
+    pub fn capture_media(
+        &self,
+        tool: &str,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> Result<String, ToolExecutionError> {
+        let artifact = Artifact {
+            tool: tool.to_owned(),
+            content_type: media_type.to_owned(),
+            content: String::new(),
+            media: Some(ArtifactMedia {
+                media_type: media_type.to_owned(),
+                bytes: base64::engine::general_purpose::STANDARD.encode(bytes),
+                revision: payload_revision(bytes),
+            }),
+            created_at_ms: now_ms(),
+        };
+        self.store_artifact(&artifact)
+    }
+
+    /// Retrieve the raw payload bytes of a media artifact, decoded. Returns
+    /// `None` for an unknown id or a text-backed artifact.
+    pub fn media_bytes(&self, id: &str) -> Result<Option<Vec<u8>>, ToolExecutionError> {
+        if !valid_artifact_id(id) {
+            return Ok(None);
+        }
+        Ok(self.read_artifact(id)?.and_then(|artifact| {
+            artifact.media.map(|media| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&media.bytes)
+                    .unwrap_or_default()
+            })
+        }))
+    }
+
     fn write_cursor(&self, cursor: &str, record: &CursorRecord) -> Result<(), ToolExecutionError> {
         if let Some(root) = &self.root {
             write_json_atomic(&root.join("cursors").join(format!("{cursor}.json")), record)
@@ -472,13 +548,17 @@ fn valid_artifact_id(id: &str) -> bool {
 /// of the TECA address stream is joined with `-`, which never appears in a
 /// lexicon atom, so the render is injective over atom sequences.
 fn artifact_base_id(artifact: &Artifact, occurrence: u64) -> Result<String, ToolExecutionError> {
-    let envelope = serde_json::to_vec(&serde_json::json!({
+    let mut envelope = serde_json::json!({
         "tool": artifact.tool,
         "contentType": artifact.content_type,
         "content": artifact.content,
         "occurrence": occurrence,
-    }))
-    .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+    });
+    if let Some(media) = &artifact.media {
+        envelope["media"] = serde_json::json!(media.bytes);
+    }
+    let envelope = serde_json::to_vec(&envelope)
+        .map_err(|error| ToolExecutionError::other(error.to_string()))?;
     let mut id = String::from("a-");
     for (index, atom) in default_address(&envelope)
         .take(ARTIFACT_ID_ATOMS)
@@ -509,12 +589,16 @@ fn next_artifact_id(
 }
 
 fn artifact_info(id: String, artifact: Artifact) -> ArtifactInfo {
+    let media = artifact.media.as_ref();
+    let total_bytes = artifact.payload_bytes();
     ArtifactInfo {
         id,
         tool: artifact.tool,
         content_type: artifact.content_type,
-        total_bytes: artifact.content.len(),
+        total_bytes,
         created_at_ms: artifact.created_at_ms,
+        media_type: media.map(|media| media.media_type.clone()),
+        revision: media.map(|media| media.revision.clone()),
     }
 }
 
@@ -533,6 +617,27 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<Option
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn payload_revision(bytes: &[u8]) -> String {
+    let mut id = String::from("a-");
+    for (index, atom) in default_address(bytes).take(ARTIFACT_ID_ATOMS).enumerate() {
+        if index != 0 {
+            id.push('-');
+        }
+        id.push_str(std::str::from_utf8(atom).expect("TECA lexicon atoms are valid UTF-8"));
+    }
+    id
+}
+
+/// Decoded byte length of a base64 string without allocating.
+fn decoded_len(encoded: &str) -> usize {
+    let padding = encoded
+        .len()
+        .saturating_sub(encoded.trim_end_matches('=').len());
+    (encoded.len() / 4)
+        .saturating_mul(3)
+        .saturating_sub(padding)
 }
 
 fn prefix(value: &str, max_bytes: usize) -> String {
@@ -697,5 +802,91 @@ mod tests {
         assert_eq!(first_id, other_id);
         assert!(first_id.contains('-'));
         assert!(!first_id.contains('/'));
+    }
+
+    #[test]
+    fn media_artifacts_round_trip_through_disk_with_metadata() {
+        let state = tempfile::tempdir().unwrap();
+        let store = PageStore::open(Some(state.path())).unwrap();
+        let png = b"\x89PNG\r\n\x1a\nscreenshot bytes".to_vec();
+        let id = store.capture_media("computer", "image/png", &png).unwrap();
+        assert!(valid_artifact_id(&id));
+        assert!(
+            store
+                .media_bytes(&id)
+                .unwrap()
+                .is_some_and(|bytes| bytes == png)
+        );
+        let info = store.artifact(&id).unwrap().unwrap();
+        assert_eq!(info.media_type.as_deref(), Some("image/png"));
+        assert_eq!(info.total_bytes, png.len());
+        assert!(
+            info.revision
+                .as_deref()
+                .is_some_and(|revision| revision.starts_with('a'))
+        );
+        assert_eq!(store.artifacts().unwrap(), vec![info]);
+        drop(store);
+
+        let store = PageStore::open(Some(state.path())).unwrap();
+        assert!(
+            store
+                .media_bytes(&id)
+                .unwrap()
+                .is_some_and(|bytes| bytes == png)
+        );
+        assert_eq!(store.artifact(&id).unwrap().unwrap().total_bytes, png.len());
+    }
+
+    #[test]
+    fn recurring_media_payloads_stay_occurrence_distinct_in_teca_material() {
+        let store = PageStore::memory();
+        let png = b"recurring frame bytes".to_vec();
+        let first = store.capture_media("computer", "image/png", &png).unwrap();
+        let second = store.capture_media("computer", "image/png", &png).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(store.media_bytes(&first).unwrap(), Some(png.clone()));
+        assert_eq!(store.media_bytes(&second).unwrap(), Some(png));
+    }
+
+    #[test]
+    fn media_artifact_revision_is_the_payload_content_address() {
+        let store = PageStore::memory();
+        let one = b"revision addressed bytes".to_vec();
+        let two = b"revision addressed bytes".to_vec();
+        let first = store.capture_media("read", "image/webp", &one).unwrap();
+        let second = store.capture_media("bash", "image/webp", &two).unwrap();
+        let first_info = store.artifact(&first).unwrap().unwrap();
+        let second_info = store.artifact(&second).unwrap().unwrap();
+        assert_eq!(first_info.revision, second_info.revision);
+        assert_ne!(first_info.id, second_info.id);
+        assert_eq!(first_info.tool, "read");
+        assert_eq!(second_info.tool, "bash");
+    }
+
+    #[test]
+    fn text_and_media_artifacts_share_one_store() {
+        let store = PageStore::memory();
+        let text = "mixed store text".repeat(5_000);
+        let page = store
+            .paginate("read", &serde_json::json!({"text": text}), &text)
+            .unwrap()
+            .unwrap();
+        let text_id = store
+            .read_cursor(&page.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+        assert!(
+            store
+                .artifact(&text_id)
+                .unwrap()
+                .unwrap()
+                .media_type
+                .is_none()
+        );
+        let media_id = store.capture_media("canvas", "image/png", b"png").unwrap();
+        assert!(store.media_bytes(&media_id).unwrap().is_some());
+        assert_eq!(store.artifacts().unwrap().len(), 2);
     }
 }
