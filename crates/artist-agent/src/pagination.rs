@@ -15,7 +15,7 @@ use rig_core::tool::{ToolExecutionError, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use teca::default_address;
 use uuid::Uuid;
 
 pub const MAX_INLINE_RESULT_BYTES: usize = 64 * 1024;
@@ -23,6 +23,8 @@ pub const DEFAULT_PAGE_BYTES: usize = 32 * 1024;
 pub const MAX_PAGE_BYTES: usize = 64 * 1024;
 const PREVIEW_BYTES: usize = 8 * 1024;
 const CURSOR_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// How many TECA lexicon atoms render into an artifact path id.
+const ARTIFACT_ID_ATOMS: usize = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,10 +170,10 @@ impl PageStore {
             content: payload,
             created_at_ms: now_ms(),
         };
-        // The base is derived from the exact canonical occurrence envelope;
-        // a serial is allocated only when that occurrence appears again. This
-        // keeps identical bytes from distinct tool-result occurrences distinct
-        // without introducing a random resource identity.
+        // The id is derived from the exact canonical occurrence envelope plus
+        // payload bytes; the occurrence serial is part of the TECA input
+        // material, so identical bytes from distinct occurrences stay distinct
+        // without an unrelated rendered serial suffix.
         let artifact_id = self.store_artifact(&artifact)?;
         let record = CursorRecord {
             artifact_id,
@@ -315,7 +317,6 @@ impl PageStore {
     }
 
     fn store_artifact(&self, artifact: &Artifact) -> Result<String, ToolExecutionError> {
-        let base = artifact_base_id(artifact)?;
         if let Some(root) = &self.root {
             let directory = root.join("artifacts");
             std::fs::create_dir_all(&directory)
@@ -329,9 +330,9 @@ impl PageStore {
                 .map_err(|error| ToolExecutionError::other(error.to_string()))?;
             lock.lock_exclusive()
                 .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-            let id = next_artifact_id(&base, |candidate| {
+            let id = next_artifact_id(artifact, 1, |candidate| {
                 directory.join(format!("{candidate}.json")).exists()
-            });
+            })?;
             let result = write_json_atomic(&directory.join(format!("{id}.json")), artifact)
                 .map_err(|error| ToolExecutionError::other(error.to_string()));
             let _ = FileExt::unlock(&lock);
@@ -342,7 +343,7 @@ impl PageStore {
                 .artifacts
                 .lock()
                 .expect("page artifact mutex poisoned");
-            let id = next_artifact_id(&base, |candidate| artifacts.contains_key(candidate));
+            let id = next_artifact_id(artifact, 1, |candidate| artifacts.contains_key(candidate))?;
             artifacts.insert(id.clone(), artifact.clone());
             Ok(id)
         }
@@ -445,49 +446,65 @@ impl PageStore {
 }
 
 fn valid_artifact_id(id: &str) -> bool {
-    // Pre-migration UUID artifacts remain readable. New IDs are a canonical
-    // `a-<sha256-prefix>` with an optional occurrence serial.
+    // Pre-migration UUID artifacts remain readable. Current IDs are a
+    // canonical `a-<teca-atoms-joined-by-dashes>` render.
     if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return true;
     }
     let Some(rest) = id.strip_prefix("a-") else {
         return false;
     };
-    let (digest, serial) = rest.split_once('-').unwrap_or((rest, ""));
-    digest.len() == 24
-        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && (serial.is_empty()
-            || (serial.bytes().all(|byte| byte.is_ascii_digit())
-                && serial.parse::<u64>().is_ok_and(|serial| serial >= 2)))
+    !rest.is_empty()
+        && rest.split('-').all(|atom| {
+            !atom.is_empty()
+                && atom
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte >= 0x80)
+        })
 }
 
-fn artifact_base_id(artifact: &Artifact) -> Result<String, ToolExecutionError> {
+/// Derive a deterministic, content-addressed artifact id from the canonical
+/// occurrence envelope plus the exact payload bytes.
+///
+/// The occurrence serial is part of the TECA input material, not a separate
+/// rendered suffix: identical bytes emitted in a distinct occurrence render a
+/// completely different id because their envelope bytes differ. A fixed prefix
+/// of the TECA address stream is joined with `-`, which never appears in a
+/// lexicon atom, so the render is injective over atom sequences.
+fn artifact_base_id(artifact: &Artifact, occurrence: u64) -> Result<String, ToolExecutionError> {
     let envelope = serde_json::to_vec(&serde_json::json!({
         "tool": artifact.tool,
         "contentType": artifact.content_type,
         "content": artifact.content,
+        "occurrence": occurrence,
     }))
     .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-    let digest = Sha256::digest(envelope);
-    let token = digest[..12]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!("a-{token}"))
+    let mut id = String::from("a-");
+    for (index, atom) in default_address(&envelope)
+        .take(ARTIFACT_ID_ATOMS)
+        .enumerate()
+    {
+        if index != 0 {
+            id.push('-');
+        }
+        id.push_str(std::str::from_utf8(atom).expect("TECA lexicon atoms are valid UTF-8"));
+    }
+    Ok(id)
 }
 
-fn next_artifact_id(base: &str, occupied: impl Fn(&str) -> bool) -> String {
-    let mut serial = 1_u64;
+/// Allocate an id for `artifact`, bumping the occurrence serial only when the
+/// prior envelope's render already exists.
+fn next_artifact_id(
+    artifact: &Artifact,
+    mut occurrence: u64,
+    occupied: impl Fn(&str) -> bool,
+) -> Result<String, ToolExecutionError> {
     loop {
-        let candidate = if serial == 1 {
-            base.to_owned()
-        } else {
-            format!("{base}-{serial}")
-        };
+        let candidate = artifact_base_id(artifact, occurrence)?;
         if !occupied(&candidate) {
-            return candidate;
+            return Ok(candidate);
         }
-        serial = serial.saturating_add(1);
+        occurrence = occurrence.saturating_add(1);
     }
 }
 
@@ -621,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn artifact_ids_are_canonical_envelope_hashes_with_occurrence_serials() {
+    fn artifact_ids_are_teca_derived_with_occurrence_in_the_input_material() {
         let store = PageStore::memory();
         let text = "same occurrence bytes".repeat(5_000);
         let first = store
@@ -644,6 +661,41 @@ mod tests {
             .artifact_id;
 
         assert!(first_id.starts_with("a-"));
-        assert_eq!(second_id, format!("{first_id}-2"));
+        assert!(valid_artifact_id(&first_id));
+        assert!(valid_artifact_id(&second_id));
+        // The occurrence serial is part of the TECA input material, so a
+        // second occurrence of identical bytes renders a different id rather
+        // than a `-2` suffix on the same rendered id.
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn artifact_ids_are_deterministic_across_stores() {
+        let store = PageStore::memory();
+        let text = "stable occurrence bytes".repeat(5_000);
+        let page = store
+            .paginate("read", &serde_json::json!({"text": text}), &text)
+            .unwrap()
+            .unwrap();
+        let first_id = store
+            .read_cursor(&page.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+
+        let other = PageStore::memory();
+        let page = other
+            .paginate("read", &serde_json::json!({"text": text}), &text)
+            .unwrap()
+            .unwrap();
+        let other_id = other
+            .read_cursor(&page.cursor)
+            .unwrap()
+            .unwrap()
+            .artifact_id;
+
+        assert_eq!(first_id, other_id);
+        assert!(first_id.contains('-'));
+        assert!(!first_id.contains('/'));
     }
 }

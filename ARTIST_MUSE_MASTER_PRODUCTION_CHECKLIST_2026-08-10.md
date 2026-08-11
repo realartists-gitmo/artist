@@ -126,8 +126,8 @@ Do not reopen whether artifacts “should” use TECA.
 - [x] Derive artifact semantic identity material from canonical occurrence envelope plus exact payload bytes.
 - [x] Preserve occurrence distinction when identical bytes are emitted in distinct occurrences.
 - [x] Preserve legacy UUID artifact reads where migration compatibility requires them.
-- [ ] Replace SHA-256/truncated-hash artifact path generation with TECA-derived artifact paths.
-- [ ] Preserve occurrence distinction in the TECA input material rather than relying on an unrelated rendered ID system.
+- [x] Replace SHA-256/truncated-hash artifact path generation with TECA-derived artifact paths.
+- [x] Preserve occurrence distinction in the TECA input material rather than relying on an unrelated rendered ID system.
 - [ ] Ensure artifacts produced by tool results, yields, screenshots, images, or other supported binary/multimodal outputs are captured/routed by the harness without requiring the producing agent/yielder to manually write an artifact.
 - [ ] `read(artifact://...)` must return metadata plus the appropriate visual/multimodal attachment when supported.
 - [ ] Define programmatic raw-byte access separately from model-facing text projection if required.
@@ -914,7 +914,7 @@ The agent should not interpret this as a strict “finish every line in section 
 
 - [x] Compact TECA lexicon rendering for line anchors.
 - [x] TECA exact-substring dictionary identity.
-- [ ] TECA artifact-path identity.
+- [x] TECA artifact-path identity.
 - [ ] Automatic artifact capture/routing from producing occurrences/yields.
 
 ## P1 — finish the common harness substrate
