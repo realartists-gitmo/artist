@@ -65,6 +65,7 @@ pub(crate) fn guard(
                 })),
             };
             let outcome = append_drift(outcome, drift).await;
+            let outcome = capture_result_images(&name, outcome, &pages);
             paginate_or_cap(&name, outcome, &pages)
         })
     })
@@ -112,6 +113,67 @@ async fn append_drift(
 }
 
 const RESULT_PRESENTATION_CAP: usize = 64 * 1024;
+
+/// Capture image blocks a tool returned and route them through artifact
+/// semantics: each base64 image is stored as a durable media artifact and the
+/// model-facing block becomes a pointer to it, so the raw payload never has to
+/// re-enter the conversation and the artifact stays addressable by id with
+/// media type, revision, provenance, and occurrence.
+///
+/// This runs on every successful tool result before pagination, at the one
+/// choke point every tool passes through — built-in, MCP, extension, canvas,
+/// delegate — so no tool can return an image later that bypasses the artifact
+/// store. Images that cannot be captured (unknown id generation, missing or
+/// opaque media type, undecodable base64) are left inline rather than lost.
+fn capture_result_images(
+    tool: &str,
+    outcome: Result<ArtistToolOutput, ToolExecutionError>,
+    pages: &crate::pagination::PageStore,
+) -> Result<ArtistToolOutput, ToolExecutionError> {
+    use base64::Engine as _;
+    use rig_core::completion::message::{DocumentSourceKind, MimeType};
+
+    let Ok(mut output) = outcome else {
+        return outcome;
+    };
+    let mut references = Vec::new();
+    let blocks = output.presentation.as_content().clone();
+    for block in blocks.iter() {
+        let rig_core::completion::message::ToolResultContent::Image(image) = block else {
+            continue;
+        };
+        let DocumentSourceKind::Base64(data) = &image.data else {
+            continue;
+        };
+        let Some(media_type) = image.media_type.clone() else {
+            continue;
+        };
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let mime = media_type.to_mime_type().to_owned();
+        if let Ok(id) = pages.capture_media(tool, &mime, &bytes) {
+            references.push(id);
+        }
+    }
+    if references.is_empty() {
+        return Ok(output);
+    }
+    let note = references
+        .iter()
+        .map(|id| format!("[captured image artifact://{id}; metadata via read(artifact://{id})]"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut blocks = blocks.into_iter().collect::<Vec<_>>();
+    blocks.push(rig_core::completion::message::ToolResultContent::text(
+        format!("\n{note}"),
+    ));
+    output.presentation = rig_core::tool::ToolOutput::content(
+        rig_core::OneOrMany::many(blocks).expect("captured-image tool result is non-empty"),
+    );
+    Ok(output)
+}
 
 fn paginate_or_cap(
     tool: &str,
@@ -576,5 +638,130 @@ mod tests {
         assert!(bounded.starts_with("HEAD:"), "{bounded}");
         assert!(bounded.ends_with(":TAIL"), "{bounded}");
         assert!(bounded.contains("[excerpted]"), "{bounded}");
+    }
+
+    /// A tool returning an inline base64 image passes through the guard choke
+    /// point, which must route that image into the artifact store and hand the
+    /// model a pointer instead of the raw payload.
+    #[tokio::test]
+    async fn guard_captures_tool_result_images_as_artifacts() {
+        use base64::Engine as _;
+        use rig_core::OneOrMany;
+        use rig_core::completion::message::{DocumentSourceKind, Image, ImageMediaType};
+
+        let payload = b"\x89PNG\r\n\x1a\nfake png bytes".to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let image = Image {
+            data: DocumentSourceKind::Base64(encoded),
+            media_type: Some(ImageMediaType::PNG),
+            detail: None,
+            additional_params: None,
+        };
+        let presentation = rig_core::tool::ToolOutput::content(
+            OneOrMany::many(vec![
+                rig_core::completion::message::ToolResultContent::text("screenshot taken"),
+                rig_core::completion::message::ToolResultContent::Image(image),
+            ])
+            .expect("two blocks"),
+        );
+        let definition = artist_tool_api::ArtistToolDefinition {
+            name: "screenshot".into(),
+            title: "Screenshot".into(),
+            description: "Capture the screen.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            category: artist_tool_api::ToolCategory::Computer,
+            annotations: artist_tool_api::ArtistToolAnnotations::read_only(),
+        };
+        let tool = artist_tool_api::ArtistDynamicTool::new(definition, move |_| {
+            let presentation = presentation.clone();
+            Box::pin(async move {
+                Ok(artist_tool_api::ArtistToolOutput {
+                    presentation,
+                    structured: serde_json::json!({"text": "screenshot taken"}),
+                })
+            })
+        });
+
+        let pages = crate::pagination::PageStore::memory();
+        let guarded = guard(tool, None, pages.clone());
+        let result = guarded
+            .execute(serde_json::json!({}))
+            .await
+            .expect("screenshot result");
+        let rendered = result.presentation.render();
+        assert!(
+            rendered.contains("screenshot taken"),
+            "text block kept: {rendered}"
+        );
+
+        let artifacts = pages.artifacts().expect("artifacts");
+        assert_eq!(artifacts.len(), 1, "one image artifact captured");
+        let info = &artifacts[0];
+        assert_eq!(info.tool, "screenshot");
+        assert_eq!(info.media_type.as_deref(), Some("image/png"));
+        assert!(info.revision.is_some(), "revision addressable");
+        let rendered = result.presentation.render();
+        assert!(
+            rendered.contains(&format!("artifact://{}", info.id)),
+            "presentation points at the captured artifact: {rendered}"
+        );
+
+        let bytes = pages.media_bytes(&info.id).expect("media bytes");
+        assert_eq!(bytes.as_deref(), Some(payload.as_slice()));
+    }
+
+    /// A text-only tool result must not touch the artifact store, and an image
+    /// with an unknown media type stays inline rather than being burned.
+    #[tokio::test]
+    async fn guard_leaves_text_and_unknown_media_inline() {
+        use base64::Engine as _;
+        use rig_core::OneOrMany;
+        use rig_core::completion::message::{DocumentSourceKind, Image};
+
+        let image = Image {
+            data: DocumentSourceKind::Base64(
+                base64::engine::general_purpose::STANDARD.encode(b"data"),
+            ),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        };
+        let presentation = rig_core::tool::ToolOutput::content(OneOrMany::one(
+            rig_core::completion::message::ToolResultContent::Image(image),
+        ));
+        let definition = artist_tool_api::ArtistToolDefinition {
+            name: "odd".into(),
+            title: "Odd".into(),
+            description: "Returns an untyped image.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "object"}),
+            category: artist_tool_api::ToolCategory::External,
+            annotations: artist_tool_api::ArtistToolAnnotations::read_only(),
+        };
+        let tool = artist_tool_api::ArtistDynamicTool::new(definition, move |_| {
+            let presentation = presentation.clone();
+            Box::pin(async move {
+                Ok(artist_tool_api::ArtistToolOutput {
+                    presentation,
+                    structured: serde_json::json!({"text": "odd"}),
+                })
+            })
+        });
+
+        let pages = crate::pagination::PageStore::memory();
+        let guarded = guard(tool, None, pages.clone());
+        let result = guarded
+            .execute(serde_json::json!({}))
+            .await
+            .expect("odd result");
+        assert!(
+            result.presentation.render().contains("base64"),
+            "untyped image stays inline"
+        );
+        assert!(
+            pages.artifacts().expect("artifacts").is_empty(),
+            "no artifact for an untyped image"
+        );
     }
 }
