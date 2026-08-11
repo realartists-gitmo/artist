@@ -1120,16 +1120,12 @@ impl VirtualReadTool {
                     .join("\n")
             }));
         }
-        if segments.len() != 1 {
-            return Err(ToolError::Message(format!(
-                "dict://{}/{} is not a readable projection; read dict://{}",
-                segments[0],
-                segments[1..].join("/"),
-                segments[0]
-            )));
-        }
+        // A TECA-prefix reference contains `/`, which the virtual path parser
+        // splits into segments; rejoin them to reconstruct the opaque `§...`
+        // reference before resolving against the known streams.
+        let reference = segments.join("/");
         let value = dictionary
-            .resolve(&segments[0])
+            .resolve(&reference)
             .map_err(|error| ToolError::Message(error.to_string()))?;
         paged_virtual_text(&value, &args.path, args)
     }

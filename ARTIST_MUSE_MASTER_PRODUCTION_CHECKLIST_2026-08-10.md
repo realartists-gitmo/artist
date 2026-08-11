@@ -103,19 +103,19 @@ Existing global dictionary infrastructure is useful, but its current SHA-256/ser
 - [x] Persist a permanent global `dict://` store.
 - [x] Persist exact dictionary content atomically.
 - [x] Provide model-facing `§...` references.
-- [ ] Delete SHA-256-truncation as the model-facing dictionary identity source.
-- [ ] Delete numeric collision suffix allocation as the dictionary address source.
-- [ ] Define dictionary semantic identity as the exact canonical substring.
-- [ ] Encode that substring as exact UTF-8 bytes with no normalization, trimming, case folding, hashing, summarization, fuzzy matching, or tokenization before TECA.
-- [ ] Feed the exact bytes directly into TECA.
-- [ ] Compute the shortest currently unique TECA prefix across known dictionary identities.
-- [ ] Render that TECA prefix after `§`.
-- [ ] Resolve `§` values against actual known TECA streams, not against heuristically parsed text fragments.
-- [ ] Zero matches => unknown/stale reference.
-- [ ] One match => expand to the exact persisted canonical substring.
-- [ ] Multiple matches => fail safely and return longer disambiguating references.
-- [ ] Never choose among colliding dictionary entries heuristically.
-- [ ] Keep dictionary discovery/profitability/definition placement/repetition/presentation logic in Artist rather than reimplementing TECA internals.
+- [x] Delete SHA-256-truncation as the model-facing dictionary identity source.
+- [x] Delete numeric collision suffix allocation as the dictionary address source.
+- [x] Define dictionary semantic identity as the exact canonical substring.
+- [x] Encode that substring as exact UTF-8 bytes with no normalization, trimming, case folding, hashing, summarization, fuzzy matching, or tokenization before TECA.
+- [x] Feed the exact bytes directly into TECA.
+- [x] Compute the shortest currently unique TECA prefix across known dictionary identities.
+- [x] Render that TECA prefix after `§`.
+- [x] Resolve `§` values against actual known TECA streams, not against heuristically parsed text fragments.
+- [x] Zero matches => unknown/stale reference.
+- [x] One match => expand to the exact persisted canonical substring.
+- [x] Multiple matches => fail safely and return longer disambiguating references.
+- [x] Never choose among colliding dictionary entries heuristically.
+- [x] Keep dictionary discovery/profitability/definition placement/repetition/presentation logic in Artist rather than reimplementing TECA internals.
 
 ## 1.3 Artifact namespace is TECA by design
 
@@ -913,7 +913,7 @@ The agent should not interpret this as a strict “finish every line in section 
 ## P0 — repair wrong ABI before more code depends on it
 
 - [x] Compact TECA lexicon rendering for line anchors.
-- [ ] TECA exact-substring dictionary identity.
+- [x] TECA exact-substring dictionary identity.
 - [ ] TECA artifact-path identity.
 - [ ] Automatic artifact capture/routing from producing occurrences/yields.
 
