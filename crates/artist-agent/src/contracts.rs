@@ -6,6 +6,30 @@ artist_tool_api::impl_tool_output_contract!(
     A::read_only(),
     "File content or typed virtual-resource snapshots selected by the read request."
 );
+impl artist_tool_api::ArtistToolContract for artist_tools::ReadManyTool {
+    fn category(&self) -> C {
+        C::Files
+    }
+    fn annotations(&self) -> A {
+        A::read_only()
+    }
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":"object",
+            "required":["reads","snapshot"],
+            "properties": {
+                "snapshot":{"const":"artist-coordinator"},
+                "reads":{"type":"array","items":{"type":"object"}}
+            }
+        })
+    }
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
 artist_tool_api::impl_text_tool_contract!(
     crate::virtual_read::VirtualFindTool,
     C::Files,
@@ -28,8 +52,123 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The spawned ask session id."
+    "The spawned canonical ask:// session path."
 );
+impl artist_tool_api::ArtistToolContract for crate::relationships::RelationshipTool {
+    fn category(&self) -> C {
+        C::Administration
+    }
+    fn annotations(&self) -> A {
+        A {
+            read_only: false,
+            destructive: true,
+            idempotent: false,
+            open_world: false,
+        }
+    }
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","description":"Structured relationship edge mutation or traversal result."})
+    }
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
+impl artist_tool_api::ArtistToolContract for crate::eval_tool::EvalTool {
+    fn category(&self) -> C {
+        C::Shell
+    }
+    fn annotations(&self) -> A {
+        A {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            open_world: true,
+        }
+    }
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "description": "Persistent Python scratchpad result with canonical eval path and ordered policy-mediated callback provenance."
+        })
+    }
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
+impl artist_tool_api::ArtistToolContract for crate::debug_tool::DebugTool {
+    fn category(&self) -> C {
+        C::Shell
+    }
+
+    fn annotations(&self) -> A {
+        A {
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            open_world: true,
+        }
+    }
+
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "description": "Structured DAP result with canonical debug path and resolved adapter provenance."
+        })
+    }
+
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
+impl artist_tool_api::ArtistToolContract for crate::lsp_tool::LspTool {
+    fn category(&self) -> C {
+        C::Code
+    }
+
+    fn annotations(&self) -> A {
+        A::read_only()
+    }
+
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "description": "Structured LSP result plus server provenance or shared-client status."
+        })
+    }
+
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
+impl artist_tool_api::ArtistToolContract for crate::forge_tool::ForgeTool {
+    fn category(&self) -> C {
+        C::Files
+    }
+    fn annotations(&self) -> A {
+        A::read_only()
+    }
+    fn output_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","description":"Current structured read-only forge resource or diff."})
+    }
+    fn structured_output(
+        &self,
+        output: &<Self as rig_core::tool::PortableTool>::Output,
+    ) -> Result<serde_json::Value, rig_core::tool::ToolExecutionError> {
+        Ok(output.clone())
+    }
+}
 artist_tool_api::impl_text_tool_contract!(
     crate::canvas::CanvasTool,
     C::Canvas,
@@ -39,7 +178,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: false
     },
-    "Canvas search results or the stable canvas session id that was opened/cloned."
+    "Canvas search results or the stable canonical canvas:// session path that was opened/cloned."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::code_search::CodeSearchTool,
@@ -62,7 +201,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The spawned subagent's bare artist-name session id."
+    "The spawned subagent's canonical agent:// session path."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::delegate::AgentCreation,
@@ -73,7 +212,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The retained Artist's canonical roster name."
+    "The retained Artist's canonical agent:// session path."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::handoff::HandoffTool,
@@ -124,7 +263,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The spawned bash session id."
+    "The spawned canonical bash:// session path."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::run_tool::RunTool,
@@ -135,7 +274,7 @@ artist_tool_api::impl_text_tool_contract!(
         idempotent: false,
         open_world: true
     },
-    "The spawned durable session id for the requested executable path."
+    "The spawned canonical bash://, process://, or canvas:// path for the requested executable."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::PollTool,
@@ -153,17 +292,6 @@ artist_tool_api::impl_text_tool_contract!(
         open_world: true
     },
     "Durable graceful-cancellation state for the targeted sessions."
-);
-artist_tool_api::impl_text_tool_contract!(
-    crate::session_tools::AbortTool,
-    C::Agents,
-    A {
-        read_only: false,
-        destructive: true,
-        idempotent: true,
-        open_world: true
-    },
-    "The durable cancellation-request state for the targeted sessions."
 );
 artist_tool_api::impl_text_tool_contract!(
     crate::session_tools::DeleteTool,
@@ -187,13 +315,6 @@ artist_tool_api::impl_text_tool_contract!(
     },
     "Durable delivery acknowledgements for the targeted sessions or artists."
 );
-artist_tool_api::impl_text_tool_contract!(
-    crate::session_tools::ListTool,
-    C::Agents,
-    A::read_only(),
-    "Live session summaries from the durable registry."
-);
-
 impl artist_tool_api::ArtistToolContract for crate::computer_tool::ComputerTool {
     fn category(&self) -> C {
         C::Computer

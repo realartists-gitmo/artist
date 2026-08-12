@@ -20,19 +20,6 @@ pub(crate) fn should_compact(
     settings.enabled && context_tokens > context_window.saturating_sub(settings.reserve_tokens)
 }
 
-fn supports_remote_compaction(provider: &SavedProvider) -> bool {
-    supports_remote_compaction_transport(provider.provider, provider.api)
-}
-
-fn supports_remote_compaction_transport(
-    provider: llm_provider::ProviderKind,
-    api: Option<llm_provider::OpenAiApi>,
-) -> bool {
-    provider == llm_provider::ProviderKind::Chatgpt
-        || (provider == llm_provider::ProviderKind::Openai
-            && api == Some(llm_provider::OpenAiApi::Responses))
-}
-
 pub(crate) fn projected_context_tokens(
     history: &[Message],
     last_usage: Option<u64>,
@@ -53,22 +40,14 @@ pub(crate) fn projected_context_tokens(
 /// counts toward it — decaying a few screenshots often avoids a compaction
 /// outright, which is much cheaper than summarizing.
 ///
-/// **Skipped when the provider sidecar is authoritative.** On ChatGPT and
-/// OpenAI Responses, remote compaction resets Rig memory to empty and the
-/// canonical history lives provider-side; rewriting a local copy the provider is
-/// about to supersede changes nothing the model sees and saves no tokens.
 pub(crate) async fn decay(
     active: &ActiveSession,
-    provider: &SavedProvider,
+    _provider: &SavedProvider,
     settings: crate::settings::ComputerConfig,
 ) -> Result<Option<Vec<Message>>> {
     if !settings.enabled || settings.keep_recent_observations == 0 {
         return Ok(None);
     }
-    if supports_remote_compaction(provider) {
-        return Ok(None);
-    }
-
     active.recorder.flush().await;
     let mut history = active
         .memory
@@ -96,13 +75,14 @@ pub(crate) async fn decay(
     Ok(Some(history))
 }
 
-/// Generate and atomically append a compaction checkpoint plus its reset
-/// snapshot. Until summary generation succeeds, the active memory is untouched.
+/// Generate and atomically append a lossless compaction checkpoint plus its
+/// reset snapshot.  There is no LLM or provider-side summary fallback: until
+/// the exact checkpoint is built, the active memory is untouched.
 pub(crate) async fn compact(
     active: &ActiveSession,
-    provider: &SavedProvider,
+    _provider: &SavedProvider,
     settings: CompactionConfig,
-    custom_instructions: Option<&str>,
+    _custom_instructions: Option<&str>,
     reason: &str,
     measured_tokens: Option<u64>,
 ) -> Result<Option<CompactionResult>> {
@@ -118,76 +98,20 @@ pub(crate) async fn compact(
         return Ok(None);
     };
 
-    // Custom instructions are a local summarizer feature; never silently drop
-    // them on the provider-side path. Other providers likewise remain local.
-    if custom_instructions.is_none() && supports_remote_compaction(provider) {
-        let model = provider
-            .model
-            .as_deref()
-            .context("no model selected; run `artist model` first")?;
-        match artist_agent::compaction::remote(
-            provider,
-            history.clone(),
-            &active.session.id,
-            active.provider_context.clone(),
-            model,
-        )
-        .await?
-        {
-            artist_agent::compaction::RemoteCompaction::Compacted { .. } => {
-                let tokens_before = measured_tokens.unwrap_or(plan.tokens_before);
-                let summarized_messages = history.len();
-                // The opaque canonical item now lives solely in the durable
-                // provider sidecar. Reset Rig memory so it cannot resend the
-                // superseded portable transcript; display projection remains
-                // append-only because SessionMemory::compact hides this reset.
-                active
-                    .memory
-                    .compact(
-                        Vec::new(),
-                        ConversationCompacted {
-                            summary: "Context compacted by OpenAI Responses".to_owned(),
-                            tokens_before,
-                            kept_messages: 0,
-                            reason: reason.to_owned(),
-                            read_files: plan.read_files.clone(),
-                            modified_files: plan.modified_files.clone(),
-                        },
-                    )
-                    .await
-                    .context("persist provider-compacted conversation")?;
-                return Ok(Some(CompactionResult {
-                    history: Vec::new(),
-                    summarized_messages,
-                    tokens_before,
-                }));
-            }
-            artist_agent::compaction::RemoteCompaction::Unsupported => {
-                // No sidecar or memory mutation occurred; use the existing
-                // local summary path below.
-            }
-        }
-    }
-
-    let summary = artist_agent::compaction::summarize(
-        provider,
-        &plan,
-        settings.reserve_tokens,
-        custom_instructions,
-    )
-    .await?;
     let summarized_messages = plan.messages_to_summarize.len() + plan.turn_prefix_messages.len();
     let tokens_before = measured_tokens.unwrap_or(plan.tokens_before);
     let kept_messages = plan.kept_messages.len();
     let read_files = plan.read_files.clone();
     let modified_files = plan.modified_files.clone();
-    let snapshot = plan.snapshot(&summary);
+    let exact_prefix = plan.exact_prefix(&history);
+    let checkpoint_source = active.memory.structural_compaction_view(&exact_prefix);
+    let snapshot = plan.exact_snapshot(&checkpoint_source);
     active
         .memory
         .compact(
             snapshot.clone(),
             ConversationCompacted {
-                summary,
+                summary: "Lossless structural condensation (presentation-v1)".to_owned(),
                 tokens_before,
                 kept_messages,
                 reason: reason.to_owned(),
@@ -224,23 +148,6 @@ mod tests {
                 enabled: false,
                 ..settings
             }
-        ));
-    }
-
-    #[test]
-    fn remote_compaction_excludes_openai_chat_completions() {
-        use llm_provider::{OpenAiApi, ProviderKind};
-        assert!(supports_remote_compaction_transport(
-            ProviderKind::Chatgpt,
-            None
-        ));
-        assert!(supports_remote_compaction_transport(
-            ProviderKind::Openai,
-            Some(OpenAiApi::Responses)
-        ));
-        assert!(!supports_remote_compaction_transport(
-            ProviderKind::Openai,
-            Some(OpenAiApi::ChatCompletions)
         ));
     }
 

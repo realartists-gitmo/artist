@@ -133,6 +133,14 @@ impl SessionMemory {
         messages
     }
 
+    /// Return an exact structural-compaction view with binary image payloads
+    /// replaced by durable attachment references.  The live conversation stays
+    /// hydrated for normal provider calls; only the text checkpoint uses this
+    /// view, so raw image bytes can never leak into model text.
+    pub fn structural_compaction_view(&self, messages: &[Message]) -> Vec<Message> {
+        self.for_log(messages)
+    }
+
     fn cache(&self, messages: Vec<Message>) -> Result<(), MemoryError> {
         let messages = normalize(messages)?;
         *self

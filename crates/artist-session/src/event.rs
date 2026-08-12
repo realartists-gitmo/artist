@@ -8,7 +8,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Current payload schema version written by this binary.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Schema v7 adds the explicit model-presentation/canonical mapping to tool
+/// results. Schema v6 adds exact rule-snapshot provenance and control actions to rule
+/// firing/injection events. Schema v4 added an immutable validated-work-unit yield event. A reader
+/// remains forward tolerant and existing sessions retain their historical
+/// meaning.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Lineage of the main agent.
 pub const MAIN_LINEAGE: &str = "main";
@@ -58,6 +63,7 @@ pub enum SessionEvent {
     SteeringDelivered(SteeringDelivered),
     DelegateStarted(DelegateStarted),
     DelegateFinished(DelegateFinished),
+    WorkUnitYield(WorkUnitYield),
     ConversationMessages(ConversationMessages),
     ConversationCompacted(ConversationCompacted),
     HistoryRewind(HistoryRewind),
@@ -68,6 +74,7 @@ pub enum SessionEvent {
     HandoffPerformed(HandoffPerformed),
     TodoUpdated(TodoUpdated),
     ProviderContext(ProviderContext),
+    ToolContext(ToolContext),
     CanvasCreated(CanvasCreated),
     CanvasOpened(CanvasOpened),
     CanvasState(CanvasState),
@@ -146,6 +153,7 @@ event_kinds!(
     (SteeringDelivered, SteeringDelivered, "steering.delivered"),
     (DelegateStarted, DelegateStarted, "delegate.started"),
     (DelegateFinished, DelegateFinished, "delegate.finished"),
+    (WorkUnitYield, WorkUnitYield, "work_unit.yield.v1"),
     (
         ConversationMessages,
         ConversationMessages,
@@ -164,6 +172,7 @@ event_kinds!(
     (HandoffPerformed, HandoffPerformed, "handoff.performed"),
     (TodoUpdated, TodoUpdated, "todo.updated"),
     (ProviderContext, ProviderContext, "provider.context.v1"),
+    (ToolContext, ToolContext, "tool.context.v1"),
     (CanvasCreated, CanvasCreated, "canvas.created"),
     (CanvasOpened, CanvasOpened, "canvas.opened"),
     (CanvasState, CanvasState, "canvas.state"),
@@ -398,6 +407,38 @@ pub struct ProviderContext {
     pub input_fingerprints: Vec<String>,
 }
 
+/// Exact model-visible tool/profile context resolved for one run. This is
+/// retained source provenance, never a live policy lookup during replay.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ToolContext {
+    pub surface_version: String,
+    pub profile: String,
+    /// Digest of the resolved profile material that governed this run.
+    pub profile_digest: String,
+    /// Lexically sorted canonical tool names.
+    pub tools: Vec<String>,
+    /// SHA-256 of the canonical tool definitions supplied to the model.
+    pub tool_definitions_digest: String,
+    /// Exact canonical tool definitions supplied to the model. This is source
+    /// evidence, not a later live-policy lookup.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_definitions: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_schema_digest: Option<String>,
+    /// Exact resolved yield schema, if the governing profile has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_schema: Option<serde_json::Value>,
+    /// Digest of the exact profile instructions injected for this attempt.
+    pub instructions_digest: String,
+    /// Exact resolved profile instructions injected for this attempt.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
+    /// Exact active extension manifests and implementation digests at this
+    /// boundary. Empty means no extension runtime was present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<serde_json::Value>,
+}
+
 /// One content block inside a message. Structurally mirrors rig's content
 /// types but with explicit tags so the on-disk format survives rig upgrades.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -597,6 +638,11 @@ pub struct ToolResultEvent {
     pub arguments: serde_json::Value,
     /// The model-visible result text (after any steering rewrite).
     pub result: String,
+    /// Exact presentation, canonical text, and source mapping.  `result` is
+    /// retained for older readers; new producers populate this field even for
+    /// ordinary literal output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<crate::presentation::ModelPresentation>,
     pub outcome: ToolOutcomeRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
@@ -647,6 +693,21 @@ pub struct DelegateStarted {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DelegateFinished {
     pub outcome: String,
+}
+
+/// A validated delegate work-unit result. This is a model-produced report,
+/// retained verbatim with its profile/schema context; it is not an observed
+/// fact and must never be normalized as one without separate evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkUnitYield {
+    pub agent: String,
+    pub sequence: u64,
+    pub profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_schema: Option<serde_json::Value>,
+    pub value: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
 }
 
 /// Rig-native conversation messages committed after a successful agent run.
@@ -789,6 +850,15 @@ pub struct RuleFired {
     /// Absent in pre-existing logs (treated as `false`, i.e. once-per-session).
     #[serde(default)]
     pub per_turn: bool,
+    /// Exact semantic rule snapshot that produced this firing. Absent for
+    /// historical event logs written before rule provenance was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
+    /// Control effect chosen for this firing, distinct from the rule evidence.
+    /// Historical events omit it; current retry-branch firings use
+    /// `abort_and_retry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -800,6 +870,10 @@ pub struct RuleInjection {
     /// injections. Absent in pre-existing logs (treated as `false`).
     #[serde(default)]
     pub session_persistent: bool,
+    /// Must match the firing's provenance when the injection was generated by
+    /// an in-run TTSR action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

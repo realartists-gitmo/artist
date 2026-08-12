@@ -93,6 +93,12 @@ pub(crate) struct ToolEnv {
     pub sessions: crate::session_tools::SessionHub,
     /// Ordinary bounded-result continuation shared by every tool in this environment.
     pub pages: crate::pagination::PageStore,
+    /// Dedicated Mnestic graph for navigational shortcuts. It is never shared
+    /// with Muse/memory's semantic data.
+    pub relationships: crate::relationships::RelationshipStore,
+    /// The policy-filtered tool surface published for the active attempt.
+    /// Python callbacks use this rather than a private bypass route.
+    pub tool_registry: crate::ToolRegistryHandle,
     /// MCP and extension tools. Not enumerable at compile time, but subject to
     /// exactly the same policy pass as everything else.
     pub dynamic: Vec<ArtistDynamicTool>,
@@ -142,6 +148,7 @@ pub(crate) enum Tool {
     Bash,
     Run,
     Read,
+    ReadMany,
     Find,
     Grep,
     Edit,
@@ -166,22 +173,25 @@ pub(crate) enum Tool {
     Canvas,
     Handoff,
     Agent,
-    Subagent,
     Poll,
     Stop,
-    Abort,
     Delete,
     Send,
-    List,
     Page,
     Ask,
+    Relationship,
+    Eval,
+    Debug,
+    Lsp,
+    Forge,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 36] = [
+    pub(crate) const ALL: [Tool; 39] = [
         Tool::Bash,
         Tool::Run,
         Tool::Read,
+        Tool::ReadMany,
         Tool::Find,
         Tool::Grep,
         Tool::Edit,
@@ -206,15 +216,17 @@ impl Tool {
         Tool::Canvas,
         Tool::Handoff,
         Tool::Agent,
-        Tool::Subagent,
         Tool::Poll,
         Tool::Stop,
-        Tool::Abort,
         Tool::Delete,
         Tool::Send,
-        Tool::List,
         Tool::Page,
         Tool::Ask,
+        Tool::Relationship,
+        Tool::Eval,
+        Tool::Debug,
+        Tool::Lsp,
+        Tool::Forge,
     ];
 
     /// The name profile policy addresses this tool by.
@@ -227,6 +239,7 @@ impl Tool {
             Tool::Bash => "bash",
             Tool::Run => "run",
             Tool::Read => "read",
+            Tool::ReadMany => "read_many",
             Tool::Find => "find",
             Tool::Grep => "grep",
             Tool::Edit => "edit",
@@ -251,15 +264,17 @@ impl Tool {
             Tool::Canvas => "canvas",
             Tool::Handoff => "handoff",
             Tool::Agent => "agent",
-            Tool::Subagent => "subagent",
             Tool::Poll => "poll",
             Tool::Stop => "stop",
-            Tool::Abort => "abort",
             Tool::Delete => "delete",
             Tool::Send => "send",
-            Tool::List => "list",
             Tool::Page => "page",
             Tool::Ask => "ask",
+            Tool::Relationship => "relationship",
+            Tool::Eval => "eval",
+            Tool::Debug => "debug",
+            Tool::Lsp => "lsp",
+            Tool::Forge => "forge",
         }
     }
 
@@ -280,6 +295,12 @@ impl Tool {
                     env.sessions.clone(),
                     env.extension_runs.clone(),
                 )
+                .with_eval(crate::eval_tool::EvalTool::new(
+                    env.bundle.project_root().to_path_buf(),
+                    env.sessions.clone(),
+                    env.tool_registry.clone(),
+                    env.relationships.clone(),
+                ))
                 .with_extension_manager(env.extension_manager.clone())
                 .with_canvas(env.canvas.as_ref().map(|canvas| {
                     crate::canvas::CanvasTool::new(
@@ -299,9 +320,11 @@ impl Tool {
                     env.profiles.clone(),
                     profile.clone(),
                     env.pages.clone(),
+                    env.relationships.clone(),
                 )
                 .with_extension_manager(env.extension_manager.clone()),
             ),
+            Tool::ReadMany => tool_prompt::dynamic(bundle.read_many.clone()),
             Tool::Find => tool_prompt::dynamic(crate::virtual_read::VirtualFindTool::new(
                 bundle.find.clone(),
                 env.sessions.clone(),
@@ -372,22 +395,16 @@ impl Tool {
             Tool::Agent => tool_prompt::dynamic(crate::delegate::AgentCreation(
                 crate::delegate::Delegate::new(env, env.delegation.as_ref()?),
             )),
-            Tool::Subagent => tool_prompt::dynamic(crate::delegate::Delegate::new(
-                env,
-                env.delegation.as_ref()?,
-            )),
             Tool::Poll => {
                 tool_prompt::dynamic(crate::session_tools::PollTool(env.sessions.clone()))
             }
             Tool::Stop => {
                 tool_prompt::dynamic(crate::session_tools::StopTool(env.sessions.clone()))
             }
-            Tool::Abort => {
-                tool_prompt::dynamic(crate::session_tools::AbortTool(env.sessions.clone()))
-            }
-            Tool::Delete => {
-                tool_prompt::dynamic(crate::session_tools::DeleteTool(env.sessions.clone()))
-            }
+            Tool::Delete => tool_prompt::dynamic(crate::session_tools::DeleteTool::new(
+                env.sessions.clone(),
+                env.relationships.clone(),
+            )),
             Tool::Send => tool_prompt::dynamic(crate::session_tools::SendTool::new(
                 env.sessions.clone(),
                 env.computer.clone().map(|registry| {
@@ -400,15 +417,32 @@ impl Tool {
                     )
                 }),
             )),
-            Tool::List => {
-                tool_prompt::dynamic(crate::session_tools::ListTool(env.sessions.clone()))
-            }
             Tool::Page => crate::pagination::page_tool(env.pages.clone()),
             Tool::Ask => tool_prompt::dynamic(crate::ask_tool::AskTool::new(
                 env.ask.clone()?,
                 env.sessions.clone(),
                 env.bundle.project_root().to_path_buf(),
+                env.relationships.clone(),
             )),
+            Tool::Relationship => tool_prompt::dynamic(
+                crate::relationships::RelationshipTool::new(env.relationships.clone()),
+            ),
+            Tool::Eval => tool_prompt::dynamic(crate::eval_tool::EvalTool::new(
+                env.bundle.project_root().to_path_buf(),
+                env.sessions.clone(),
+                env.tool_registry.clone(),
+                env.relationships.clone(),
+            )),
+            Tool::Debug => tool_prompt::dynamic(crate::debug_tool::DebugTool::new(
+                env.bundle.read.0.clone(),
+                env.sessions.clone(),
+                env.relationships.clone(),
+            )),
+            Tool::Lsp => tool_prompt::dynamic(crate::lsp_tool::LspTool::new(
+                env.bundle.read.0.clone(),
+                env.sessions.artist().to_owned(),
+            )),
+            Tool::Forge => tool_prompt::dynamic(crate::forge_tool::ForgeTool),
         })
     }
 }
@@ -521,6 +555,11 @@ pub fn mcp_surface(surface: McpSurface) -> Vec<ArtistDynamicTool> {
             None,
         ),
         pages: surface.pages.clone(),
+        relationships: crate::relationships::RelationshipStore::for_project(
+            surface.workspace.root(),
+        )
+        .expect("opening project relationship store"),
+        tool_registry: crate::ToolRegistryHandle::default(),
         dynamic: Vec::new(),
         extension_runs: Vec::new(),
         extension_manager: None,
@@ -579,6 +618,8 @@ pub(crate) mod tests {
             inbox: None,
             sessions: crate::session_tools::SessionHub::standard(root, actor, None),
             pages: crate::pagination::PageStore::memory(),
+            relationships: crate::relationships::RelationshipStore::for_project(root).unwrap(),
+            tool_registry: crate::ToolRegistryHandle::default(),
             dynamic: Vec::new(),
             extension_runs: Vec::new(),
             extension_manager: None,
@@ -732,6 +773,21 @@ pub(crate) mod tests {
             .collect();
         assert!(!registered.contains("bash"));
         assert!(registered.contains("read"));
+        assert!(registered.contains("read_many"));
+    }
+
+    #[test]
+    fn legacy_abort_and_subagent_are_not_model_tools() {
+        let names = Tool::ALL.iter().map(|tool| tool.name()).collect::<Vec<_>>();
+        assert!(names.contains(&"stop"));
+        assert!(names.contains(&"agent"));
+        assert!(!names.contains(&"abort"));
+        assert!(!names.contains(&"subagent"));
+    }
+
+    #[test]
+    fn legacy_list_is_not_a_model_tool() {
+        assert!(!Tool::ALL.iter().any(|tool| tool.name() == "list"));
     }
 
     /// Names are what policy addresses; a duplicate would make one of the pair

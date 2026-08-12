@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use regex::{Regex, RegexSet};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::types::{DeclarativeRule, Firing, MatchTarget, RuleId};
 
@@ -154,6 +156,38 @@ impl RuleSet {
             #[cfg(feature = "wasm")]
             wasm: Default::default(),
         }
+    }
+
+    /// Immutable, deterministic semantic identity for the rule snapshot a run
+    /// actually used. Paths are retained as provenance but deliberately not
+    /// folded into the digest: moving an unchanged rule file is not a semantic
+    /// rule edit.
+    pub fn provenance(&self, id: &RuleId) -> Option<serde_json::Value> {
+        let compiled = self.rules.iter().find(|compiled| compiled.rule.id == *id)?;
+        let rule = &compiled.rule;
+        let canonical = json!({
+            "id": rule.id.0,
+            "description": rule.description,
+            "targets": rule.targets.iter().map(MatchTarget::as_str).collect::<Vec<_>>(),
+            "patterns": rule.patterns,
+            "tools": rule.tools,
+            "window": rule.window,
+            "fire": rule.fire,
+            "persistence": rule.persistence,
+            "scope": {"main": rule.scope.main, "delegate": rule.scope.delegate},
+            "enabled": rule.enabled,
+            "reminder": rule.reminder,
+        });
+        let bytes = serde_json::to_vec(&canonical).expect("rule provenance serializes");
+        let digest = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        Some(json!({
+            "ruleId": rule.id.0,
+            "digest": format!("sha256:{digest}"),
+            "source": rule.source.as_ref().map(|path| path.display().to_string()),
+        }))
     }
 
     /// Attach programmable plugins (their prefilters are already among
@@ -700,5 +734,18 @@ mod tests {
         assert!(rules.observes(MatchTarget::AssistantText));
         assert!(!rules.observes(MatchTarget::ToolArgs));
         assert!(!rules.observes(MatchTarget::ReasoningSummary));
+    }
+
+    #[test]
+    fn rule_provenance_is_stable_for_equivalent_compiled_rules() {
+        let rules = rule_set(&[("leak", "patterns: ['Box::leak']\nreminder: do not leak")]);
+        let first = rules.provenance(&RuleId("leak".into())).unwrap();
+        let second = rules.provenance(&RuleId("leak".into())).unwrap();
+        assert_eq!(first, second);
+        assert!(
+            first["digest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:"))
+        );
     }
 }

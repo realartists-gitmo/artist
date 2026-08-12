@@ -101,15 +101,26 @@ impl Dictionary {
     }
 
     /// Resolve a `§<teca-prefix>` reference against the actual known TECA
-    /// streams. Zero matches are unknown/stale. One match expands to the exact
-    /// persisted canonical substring. Multiple matches fail safely and return
-    /// longer disambiguating references; the entry is never chosen heuristically.
+    /// streams. A reference that was actually emitted by [`intern`](Self::intern)
+    /// is a permanent dictionary key and wins before prefix interpretation: later
+    /// additions therefore cannot make a historical transcript ambiguous. Zero
+    /// prefix matches are unknown/stale. One non-key prefix match expands to the
+    /// exact persisted canonical substring. Multiple non-key matches fail safely
+    /// and return longer disambiguating references; an entry is never chosen
+    /// heuristically.
     pub fn resolve(&self, reference: &str) -> Result<String, DictionaryError> {
         let suffix = reference.strip_prefix('§').unwrap_or(reference);
         if suffix.is_empty() {
             return Err(DictionaryError::UnknownReference(reference.to_owned()));
         }
         let dictionary = self.read()?;
+        // `intern` preserves an existing stored key. Check it directly before
+        // interpreting the same text as a currently-short prefix of every
+        // entry, otherwise a later addition can retroactively break a string
+        // the model was already shown in a prior turn.
+        if let Some(value) = dictionary.entries.get(reference) {
+            return Ok(value.clone());
+        }
         let mut matched: Vec<(&String, String, usize)> = Vec::new();
         for (stored, value) in &dictionary.entries {
             if let Some(depth) = stream_prefix_depth(value.as_bytes(), suffix) {
@@ -278,6 +289,23 @@ mod tests {
         // A reference must never resolve to the wrong entry heuristically.
         assert_eq!(dictionary.resolve(&alpha).unwrap(), "alpha");
         assert_eq!(dictionary.resolve(&beta).unwrap(), "beta");
+    }
+
+    #[test]
+    fn emitted_reference_remains_stable_after_a_later_prefix_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("dictionary.json");
+        let dictionary = Dictionary::at(&path).unwrap();
+        let first = dictionary.intern("shared prefix alpha").unwrap();
+        // The first insertion receives a shortest prefix without knowledge of
+        // this later sibling. Its stored key, not a fresh prefix search, is
+        // the durable meaning recorded in an earlier transcript.
+        let _second = dictionary.intern("shared prefix beta").unwrap();
+        assert!(
+            stream_prefix_depth(b"shared prefix beta", first.strip_prefix('§').unwrap()).is_some(),
+            "the later entry must make the original shortest prefix ambiguous"
+        );
+        assert_eq!(dictionary.resolve(&first).unwrap(), "shared prefix alpha");
     }
 
     #[test]

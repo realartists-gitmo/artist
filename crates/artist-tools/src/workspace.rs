@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use fff_search::{FFFMode, FilePicker, FilePickerOptions, SharedFilePicker, SharedFrecency};
-use hashline_tools::{AgentIdentity, FileCoordinator, FileToolConfig};
+use hashline_tools::{AgentIdentity, BatchWrite, FileCoordinator, FileToolConfig, ReadFileRequest};
 
 mod search_scope;
 
@@ -61,6 +61,50 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Conditionally replace several existing files as one coordinated commit.
+    /// Callers supply path/content/hash predicates already derived from one
+    /// snapshot; the coordinator validates the full set before writing any.
+    pub(crate) async fn write_files_atomic(
+        &self,
+        writes: Vec<BatchWrite>,
+    ) -> Result<Vec<hashline_tools::CoordinatedReadResult>> {
+        self.files.write_files_atomic(&self.actor, writes).await
+    }
+
+    /// Read a set of real files while holding every participating coordinator
+    /// lock. The resulting snapshots belong to one Artist-coordinated view.
+    pub(crate) async fn read_files_atomic(
+        &self,
+        paths: Vec<String>,
+    ) -> Result<Vec<hashline_tools::CoordinatedReadResult>> {
+        self.files.read_files_atomic(&self.actor, paths).await
+    }
+
+    /// Return the canonical Artist anchors for every logical line in one live
+    /// project file. Semantic consumers such as LSP use this rather than
+    /// manufacturing a parallel line-address scheme from byte offsets.
+    pub async fn anchors_for(&self, input: &str) -> Result<Vec<(usize, String)>> {
+        self.resolve_existing(input)?;
+        let read = self
+            .files
+            .read_file(
+                &self.actor,
+                ReadFileRequest {
+                    path: input.to_owned(),
+                    start_line: 1,
+                    max_lines: None,
+                },
+            )
+            .await?;
+        Ok(read
+            .result
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(index, line)| (index + 1, line.anchor.clone()))
+            .collect())
+    }
+
     /// A handle for asking what changed under this session.
     ///
     /// Handed out rather than exposing `files`/`actor`, so callers get the one

@@ -31,17 +31,38 @@ pub const ARTIST_BRANCH: &str = "Gortnite";
 pub const ARTIST_GORTNITE_COMMIT: &str = "656383b4906a796727b09a249ef5da7e60f51b81";
 /// Exact Git tree for [`ARTIST_GORTNITE_COMMIT`].
 pub const ARTIST_GORTNITE_TREE: &str = "d37315bb8d9345d51d37699867f6b1e8c1b0631d";
-/// Payload schema version supported by the pinned Artist session schema.
-pub const ARTIST_SESSION_SCHEMA_VERSION: u32 = 1;
+/// Latest payload schema understood by this intermediate adapter.
+pub const ARTIST_SESSION_SCHEMA_VERSION: u32 = 7;
+/// Historical schemas are deliberately decoded by their own
+/// pinned surface inventories; new schemas must add another explicit branch.
+pub const ARTIST_SUPPORTED_SESSION_SCHEMA_VERSIONS: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];
 /// Version string recorded in Muse deterministic derivations.
-pub const ARTIST_ADAPTER_VERSION: &str =
+pub const ARTIST_ADAPTER_VERSION: &str = "muse-artist-adapter-3+artist.session-schema-2";
+pub const ARTIST_V3_ADAPTER_VERSION: &str = "muse-artist-adapter-4+artist.session-schema-3";
+pub const ARTIST_V4_ADAPTER_VERSION: &str = "muse-artist-adapter-5+artist.session-schema-4";
+pub const ARTIST_V1_ADAPTER_VERSION: &str =
     "muse-artist-adapter-2+artist.656383b4906a796727b09a249ef5da7e60f51b81";
 /// Version of the total known-event formalizer at the pinned Artist commit.
 pub const ARTIST_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-2+artist.session-schema-2";
+pub const ARTIST_V3_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-3+artist.session-schema-3";
+pub const ARTIST_V4_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-4+artist.session-schema-4";
+pub const ARTIST_V5_ADAPTER_VERSION: &str = "muse-artist-adapter-6+artist.session-schema-5";
+pub const ARTIST_V5_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-5+artist.session-schema-5";
+pub const ARTIST_V6_ADAPTER_VERSION: &str = "muse-artist-adapter-7+artist.session-schema-6";
+pub const ARTIST_V6_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-6+artist.session-schema-6";
+pub const ARTIST_V7_ADAPTER_VERSION: &str = "muse-artist-adapter-8+artist.session-schema-7";
+pub const ARTIST_V7_EVENT_FORMALIZER_VERSION: &str =
+    "muse-artist-event-formalizer-7+artist.session-schema-7";
+pub const ARTIST_V1_EVENT_FORMALIZER_VERSION: &str =
     "muse-artist-event-formalizer-1+artist.656383b4906a796727b09a249ef5da7e60f51b81";
 
 /// Built-in tool names from the exhaustive `Tool::ALL` registry at the pinned commit.
-pub const ARTIST_BUILTIN_TOOLS: [&str; 31] = [
+pub const ARTIST_V1_BUILTIN_TOOLS: [&str; 31] = [
     "bash",
     "read",
     "find",
@@ -73,6 +94,49 @@ pub const ARTIST_BUILTIN_TOOLS: [&str; 31] = [
     "send",
     "list",
     "ask",
+];
+pub const ARTIST_BUILTIN_TOOLS: [&str; 41] = [
+    "bash",
+    "run",
+    "read",
+    "find",
+    "grep",
+    "edit",
+    "write",
+    "skill",
+    "todo",
+    "memory",
+    "code_map",
+    "code_show",
+    "code_surface",
+    "code_implements",
+    "code_deps",
+    "code_cycles",
+    "code_calls",
+    "code_trace",
+    "code_impact",
+    "code_search",
+    "code_related",
+    "ast_query",
+    "ast_rewrite",
+    "computer",
+    "canvas",
+    "handoff",
+    "agent",
+    "subagent",
+    "poll",
+    "stop",
+    "abort",
+    "delete",
+    "send",
+    "list",
+    "page",
+    "ask",
+    "relationship",
+    "eval",
+    "debug",
+    "lsp",
+    "forge",
 ];
 
 /// Every event kind emitted by the pinned schema. This list is deliberately
@@ -116,10 +180,96 @@ pub const ARTIST_KNOWN_EVENT_KINDS: [&str; 37] = [
     "computer.acted",
     "computer.elided",
 ];
+pub const ARTIST_V2_KNOWN_EVENT_KINDS: [&str; 38] = [
+    "session.created",
+    "run.started",
+    "run.usage",
+    "run.finished",
+    "task.started",
+    "task.updated",
+    "task.finished",
+    "change.recorded",
+    "turn.user",
+    "model.turn",
+    "tool.result",
+    "tool.result.images",
+    "steering.delivered",
+    "delegate.started",
+    "delegate.finished",
+    "conversation.messages",
+    "conversation.compacted",
+    "history.rewind",
+    "legacy.turn",
+    "rule.fired",
+    "rule.injection",
+    "rule.retro_findings",
+    "handoff.performed",
+    "todo.updated",
+    "provider.context.v1",
+    "tool.context.v1",
+    "canvas.created",
+    "canvas.opened",
+    "canvas.state",
+    "ask.posted",
+    "ask.answered",
+    "memory.written",
+    "computer.stage_opened",
+    "computer.stage_closed",
+    "computer.launched",
+    "computer.observed",
+    "computer.acted",
+    "computer.elided",
+];
+/// Schema v3 only expands payload fields of the existing context event.
+pub const ARTIST_V3_KNOWN_EVENT_KINDS: [&str; 38] = ARTIST_V2_KNOWN_EVENT_KINDS;
+pub const ARTIST_V4_KNOWN_EVENT_KINDS: [&str; 39] = [
+    "session.created",
+    "run.started",
+    "run.usage",
+    "run.finished",
+    "task.started",
+    "task.updated",
+    "task.finished",
+    "change.recorded",
+    "turn.user",
+    "model.turn",
+    "tool.result",
+    "tool.result.images",
+    "steering.delivered",
+    "delegate.started",
+    "delegate.finished",
+    "work_unit.yield.v1",
+    "conversation.messages",
+    "conversation.compacted",
+    "history.rewind",
+    "legacy.turn",
+    "rule.fired",
+    "rule.injection",
+    "rule.retro_findings",
+    "handoff.performed",
+    "todo.updated",
+    "provider.context.v1",
+    "tool.context.v1",
+    "canvas.created",
+    "canvas.opened",
+    "canvas.state",
+    "ask.posted",
+    "ask.answered",
+    "memory.written",
+    "computer.stage_opened",
+    "computer.stage_closed",
+    "computer.launched",
+    "computer.observed",
+    "computer.acted",
+    "computer.elided",
+];
+pub const ARTIST_V5_KNOWN_EVENT_KINDS: [&str; 39] = ARTIST_V4_KNOWN_EVENT_KINDS;
 
 /// Lossless normalized view of every known Artist envelope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistStructuredEvent {
+    pub schema_version: u32,
+    pub adapter_version: String,
     pub source: StructuredSource,
     pub session: String,
     pub lineage: String,
@@ -258,7 +408,7 @@ impl ArtistNormalizer {
     /// Consume one source-order envelope.
     pub fn push(&mut self, envelope: ArtistEnvelope) -> Result<(), ArtistAdapterError> {
         self.validate_envelope_order(&envelope)?;
-        if envelope.v != ARTIST_SESSION_SCHEMA_VERSION {
+        if !is_supported_schema(envelope.v) {
             let source = source_for(&envelope, None)?;
             self.residual.push(ArtistResidual {
                 source,
@@ -269,7 +419,7 @@ impl ArtistNormalizer {
             return Ok(());
         }
 
-        if !is_known_event_kind(&envelope.kind) {
+        if !is_known_event_kind(envelope.v, &envelope.kind) {
             let source = source_for(&envelope, None)?;
             self.residual.push(ArtistResidual {
                 source,
@@ -280,6 +430,8 @@ impl ArtistNormalizer {
             return Ok(());
         }
         self.structured_events.push(ArtistStructuredEvent {
+            schema_version: envelope.v,
+            adapter_version: adapter_version_for_schema(envelope.v).into(),
             source: source_for(&envelope, None)?,
             session: envelope.session.clone(),
             lineage: envelope.lineage.clone(),
@@ -548,7 +700,7 @@ impl ArtistNormalizer {
             invocation_id: id.clone(),
             invocation_scope: invocation_scope(source),
             invoker: invoker.clone(),
-            tool: tool_descriptor(&name),
+            tool: tool_descriptor(&name, envelope.v),
             invocation_sort: tool_invocation_sort(&name),
             arguments: object_to_structured(arguments)?,
             result: None,
@@ -589,6 +741,26 @@ impl ArtistNormalizer {
             ArtistAdapterError::MalformedPayload("tool.result missing arguments".into())
         })?;
         let result_text = required_string(&envelope.payload, "result")?;
+        // Schema v7 records the actual model-facing form separately from its
+        // canonical decoding. Older events remain literal by definition.
+        let (visible_result, canonical_result, result_source_field) = envelope
+            .payload
+            .get("presentation")
+            .and_then(Value::as_object)
+            .and_then(|presentation| {
+                Some((
+                    presentation.get("visible")?.as_str()?.to_owned(),
+                    presentation.get("canonical")?.as_str()?.to_owned(),
+                    "$.payload.presentation.canonical".to_owned(),
+                ))
+            })
+            .unwrap_or_else(|| {
+                (
+                    result_text.clone(),
+                    result_text.clone(),
+                    "$.payload.result".to_owned(),
+                )
+            });
         let provider_call_id = optional_string(&envelope.payload, "tool_call_id")?;
         let source = source_for(envelope, None)?;
         let outcome = parse_outcome(envelope.payload.get("outcome").ok_or_else(|| {
@@ -606,7 +778,7 @@ impl ArtistNormalizer {
                 invocation_id: internal_call_id.clone(),
                 invocation_scope: invocation_scope(&source),
                 invoker,
-                tool: tool_descriptor(&name),
+                tool: tool_descriptor(&name, envelope.v),
                 invocation_sort: tool_invocation_sort(&name),
                 arguments: object_to_structured(arguments)?,
                 result: None,
@@ -643,12 +815,12 @@ impl ArtistNormalizer {
             self.register_alias(envelope, &call_id, position)?;
         }
         let execution = if name == "bash" {
-            parse_bash_execution(&result_text)
+            parse_bash_execution(&canonical_result)
         } else {
             ExecutionDetails::default()
         };
         let execution_source_field =
-            execution_has_data(&execution).then(|| "$.payload.result".into());
+            execution_has_data(&execution).then(|| result_source_field.clone());
         let record = self
             .records
             .get_mut(position)
@@ -663,8 +835,8 @@ impl ArtistNormalizer {
             detail: outcome.detail,
             payloads: vec![ToolResultPayloadFragment {
                 source_record: None,
-                value: StructuredValue::String(result_text.clone()),
-                source_field: "$.payload.result".into(),
+                value: StructuredValue::String(canonical_result),
+                source_field: result_source_field.clone(),
             }],
             execution,
             status_source_field: "$.payload.outcome".into(),
@@ -683,8 +855,11 @@ impl ArtistNormalizer {
                 label: Some(name),
             },
             channel: ArtistProseChannel::ToolResultText,
-            text: result_text,
-            source_field: "$.payload.result".into(),
+            text: visible_result,
+            source_field: envelope.payload.get("presentation").map_or_else(
+                || "$.payload.result".into(),
+                || "$.payload.presentation.visible".into(),
+            ),
             include_in_default_training: false,
         });
         Ok(())
@@ -1082,14 +1257,18 @@ fn execution_has_data(value: &ExecutionDetails) -> bool {
         || !value.diagnostics.is_empty()
 }
 
-fn tool_descriptor(name: &str) -> ToolDescriptor {
-    let built_in = ARTIST_BUILTIN_TOOLS.contains(&name);
+fn tool_descriptor(name: &str, schema_version: u32) -> ToolDescriptor {
+    let built_in = builtins_for_schema(schema_version).contains(&name);
     ToolDescriptor {
         id: name.to_owned(),
         scope: IdentityScope::Source,
         name: name.to_owned(),
-        specification_id: built_in
-            .then(|| format!("artist:{ARTIST_GORTNITE_COMMIT}:built-in-tool:{name}")),
+        specification_id: built_in.then(|| {
+            format!(
+                "artist:{}:built-in-tool:{name}",
+                adapter_version_for_schema(schema_version)
+            )
+        }),
         sort: ConceptId::from("agent:Tool"),
     }
 }
@@ -1097,10 +1276,11 @@ fn tool_descriptor(name: &str) -> ToolDescriptor {
 fn tool_invocation_sort(name: &str) -> ConceptId {
     match name {
         "bash" => ConceptId::from("harness:ShellToolInvocation"),
+        "run" | "eval" | "debug" => ConceptId::from("harness:ExecutionToolInvocation"),
         "read" | "find" | "grep" | "edit" | "write" => {
             ConceptId::from("harness:FilesystemToolInvocation")
         }
-        "skill" => ConceptId::from("harness:ResourceLookupToolInvocation"),
+        "skill" | "page" => ConceptId::from("harness:ResourceLookupToolInvocation"),
         "todo" => ConceptId::from("harness:TaskManagementToolInvocation"),
         "memory" => ConceptId::from("harness:MemoryToolInvocation"),
         "code_map" | "code_show" | "code_surface" | "code_implements" | "code_deps"
@@ -1108,17 +1288,65 @@ fn tool_invocation_sort(name: &str) -> ConceptId {
         | "code_related" | "ast_query" => ConceptId::from("harness:CodeInspectionToolInvocation"),
         "ast_rewrite" => ConceptId::from("harness:CodeTransformationToolInvocation"),
         "computer" => ConceptId::from("harness:ComputerToolInvocation"),
+        "lsp" | "relationship" => ConceptId::from("harness:CodeInspectionToolInvocation"),
+        "forge" => ConceptId::from("harness:ExternalServiceToolInvocation"),
         "canvas" => ConceptId::from("harness:ApplicationToolInvocation"),
-        "handoff" | "subagent" | "poll" | "abort" | "send" | "list" => {
-            ConceptId::from("harness:AgentCoordinationToolInvocation")
-        }
+        "handoff" | "agent" | "subagent" | "poll" | "stop" | "abort" | "delete" | "send"
+        | "list" => ConceptId::from("harness:AgentCoordinationToolInvocation"),
         "ask" => ConceptId::from("harness:UserInteractionToolInvocation"),
         _ => ConceptId::from("agent:ToolInvocation"),
     }
 }
 
-fn is_known_event_kind(kind: &str) -> bool {
-    ARTIST_KNOWN_EVENT_KINDS.contains(&kind)
+fn is_supported_schema(version: u32) -> bool {
+    ARTIST_SUPPORTED_SESSION_SCHEMA_VERSIONS.contains(&version)
+}
+
+fn adapter_version_for_schema(version: u32) -> &'static str {
+    match version {
+        1 => ARTIST_V1_ADAPTER_VERSION,
+        2 => ARTIST_ADAPTER_VERSION,
+        3 => ARTIST_V3_ADAPTER_VERSION,
+        4 => ARTIST_V4_ADAPTER_VERSION,
+        5 => ARTIST_V5_ADAPTER_VERSION,
+        6 => ARTIST_V6_ADAPTER_VERSION,
+        7 => ARTIST_V7_ADAPTER_VERSION,
+        _ => "unsupported",
+    }
+}
+
+pub(crate) fn event_formalizer_version_for_schema(version: u32) -> &'static str {
+    match version {
+        1 => ARTIST_V1_EVENT_FORMALIZER_VERSION,
+        2 => ARTIST_EVENT_FORMALIZER_VERSION,
+        3 => ARTIST_V3_EVENT_FORMALIZER_VERSION,
+        4 => ARTIST_V4_EVENT_FORMALIZER_VERSION,
+        5 => ARTIST_V5_EVENT_FORMALIZER_VERSION,
+        6 => ARTIST_V6_EVENT_FORMALIZER_VERSION,
+        7 => ARTIST_V7_EVENT_FORMALIZER_VERSION,
+        _ => "unsupported",
+    }
+}
+
+fn builtins_for_schema(version: u32) -> &'static [&'static str] {
+    match version {
+        1 => &ARTIST_V1_BUILTIN_TOOLS,
+        2 | 3 | 4 | 5 | 6 | 7 => &ARTIST_BUILTIN_TOOLS,
+        _ => &[],
+    }
+}
+
+fn is_known_event_kind(version: u32, kind: &str) -> bool {
+    match version {
+        1 => ARTIST_KNOWN_EVENT_KINDS.contains(&kind),
+        2 => ARTIST_V2_KNOWN_EVENT_KINDS.contains(&kind),
+        3 => ARTIST_V3_KNOWN_EVENT_KINDS.contains(&kind),
+        4 => ARTIST_V4_KNOWN_EVENT_KINDS.contains(&kind),
+        5 => ARTIST_V5_KNOWN_EVENT_KINDS.contains(&kind),
+        6 => ARTIST_V5_KNOWN_EVENT_KINDS.contains(&kind),
+        7 => ARTIST_V5_KNOWN_EVENT_KINDS.contains(&kind),
+        _ => false,
+    }
 }
 
 fn source_for(
@@ -1446,6 +1674,64 @@ mod tests {
     }
 
     #[test]
+    fn v4_work_unit_yield_is_retained_as_report_evidence() {
+        let normalized = ArtistNormalizer::normalize_jsonl(
+            r#"{"v":4,"seq":1,"ts":2,"session":"s","lineage":"main/a","kind":"work_unit.yield.v1","payload":{"agent":"ada","sequence":1,"profile":"reviewer","yield_schema":{"type":"object"},"value":{"answer":"done"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(normalized.structured_events.len(), 1);
+        let event = &normalized.structured_events[0];
+        assert_eq!(event.kind, "work_unit.yield.v1");
+        assert_eq!(event.payload["value"]["answer"], "done");
+        assert_eq!(event.adapter_version, ARTIST_V4_ADAPTER_VERSION);
+    }
+
+    #[test]
+    fn v5_rule_events_preserve_the_exact_rule_snapshot_provenance() {
+        let normalized = ArtistNormalizer::normalize_jsonl(
+            r#"{"v":5,"seq":1,"ts":2,"session":"s","lineage":"main","kind":"rule.fired","payload":{"rule":"no-leak","target":"assistant-text","matched":"Box::leak","turn":1,"provenance":{"ruleId":"no-leak","digest":"sha256:abc","source":".artist/rules/no-leak.md"}}}"#,
+        )
+        .unwrap();
+        let event = &normalized.structured_events[0];
+        assert_eq!(event.adapter_version, ARTIST_V5_ADAPTER_VERSION);
+        assert_eq!(event.payload["provenance"]["digest"], "sha256:abc");
+    }
+
+    #[test]
+    fn v5_still_uses_the_active_builtin_tool_catalog() {
+        let descriptor = tool_descriptor("read", 5);
+        assert_eq!(
+            descriptor.specification_id,
+            Some(format!(
+                "artist:{ARTIST_V5_ADAPTER_VERSION}:built-in-tool:read"
+            ))
+        );
+    }
+
+    #[test]
+    fn v6_rule_actions_preserve_control_effects_separately_from_evidence() {
+        let normalized = ArtistNormalizer::normalize_jsonl(
+            r#"{"v":6,"seq":1,"ts":2,"session":"s","lineage":"main","kind":"rule.fired","payload":{"rule":"no-leak","target":"assistant-text","matched":"Box::leak","turn":1,"action":"abort_and_retry"}}"#,
+        )
+        .unwrap();
+        let event = &normalized.structured_events[0];
+        assert_eq!(event.adapter_version, ARTIST_V6_ADAPTER_VERSION);
+        assert_eq!(event.payload["action"], "abort_and_retry");
+    }
+
+    #[test]
+    fn auto_resolved_ask_retains_its_non_human_provenance() {
+        let normalized = ArtistNormalizer::normalize_jsonl(
+            r#"{"v":4,"seq":1,"ts":2,"session":"s","lineage":"main","kind":"ask.answered","payload":{"answer":{"selections":["option"]},"source":"AutoResolve","surface":"auto_resolve"}}"#,
+        )
+        .unwrap();
+        let event = &normalized.structured_events[0];
+        assert_eq!(event.kind, "ask.answered");
+        assert_eq!(event.payload["source"], "AutoResolve");
+        assert_ne!(event.payload["source"], "Human");
+    }
+
+    #[test]
     fn every_pinned_builtin_has_a_non_generic_family() {
         for name in ARTIST_BUILTIN_TOOLS {
             assert_ne!(
@@ -1458,7 +1744,7 @@ mod tests {
 
     #[test]
     fn dynamic_tool_names_normalize_without_a_built_in_assumption() {
-        let descriptor = tool_descriptor("mcp:github/search");
+        let descriptor = tool_descriptor("mcp:github/search", ARTIST_SESSION_SCHEMA_VERSION);
         assert!(descriptor.specification_id.is_none());
         assert_eq!(
             tool_invocation_sort(&descriptor.name),

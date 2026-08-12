@@ -18,6 +18,8 @@ use files::FileOperations;
 
 const SUMMARY_OPEN: &str = "<conversation-summary>";
 const SUMMARY_CLOSE: &str = "</conversation-summary>";
+const EXACT_OPEN: &str = "<artist-exact-context codec=\"presentation-v1\">";
+const EXACT_CLOSE: &str = "</artist-exact-context>";
 
 /// Prepared compaction input and the recent suffix that remains verbatim.
 #[derive(Clone, Debug)]
@@ -48,13 +50,44 @@ impl CompactionPlan {
         messages.extend(self.kept_messages.clone());
         messages
     }
+
+    /// Build the non-lossy replacement snapshot.  The checkpoint is a
+    /// reversible structural encoding of every compacted Rig message; it is
+    /// not an LLM-produced account of those messages.  Repeated compactions
+    /// first expand the prior checkpoint, so they do not accumulate nested
+    /// approximations or discard continuation/stale-recovery details.
+    pub fn exact_snapshot(&self, messages: &[Message]) -> Vec<Message> {
+        let mut snapshot = Vec::with_capacity(self.kept_messages.len() + 1);
+        snapshot.push(exact_context_message(messages));
+        snapshot.extend(self.kept_messages.clone());
+        snapshot
+    }
+
+    /// The complete exact prefix that the checkpoint replaces.  A prior exact
+    /// checkpoint is expanded before re-encoding; a legacy summary cannot be
+    /// expanded and is retained verbatim as historical input rather than being
+    /// silently treated as ground truth.
+    pub fn exact_prefix(&self, original: &[Message]) -> Vec<Message> {
+        let boundary = usize::from(original.first().is_some_and(is_compaction_checkpoint));
+        let mut messages = if boundary == 1 {
+            exact_context_messages(&original[0]).unwrap_or_else(|| vec![original[0].clone()])
+        } else {
+            Vec::new()
+        };
+        messages.extend_from_slice(&original[boundary..self.kept_start(original)]);
+        messages
+    }
+
+    fn kept_start(&self, original: &[Message]) -> usize {
+        original.len().saturating_sub(self.kept_messages.len())
+    }
 }
 
 /// Find a turn-aware cut point that retains approximately `keep_recent_tokens`.
 /// Tool-result messages are never selected as cut points.
 pub fn prepare_compaction(messages: &[Message], keep_recent_tokens: u64) -> Option<CompactionPlan> {
     let previous_summary = messages.first().and_then(compaction_summary);
-    let boundary = usize::from(previous_summary.is_some());
+    let boundary = usize::from(messages.first().is_some_and(is_compaction_checkpoint));
     if boundary >= messages.len() {
         return None;
     }
@@ -123,6 +156,49 @@ pub fn summary_message(summary: &str) -> Message {
         "{SUMMARY_OPEN}\n{}\n{SUMMARY_CLOSE}",
         summary.trim()
     ))
+}
+
+/// Make a lossless, model-readable structural checkpoint.  JSON is used for
+/// the Rig-native shape (roles, tool IDs, arguments, result blocks and all
+/// continuation selectors); the presentation grammar then applies only
+/// reversible syntax compression.  This function intentionally returns a
+/// `Message` rather than a string so the only model-visible representation is
+/// the exact checkpoint, never an expanded transcript substituted after the
+/// fact.
+pub fn exact_context_message(messages: &[Message]) -> Message {
+    let canonical = serde_json::to_string(messages)
+        .expect("Rig messages used by the durable session event schema serialize");
+    let presentation = crate::presentation::Presentation::from_canonical(canonical);
+    presentation
+        .verify()
+        .expect("freshly encoded exact compaction presentation verifies");
+    Message::user(format!(
+        "{EXACT_OPEN}\n{}\n{EXACT_CLOSE}",
+        presentation.encoded
+    ))
+}
+
+/// Recover the original compacted messages from an exact checkpoint.  Invalid
+/// checkpoints are deliberately not guessed at: callers retain the literal
+/// message instead of claiming a fabricated recovery.
+pub fn exact_context_messages(message: &Message) -> Option<Vec<Message>> {
+    let Message::User { content } = message else {
+        return None;
+    };
+    let text = content.iter().find_map(|item| match item {
+        UserContent::Text(text) => Some(text.text.trim()),
+        _ => None,
+    })?;
+    let encoded = text
+        .strip_prefix(EXACT_OPEN)?
+        .strip_suffix(EXACT_CLOSE)?
+        .trim();
+    let canonical = crate::presentation::decode(encoded).ok()?;
+    serde_json::from_str(&canonical).ok()
+}
+
+fn is_compaction_checkpoint(message: &Message) -> bool {
+    compaction_summary(message).is_some() || exact_context_messages(message).is_some()
 }
 
 fn compaction_summary(message: &Message) -> Option<String> {

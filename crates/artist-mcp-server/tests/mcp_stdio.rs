@@ -358,8 +358,8 @@ async fn start_daemon(
 }
 
 #[tokio::test]
-async fn http_vanilla_clients_are_bound_lazily_and_explicit_identity_is_honored(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn http_vanilla_clients_are_bound_lazily_and_explicit_identity_is_honored()
+-> Result<(), Box<dyn std::error::Error>> {
     if !binary_available() {
         return Ok(());
     }

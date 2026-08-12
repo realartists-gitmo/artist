@@ -71,6 +71,9 @@ impl PortableTool for EditTool {
             "additionalProperties": false
         })
     }
+    fn map_error(&self, error: ToolError) -> rig_core::tool::ToolExecutionError {
+        error.into_execution_error()
+    }
 
     async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
         reject_unresolved_virtual_mutation(&args.path)?;
@@ -103,15 +106,9 @@ impl PortableTool for EditTool {
             .map_err(|error| {
                 let detail = error.to_string();
                 if detail.contains("content hash mismatch") {
-                    ToolError::Message(format!(
-                        "stale_revision: {} changed after it was read; start a fresh read(path=\"{}\") before editing it",
-                        args.path, args.path
-                    ))
+                    ToolError::stale_revision(&args.path, Some(args.revision.clone()), None)
                 } else if detail.contains("stale") || detail.contains("anchor") {
-                    ToolError::Message(format!(
-                        "stale_revision: {detail}; start a fresh read(path=\"{}\") before editing it",
-                        args.path
-                    ))
+                    ToolError::stale_revision(&args.path, Some(args.revision.clone()), None)
                 } else {
                     ToolError::Anyhow(error)
                 }

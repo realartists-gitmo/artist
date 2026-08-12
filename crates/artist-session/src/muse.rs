@@ -7,8 +7,8 @@
 
 use artist_empirical::ModelId;
 use muse_artist_adapter::{
-    ARTIST_SESSION_SCHEMA_VERSION, ArtistAdapterError, ArtistEnvelope, ArtistEventFormalizer,
-    ArtistNormalization, ArtistNormalizer,
+    ARTIST_SESSION_SCHEMA_VERSION, ARTIST_SUPPORTED_SESSION_SCHEMA_VERSIONS, ArtistAdapterError,
+    ArtistEnvelope, ArtistEventFormalizer, ArtistNormalization, ArtistNormalizer,
 };
 use muse_core::{ConceptId, OccurrenceDocumentId, RelationId, SemanticObjectId};
 use muse_occurrence::{
@@ -1055,7 +1055,7 @@ pub fn write_muse_diagnostic(
 /// payload. This is intentionally a field-for-field bridge so an unknown
 /// future event remains visible to Muse as residual source material.
 pub fn muse_envelope(envelope: &crate::Envelope) -> Result<ArtistEnvelope, MuseCaptureError> {
-    if envelope.v != ARTIST_SESSION_SCHEMA_VERSION {
+    if !ARTIST_SUPPORTED_SESSION_SCHEMA_VERSIONS.contains(&envelope.v) {
         return Err(MuseCaptureError::UnsupportedSchema {
             actual: envelope.v,
             expected: ARTIST_SESSION_SCHEMA_VERSION,
@@ -1195,6 +1195,42 @@ mod tests {
         let normalized = normalize_for_muse(&events).unwrap();
         assert_eq!(normalized.residual.len(), 1);
         assert_eq!(normalized.residual[0].kind, "future.event");
+    }
+
+    #[test]
+    fn v1_events_keep_their_historical_adapter_identity() {
+        let event = crate::Envelope {
+            v: 1,
+            ..envelope(
+                1,
+                "turn.user",
+                serde_json::json!({"content":[{"type":"text","text":"old session"}]}),
+            )
+        };
+        let normalized = normalize_for_muse(&[event]).unwrap();
+        assert_eq!(normalized.structured_events[0].schema_version, 1);
+        assert_eq!(
+            normalized.structured_events[0].adapter_version,
+            muse_artist_adapter::ARTIST_V1_ADAPTER_VERSION
+        );
+    }
+
+    #[test]
+    fn v3_tool_context_retains_exact_resolved_source_evidence() {
+        let normalized = normalize_for_muse(&[envelope(
+            1,
+            "tool.context.v1",
+            serde_json::json!({
+                "surface_version":"artist-tool-surface-v2", "profile":"default", "profile_digest":"p",
+                "tools":["read"], "tool_definitions_digest":"a",
+                "tool_definitions":[{"name":"read","input_schema":{"type":"object"}}],
+                "instructions_digest":"b", "instructions":"Read the workspace.",
+                "yield_schema":{"type":"object"}
+            }),
+        )])
+        .unwrap();
+        assert_eq!(normalized.structured_events.len(), 1);
+        assert_eq!(normalized.structured_events[0].kind, "tool.context.v1");
     }
 
     #[test]

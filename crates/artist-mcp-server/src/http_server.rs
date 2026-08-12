@@ -290,8 +290,12 @@ impl ServerHandler for HttpMcpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.call_tool_for_session(request, transport_session_id(&context), context.meta.clone())
-            .await
+        self.call_tool_for_session(
+            request,
+            transport_session_id(&context),
+            context.meta.clone(),
+        )
+        .await
     }
 }
 
@@ -436,7 +440,9 @@ mod tests {
         let factory: SurfaceFactory = Arc::new(|_| McpServer::new(Vec::new(), None));
         let server = HttpMcpServer::new(
             factory,
-            registry.http_identities().with_names(registry.names_for_test()),
+            registry
+                .http_identities()
+                .with_names(registry.names_for_test()),
             "worker",
             root.path().display().to_string(),
             "PROFILE RULES",
@@ -537,7 +543,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let server = http_server(recording_factory(Arc::clone(&seen), Arc::clone(&calls)), &root);
+        let server = http_server(
+            recording_factory(Arc::clone(&seen), Arc::clone(&calls)),
+            &root,
+        );
 
         // Two vanilla tools/call requests in the same transport session, neither
         // carrying any identity plumbing.
@@ -552,8 +561,15 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 2, "both calls executed");
         let recorded = seen.lock().unwrap();
-        assert_eq!(recorded.len(), 2, "exactly one identity was minted for the session");
-        assert_eq!(recorded[0], recorded[1], "the second call reuses the bound identity");
+        assert_eq!(
+            recorded.len(),
+            2,
+            "exactly one identity was minted for the session"
+        );
+        assert_eq!(
+            recorded[0], recorded[1],
+            "the second call reuses the bound identity"
+        );
         let first = recorded[0].clone();
         drop(recorded);
 
@@ -572,7 +588,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let server = http_server(recording_factory(Arc::clone(&seen), Arc::clone(&calls)), &root);
+        let server = http_server(
+            recording_factory(Arc::clone(&seen), Arc::clone(&calls)),
+            &root,
+        );
 
         let created = server
             .establish_identity(json!({}), Some("s1"))
@@ -591,7 +610,10 @@ mod tests {
             .expect("anonymous call in resumed session");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 1, "no replacement identity was minted");
-        assert_eq!(seen[0], name, "the session stays bound to the resumed identity");
+        assert_eq!(
+            seen[0], name,
+            "the session stays bound to the resumed identity"
+        );
     }
 
     #[tokio::test]
@@ -599,7 +621,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let server = http_server(recording_factory(Arc::clone(&seen), Arc::clone(&calls)), &root);
+        let server = http_server(
+            recording_factory(Arc::clone(&seen), Arc::clone(&calls)),
+            &root,
+        );
 
         let created = server
             .establish_identity(json!({}), None)

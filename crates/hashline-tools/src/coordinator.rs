@@ -48,6 +48,19 @@ pub enum WriteCondition {
     Any,
 }
 
+/// One conditional whole-file replacement in a coordinated batch.
+///
+/// A batch is validated while every participating path lock is held before
+/// any destination is replaced. This is the transaction primitive for
+/// structural refactors: a stale member rejects the entire operation rather
+/// than leaving earlier members committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchWrite {
+    pub path: String,
+    pub content: String,
+    pub condition: WriteCondition,
+}
+
 #[derive(Debug)]
 pub struct CoordinatedReadResult {
     pub result: ReadFileResult,
@@ -141,6 +154,70 @@ impl FileCoordinator {
         })
     }
 
+    /// Read several real files from one coordinator-consistent snapshot.
+    ///
+    /// Paths are locked in normalized order before any bytes are read. This is
+    /// the read counterpart to [`write_files_atomic`](Self::write_files_atomic):
+    /// a structural planner cannot observe one file before and another after a
+    /// coordinated refactor. Results retain caller order.
+    pub async fn read_files_atomic(
+        &self,
+        actor: &AgentIdentity,
+        paths: Vec<String>,
+    ) -> Result<Vec<CoordinatedReadResult>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _ = self.state.register_agent(actor).await;
+        let manager = self.manager_for(actor).await?;
+        let mut prepared = Vec::with_capacity(paths.len());
+        {
+            let manager = manager.lock().await;
+            for (position, path) in paths.into_iter().enumerate() {
+                prepared.push((manager.normalized_path(&path)?, position, path));
+            }
+        }
+        prepared.sort_by(|left, right| left.0.cmp(&right.0));
+        for pair in prepared.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                bail!(
+                    "atomic read batch names the same path more than once: {}",
+                    pair[0].2
+                );
+            }
+        }
+        let mut locks = Vec::with_capacity(prepared.len());
+        for (normalized, _, _) in &prepared {
+            locks.push(self.lock_path(normalized).await?);
+        }
+        let mut ordered = std::iter::repeat_with(|| None)
+            .take(prepared.len())
+            .collect::<Vec<Option<CoordinatedReadResult>>>();
+        let mut manager = manager.lock().await;
+        for (normalized, position, path) in &prepared {
+            let result = manager
+                .read_file(ReadFileRequest {
+                    path: path.clone(),
+                    start_line: 1,
+                    max_lines: None,
+                })
+                .await?;
+            let bytes = fs::read(normalized)
+                .await
+                .with_context(|| format!("failed to read {path}"))?;
+            ordered[*position] = Some(CoordinatedReadResult {
+                result,
+                content_hash: content_hash(&bytes),
+            });
+        }
+        drop(manager);
+        drop(locks);
+        Ok(ordered
+            .into_iter()
+            .map(|result| result.expect("every input position was read"))
+            .collect())
+    }
+
     pub async fn write_file(
         &self,
         actor: &AgentIdentity,
@@ -213,6 +290,122 @@ impl FileCoordinator {
             result,
             content_hash: hash,
         })
+    }
+
+    /// Replace a set of existing files as one coordinated operation.
+    ///
+    /// Files are locked in normalized-path order to avoid deadlock. All
+    /// compare-and-swap predicates are checked before the first replacement;
+    /// therefore ordinary expected failures (stale content, a missing file,
+    /// or a duplicate target) leave every file untouched. The locks also make
+    /// the commit indivisible to other Artist coordinators.
+    pub async fn write_files_atomic(
+        &self,
+        actor: &AgentIdentity,
+        writes: Vec<BatchWrite>,
+    ) -> Result<Vec<CoordinatedReadResult>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _ = self.state.register_agent(actor).await;
+        let manager = self.manager_for(actor).await?;
+        let mut prepared = Vec::with_capacity(writes.len());
+        {
+            let manager = manager.lock().await;
+            for write in writes {
+                let normalized = manager.normalized_path(&write.path)?;
+                prepared.push((normalized, write));
+            }
+        }
+        prepared.sort_by(|left, right| left.0.cmp(&right.0));
+        for pair in prepared.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                bail!(
+                    "atomic write batch names the same path more than once: {}",
+                    pair[0].1.path
+                );
+            }
+        }
+
+        let mut locks = Vec::with_capacity(prepared.len());
+        for (normalized, _) in &prepared {
+            locks.push(self.lock_path(normalized).await?);
+        }
+
+        // Validate every precondition before performing any write.
+        let mut originals = Vec::with_capacity(prepared.len());
+        for (normalized, write) in &prepared {
+            let destination = Path::new(normalized);
+            let current = fs::read(destination)
+                .await
+                .with_context(|| format!("failed to read {} for atomic replacement", write.path))?;
+            match &write.condition {
+                WriteCondition::ContentHash { hash } => {
+                    let actual = content_hash(&current);
+                    if actual != hash.to_ascii_lowercase() {
+                        bail!(
+                            "content hash mismatch for {}: expected {hash}, current hash is {actual}",
+                            write.path
+                        );
+                    }
+                }
+                WriteCondition::Any => {}
+                WriteCondition::Absent => bail!(
+                    "atomic replacement only supports existing files; {} requested create-only",
+                    write.path
+                ),
+            }
+            originals.push(current);
+        }
+
+        let mut committed = 0usize;
+        for (index, (normalized, write)) in prepared.iter().enumerate() {
+            if let Err(error) =
+                atomic_replace(Path::new(normalized), write.content.as_bytes()).await
+            {
+                // This is only for an unexpected I/O failure after validation.
+                // All path locks are still held, so rollback cannot clobber a
+                // concurrent coordinated writer.
+                for rollback in (0..committed).rev() {
+                    let _ = atomic_replace(Path::new(&prepared[rollback].0), &originals[rollback])
+                        .await;
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "atomic batch failed at {}; earlier replacements were rolled back",
+                        write.path
+                    )
+                });
+            }
+            committed = index + 1;
+        }
+
+        let mut results = Vec::with_capacity(prepared.len());
+        let mut manager = manager.lock().await;
+        for (normalized, write) in &prepared {
+            manager.forget_path(&write.path)?;
+            let result = manager
+                .read_file(ReadFileRequest {
+                    path: write.path.clone(),
+                    start_line: 1,
+                    max_lines: None,
+                })
+                .await?;
+            let hash = content_hash(write.content.as_bytes());
+            results.push((normalized.clone(), hash, result));
+        }
+        drop(manager);
+        for (normalized, hash, _) in &results {
+            self.note_writer(normalized, actor, hash).await;
+        }
+        drop(locks);
+        Ok(results
+            .into_iter()
+            .map(|(_, content_hash, result)| CoordinatedReadResult {
+                result,
+                content_hash,
+            })
+            .collect())
     }
 
     pub async fn delete_file(
@@ -588,6 +781,60 @@ mod tests {
             )
             .await
             .expect("read");
+    }
+
+    #[tokio::test]
+    async fn stale_member_rejects_an_atomic_batch_without_writing_its_peers() {
+        let (files, root) = coordinator("atomic-batch-stale");
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        std::fs::write(&first, "first before\n").unwrap();
+        std::fs::write(&second, "second before\n").unwrap();
+        let actor = agent("alpha");
+        let first_before = std::fs::read(&first).unwrap();
+        let writes = vec![
+            BatchWrite {
+                path: first.to_string_lossy().into_owned(),
+                content: "first after\n".into(),
+                condition: WriteCondition::ContentHash {
+                    hash: content_hash(&first_before),
+                },
+            },
+            BatchWrite {
+                path: second.to_string_lossy().into_owned(),
+                content: "second after\n".into(),
+                condition: WriteCondition::ContentHash {
+                    hash: "not-the-current-hash".into(),
+                },
+            },
+        ];
+        let error = files.write_files_atomic(&actor, writes).await.unwrap_err();
+        assert!(error.to_string().contains("content hash mismatch"));
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first before\n");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "second before\n");
+    }
+
+    #[tokio::test]
+    async fn atomic_read_preserves_request_order_and_full_revisions() {
+        let (files, root) = coordinator("atomic-read");
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        std::fs::write(&first, "first\n").unwrap();
+        std::fs::write(&second, "second\n").unwrap();
+        let results = files
+            .read_files_atomic(
+                &agent("alpha"),
+                vec![
+                    second.to_string_lossy().into_owned(),
+                    first.to_string_lossy().into_owned(),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(results[0].result.lines[0].text, "second");
+        assert_eq!(results[1].result.lines[0].text, "first");
+        assert_eq!(results[0].content_hash, content_hash(b"second\n"));
+        assert_eq!(results[1].content_hash, content_hash(b"first\n"));
     }
 
     #[tokio::test]

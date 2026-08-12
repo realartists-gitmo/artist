@@ -27,6 +27,7 @@ pub(crate) struct RunTool {
     extension_runs: HashMap<String, ArtistDynamicTool>,
     extension_manager: Option<Arc<artist_extensions::Manager>>,
     canvas: Option<crate::canvas::CanvasTool>,
+    eval: Option<crate::eval_tool::EvalTool>,
 }
 
 impl RunTool {
@@ -41,6 +42,7 @@ impl RunTool {
             extension_runs: extension_runs.into_iter().collect(),
             extension_manager: None,
             canvas: None,
+            eval: None,
         }
     }
 
@@ -54,6 +56,11 @@ impl RunTool {
 
     pub(crate) fn with_canvas(mut self, canvas: Option<crate::canvas::CanvasTool>) -> Self {
         self.canvas = canvas;
+        self
+    }
+
+    pub(crate) fn with_eval(mut self, eval: crate::eval_tool::EvalTool) -> Self {
+        self.eval = Some(eval);
         self
     }
 }
@@ -88,7 +95,7 @@ impl PortableTool for RunTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Run one real executable or script path with exact arguments and return its durable bash session id. Use bash for shell expressions; use run for a path. Typed virtual paths require their owning runtime dispatcher.".into()
+        "Run one real executable or script path with exact arguments and return its canonical bash://, process://, or canvas:// path. Use bash for shell expressions; use run for a path. Typed virtual paths require their owning runtime dispatcher.".into()
     }
 
     fn parameters(&self) -> Value {
@@ -116,6 +123,31 @@ impl PortableTool for RunTool {
                     .run_extension(&args.path, &segments, args.arguments)
                     .await;
             }
+            ResourcePath::Virtual {
+                scheme: artist_tools::resource_path::ResourceScheme::Eval,
+                ..
+            } => {
+                let eval = self
+                    .eval
+                    .as_ref()
+                    .ok_or_else(|| RunError("eval runtime is unavailable".into()))?;
+                let arguments = args.arguments.unwrap_or_else(|| json!({}));
+                let code = arguments
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| (!args.args.is_empty()).then(|| args.args.join(" ")));
+                let reset = arguments
+                    .get("reset")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let result = eval
+                    .call(crate::eval_tool::EvalArgs { code, reset })
+                    .await
+                    .map_err(|error| RunError(error.to_string()))?;
+                return serde_json::to_string_pretty(&result)
+                    .map_err(|error| RunError(error.to_string()));
+            }
             ResourcePath::Virtual { .. } => {
                 return Err(RunError(format!(
                     "{} is a typed virtual resource; use its owning runtime dispatcher",
@@ -135,19 +167,20 @@ impl PortableTool for RunTool {
                 target.display()
             )));
         }
-        if let Some(canvas) = &self.canvas
-            && let Some(id) = canvas
+        if let Some(canvas) = &self.canvas {
+            if let Some(id) = canvas
                 .run_source(&target)
                 .await
                 .map_err(|error| RunError(error.to_string()))?
-        {
-            if !args.args.is_empty() || args.cwd.is_some() || args.env.is_some() {
-                return Err(RunError(
-                    "canvas sources do not accept run args, cwd, or env; run the source path alone"
-                        .into(),
-                ));
+            {
+                if !args.args.is_empty() || args.cwd.is_some() || args.env.is_some() {
+                    return Err(RunError(
+                        "canvas sources do not accept run args, cwd, or env; run the source path alone"
+                            .into(),
+                    ));
+                }
+                return Ok(id);
             }
-            return Ok(id);
         }
         let program = run_program(&target).ok_or_else(|| {
             RunError(format!(
@@ -167,6 +200,7 @@ impl PortableTool for RunTool {
             self.bash
                 .start_process_session(command, args.cwd, args.env)
                 .await
+                .map(|id| canonical_process_path(&id))
                 .map_err(|error| RunError(error.to_string()))
         } else {
             self.bash
@@ -175,6 +209,16 @@ impl PortableTool for RunTool {
                 .map_err(|error| RunError(error.to_string()))
         }
     }
+}
+
+/// The registry keeps its legacy `process:<slug>` storage key for migration
+/// compatibility. `run` never exposes that bare key: the model-facing noun is
+/// the typed `process://<slug>` path.
+fn canonical_process_path(registry_id: &str) -> String {
+    format!(
+        "process://{}",
+        registry_id.strip_prefix("process:").unwrap_or(registry_id)
+    )
 }
 
 impl RunTool {
@@ -298,9 +342,11 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(id.starts_with("bash://"), "{id}");
+        let record_id = id.strip_prefix("bash://").expect("canonical bash path");
         let record = hub
             .registry()
-            .get(&id)
+            .get(record_id)
             .unwrap()
             .expect("durable run record");
         assert_eq!(record.kind, "bash");
@@ -337,8 +383,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let record = hub.registry().get(&id).unwrap().unwrap();
-        assert!(id.starts_with("process:"));
+        assert!(id.starts_with("process://"));
+        let registry_id = format!("process:{}", id.strip_prefix("process://").unwrap());
+        let record = hub.registry().get(&registry_id).unwrap().unwrap();
         assert_eq!(record.kind, "bash");
         assert_eq!(record.snapshot["resourceType"], "process");
     }

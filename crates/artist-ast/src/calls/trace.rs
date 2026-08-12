@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::calls::cli_helpers::resolve_target_qns;
 use crate::calls::graph::{CallEdge, CallGraph, CallTarget, Qn};
-use crate::core::{ParseResult, JSON_SCHEMA_TRACE};
+use crate::core::{JSON_SCHEMA_TRACE, ParseResult};
 
 /// Total inlined-body budget for one trace response. Beyond this, remaining
 /// hops are listed header-only with a note.

@@ -625,6 +625,7 @@ fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
             Some(
                 [
                     Tool::Read.name(),
+                    Tool::ReadMany.name(),
                     Tool::Find.name(),
                     Tool::Grep.name(),
                     Tool::Skill.name(),
@@ -633,9 +634,7 @@ fn builtin_tools(name: &str) -> (Option<Vec<String>>, Vec<String>) {
                     Tool::Handoff.name(),
                     Tool::Poll.name(),
                     Tool::Stop.name(),
-                    Tool::Abort.name(),
                     Tool::Send.name(),
-                    Tool::List.name(),
                     // MCP's ordinary bounded-result continuation and keyed-operation
                     // recovery are read-only administration. Keeping them in the
                     // read-only built-ins preserves pagination without bypassing

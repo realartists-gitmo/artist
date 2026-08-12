@@ -36,6 +36,88 @@ pub struct ReadArgs {
     /// read must carry it, so an offset can never drift onto changed content.
     pub revision: Option<String>,
 }
+
+/// Atomically observe several real text files. This is intentionally separate
+/// from `read`: its request contains no virtual resources, images, or
+/// directories, because those cannot truthfully share one file-coordinator
+/// snapshot with source files.
+#[derive(Clone)]
+pub struct ReadManyTool(pub Workspace);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadManyArgs {
+    pub paths: Vec<String>,
+    pub limit: Option<usize>,
+}
+
+impl PortableTool for ReadManyTool {
+    const NAME: &'static str = "read_many";
+    type Error = ToolError;
+    type Args = ReadManyArgs;
+    type Output = Value;
+
+    fn description(&self) -> String {
+        "Read several real text files from one Artist-coordinated snapshot. Use for a related source set before a structural change; each result has its own revision and anchored lines. Virtual paths, directories, and media are intentionally unsupported—read those individually.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "paths": {"type":"array","minItems":1,"items":{"type":"string"},"description":"Real project-relative or absolute text-file paths. Duplicate paths are rejected."},
+                "limit": {"type":"integer","minimum":1,"description":"Per-file line window; defaults to 200. Use ordinary read with the returned revision to continue one file."}
+            },
+            "required": ["paths"],
+            "additionalProperties": false
+        })
+    }
+
+    async fn call(&self, args: ReadManyArgs) -> Result<Value, ToolError> {
+        if args.paths.is_empty() {
+            return Err(ToolError::Message("paths cannot be empty".into()));
+        }
+        let limit = args.limit.unwrap_or(READ_LINES).max(1);
+        for path in &args.paths {
+            let resolved = self.0.resolve_existing(path)?;
+            if tokio::fs::metadata(&resolved).await?.is_dir() {
+                return Err(ToolError::Message(format!(
+                    "read_many accepts text files only; {path} is a directory"
+                )));
+            }
+        }
+        let results = self.0.read_files_atomic(args.paths.clone()).await?;
+        let reads = args
+            .paths
+            .into_iter()
+            .zip(results)
+            .map(|(path, read)| {
+                let lines = read
+                    .result
+                    .lines
+                    .iter()
+                    .take(limit)
+                    .map(|line| json!({"anchor":line.anchor,"text":line.text}))
+                    .collect::<Vec<_>>();
+                let returned = lines.len();
+                let has_more = read.result.total_lines > returned;
+                let continuation = has_more.then(|| {
+                    json!({"tool":"read","arguments":{"path":path,"offset":returned + 1,"revision":read.content_hash}})
+                });
+                json!({
+                    "path": path,
+                    "revision": read.content_hash,
+                    "totalLines": read.result.total_lines,
+                    "lines": lines,
+                    "hasMore": has_more,
+                    "continuation": continuation,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"reads":reads,"snapshot":"artist-coordinator"}))
+    }
+}
+
 impl PortableTool for ReadTool {
     const NAME: &'static str = "read";
     type Error = ToolError;
@@ -53,6 +135,9 @@ impl PortableTool for ReadTool {
 
     fn parameters(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":1},"limit":{"type":"integer","minimum":1},"revision":{"type":"string","description":"Required for a continuation (offset greater than 1); must exactly match the preceding read revision."}},"required":["path"],"additionalProperties":false})
+    }
+    fn map_error(&self, error: ToolError) -> rig_core::tool::ToolExecutionError {
+        error.into_execution_error()
     }
     async fn call(&self, args: ReadArgs) -> Result<ToolOutput, ToolError> {
         let path = self.0.resolve_existing(&args.path)?;
@@ -119,16 +204,14 @@ impl PortableTool for ReadTool {
         let revision = result.content_hash.clone();
         if offset > 1 {
             let supplied = args.revision.as_deref().ok_or_else(|| {
-                ToolError::Message(format!(
-                    "stale_revision: continuation for {} requires the revision from its preceding read; start a fresh read(path=\"{}\")",
-                    args.path, args.path
-                ))
+                ToolError::stale_revision(&args.path, None, Some(revision.clone()))
             })?;
             if supplied != revision {
-                return Err(ToolError::Message(format!(
-                    "stale_revision: {} is now revision {revision}, not {supplied}; start a fresh read(path=\"{}\")",
-                    args.path, args.path
-                )));
+                return Err(ToolError::stale_revision(
+                    &args.path,
+                    Some(supplied.to_owned()),
+                    Some(revision),
+                ));
             }
         }
         let all = &result.result.lines;
@@ -250,4 +333,31 @@ fn image_media_type(extension: &str) -> Option<ImageMediaType> {
         "heif" => ImageMediaType::HEIF,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_many_returns_structured_ordered_coordinator_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "a1\na2\n").unwrap();
+        std::fs::write(root.path().join("b.txt"), "b1\nb2\n").unwrap();
+        let workspace = Workspace::open(root.path(), state.path(), "read-many").unwrap();
+        let output = ReadManyTool(workspace)
+            .call(ReadManyArgs {
+                paths: vec!["b.txt".into(), "a.txt".into()],
+                limit: Some(1),
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["snapshot"], "artist-coordinator");
+        assert_eq!(output["reads"][0]["path"], "b.txt");
+        assert_eq!(output["reads"][0]["lines"][0]["text"], "b1");
+        assert_eq!(output["reads"][1]["path"], "a.txt");
+        assert_eq!(output["reads"][1]["lines"][0]["text"], "a1");
+        assert_eq!(output["reads"][0]["continuation"]["arguments"]["offset"], 2);
+    }
 }

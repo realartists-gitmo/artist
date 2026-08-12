@@ -31,6 +31,10 @@ fn tool_result(id: &str, text: &str) -> Message {
     }
 }
 
+fn wire_canonical(messages: &[Message]) -> Vec<Message> {
+    serde_json::from_value(serde_json::to_value(messages).unwrap()).unwrap()
+}
+
 #[test]
 fn compacts_at_turn_boundary_and_keeps_recent_suffix() {
     let messages = vec![
@@ -92,4 +96,52 @@ fn serialization_truncates_large_tool_results() {
     let source = serialize_conversation(&[tool_result("read-id", &"x".repeat(2_100))]);
     assert!(source.contains("100 more characters truncated"));
     assert!(source.len() < 2_100);
+}
+
+#[test]
+fn exact_checkpoint_round_trips_large_tool_results_without_truncation() {
+    let messages = vec![
+        Message::user("request"),
+        tool_call("read", "src/lib.rs"),
+        tool_result("read-id", &"x".repeat(12_000)),
+    ];
+    let checkpoint = exact_context_message(&messages);
+    let recovered = exact_context_messages(&checkpoint).expect("valid exact checkpoint");
+    assert_eq!(recovered, wire_canonical(&messages));
+    let Message::User { content } = checkpoint else {
+        panic!("checkpoint is a user message")
+    };
+    let rendered = content
+        .iter()
+        .find_map(|item| match item {
+            UserContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!rendered.contains("truncated"));
+}
+
+#[test]
+fn repeated_exact_compaction_rehydrates_the_prior_checkpoint() {
+    let earlier = vec![Message::user("first"), Message::assistant("first answer")];
+    let checkpoint = exact_context_message(&earlier);
+    let messages = vec![
+        checkpoint,
+        Message::user("second"),
+        Message::assistant("second answer"),
+        Message::user("recent"),
+        Message::assistant("recent answer"),
+    ];
+    let keep = estimate_messages_tokens(&messages[3..]);
+    let plan = prepare_compaction(&messages, keep).unwrap();
+    let prefix = plan.exact_prefix(&messages);
+    let mut expected = wire_canonical(&earlier);
+    expected.extend_from_slice(&messages[1..3]);
+    assert_eq!(prefix, expected);
+    let snapshot = plan.exact_snapshot(&prefix);
+    assert_eq!(
+        exact_context_messages(&snapshot[0]).unwrap(),
+        wire_canonical(&prefix)
+    );
+    assert_eq!(snapshot[1..], messages[3..]);
 }

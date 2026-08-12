@@ -42,6 +42,11 @@ struct Artifact {
     content_type: String,
     content: String,
     created_at_ms: u64,
+    /// Canonical occurrence number within an otherwise identical occurrence
+    /// envelope. It is included in the TECA input and retained explicitly so
+    /// provenance consumers do not have to reverse engineer it from the path.
+    #[serde(default)]
+    occurrence: u64,
     /// Present when this artifact carries a binary/multimodal payload
     /// (screenshot, image, yield blob). Raw bytes stay out of model text and
     /// are only decoded on demand through the metadata or raw projections.
@@ -83,12 +88,26 @@ pub struct ArtifactInfo {
     pub content_type: String,
     pub total_bytes: usize,
     pub created_at_ms: u64,
+    /// Canonical occurrence identity used in the TECA artifact envelope.
+    pub occurrence: u64,
     /// Present when the artifact carries a binary/multimodal payload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
     /// Content address of the payload bytes alone; the payload revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+}
+
+/// Exact binary payload for programmatic consumers. This deliberately is not
+/// serializable and is never returned by `read(artifact://...)`: callers that
+/// need bytes must opt into this separate API rather than accidentally placing
+/// a base64 blob in model-visible text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaArtifactPayload {
+    pub id: String,
+    pub media_type: String,
+    pub revision: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -205,6 +224,7 @@ impl PageStore {
             content: payload,
             media: None,
             created_at_ms: now_ms(),
+            occurrence: 0,
         };
         // The id is derived from the exact canonical occurrence envelope plus
         // payload bytes; the occurrence serial is part of the TECA input
@@ -366,10 +386,12 @@ impl PageStore {
                 .map_err(|error| ToolExecutionError::other(error.to_string()))?;
             lock.lock_exclusive()
                 .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-            let id = next_artifact_id(artifact, 1, |candidate| {
+            let (id, occurrence) = next_artifact_id(artifact, 1, |candidate| {
                 directory.join(format!("{candidate}.json")).exists()
             })?;
-            let result = write_json_atomic(&directory.join(format!("{id}.json")), artifact)
+            let mut stored = artifact.clone();
+            stored.occurrence = occurrence;
+            let result = write_json_atomic(&directory.join(format!("{id}.json")), &stored)
                 .map_err(|error| ToolExecutionError::other(error.to_string()));
             let _ = FileExt::unlock(&lock);
             result.map(|()| id)
@@ -379,8 +401,11 @@ impl PageStore {
                 .artifacts
                 .lock()
                 .expect("page artifact mutex poisoned");
-            let id = next_artifact_id(artifact, 1, |candidate| artifacts.contains_key(candidate))?;
-            artifacts.insert(id.clone(), artifact.clone());
+            let (id, occurrence) =
+                next_artifact_id(artifact, 1, |candidate| artifacts.contains_key(candidate))?;
+            let mut stored = artifact.clone();
+            stored.occurrence = occurrence;
+            artifacts.insert(id.clone(), stored);
             Ok(id)
         }
     }
@@ -421,23 +446,65 @@ impl PageStore {
                 revision: payload_revision(bytes),
             }),
             created_at_ms: now_ms(),
+            occurrence: 0,
         };
         self.store_artifact(&artifact)
     }
 
-    /// Retrieve the raw payload bytes of a media artifact, decoded. Returns
-    /// `None` for an unknown id or a text-backed artifact.
-    pub fn media_bytes(&self, id: &str) -> Result<Option<Vec<u8>>, ToolExecutionError> {
+    /// Capture a text/JSON artifact (yield result, delegated output) as a
+    /// durable artifact, returning its TECA-derived id. Occurrence distinction
+    /// lives in the TECA input material exactly as it does for media: identical
+    /// content from a distinct occurrence renders a different id.
+    pub fn capture_text(
+        &self,
+        tool: &str,
+        content_type: &str,
+        content: &str,
+    ) -> Result<String, ToolExecutionError> {
+        let artifact = Artifact {
+            tool: tool.to_owned(),
+            content_type: content_type.to_owned(),
+            content: content.to_owned(),
+            media: None,
+            created_at_ms: now_ms(),
+            occurrence: 0,
+        };
+        self.store_artifact(&artifact)
+    }
+
+    /// Retrieve a binary artifact through the explicit programmatic payload
+    /// boundary. Returns `None` for an unknown id or text-backed artifact.
+    pub fn media_payload(
+        &self,
+        id: &str,
+    ) -> Result<Option<MediaArtifactPayload>, ToolExecutionError> {
         if !valid_artifact_id(id) {
             return Ok(None);
         }
-        Ok(self.read_artifact(id)?.and_then(|artifact| {
-            artifact.media.map(|media| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(&media.bytes)
-                    .unwrap_or_default()
-            })
+        let Some(artifact) = self.read_artifact(id)? else {
+            return Ok(None);
+        };
+        let Some(media) = artifact.media else {
+            return Ok(None);
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&media.bytes)
+            .map_err(|error| {
+                ToolExecutionError::other(format!("invalid retained artifact media: {error}"))
+            })?;
+        Ok(Some(MediaArtifactPayload {
+            id: id.to_owned(),
+            media_type: media.media_type,
+            revision: media.revision,
+            bytes,
         }))
+    }
+
+    /// Compatibility convenience for code that only needs bytes. New callers
+    /// should use [`Self::media_payload`] so type and revision provenance stay
+    /// attached to the byte stream.
+    pub fn media_bytes(&self, id: &str) -> Result<Option<Vec<u8>>, ToolExecutionError> {
+        Ok(self.media_payload(id)?.map(|payload| payload.bytes))
     }
 
     fn write_cursor(&self, cursor: &str, record: &CursorRecord) -> Result<(), ToolExecutionError> {
@@ -578,11 +645,11 @@ fn next_artifact_id(
     artifact: &Artifact,
     mut occurrence: u64,
     occupied: impl Fn(&str) -> bool,
-) -> Result<String, ToolExecutionError> {
+) -> Result<(String, u64), ToolExecutionError> {
     loop {
         let candidate = artifact_base_id(artifact, occurrence)?;
         if !occupied(&candidate) {
-            return Ok(candidate);
+            return Ok((candidate, occurrence));
         }
         occurrence = occurrence.saturating_add(1);
     }
@@ -597,6 +664,7 @@ fn artifact_info(id: String, artifact: Artifact) -> ArtifactInfo {
         content_type: artifact.content_type,
         total_bytes,
         created_at_ms: artifact.created_at_ms,
+        occurrence: artifact.occurrence,
         media_type: media.map(|media| media.media_type.clone()),
         revision: media.map(|media| media.revision.clone()),
     }
@@ -772,6 +840,8 @@ mod tests {
         // second occurrence of identical bytes renders a different id rather
         // than a `-2` suffix on the same rendered id.
         assert_ne!(first_id, second_id);
+        assert_eq!(store.artifact(&first_id).unwrap().unwrap().occurrence, 1);
+        assert_eq!(store.artifact(&second_id).unwrap().unwrap().occurrence, 2);
     }
 
     #[test]
@@ -865,6 +935,19 @@ mod tests {
     }
 
     #[test]
+    fn programmatic_media_payload_keeps_bytes_type_and_revision_together() {
+        let store = PageStore::memory();
+        let bytes = b"\x89PNG\r\n\x1a\nprogrammatic";
+        let id = store.capture_media("computer", "image/png", bytes).unwrap();
+        let payload = store.media_payload(&id).unwrap().expect("media payload");
+        assert_eq!(payload.id, id);
+        assert_eq!(payload.media_type, "image/png");
+        assert_eq!(payload.bytes, bytes);
+        assert!(!payload.revision.is_empty());
+        assert!(store.media_payload("a-not-real").unwrap().is_none());
+    }
+
+    #[test]
     fn text_and_media_artifacts_share_one_store() {
         let store = PageStore::memory();
         let text = "mixed store text".repeat(5_000);
@@ -888,5 +971,37 @@ mod tests {
         let media_id = store.capture_media("canvas", "image/png", b"png").unwrap();
         assert!(store.media_bytes(&media_id).unwrap().is_some());
         assert_eq!(store.artifacts().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn captured_text_is_durable_provenanced_and_occurrence_distinct() {
+        let store = PageStore::memory();
+        let first = store
+            .capture_text(
+                "subagent:reviewer",
+                "application/json",
+                r#"{"answer":"done"}"#,
+            )
+            .unwrap();
+        let second = store
+            .capture_text(
+                "subagent:reviewer",
+                "application/json",
+                r#"{"answer":"done"}"#,
+            )
+            .unwrap();
+        assert_ne!(first, second, "distinct occurrences stay distinct");
+        assert_eq!(
+            store.artifact(&first).unwrap().unwrap().tool,
+            "subagent:reviewer"
+        );
+        assert_eq!(
+            store.artifact(&first).unwrap().unwrap().content_type,
+            "application/json"
+        );
+        let text = store.artifact(&first).unwrap().unwrap();
+        assert!(text.media_type.is_none(), "text artifact has no media");
+        assert!(text.total_bytes >= r#"{"answer":"done"}"#.len());
+        assert!(valid_artifact_id(&first));
     }
 }

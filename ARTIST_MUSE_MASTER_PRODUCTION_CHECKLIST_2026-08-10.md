@@ -128,10 +128,10 @@ Do not reopen whether artifacts “should” use TECA.
 - [x] Preserve legacy UUID artifact reads where migration compatibility requires them.
 - [x] Replace SHA-256/truncated-hash artifact path generation with TECA-derived artifact paths.
 - [x] Preserve occurrence distinction in the TECA input material rather than relying on an unrelated rendered ID system.
-- [ ] Ensure artifacts produced by tool results, yields, screenshots, images, or other supported binary/multimodal outputs are captured/routed by the harness without requiring the producing agent/yielder to manually write an artifact.
-- [ ] `read(artifact://...)` must return metadata plus the appropriate visual/multimodal attachment when supported.
-- [ ] Define programmatic raw-byte access separately from model-facing text projection if required.
-- [ ] Keep binary/media type, provenance, occurrence identity, and payload revision addressable.
+- [x] Ensure artifacts produced by tool results, yields, screenshots, images, or other supported binary/multimodal outputs are captured/routed by the harness without requiring the producing agent/yielder to manually write an artifact.
+- [x] `read(artifact://...)` must return metadata plus the appropriate visual/multimodal attachment when supported.
+- [x] Define programmatic raw-byte access separately from model-facing text projection if required.
+- [x] Keep binary/media type, provenance, occurrence identity, and payload revision addressable.
 
 ---
 
@@ -160,26 +160,26 @@ Do not reopen whether artifacts “should” use TECA.
 
 ## 2.2 Complete the namespace
 
-- [ ] Add/freeze the production path shape for Python eval sessions.
-- [ ] Add/freeze the production path shape for debugger/DAP sessions.
-- [ ] Add/freeze the production path shape for forge/repository resources.
-- [ ] Add/freeze code/symbol/AST graph projections.
-- [ ] Add/freeze relationship projections for parent/children/predecessor/successor/pointers.
-- [ ] Decide whether TTSR/rule resources need a dedicated root or projections under an existing root and freeze that ABI.
-- [ ] Ensure every newly declared root is readable even before all specialized behavior is installed, without host-path fallthrough.
-- [ ] Ensure all model-facing runtime resources use canonical real/typed virtual paths.
-- [ ] Eliminate remaining bare legacy runtime IDs from the target model-facing ABI.
-- [ ] Resolve the current one-shot native `process:<slug>` mismatch: either give process resources a canonical typed path/root or deliberately fold them into an existing typed runtime namespace.
-- [ ] Remove legacy `list` from the target public surface when all enumeration paths are covered by `read`/`find`.
-- [ ] Remove or quarantine legacy `abort`/`subagent` compatibility surfaces once `stop`/`agent` migration no longer needs them.
+- [x] Add/freeze the production path shape for Python eval sessions.
+- [x] Add/freeze the production path shape for debugger/DAP sessions.
+- [x] Add/freeze the production path shape for forge/repository resources.
+- [x] Add/freeze code/symbol/AST graph projections.
+- [x] Add/freeze relationship projections for parent/children/predecessor/successor/pointers.
+- [x] Decide whether TTSR/rule resources need a dedicated root or projections under an existing root and freeze that ABI.
+- [x] Ensure every newly declared root is readable even before all specialized behavior is installed, without host-path fallthrough.
+- [x] Ensure all model-facing runtime resources use canonical real/typed virtual paths.
+- [x] Eliminate remaining bare legacy runtime IDs from the target model-facing ABI.
+- [x] Resolve the current one-shot native `process:<slug>` mismatch: either give process resources a canonical typed path/root or deliberately fold them into an existing typed runtime namespace.
+- [x] Remove legacy `list` from the target public surface when all enumeration paths are covered by `read`/`find`.
+- [x] Remove or quarantine legacy `abort`/`subagent` compatibility surfaces once `stop`/`agent` migration no longer needs them.
 
 ## 2.3 Universal result/error behavior
 
-- [ ] Finish one path/result envelope across real files and virtual resources.
-- [ ] Every failure must include a typed error code/type.
-- [ ] Every failure must include a concise explanation.
-- [ ] Every stale/path-sensitive failure must identify the affected path and relevant revision.
-- [ ] Every recoverable failure must return a usable recovery action/path.
+- [x] Finish one path/result envelope across real files and virtual resources.
+- [x] Every failure must include a typed error code/type.
+- [x] Every failure must include a concise explanation.
+- [x] Every stale/path-sensitive failure must identify the affected path and relevant revision.
+- [x] Every recoverable failure must return a usable recovery action/path.
 - [ ] Do not flatten structured subsystem facts into prose when machine-structured output is already available.
 
 ---
@@ -228,7 +228,7 @@ Do not reopen whether artifacts “should” use TECA.
 - [x] Reject deletion of live sessions.
 - [x] Delete stopped records/queued input and release retained name leases where applicable.
 - [x] Preserve unrelated Muse-derived records when deleting stopped agents.
-- [x] Accept canonical `agent://`, `bash://`, `ask://`, `canvas://`, and `computer://` targets for lifecycle operations.
+- [x] Accept canonical `agent://`, `bash://`, `ask://`, `canvas://`, `computer://`, `process://`, `eval://`, and `debug://` targets for lifecycle operations.
 - [x] Reject relationship-child projections as if they were live runtime resources.
 - [x] Add canonical `agent({profile, brief})` creation.
 - [x] Claim a durable Artist roster name and start immediately.
@@ -240,9 +240,9 @@ Do not reopen whether artifacts “should” use TECA.
 - [x] Fail the run rather than store an invalid “completed” yield.
 - [x] Expose valid yields read-only at `agent://<artist>/yields/<n>`.
 - [x] Surface resolved yield schema through `profile://`.
-- [ ] Ensure artifact-producing yields are automatically captured into the TECA artifact namespace without requiring explicit artifact writes.
-- [ ] Preserve agent identity, work-unit identity, yield schema/version, exact yielded content, and supporting transcript/tool evidence in Muse normalization.
-- [ ] Treat a yield as a model-produced report/assertion, never automatically as an independently observed fact.
+- [x] Ensure artifact-producing yields are automatically captured into the TECA artifact namespace without requiring explicit artifact writes.
+- [x] Preserve agent identity, work-unit identity, yield schema/version, exact yielded content, and supporting transcript/tool evidence in Muse normalization.
+- [x] Treat a yield as a model-produced report/assertion, never automatically as an independently observed fact.
 
 ## 4.3 Profiles and skills
 
@@ -258,50 +258,50 @@ Do not reopen whether artifacts “should” use TECA.
 - [x] Make `skill://` ordinary profile-governed files.
 - [x] Reading a skill is the only activation.
 - [x] Do not maintain hidden persistent skill activation state.
-- [ ] Record exact resolved profile revision/digest for each governed work unit/turn boundary in Muse source context.
-- [ ] Record the exact tool policy visible at that occurrence.
-- [ ] Record the exact yield schema applicable at that occurrence.
-- [ ] Record the exact profile instructions injected at that occurrence.
+- [x] Record exact resolved profile revision/digest for each governed work unit/turn boundary in Muse source context.
+- [x] Record the exact tool policy visible at that occurrence.
+- [x] Record the exact yield schema applicable at that occurrence.
+- [x] Record the exact profile instructions injected at that occurrence.
 
 ## 4.4 Todo semantics
 
 - [x] Expose each retained agent's todo tree only at `agent://<artist>/todo`.
 - [x] Keep `todo://` absent.
-- [ ] Preserve one todo tree per owning agent/session.
-- [ ] Do not expose hidden direct parent-todo access.
-- [ ] Preserve states `Open{Idle}`, `Open{Active}`, `Closed{Done}`, `Closed{Failed}`, `Closed{Cancelled}`, `Closed{Inherited}`.
-- [ ] Enforce: an open descendant forces all ancestors open.
-- [ ] Enforce: closing a parent cascades `Closed{Inherited}` to still-open descendants.
-- [ ] Enforce: `Inherited` is system-owned and never model-authored directly.
-- [ ] Enforce: reopening a parent does not automatically reopen inherited descendants.
-- [ ] Preserve deterministic nested-tree addressing.
-- [ ] Preserve atomic all-or-nothing structural todo mutations.
-- [ ] Keep status mutation semantically distinct from ordinary text replacement.
-- [ ] Surface enough displacement/path-change information after structural mutation for the model to retain correct references.
+- [x] Preserve one todo tree per owning agent/session.
+- [x] Do not expose hidden direct parent-todo access.
+- [x] Preserve states `Open{Idle}`, `Open{Active}`, `Closed{Done}`, `Closed{Failed}`, `Closed{Cancelled}`, `Closed{Inherited}`.
+- [x] Enforce: an open descendant forces all ancestors open.
+- [x] Enforce: closing a parent cascades `Closed{Inherited}` to still-open descendants.
+- [x] Enforce: `Inherited` is system-owned and never model-authored directly.
+- [x] Enforce: reopening a parent does not automatically reopen inherited descendants.
+- [x] Preserve deterministic nested-tree addressing.
+- [x] Preserve atomic all-or-nothing structural todo mutations.
+- [x] Keep status mutation semantically distinct from ordinary text replacement.
+- [x] Surface enough displacement/path-change information after structural mutation for the model to retain correct references.
 - [ ] If universal `edit` is the public mutation surface, make it preserve the todo semantic model rather than reducing todo to arbitrary text.
 
 ## 4.5 Ask semantics
 
-- [ ] `ask` creation returns/backgrounds immediately.
-- [ ] Treat one ask batch as one human-decision work unit.
-- [ ] Block explicitly through `poll`, never by making `ask` itself synchronously wait.
-- [ ] Support 1..infinity questions.
-- [ ] Support 0..infinity options per question.
-- [ ] Zero options means free response.
-- [ ] Keep arbitrary `header` out of the target schema.
-- [ ] Keep model-controlled `multiSelect` out of the target schema.
-- [ ] Human UI permits multi-select.
-- [ ] Options carry ordinary option text plus mandatory `recommended: bool`.
-- [ ] Preserve per-selection annotations/notes.
-- [ ] Preserve dismissed answer as an empty selection set.
-- [ ] Preserve original option order exactly; no sorting/deduplication may change index identity.
-- [ ] If timeout auto-resolution remains enabled, select exactly the recommended options.
-- [ ] If timeout auto-resolution has no recommended options, resolve as dismissed.
-- [ ] Auto-resolution settles completed rather than cancelled.
-- [ ] Persist `Human | AutoResolve` provenance.
-- [ ] Do not encode a UX rule that hides provenance from the live model unless a later explicit decision restores that behavior.
-- [ ] Muse must never normalize auto-resolution into “the human chose X” merely because the returned answer content is equivalent.
-- [ ] Do not resurrect a separate MCP-only ask outbox merely because transport is stateless.
+- [x] `ask` creation returns/backgrounds immediately.
+- [x] Treat one ask batch as one human-decision work unit.
+- [x] Block explicitly through `poll`, never by making `ask` itself synchronously wait.
+- [x] Support 1..infinity questions.
+- [x] Support 0..infinity options per question.
+- [x] Zero options means free response.
+- [x] Keep arbitrary `header` out of the target schema.
+- [x] Keep model-controlled `multiSelect` out of the target schema.
+- [x] Human UI permits multi-select.
+- [x] Options carry ordinary option text plus mandatory `recommended: bool`.
+- [x] Preserve per-selection annotations/notes.
+- [x] Preserve dismissed answer as an empty selection set.
+- [x] Preserve original option order exactly; no sorting/deduplication may change index identity.
+- [x] If timeout auto-resolution remains enabled, select exactly the recommended options.
+- [x] If timeout auto-resolution has no recommended options, resolve as dismissed.
+- [x] Auto-resolution settles completed rather than cancelled.
+- [x] Persist `Human | AutoResolve` provenance.
+- [x] Do not encode a UX rule that hides provenance from the live model unless a later explicit decision restores that behavior.
+- [x] Muse must never normalize auto-resolution into “the human chose X” merely because the returned answer content is equivalent.
+- [x] Do not resurrect a separate MCP-only ask outbox merely because transport is stateless.
 
 ---
 
@@ -312,40 +312,40 @@ Relationship traversal is production scope, not an optional appendix.
 ## 5.1 Relationship model
 
 - [x] Agent canonical paths already expose immediate read-only relationship children for todo/yields.
-- [ ] Add addressable immediate parent.
-- [ ] Add addressable children.
-- [ ] Add immediate agent children where useful.
-- [ ] Add predecessor.
-- [ ] Add successor.
-- [ ] Add general pointer/reference relationships to other resource paths where required.
-- [ ] Preserve the rule that a spawned thing generally has one immediate parent.
-- [ ] Allow that parent to be a non-agent runtime/resource.
-- [ ] Keep predecessor/successor independent of parentage so handoff continuity is representable.
-- [ ] Freeze the exact relationship path shape.
-- [ ] Freeze whether relationships are explicit pointer resources, projections, aliases, or a deliberate mixture.
-- [ ] Define cycle handling.
-- [ ] Define broken-link handling.
-- [ ] Define deletion behavior.
-- [ ] Define relationship behavior after target deletion/GC.
-- [ ] Define whether `find` follows relationship pointers by default.
-- [ ] Define whether `grep` follows relationship pointers by default.
-- [ ] Define relationship identity separately from target-resource identity where needed.
+- [x] Add addressable immediate parent.
+- [x] Add addressable children.
+- [x] Add immediate agent children where useful.
+- [x] Add predecessor.
+- [x] Add successor.
+- [x] Add general pointer/reference relationships to other resource paths where required.
+- [x] Preserve the rule that a spawned thing generally has one immediate parent.
+- [x] Allow that parent to be a non-agent runtime/resource.
+- [x] Keep predecessor/successor independent of parentage so handoff continuity is representable.
+- [x] Freeze the exact relationship path shape.
+- [x] Freeze whether relationships are explicit pointer resources, projections, aliases, or a deliberate mixture.
+- [x] Define cycle handling.
+- [x] Define broken-link handling.
+- [x] Define deletion behavior.
+- [x] Define relationship behavior after target deletion/GC.
+- [x] Define whether `find` follows relationship pointers by default.
+- [x] Define whether `grep` follows relationship pointers by default.
+- [x] Define relationship identity separately from target-resource identity where needed.
 
 ## 5.2 Relational store
 
 This is a required architecture decision/implementation.
 
-- [ ] Evaluate reuse of Mnestic/Cozo/RocksDB for Artist runtime relationships.
-- [ ] Evaluate a purpose-built relationship registry/index.
-- [ ] Evaluate any better existing relational/graph substrate discovered during implementation.
-- [ ] Compare transaction semantics.
-- [ ] Compare lifecycle/GC semantics.
-- [ ] Compare migration requirements.
-- [ ] Compare query/traversal behavior.
-- [ ] Compare durability/restart behavior.
-- [ ] Compare indexing requirements.
-- [ ] Do not couple Artist runtime relationships, existing Artist memory, and Muse ontology/fact persistence merely because each is graph-shaped.
-- [ ] Select and implement the relationship backing store deliberately.
+- [x] Evaluate reuse of Mnestic/Cozo/RocksDB for Artist runtime relationships.
+- [x] Evaluate a purpose-built relationship registry/index.
+- [x] Evaluate any better existing relational/graph substrate discovered during implementation.
+- [x] Compare transaction semantics.
+- [x] Compare lifecycle/GC semantics.
+- [x] Compare migration requirements.
+- [x] Compare query/traversal behavior.
+- [x] Compare durability/restart behavior.
+- [x] Compare indexing requirements.
+- [x] Do not couple Artist runtime relationships, existing Artist memory, and Muse ontology/fact persistence merely because each is graph-shaped.
+- [x] Select and implement the relationship backing store deliberately.
 
 ---
 
@@ -366,12 +366,12 @@ This is a required architecture decision/implementation.
 ## 6.2 Terminal hardening still required
 
 - [ ] Exercise/preserve difficult TUI behavior.
-- [ ] Exercise/preserve alternate-screen behavior.
-- [ ] Handle terminal queries/responses correctly.
+- [x] Exercise/preserve alternate-screen behavior.
+- [x] Handle terminal queries/responses correctly.
 - [ ] Handle tmux/passthrough cases where required.
 - [ ] Preserve visually meaningful attribute state when it affects semantic interpretation.
 - [ ] Route terminal images/graphics through binary/artifact handling rather than textual escape leakage.
-- [ ] Record the exact `wezterm-term` upstream revision in provenance where Muse/replay semantics require exact behavior.
+- [x] Record the exact `wezterm-term` upstream revision in provenance where Muse/replay semantics require exact behavior.
 
 ## 6.3 Brush/uutils workstream
 
@@ -396,36 +396,36 @@ This is a required architecture decision/implementation.
 
 - [x] Artifact reads expose metadata rather than dumping binary into text.
 - [x] Oversized-result payloads can be retained behind artifact/pagination machinery.
-- [ ] Complete TECA artifact-path migration from Section 1.3.
-- [ ] Support visual attachment rendering on `read(artifact://...)` where supported.
-- [ ] Define binary/media programmatic access separately from model-facing text.
+- [x] Complete TECA artifact-path migration from Section 1.3.
+- [x] Support visual attachment rendering on `read(artifact://...)` where supported.
+- [x] Define binary/media programmatic access separately from model-facing text.
 - [x] Route screenshots/computer/canvas/terminal images through artifact semantics.
-- [ ] Ensure yield-produced artifacts are captured automatically by the harness.
+- [x] Ensure yield-produced artifacts are captured automatically by the harness.
 
 ## 7.2 Dictionary presentation and lifecycle
 
 - [ ] Complete TECA dictionary migration from Section 1.2.
-- [ ] Freeze repeated-substring discovery strategy.
-- [ ] Freeze profitability threshold/selection strategy.
+- [x] Freeze repeated-substring discovery strategy.
+- [x] Freeze profitability threshold/selection strategy.
 - [ ] Freeze dictionary definition placement.
 - [ ] Define when a new reference must be defined before use.
 - [ ] Redefine required references after compaction, resume, or new conversation.
-- [ ] Preserve permanent/no-GC dictionary policy unless explicitly superseded.
-- [ ] Define exact known-entry indexing under `dict://`.
+- [x] Preserve permanent/no-GC dictionary policy unless explicitly superseded.
+- [x] Define exact known-entry indexing under `dict://`.
 
 ## 7.3 Repetition and codec grammar
 
-- [ ] Implement `×<count>{value}` or the explicitly superseding frozen repetition grammar.
-- [ ] Freeze punctuation/nesting grammar.
-- [ ] Implement unambiguous escaping/quoting for literal reserved syntax such as `§`, repetition syntax, and selector-like punctuation.
-- [ ] Guarantee exact decode(encode(x)) round trips over all valid text.
-- [ ] Preserve exact canonical text independently from its compressed presentation.
-- [ ] Never allow codec syntax itself to become accidental semantic source truth.
+- [x] Implement `×<count>{value}` or the explicitly superseding frozen repetition grammar.
+- [x] Freeze punctuation/nesting grammar.
+- [x] Implement unambiguous escaping/quoting for literal reserved syntax such as `§`, repetition syntax, and selector-like punctuation.
+- [x] Guarantee exact decode(encode(x)) round trips over all valid text.
+- [x] Preserve exact canonical text independently from its compressed presentation.
+- [x] Never allow codec syntax itself to become accidental semantic source truth.
 
 ## 7.4 Dictionary-prefix history
 
-- [ ] Handle shortest-prefix instability when future dictionary entries make an old prefix ambiguous.
-- [ ] Keep canonical text/event data authoritative.
+- [x] Handle shortest-prefix instability when future dictionary entries make an old prefix ambiguous.
+- [x] Keep canonical text/event data authoritative.
 - [ ] Retain/version exact presentation emitted to a model when required for replay/training.
 - [ ] Retain sufficient dictionary/version provenance to reconstruct what the model actually saw.
 
@@ -438,10 +438,10 @@ This is a required architecture decision/implementation.
 
 ## 7.6 Structural condensation + SnapCompact
 
-- [ ] Remove lossy LLM summarization as the final compaction architecture.
-- [ ] Implement exact structural condensation.
+- [x] Remove lossy LLM summarization as the final compaction architecture.
+- [x] Implement exact structural condensation.
 - [ ] Implement SnapCompact lossless text-to-bitmap packing for vision-capable models.
-- [ ] Provide exact condensed text to non-vision models.
+- [x] Provide exact condensed text to non-vision models.
 - [ ] Preserve continuation selectors through compaction.
 - [ ] Preserve stale-recovery information through compaction.
 - [ ] Preserve dictionary definitions needed to decode retained compressed text.
@@ -461,8 +461,8 @@ This is a required architecture decision/implementation.
 - [x] Interpreted scripts create durable bash lifecycle resources.
 - [x] Route explicit JavaScript/TypeScript canvas-source paths to their owning live canvas session.
 - [x] Direct native executables create one-shot process snapshots.
-- [ ] Resolve the remaining canonical typed-path identity for one-shot native process resources.
-- [ ] Ensure `run` behavior is represented consistently in Muse events/results.
+- [x] Resolve the remaining canonical typed-path identity for one-shot native process resources.
+- [x] Ensure `run` behavior is represented consistently in Muse events/results.
 
 ## 8.2 Computer rung 0
 
@@ -482,9 +482,9 @@ This is a required architecture decision/implementation.
 - [x] Restart only replacement status/event tasks.
 - [x] Support host-triggered reload.
 - [x] Dispatch active callbacks locally through canonical `tools://<extension>/tool/<name>` run paths.
-- [ ] Ensure final provider/tool schemas reflect active extensions at the intended refresh boundary.
-- [ ] Record extension/tool-surface version context for Muse.
-- [ ] Preserve tool/event provenance across hot swaps.
+- [x] Ensure final provider/tool schemas reflect active extensions at the intended refresh boundary.
+- [x] Record extension/tool-surface version context for Muse.
+- [x] Preserve tool/event provenance across hot swaps.
 
 ---
 
@@ -492,21 +492,21 @@ This is a required architecture decision/implementation.
 
 The previous Rust/evcxr direction is superseded. Benchmarks led to the explicit decision to use a Python REPL that can call back into Artist tools.
 
-- [ ] Freeze the canonical `eval://` path hierarchy.
-- [ ] Implement a persistent/session-shaped Python REPL.
-- [ ] Make eval state addressable rather than hidden bespoke process state.
-- [ ] Allow Python eval code to call back into permitted Artist tools.
-- [ ] Route tool callbacks through the same permission/profile boundary as ordinary tool calls.
-- [ ] Prevent eval from bypassing tool policy merely because it executes locally.
-- [ ] Define persistence/reset semantics.
-- [ ] Define imports/environment/package behavior.
-- [ ] Define cwd/workspace behavior.
-- [ ] Return structured/programmatic outputs.
-- [ ] Return typed execution errors.
-- [ ] Define relation to `run` and `bash://`.
-- [ ] Ensure eval-created resources receive normal parent/child relationships.
-- [ ] Normalize eval inputs/results/tool callbacks into Muse with exact source/tool context.
-- [ ] Add direct contract tests for Python↔Artist-tool callbacks and policy enforcement.
+- [x] Freeze the canonical `eval://` path hierarchy.
+- [x] Implement a persistent/session-shaped Python REPL.
+- [x] Make eval state addressable rather than hidden bespoke process state.
+- [x] Allow Python eval code to call back into permitted Artist tools.
+- [x] Route tool callbacks through the same permission/profile boundary as ordinary tool calls.
+- [x] Prevent eval from bypassing tool policy merely because it executes locally.
+- [x] Define persistence/reset semantics.
+- [x] Define imports/environment/package behavior.
+- [x] Define cwd/workspace behavior.
+- [x] Return structured/programmatic outputs.
+- [x] Return typed execution errors.
+- [x] Define relation to `run` and `bash://`.
+- [x] Ensure eval-created resources receive normal parent/child relationships.
+- [x] Normalize eval inputs/results/tool callbacks into Muse with exact source/tool context.
+- [x] Add direct contract tests for Python↔Artist-tool callbacks and policy enforcement.
 
 ---
 
@@ -514,25 +514,25 @@ The previous Rust/evcxr direction is superseded. Benchmarks led to the explicit 
 
 DAP is required; do not invent a private debugger multiplexer.
 
-- [ ] Freeze canonical `debug://` session hierarchy.
-- [ ] Implement DAP launch.
-- [ ] Implement DAP attach.
-- [ ] Implement breakpoints.
-- [ ] Implement continue.
-- [ ] Implement pause.
-- [ ] Implement step in.
-- [ ] Implement step over.
-- [ ] Implement step out.
-- [ ] Expose stack frames.
-- [ ] Expose scopes.
-- [ ] Expose variables.
-- [ ] Implement debugger evaluate.
-- [ ] Implement termination/cleanup.
-- [ ] Map debugger source locations to durable Artist anchors.
+- [x] Freeze canonical `debug://` session hierarchy.
+- [x] Implement DAP launch.
+- [x] Implement DAP attach.
+- [x] Implement breakpoints.
+- [x] Implement continue.
+- [x] Implement pause.
+- [x] Implement step in.
+- [x] Implement step over.
+- [x] Implement step out.
+- [x] Expose stack frames.
+- [x] Expose scopes.
+- [x] Expose variables.
+- [x] Implement debugger evaluate.
+- [x] Implement termination/cleanup.
+- [x] Map debugger source locations to durable Artist anchors.
 - [ ] Use universal typed result/error behavior.
-- [ ] Put debug sessions into parent/child/history relationships.
-- [ ] Record debugger/server/capability context when observations enter Muse.
-- [ ] Keep debugger state/projections addressable through the noun space.
+- [x] Put debug sessions into parent/child/history relationships.
+- [x] Record debugger/server/capability context when observations enter Muse.
+- [x] Keep debugger state/projections addressable through the noun space.
 
 ---
 
@@ -540,22 +540,22 @@ DAP is required; do not invent a private debugger multiplexer.
 
 LSP is mandatory production scope.
 
-- [ ] Implement/mature an LSP multiplexer.
-- [ ] Avoid accidental one-agent/one-server silos when shared servers are safe.
-- [ ] Scope diagnostics/requests to the correct agent/worktree/project state.
-- [ ] Attribute diagnostics/changes to responsible agents/worktrees where possible.
-- [ ] Return definition/reference/symbol locations using durable Artist anchors.
-- [ ] Expose symbols.
-- [ ] Expose definitions.
-- [ ] Expose references.
-- [ ] Expose diagnostics.
-- [ ] Expose hover/type information.
-- [ ] Support rename where safe.
-- [ ] Support code actions where safe.
-- [ ] Expose relevant workspace/project state.
-- [ ] Preserve server/version/provenance when results can differ by server build.
-- [ ] Integrate with AST/code intelligence instead of blindly duplicating structural facts.
-- [ ] Keep useful structured LSP results machine-structured.
+- [x] Implement/mature an LSP multiplexer.
+- [x] Avoid accidental one-agent/one-server silos when shared servers are safe.
+- [x] Scope diagnostics/requests to the correct agent/worktree/project state.
+- [x] Attribute diagnostics/changes to responsible agents/worktrees where possible.
+- [x] Return definition/reference/symbol locations using durable Artist anchors.
+- [x] Expose symbols.
+- [x] Expose definitions.
+- [x] Expose references.
+- [x] Expose diagnostics.
+- [x] Expose hover/type information.
+- [x] Support rename where safe.
+- [x] Support code actions where safe.
+- [x] Expose relevant workspace/project state.
+- [x] Preserve server/version/provenance when results can differ by server build.
+- [x] Integrate with AST/code intelligence instead of blindly duplicating structural facts.
+- [x] Keep useful structured LSP results machine-structured.
 
 ---
 
@@ -565,37 +565,37 @@ The existing AST work is a starting point, not the complete requirement.
 
 ## 12.1 Required code graph breadth
 
-- [ ] Expose symbols.
-- [ ] Expose definitions.
-- [ ] Expose references.
-- [ ] Expose callers.
-- [ ] Expose callees.
-- [ ] Expose dependencies.
-- [ ] Expose implementations.
-- [ ] Expose cycles.
-- [ ] Expose traces.
-- [ ] Expose impact.
-- [ ] Expose related structures.
-- [ ] Use accurate durable source anchors for every source-location-bearing result.
-- [ ] Keep graph/relationship results machine-structured.
+- [x] Expose symbols.
+- [x] Expose definitions.
+- [x] Expose references.
+- [x] Expose callers.
+- [x] Expose callees.
+- [x] Expose dependencies.
+- [x] Expose implementations.
+- [x] Expose cycles.
+- [x] Expose traces.
+- [x] Expose impact.
+- [x] Expose related structures.
+- [x] Use accurate durable source anchors for every source-location-bearing result.
+- [x] Keep graph/relationship results machine-structured.
 
 ## 12.2 Structural operations
 
-- [ ] Keep AST/query operations explicit when they cannot truthfully collapse into ordinary path/read semantics.
-- [ ] Define exact structural-query contracts.
-- [ ] Define exact structural-edit preconditions.
-- [ ] Define exact structural-edit postconditions.
-- [ ] Prevent partial tree corruption on failed structural edits.
-- [ ] Attribute LSP/structural findings to responsible agent/change where possible.
+- [x] Keep AST/query operations explicit when they cannot truthfully collapse into ordinary path/read semantics.
+- [x] Define exact structural-query contracts.
+- [x] Define exact structural-edit preconditions.
+- [x] Define exact structural-edit postconditions.
+- [x] Prevent partial tree corruption on failed structural edits.
+- [x] Attribute LSP/structural findings to responsible agent/change where possible.
 
 ## 12.3 First-class batching
 
 - [x] Ordinary text edit already resolves all targets against one pre-edit snapshot and commits atomically.
-- [ ] Add first-class batched reads where they materially reduce repeated/intermediate-state slop.
+- [x] Add first-class batched reads where they materially reduce repeated/intermediate-state slop.
 - [ ] Compose batching with structural/AST operations where safe.
 - [ ] Keep dependent target semantics deterministic.
-- [ ] Return exact per-operation failure when an atomic structural batch cannot commit.
-- [ ] Do not silently partially apply a structural refactor.
+- [x] Return exact per-operation failure when an atomic structural batch cannot commit.
+- [x] Do not silently partially apply a structural refactor.
 
 ---
 
@@ -610,16 +610,16 @@ TTSR is production scope. Existing code is substantial but not final.
 - [x] Retain retroactive scans where designed.
 - [x] Retain WASM programmable rules where designed.
 - [x] Retain hot reload.
-- [ ] Audit all rule terminology/actions against the new path-first lifecycle.
-- [ ] Decide/freeze canonical TTSR/rule path projection.
-- [ ] Reconcile old `abort` semantics with public `stop` and any internal immediate-cancel primitive.
-- [ ] Reconcile rule injection with the standard non-interrupting context-update primitive.
-- [ ] Remove stale assumptions tied to old tool/session names.
-- [ ] Ensure rewind/resume restores the intended rule state.
-- [ ] Preserve exact rule/version provenance in captured events.
-- [ ] Muse must distinguish a rule firing from the underlying fact that made it applicable.
-- [ ] Muse must distinguish rule-injected text from independently observed source truth.
-- [ ] Muse must distinguish retry/cancellation action from the semantic reason/evidence.
+- [x] Audit all rule terminology/actions against the new path-first lifecycle.
+- [x] Decide/freeze canonical TTSR/rule path projection.
+- [x] Reconcile old `abort` semantics with public `stop` and any internal immediate-cancel primitive.
+- [x] Reconcile rule injection with the standard non-interrupting context-update primitive.
+- [x] Remove stale assumptions tied to old tool/session names.
+- [x] Ensure rewind/resume restores the intended rule state.
+- [x] Preserve exact rule/version provenance in captured events.
+- [x] Muse must distinguish a rule firing from the underlying fact that made it applicable.
+- [x] Muse must distinguish rule-injected text from independently observed source truth.
+- [x] Muse must distinguish retry/cancellation action from the semantic reason/evidence.
 - [ ] Finish TTSR cleanup/completion rather than treating the crate's existence as subsystem completion.
 
 ---
@@ -628,22 +628,22 @@ TTSR is production scope. Existing code is substantial but not final.
 
 Provider-specific APIs should be resolver implementation detail rather than model burden.
 
-- [ ] Freeze canonical forge/repository path grammar.
-- [ ] Address repositories.
-- [ ] Address commits.
-- [ ] Address blobs/trees.
-- [ ] Address pull/merge requests.
-- [ ] Address issues.
-- [ ] Address comments/reviews.
-- [ ] Address diffs.
-- [ ] Address checks/statuses where useful and available.
+- [x] Freeze canonical forge/repository path grammar.
+- [x] Address repositories.
+- [x] Address commits.
+- [x] Address blobs/trees.
+- [x] Address pull/merge requests.
+- [x] Address issues.
+- [x] Address comments/reviews.
+- [x] Address diffs.
+- [x] Address checks/statuses where useful and available.
 - [ ] Resolve GitHub/GitLab/other provider mechanics behind the path resolver.
 - [ ] Ensure canonical resource identity survives provider pagination/order.
-- [ ] Define explicit cache freshness/version/ETag semantics.
-- [ ] Allow immutable commits/blobs to be frozen/cache-forever.
-- [ ] Never serve mutable PR/issue stale cache as if it were current.
-- [ ] Distinguish authentication failure from not-found.
-- [ ] Distinguish partial permission from not-found.
+- [x] Define explicit cache freshness/version/ETag semantics.
+- [x] Allow immutable commits/blobs to be frozen/cache-forever.
+- [x] Never serve mutable PR/issue stale cache as if it were current.
+- [x] Distinguish authentication failure from not-found.
+- [x] Distinguish partial permission from not-found.
 - [ ] Integrate remote source locations/diffs with durable Artist anchors where meaningful.
 - [ ] Make write/edit/run support capability-specific; do not pretend every forge resource is mutable.
 
@@ -808,11 +808,11 @@ Do not final-freeze the Artist-specific adapter while its model-visible surface 
 ## 18.1 Adapter boundary/versioning
 
 - [x] Existing bridge rejects unsupported schema versions rather than interpreting them.
-- [ ] Maintain a narrow versioned `Artist event/result IR -> Muse occurrence/tool normalization` boundary.
-- [ ] Do not couple Artist's basic transport types to Muse internal semantic types.
-- [ ] Preserve old transcript interpretation through the adapter/schema that actually produced those sessions.
-- [ ] Never reinterpret old sessions as though they had new paths/tools/codec semantics.
-- [ ] Record adapter/normalization version in training/source corpora.
+- [x] Maintain a narrow versioned `Artist event/result IR -> Muse occurrence/tool normalization` boundary.
+- [x] Do not couple Artist's basic transport types to Muse internal semantic types.
+- [x] Preserve old transcript interpretation through the adapter/schema that actually produced those sessions.
+- [x] Never reinterpret old sessions as though they had new paths/tools/codec semantics.
+- [x] Record adapter/normalization version in training/source corpora.
 
 ## 18.2 Exact model-visible presentation + canonical meaning
 
@@ -825,10 +825,10 @@ Do not final-freeze the Artist-specific adapter while its model-visible surface 
 
 ## 18.3 Ask truth conditions
 
-- [ ] Record model-visible ask answer content.
-- [ ] Record `Human | AutoResolve` provenance.
-- [ ] Record whether a human-decision occurrence actually happened.
-- [ ] Never collapse equivalent presentation into false human provenance.
+- [x] Record model-visible ask answer content.
+- [x] Record `Human | AutoResolve` provenance.
+- [x] Record whether a human-decision occurrence actually happened.
+- [x] Never collapse equivalent presentation into false human provenance.
 
 ## 18.4 Structured yield semantics
 
@@ -838,13 +838,13 @@ Do not final-freeze the Artist-specific adapter while its model-visible surface 
 
 ## 18.5 Dynamic model-visible tool/profile context
 
-- [ ] Record active tool/capability surface version/context for each relevant occurrence.
-- [ ] Record active extension/tool schema state.
-- [ ] Record resolved profile revision/digest.
-- [ ] Record active tool policy.
-- [ ] Record applicable yield schema.
-- [ ] Record injected profile instructions.
-- [ ] Use that historical context when interpreting the model action.
+- [x] Record active tool/capability surface version/context for each relevant occurrence.
+- [x] Record active extension/tool schema state.
+- [x] Record resolved profile revision/digest.
+- [x] Record active tool policy.
+- [x] Record applicable yield schema.
+- [x] Record injected profile instructions.
+- [x] Use that historical context when interpreting the model action.
 
 ## 18.6 `memory://` versus presentation codec
 
@@ -925,7 +925,7 @@ The agent should not interpret this as a strict “finish every line in section 
 - [ ] Finish exact token-budgeted read/poll and continuations.
 - [ ] Finish relationships + choose/implement their backing store.
 - [ ] Finish asks/todo semantics under the path-first surface.
-- [ ] Finish process-resource path identity.
+- [x] Finish process-resource path identity.
 
 ## P2 — complete model-facing context/runtime breadth
 

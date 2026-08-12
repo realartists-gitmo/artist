@@ -31,6 +31,7 @@ pub mod inline_images;
 mod log;
 mod memory;
 mod muse;
+pub mod presentation;
 mod provider_context;
 mod recorder;
 mod replay;
@@ -53,8 +54,8 @@ pub use event::{
     MAIN_LINEAGE, MemoryWritten, ModelTurn, ProviderContext, RuleFired, RuleInjection,
     RuleRetroFindings, RunFinished, RunStarted, RunUsage, SCHEMA_VERSION, SessionCreated,
     SessionEvent, SteeringDelivered, TaskFinished, TaskStarted, TaskUpdated, TodoClosedStatus,
-    TodoItem, TodoOpenStatus, TodoStatus, TodoUpdated, ToolOutcomeRecord, ToolResultEvent,
-    ToolResultImagesEvent, TurnUser,
+    TodoItem, TodoOpenStatus, TodoStatus, TodoUpdated, ToolContext, ToolOutcomeRecord,
+    ToolResultEvent, ToolResultImagesEvent, TurnUser, WorkUnitYield,
 };
 pub use file_handles::HandleLedger;
 pub use history::{HistoryOptions, build as build_history};

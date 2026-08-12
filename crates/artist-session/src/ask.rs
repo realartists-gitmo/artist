@@ -124,8 +124,9 @@ pub struct DurableAskState {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub answers: Vec<DurableAnswer>,
-    /// Precomputed model-facing projection. This deliberately contains no q-/o-
-    /// ids and no Human/AutoResolve source marker.
+    /// Precomputed model-facing projection. It deliberately contains no q-/o-
+    /// ids, but retains Human versus AutoResolve provenance because those are
+    /// semantically distinct for the live model and Muse normalization.
     pub model: serde_json::Value,
 }
 
@@ -148,7 +149,15 @@ impl DurableAskState {
                 self.answers
                     .iter()
                     .find(|answered| answered.answer.question_id == question.id)
-                    .map(|answered| answered.answer.describe_for(question))
+                    .map(|answered| {
+                        serde_json::json!({
+                            "value": answered.answer.describe_for(question),
+                            "source": match answered.source {
+                                AnswerSource::Human => "Human",
+                                AnswerSource::AutoResolve => "AutoResolve",
+                            }
+                        })
+                    })
             })
             .collect::<Vec<_>>();
         self.model = serde_json::json!({
@@ -610,7 +619,52 @@ mod tests {
         assert!(registry.auto_resolve("ask:pick"));
         let record = sessions.get("ask:pick").unwrap().unwrap();
         let state: DurableAskState = serde_json::from_value(record.snapshot).unwrap();
-        assert_eq!(state.model["answers"][0], "chose 2");
+        assert_eq!(state.model["answers"][0]["value"], "chose 2");
+        assert_eq!(state.model["answers"][0]["source"], "AutoResolve");
         assert_eq!(state.answers[0].source, AnswerSource::AutoResolve);
+        assert_eq!(
+            record.lifecycle,
+            SessionLifecycle::Stopped {
+                status: SessionStatus::Completed
+            }
+        );
+    }
+
+    #[test]
+    fn auto_resolve_without_recommendations_settles_as_dismissed() {
+        let root = tempfile::tempdir().unwrap();
+        let sessions = artist_registry::Registry::for_project(root.path()).sessions();
+        let q = Question {
+            id: "q-1".into(),
+            ask_session: "ask:pick".into(),
+            question: "Pick".into(),
+            options: vec![QuestionOption {
+                id: "o-1".into(),
+                label: "One".into(),
+                recommended: false,
+            }],
+        };
+        sessions
+            .create_exact(
+                "ask:pick",
+                "ask",
+                "Goethe",
+                None,
+                serde_json::to_value(DurableAskState::new(vec![q])).unwrap(),
+            )
+            .unwrap();
+        let registry = AskRegistry::for_project(root.path(), None);
+        assert!(registry.auto_resolve("ask:pick"));
+        let record = sessions.get("ask:pick").unwrap().unwrap();
+        let state: DurableAskState = serde_json::from_value(record.snapshot).unwrap();
+        assert!(state.answers[0].answer.selections.is_empty());
+        assert_eq!(state.answers[0].source, AnswerSource::AutoResolve);
+        assert_eq!(state.model["answers"][0]["value"], "(dismissed)");
+        assert_eq!(
+            record.lifecycle,
+            SessionLifecycle::Stopped {
+                status: SessionStatus::Completed
+            }
+        );
     }
 }

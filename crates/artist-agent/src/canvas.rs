@@ -400,7 +400,7 @@ impl CanvasTool {
             .map_err(|error| CanvasError(error.to_string()))?
         {
             Reactivate::AlreadyLive(_) => {
-                return Ok(format!("{id}\nalready live"));
+                return Ok(format!("canvas://{id}\nalready live"));
             }
             Reactivate::Opened(_) => {}
         }
@@ -431,7 +431,7 @@ impl CanvasTool {
                 window_expected: true,
             }),
         );
-        Ok(id)
+        Ok(format!("canvas://{id}"))
     }
 }
 

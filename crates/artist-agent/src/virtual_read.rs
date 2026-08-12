@@ -29,6 +29,7 @@ pub(crate) struct VirtualReadTool {
     extension_manager: Option<Arc<artist_extensions::Manager>>,
     pages: crate::pagination::PageStore,
     dictionary: Option<crate::Dictionary>,
+    relationships: crate::relationships::RelationshipStore,
 }
 
 impl VirtualReadTool {
@@ -40,6 +41,7 @@ impl VirtualReadTool {
         profiles: crate::profiles::Profiles,
         profile: crate::profiles::Profile,
         pages: crate::pagination::PageStore,
+        relationships: crate::relationships::RelationshipStore,
     ) -> Self {
         Self {
             real,
@@ -52,6 +54,7 @@ impl VirtualReadTool {
             extension_manager: None,
             pages,
             dictionary: crate::Dictionary::global().ok(),
+            relationships,
         }
     }
 
@@ -115,7 +118,7 @@ impl PortableTool for VirtualGrepTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Search real text with FFF or canonical snapshots beneath an explicit typed Artist path. Virtual search never reads a host filesystem path.".into()
+        "Search real text with FFF or canonical snapshots beneath an explicit typed Artist path. Virtual search never reads a host filesystem path and never follows relationship pointers; read relation:// or a resource's /parent, /children, /predecessor, or /successor projection explicitly.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -202,11 +205,14 @@ impl VirtualGrepTool {
         // the matching semantics, but grep deliberately leaves matching lines
         // in source order (only file chunks are rankable).
         let mut fuzzy_candidates = Vec::new();
-        for record in records.into_iter().filter(|record| record.kind == kind) {
-            if !segments.is_empty() && record.id != segments[0] {
+        for record in records
+            .into_iter()
+            .filter(|record| record_matches_scheme(record, scheme, kind))
+        {
+            if !segments.is_empty() && resource_segment_for_record(scheme, &record) != segments[0] {
                 continue;
             }
-            let path = format!("{}://{}", scheme, record.id);
+            let path = resource_path_for_record(scheme, &record);
             if glob
                 .as_ref()
                 .is_some_and(|glob| !glob.is_match(Path::new(&path)))
@@ -281,7 +287,7 @@ impl PortableTool for VirtualFindTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Ranked discovery over real files or typed Artist resources. Pass a virtual scheme path to search that canonical runtime namespace.".into()
+        "Ranked discovery over real files or typed Artist resources. Pass a virtual scheme path to search that canonical runtime namespace. Relationship pointers are not followed implicitly; they are explicit one-hop read projections.".into()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -342,10 +348,12 @@ impl VirtualFindTool {
             .list()
             .map_err(|error| ToolError::Message(error.to_string()))?
             .into_iter()
-            .filter(|record| record.kind == kind)
-            .filter(|record| segments.is_empty() || record.id == segments[0])
+            .filter(|record| record_matches_scheme(record, scheme, kind))
+            .filter(|record| {
+                segments.is_empty() || resource_segment_for_record(scheme, record) == segments[0]
+            })
             .map(|record| {
-                let path = format!("{}://{}", scheme, record.id);
+                let path = resource_path_for_record(scheme, &record);
                 let score = virtual_path_match_score(&query, &path);
                 (path, record.last_seen, score)
             })
@@ -388,15 +396,16 @@ fn paged_virtual_text(
     let revision = artist_tools::resource_path::virtual_text_revision(source);
     let offset = args.offset.unwrap_or(1).max(1);
     if offset > 1 {
-        let supplied = args.revision.as_deref().ok_or_else(|| {
-            ToolError::Message(format!(
-                "stale_revision: continuation for {path} requires the revision from its preceding read; start a fresh read(path=\"{path}\")"
-            ))
-        })?;
+        let supplied = args
+            .revision
+            .as_deref()
+            .ok_or_else(|| ToolError::stale_revision(path, None, Some(revision.clone())))?;
         if supplied != revision {
-            return Err(ToolError::Message(format!(
-                "stale_revision: {path} is now revision {revision}, not {supplied}; start a fresh read(path=\"{path}\")"
-            )));
+            return Err(ToolError::stale_revision(
+                path,
+                Some(supplied.to_owned()),
+                Some(revision),
+            ));
         }
     }
     let anchored = artist_tools::resource_path::render_anchored_virtual_text(source);
@@ -497,20 +506,24 @@ impl PortableTool for VirtualReadTool {
         self.real.parameters()
     }
 
+    fn map_error(&self, error: ToolError) -> rig_core::tool::ToolExecutionError {
+        error.into_execution_error()
+    }
+
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         match ResourcePath::parse(&args.path)
             .map_err(|error| ToolError::Message(error.to_string()))?
         {
             ResourcePath::Real(_) => self.real.call(args).await,
             ResourcePath::Virtual { scheme, segments } => {
-                self.read_virtual(scheme, &segments, &args)
+                self.read_virtual(scheme, &segments, &args).await
             }
         }
     }
 }
 
 impl VirtualReadTool {
-    fn read_virtual(
+    async fn read_virtual(
         &self,
         scheme: ResourceScheme,
         segments: &[String],
@@ -533,6 +546,15 @@ impl VirtualReadTool {
         }
         if scheme == ResourceScheme::Dict {
             return self.read_dictionary(segments, args);
+        }
+        if scheme == ResourceScheme::Relation {
+            return self.read_relationship(segments, args);
+        }
+        if scheme == ResourceScheme::Rules {
+            return self.read_rules(segments, args);
+        }
+        if scheme == ResourceScheme::Forge {
+            return self.read_forge(segments, args).await;
         }
         if scheme == ResourceScheme::Computer && segments.first().is_some_and(|part| part == "use")
         {
@@ -559,6 +581,14 @@ impl VirtualReadTool {
         if scheme == ResourceScheme::Agent && segments.len() >= 2 && segments[1] == "yields" {
             return self.read_agent_yields(&segments[0], &segments[2..], kind, args);
         }
+        if segments.len() == 2
+            && matches!(
+                segments[1].as_str(),
+                "parent" | "children" | "predecessor" | "successor"
+            )
+        {
+            return self.read_resource_relationship_projection(scheme, &segments[0], &segments[1]);
+        }
         if segments.len() > 1 {
             return Err(ToolError::Message(format!(
                 "{}://{}/{} is not a readable projection; read {}://{} for its canonical snapshot",
@@ -577,8 +607,8 @@ impl VirtualReadTool {
         if segments.is_empty() {
             let listing = records
                 .into_iter()
-                .filter(|record| record.kind == kind)
-                .map(|record| format!("{}://{}", scheme, record.id))
+                .filter(|record| record_matches_scheme(record, scheme, kind))
+                .map(|record| resource_path_for_record(scheme, &record))
                 .collect::<Vec<_>>();
             return Ok(rig_core::tool::ToolOutput::text(if listing.is_empty() {
                 format!("[{}:// has no immediate children]", scheme)
@@ -587,15 +617,16 @@ impl VirtualReadTool {
             }));
         }
         let id = &segments[0];
+        let registry_id = registry_id_for_resource(scheme, id);
         // An explicit resource open is the only path that updates its durable
         // recency. `find`/`grep` and root listings deliberately use `list`,
         // whose discovery pass never changes this signal.
         let record = self
             .sessions
             .registry()
-            .get(id)
+            .get(&registry_id)
             .map_err(|error| ToolError::Message(error.to_string()))?
-            .filter(|record| record.kind == kind)
+            .filter(|record| record_matches_scheme(record, scheme, kind))
             .ok_or_else(|| {
                 ToolError::Message(format!(
                     "unknown {} resource {}://{}; read {}:// for immediate children",
@@ -612,6 +643,12 @@ impl VirtualReadTool {
             {
                 children.push(format!("agent://{}/yields", record.id));
             }
+            children.extend([
+                format!("agent://{}/parent", record.id),
+                format!("agent://{}/children", record.id),
+                format!("agent://{}/predecessor", record.id),
+                format!("agent://{}/successor", record.id),
+            ]);
             return Ok(rig_core::tool::ToolOutput::text(children.join("\n")));
         }
         if scheme == ResourceScheme::Bash {
@@ -623,7 +660,7 @@ impl VirtualReadTool {
             return paged_virtual_text(transcript, &args.path, args);
         }
         let payload = serde_json::json!({
-            "path": format!("{}://{}", scheme, record.id),
+            "path": resource_path_for_record(scheme, &record),
             "kind": record.kind,
             "lifecycle": record.lifecycle,
             "cancelRequested": record.cancel_requested,
@@ -640,6 +677,166 @@ impl VirtualReadTool {
         Ok(rig_core::tool::ToolOutput::one(ToolResultContent::text(
             format!("[revision: {revision}]\n{rendered}"),
         )))
+    }
+
+    /// Addressable relationship projections keep orientation explicit: an edge
+    /// `source --child--> target` makes `target/parent` and `source/children`
+    /// readable. Successor/predecessor use the same directed convention.
+    fn read_resource_relationship_projection(
+        &self,
+        scheme: ResourceScheme,
+        id: &str,
+        projection: &str,
+    ) -> Result<rig_core::tool::ToolOutput, ToolError> {
+        let kind = session_kind(scheme).ok_or_else(|| {
+            ToolError::Message(format!(
+                "{scheme}://{id} does not support relationship projections"
+            ))
+        })?;
+        let registry_id = registry_id_for_resource(scheme, id);
+        let exists = self
+            .sessions
+            .registry()
+            .get(&registry_id)
+            .map_err(|error| ToolError::Message(error.to_string()))?
+            .is_some_and(|record| record_matches_scheme(&record, scheme, kind));
+        if !exists {
+            return Err(ToolError::Message(format!(
+                "unknown {} resource {}://{}; read {}:// for immediate children",
+                scheme, scheme, id, scheme
+            )));
+        }
+        let path = format!("{scheme}://{id}");
+        let (source, target, edge_kind) = match projection {
+            "parent" => (None, Some(path.as_str()), Some("child")),
+            "children" => (Some(path.as_str()), None, Some("child")),
+            "predecessor" => (None, Some(path.as_str()), Some("successor")),
+            "successor" => (Some(path.as_str()), None, Some("successor")),
+            _ => unreachable!("projection is checked by read_virtual"),
+        };
+        let mut paths = self
+            .relationships
+            .list(source, target, edge_kind)
+            .map_err(|error| ToolError::Message(error.to_string()))?
+            .into_iter()
+            .map(|edge| {
+                if source.is_some() {
+                    edge.target
+                } else {
+                    edge.source
+                }
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        Ok(rig_core::tool::ToolOutput::text(if paths.is_empty() {
+            format!("[{path}/{projection} has no immediate children]")
+        } else {
+            paths.join("\n")
+        }))
+    }
+
+    async fn read_forge(
+        &self,
+        segments: &[String],
+        args: &ReadArgs,
+    ) -> Result<rig_core::tool::ToolOutput, ToolError> {
+        if segments.is_empty() {
+            return Ok(rig_core::tool::ToolOutput::text(
+                "[forge:// has no immediate children; read forge://github/<owner>/<repo>]",
+            ));
+        }
+        let path = format!("forge://{}", segments.join("/"));
+        let rendered = crate::forge_tool::read_path(&path)
+            .await
+            .map_err(|error| ToolError::Message(error.to_string()))?;
+        paged_virtual_text(&rendered, &args.path, args)
+    }
+
+    fn read_rules(
+        &self,
+        segments: &[String],
+        args: &ReadArgs,
+    ) -> Result<rig_core::tool::ToolOutput, ToolError> {
+        let mut diagnostics = Vec::new();
+        let rules = artist_rules::discovery::discover(self.real.0.root(), &mut diagnostics);
+        if segments.is_empty() {
+            let mut paths = rules
+                .iter()
+                .map(|rule| format!("rules://{}", rule.id))
+                .collect::<Vec<_>>();
+            paths.sort();
+            if !diagnostics.is_empty() {
+                paths.push(format!(
+                    "[rule discovery diagnostics: {}]",
+                    diagnostics.join("; ")
+                ));
+            }
+            return Ok(rig_core::tool::ToolOutput::text(if paths.is_empty() {
+                "[rules:// has no immediate children]".into()
+            } else {
+                paths.join("\n")
+            }));
+        }
+        if segments.len() != 1 {
+            return Err(ToolError::Message(
+                "rules are addressed as rules://<rule-id>".into(),
+            ));
+        }
+        let rule = rules
+            .iter()
+            .find(|rule| rule.id.0 == segments[0])
+            .ok_or_else(|| {
+                ToolError::Message(format!(
+                    "unknown rule rules://{}; read rules:// for immediate children",
+                    segments[0]
+                ))
+            })?;
+        let source = rule
+            .source
+            .as_ref()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_else(|| format!("{rule:#?}"));
+        paged_virtual_text(&source, &args.path, args)
+    }
+
+    fn read_relationship(
+        &self,
+        segments: &[String],
+        args: &ReadArgs,
+    ) -> Result<rig_core::tool::ToolOutput, ToolError> {
+        if segments.is_empty() {
+            let listing = self
+                .relationships
+                .list(None, None, None)
+                .map_err(|error| ToolError::Message(error.to_string()))?
+                .into_iter()
+                .map(|edge| format!("relation://{}", edge.id))
+                .collect::<Vec<_>>();
+            return Ok(rig_core::tool::ToolOutput::text(if listing.is_empty() {
+                "[relation:// has no immediate children]".into()
+            } else {
+                listing.join("\n")
+            }));
+        }
+        if segments.len() != 1 {
+            return Err(ToolError::Message(
+                "relationship edges are addressed as relation://<edge-id>".into(),
+            ));
+        }
+        let edge = self
+            .relationships
+            .get(&segments[0])
+            .map_err(|error| ToolError::Message(error.to_string()))?
+            .ok_or_else(|| {
+                ToolError::Message(format!(
+                    "unknown relationship relation://{}; read relation:// for immediate children",
+                    segments[0]
+                ))
+            })?;
+        let rendered = serde_json::to_string_pretty(&edge)
+            .map_err(|error| ToolError::Message(error.to_string()))?;
+        paged_virtual_text(&rendered, &args.path, args)
     }
 
     fn read_agent_todo(
@@ -1093,7 +1290,53 @@ impl VirtualReadTool {
             })?;
         let source = serde_json::to_string_pretty(&artifact)
             .map_err(|error| ToolError::Message(error.to_string()))?;
-        paged_virtual_text(&source, &args.path, args)
+        let metadata = paged_virtual_text(&source, &args.path, args)?;
+        let Some(media_type) = artifact
+            .media_type
+            .as_deref()
+            .and_then(Self::artifact_image_type)
+        else {
+            return Ok(metadata);
+        };
+        let Some(bytes) = self
+            .pages
+            .media_bytes(&artifact.id)
+            .map_err(|error| ToolError::Message(error.to_string()))?
+        else {
+            return Ok(metadata);
+        };
+        use base64::Engine as _;
+        use rig_core::completion::message::{DocumentSourceKind, Image};
+        let mut content = metadata.into_content().into_iter().collect::<Vec<_>>();
+        content.push(ToolResultContent::Image(Image {
+            data: DocumentSourceKind::Base64(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            ),
+            media_type: Some(media_type),
+            detail: None,
+            additional_params: None,
+        }));
+        Ok(rig_core::tool::ToolOutput::content(
+            rig_core::OneOrMany::many(content)
+                .expect("artifact metadata with visual attachment is non-empty"),
+        ))
+    }
+
+    /// Image MIME types whose visual attachment representation is supported by the
+    /// current provider abstraction. Other media remains safely addressable as
+    /// metadata until its attachment type has an explicit model-facing contract.
+    fn artifact_image_type(mime: &str) -> Option<rig_core::completion::message::ImageMediaType> {
+        use rig_core::completion::message::ImageMediaType;
+        match mime {
+            "image/png" => Some(ImageMediaType::PNG),
+            "image/jpeg" | "image/jpg" => Some(ImageMediaType::JPEG),
+            "image/gif" => Some(ImageMediaType::GIF),
+            "image/webp" => Some(ImageMediaType::WEBP),
+            "image/svg+xml" => Some(ImageMediaType::SVG),
+            "image/heic" => Some(ImageMediaType::HEIC),
+            "image/heif" => Some(ImageMediaType::HEIF),
+            _ => None,
+        }
     }
 
     fn read_dictionary(
@@ -1138,12 +1381,91 @@ pub(crate) fn session_kind(scheme: ResourceScheme) -> Option<&'static str> {
         ResourceScheme::Ask => Some("ask"),
         ResourceScheme::Canvas => Some("canvas"),
         ResourceScheme::Computer => Some("computer"),
+        // Native processes use the terminal backend and registry kind, but
+        // their public path is deliberately distinct from `bash://`.
+        ResourceScheme::Process => Some("bash"),
+        ResourceScheme::Eval => Some("eval"),
+        ResourceScheme::Debug => Some("debug"),
         ResourceScheme::Artifact
         | ResourceScheme::Dict
         | ResourceScheme::Memory
         | ResourceScheme::Profile
         | ResourceScheme::Skill
-        | ResourceScheme::Tools => None,
+        | ResourceScheme::Tools
+        | ResourceScheme::Forge
+        | ResourceScheme::Code
+        | ResourceScheme::Relation
+        | ResourceScheme::Rules => None,
+    }
+}
+
+fn record_matches_scheme(
+    record: &artist_registry::SessionRecord,
+    scheme: ResourceScheme,
+    kind: &str,
+) -> bool {
+    match scheme {
+        ResourceScheme::Bash => {
+            record.kind == kind
+                && record
+                    .snapshot
+                    .get("resourceType")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("process")
+        }
+        ResourceScheme::Process => {
+            record.kind == kind
+                && record
+                    .snapshot
+                    .get("resourceType")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("process")
+        }
+        _ => record.kind == kind,
+    }
+}
+
+fn resource_segment_for_record(
+    scheme: ResourceScheme,
+    record: &artist_registry::SessionRecord,
+) -> String {
+    match scheme {
+        ResourceScheme::Process => record
+            .id
+            .strip_prefix("process:")
+            .unwrap_or(&record.id)
+            .to_owned(),
+        ResourceScheme::Eval => record
+            .id
+            .strip_prefix("eval:")
+            .unwrap_or(&record.id)
+            .to_owned(),
+        ResourceScheme::Debug => record
+            .id
+            .strip_prefix("debug:")
+            .unwrap_or(&record.id)
+            .to_owned(),
+        _ => record.id.clone(),
+    }
+}
+
+fn resource_path_for_record(
+    scheme: ResourceScheme,
+    record: &artist_registry::SessionRecord,
+) -> String {
+    format!(
+        "{}://{}",
+        scheme,
+        resource_segment_for_record(scheme, record)
+    )
+}
+
+fn registry_id_for_resource(scheme: ResourceScheme, segment: &str) -> String {
+    match scheme {
+        ResourceScheme::Process if !segment.starts_with("process:") => format!("process:{segment}"),
+        ResourceScheme::Eval if !segment.starts_with("eval:") => format!("eval:{segment}"),
+        ResourceScheme::Debug if !segment.starts_with("debug:") => format!("debug:{segment}"),
+        _ => segment.to_owned(),
     }
 }
 
@@ -1167,6 +1489,7 @@ mod tests {
             profiles,
             profile,
             crate::pagination::PageStore::memory(),
+            crate::relationships::RelationshipStore::for_project(root).unwrap(),
         )
     }
 
@@ -1213,6 +1536,66 @@ mod tests {
         let rendered = snapshot.render();
         assert!(rendered.contains("[revision: "));
         assert!(rendered.contains(": ok"));
+    }
+
+    #[tokio::test]
+    async fn native_processes_have_a_distinct_typed_root_not_a_bash_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let workspace = artist_tools::Workspace::open(root.path(), state.path(), "goethe").unwrap();
+        let hub = SessionHub::standard(root.path(), "goethe", None);
+        hub.registry()
+            .create_exact(
+                "process:worker",
+                "bash",
+                "goethe",
+                None,
+                serde_json::json!({"resourceType":"process", "output":"native"}),
+            )
+            .unwrap();
+        let read = read_tool(
+            workspace,
+            root.path(),
+            hub,
+            crate::todo::TodoStore::default(),
+        );
+        let process_root = read
+            .call(ReadArgs {
+                path: "process://".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert!(process_root.contains("process://worker"), "{process_root}");
+        assert!(!process_root.contains("process:worker"), "{process_root}");
+        let bash_root = read
+            .call(ReadArgs {
+                path: "bash://".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert!(!bash_root.contains("worker"), "{bash_root}");
+        let snapshot = read
+            .call(ReadArgs {
+                path: "process://worker".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert!(
+            snapshot.contains("\"path\": \"process://worker\""),
+            "{snapshot}"
+        );
     }
 
     #[tokio::test]
@@ -1289,6 +1672,13 @@ mod tests {
         );
         for scheme in [
             ResourceScheme::Artifact,
+            ResourceScheme::Process,
+            ResourceScheme::Eval,
+            ResourceScheme::Debug,
+            ResourceScheme::Forge,
+            ResourceScheme::Code,
+            ResourceScheme::Relation,
+            ResourceScheme::Rules,
             ResourceScheme::Dict,
             ResourceScheme::Memory,
             ResourceScheme::Profile,
@@ -1427,6 +1817,66 @@ mod tests {
             .render();
         assert!(output.contains("[revision: "));
         assert!(output.contains("implement the projection"));
+    }
+
+    #[tokio::test]
+    async fn relationship_projections_are_readable_on_canonical_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let workspace = artist_tools::Workspace::open(root.path(), state.path(), "ada").unwrap();
+        let hub = SessionHub::standard(root.path(), "ada", None);
+        for artist in ["ada", "bea", "cy"] {
+            hub.registry()
+                .create_exact(artist, "subagent", "ada", None, serde_json::Value::Null)
+                .unwrap();
+        }
+        let relationships =
+            crate::relationships::RelationshipStore::for_project(root.path()).unwrap();
+        relationships
+            .add("agent://ada", "child", "agent://bea")
+            .unwrap();
+        relationships
+            .add("agent://bea", "successor", "agent://cy")
+            .unwrap();
+        let read = read_tool(
+            workspace,
+            root.path(),
+            hub,
+            crate::todo::TodoStore::default(),
+        );
+        let parent = read
+            .call(ReadArgs {
+                path: "agent://bea/parent".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert_eq!(parent, "agent://ada");
+        let children = read
+            .call(ReadArgs {
+                path: "agent://ada/children".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert_eq!(children, "agent://bea");
+        let predecessor = read
+            .call(ReadArgs {
+                path: "agent://cy/predecessor".into(),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap()
+            .render();
+        assert_eq!(predecessor, "agent://bea");
     }
 
     #[tokio::test]
@@ -1934,6 +2384,40 @@ mod tests {
         assert!(metadata.contains("[revision: "));
         assert!(metadata.contains("\"tool\": \"read\""));
         assert!(!metadata.contains("artifact-private"));
+    }
+
+    #[tokio::test]
+    async fn reading_an_image_artifact_returns_metadata_and_a_visual_attachment() {
+        let root = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let pages = crate::pagination::PageStore::memory();
+        let artifact_id = pages
+            .capture_media("computer:screenshot", "image/png", b"not-a-real-png")
+            .unwrap();
+        let workspace = artist_tools::Workspace::open(root.path(), state.path(), "goethe").unwrap();
+        let read = read_tool(
+            workspace,
+            root.path(),
+            SessionHub::standard(root.path(), "goethe", None),
+            crate::todo::TodoStore::default(),
+        )
+        .with_pages(pages);
+        let result = read
+            .call(ReadArgs {
+                path: format!("artifact://{artifact_id}"),
+                offset: None,
+                limit: None,
+                revision: None,
+            })
+            .await
+            .unwrap();
+        assert!(result.render().contains("computer:screenshot"));
+        assert!(result.into_content().iter().any(|block| matches!(
+            block,
+            ToolResultContent::Image(image)
+                if image.media_type
+                    == Some(rig_core::completion::message::ImageMediaType::PNG)
+        )));
     }
 
     #[tokio::test]

@@ -13,8 +13,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc, time::Instant};
 
 use artist_tool_api::{
-    ArtistDynamicTool, ArtistFailure, ArtistToolOutput, FieldError, NextAction, ResultMeta,
-    ToolCallContext, failure_envelope, set_page, set_result_meta,
+    ArtistDynamicTool, ArtistToolOutput, FieldError, NextAction, ResultMeta, ToolCallContext,
+    failure_envelope, failure_parts, set_page, set_result_meta,
 };
 use rig_core::{
     completion::message::{DocumentSourceKind, MimeType, ToolResultContent},
@@ -690,9 +690,10 @@ fn render_failure(
     meta: ResultMeta,
     field_errors: Vec<FieldError>,
 ) -> CallToolResult {
-    let mut failure = ArtistFailure::from_tool_error(error);
+    let (mut failure, mut authored_actions) = failure_parts(error);
     failure.field_errors = field_errors;
-    let structured = failure_envelope(failure, next_actions, Some(meta));
+    authored_actions.extend(next_actions);
+    let structured = failure_envelope(failure, authored_actions, Some(meta));
     let mut result = CallToolResult::error(vec![ContentBlock::text(
         error
             .model_feedback()

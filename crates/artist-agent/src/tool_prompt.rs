@@ -137,24 +137,32 @@ fn capture_result_images(
         return outcome;
     };
     let mut references = Vec::new();
+    let mut retained = Vec::new();
     let blocks = output.presentation.as_content().clone();
-    for block in blocks.iter() {
-        let rig_core::completion::message::ToolResultContent::Image(image) = block else {
+    for block in blocks.into_iter() {
+        let rig_core::completion::message::ToolResultContent::Image(image) = &block else {
+            retained.push(block);
             continue;
         };
         let DocumentSourceKind::Base64(data) = &image.data else {
+            retained.push(block);
             continue;
         };
         let Some(media_type) = image.media_type.clone() else {
+            retained.push(block);
             continue;
         };
         let bytes = match base64::engine::general_purpose::STANDARD.decode(data) {
             Ok(bytes) => bytes,
-            Err(_) => continue,
+            Err(_) => {
+                retained.push(block);
+                continue;
+            }
         };
         let mime = media_type.to_mime_type().to_owned();
-        if let Ok(id) = pages.capture_media(tool, &mime, &bytes) {
-            references.push(id);
+        match pages.capture_media(tool, &mime, &bytes) {
+            Ok(id) => references.push(id),
+            Err(_) => retained.push(block),
         }
     }
     if references.is_empty() {
@@ -165,12 +173,11 @@ fn capture_result_images(
         .map(|id| format!("[captured image artifact://{id}; metadata via read(artifact://{id})]"))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut blocks = blocks.into_iter().collect::<Vec<_>>();
-    blocks.push(rig_core::completion::message::ToolResultContent::text(
+    retained.push(rig_core::completion::message::ToolResultContent::text(
         format!("\n{note}"),
     ));
     output.presentation = rig_core::tool::ToolOutput::content(
-        rig_core::OneOrMany::many(blocks).expect("captured-image tool result is non-empty"),
+        rig_core::OneOrMany::many(retained).expect("captured-image tool result is non-empty"),
     );
     Ok(output)
 }
@@ -705,6 +712,17 @@ mod tests {
         assert!(
             rendered.contains(&format!("artifact://{}", info.id)),
             "presentation points at the captured artifact: {rendered}"
+        );
+        assert!(
+            !result
+                .presentation
+                .as_content()
+                .iter()
+                .any(|block| matches!(
+                    block,
+                    rig_core::completion::message::ToolResultContent::Image(_)
+                )),
+            "the raw image is replaced by its artifact pointer"
         );
 
         let bytes = pages.media_bytes(&info.id).expect("media bytes");

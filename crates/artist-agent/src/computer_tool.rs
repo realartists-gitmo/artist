@@ -1,6 +1,6 @@
 //! Shallow model-facing computer tool over the durable universal session substrate.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use artist_registry::SessionStatus;
 use futures::future::BoxFuture;
@@ -83,6 +83,7 @@ pub(crate) struct ComputerTool {
     registry: artist_computer::SurfaceRegistry,
     sessions: SessionHub,
     states: artist_registry::ArtistStates,
+    project: PathBuf,
 }
 
 impl ComputerTool {
@@ -103,6 +104,7 @@ impl ComputerTool {
             registry,
             sessions,
             states: artist_registry::Registry::for_project(project).artist_states(),
+            project: project.to_path_buf(),
         }
     }
 
@@ -122,10 +124,11 @@ impl ComputerTool {
     }
 
     fn session_surface(&self, session: &str) -> Result<String, ComputerError> {
+        let session = computer_session_id(session)?;
         let record = self
             .sessions
             .registry()
-            .get(session)
+            .get(&session)
             .map_err(|error| ComputerError::plain(error.to_string()))?
             .ok_or_else(|| ComputerError::plain(format!("unknown session `{session}`")))?;
         if record.kind != "computer" {
@@ -174,7 +177,7 @@ impl ComputerTool {
             "launch" | "attach" => {}
             _ if session.is_none() => {
                 return Err(ComputerError::plain(format!(
-                    "computer action `{action}` requires a live `computer:<slug>` session"
+                    "computer action `{action}` requires a live `computer://<slug>` session"
                 )));
             }
             _ => {}
@@ -247,6 +250,14 @@ impl ComputerTool {
             .create_content("computer", content, self.sessions.artist(), None, snapshot)
             .map_err(|error| ComputerError::plain(error.to_string()))?;
         let session_id = record.id.clone();
+        crate::relationships::RelationshipStore::for_project(&self.project)
+            .map_err(|error| ComputerError::plain(error.to_string()))?
+            .add(
+                &format!("agent://{}", self.sessions.artist()),
+                "child",
+                &format!("computer://{session_id}"),
+            )
+            .map_err(|error| ComputerError::plain(error.to_string()))?;
         self.sessions.own(
             record.id.clone(),
             Arc::new(ComputerSession {
@@ -264,7 +275,7 @@ impl ComputerTool {
             launched
         };
         let output = rewrite_output(output, &surface, &session_id);
-        Ok(prepend_session(output, &session_id))
+        Ok(prepend_session(output, &format!("computer://{session_id}")))
     }
 
     async fn act(
@@ -343,8 +354,9 @@ impl ComputerTool {
         if action == "observe" && args.as_object().is_some_and(Map::is_empty) {
             args = json!({"full":true});
         }
-        self.validate(action, Some(session), &args)?;
-        self.act(action, session, args).await
+        let session = computer_session_id(session)?;
+        self.validate(action, Some(&session), &args)?;
+        self.act(action, &session, args).await
     }
 }
 
@@ -416,7 +428,7 @@ impl PortableTool for ComputerTool {
     type Output = ToolOutput;
 
     fn description(&self) -> String {
-        "Drive one computer session action with `{ action, session?, args? }`. `launch` and `attach` create `computer:<slug>` sessions and must omit `session`; every other action requires a live session. Launch uses `args: { command: string, cwd?: string, gui?: boolean, platform?: \"linux\"|\"android\" }`. Attach uses `args: { endpoint: string }`. Use universal `list` to discover live computer sessions and `abort` to close one. Full advanced action schemas and safety guidance are injected once on this artist's first computer invocation, including an invalid first call.".into()
+        "Drive one computer session action with `{ action, session?, args? }`. `launch` and `attach` create `computer://<slug>` sessions and must omit `session`; every other action requires a live session. Launch uses `args: { command: string, cwd?: string, gui?: boolean, platform?: \"linux\"|\"android\" }`. Attach uses `args: { endpoint: string }`. Read `computer://` to discover live computer sessions and use `stop` to close one. Full advanced action schemas and safety guidance are injected once on this artist's first computer invocation, including an invalid first call.".into()
     }
 
     fn parameters(&self) -> Value {
@@ -427,7 +439,7 @@ impl PortableTool for ComputerTool {
                     "enum": ACTIONS,
                     "description":"launch/attach create sessions; observe/find/extract/zoom/screenshot are read projections; focus/resize/watch are controls; do is atomic composite interaction."
                 },
-                "session":{"type":"string","description":"Required live computer:<slug> for every action except launch and attach."},
+                "session":{"type":"string","description":"Required live computer://<slug> for every action except launch and attach."},
                 "args":{"type":"object","description":"Action-specific arguments. launch requires command and optionally cwd/gui/platform. attach requires endpoint. Full advanced schemas are injected on first invocation."}
             },
             "required":["action"],
@@ -441,6 +453,7 @@ impl PortableTool for ComputerTool {
                 ComputerError::plain(format!("invalid computer input: {error}"))
             })?;
             let (action, session, args) = input.into_action()?;
+            let session = session.as_deref().map(computer_session_id).transpose()?;
             self.validate(&action, session.as_deref(), &args)?;
             let output = match action.as_str() {
                 "launch" | "attach" => self.spawn(&action, args).await?,
@@ -461,6 +474,23 @@ impl PortableTool for ComputerTool {
             Ok(output) => Ok(append_reference(output, reference)),
             Err(error) => Err(error.with_reference(reference)),
         }
+    }
+}
+
+fn computer_session_id(session: &str) -> Result<String, ComputerError> {
+    let parsed = artist_tools::resource_path::ResourcePath::parse(session)
+        .map_err(|error| ComputerError::plain(error.to_string()))?;
+    match parsed {
+        artist_tools::resource_path::ResourcePath::Real(_) => Ok(session.to_owned()),
+        artist_tools::resource_path::ResourcePath::Virtual { scheme, segments }
+            if scheme == artist_tools::resource_path::ResourceScheme::Computer
+                && segments.len() == 1 =>
+        {
+            Ok(segments.into_iter().next().expect("one segment"))
+        }
+        artist_tools::resource_path::ResourcePath::Virtual { .. } => Err(ComputerError::plain(
+            "computer session must be a direct computer://<id> path",
+        )),
     }
 }
 
@@ -547,7 +577,7 @@ fn action_schema(inner: &artist_computer::ComputerTool, action: &str) -> Value {
 
 fn reference(inner: &artist_computer::ComputerTool) -> String {
     let mut out = String::from(
-        "<computer_skill>\nThe `computer` tool uses `{ action, session?, args? }`. `launch` and `attach` omit `session`; every other action carries the returned `computer:<slug>` in `session`, with action-specific fields inside `args`. Universal `list` discovers live computer sessions and `abort` closes them. Generic `poll` reports lifecycle/control only; use the read actions for page/surface content.\n\nNaming and safety rules: use anchors, never coordinates. Any step naming an anchor must also carry its current label when the element has a name. `do` is atomic with guardrails before step 1, stops at the first failed step, and requires `expect`. Arm browser dialogs before triggering them. A stale anchor must be refreshed with observe/find rather than guessed. `screenshot`/`zoom` are for visual information that structured observation cannot answer.\n",
+        "<computer_skill>\nThe `computer` tool uses `{ action, session?, args? }`. `launch` and `attach` omit `session`; every other action carries the returned `computer://<slug>` in `session`, with action-specific fields inside `args`. Read `computer://` to discover live computer sessions and use `stop` to close them. Generic `poll` reports lifecycle/control only; use the read actions for page/surface content.\n\nNaming and safety rules: use anchors, never coordinates. Any step naming an anchor must also carry its current label when the element has a name. `do` is atomic with guardrails before step 1, stops at the first failed step, and requires `expect`. Arm browser dialogs before triggering them. A stale anchor must be refreshed with observe/find rather than guessed. `screenshot`/`zoom` are for visual information that structured observation cannot answer.\n",
     );
     for action in ACTIONS {
         let schema = action_schema(inner, action);
@@ -682,8 +712,17 @@ mod tests {
         let description = tool(root.path()).description();
         assert!(description.contains("command: string"));
         assert!(description.contains("endpoint: string"));
-        assert!(description.contains("universal `list`"));
-        assert!(description.contains("`abort`"));
+        assert!(description.contains("Read `computer://`"));
+        assert!(description.contains("`stop`"));
+    }
+
+    #[test]
+    fn computer_actions_accept_the_canonical_session_path() {
+        assert_eq!(
+            computer_session_id("computer://display-7").unwrap(),
+            "display-7"
+        );
+        assert!(computer_session_id("computer://display-7/use").is_err());
     }
 
     #[tokio::test]
@@ -705,7 +744,7 @@ mod tests {
         let first_tool = tool(root.path());
         let invalid = || json!({"action":"observe","args":{}});
         let first = first_tool.call(invalid()).await.unwrap_err().to_string();
-        assert!(first.contains("requires a live `computer:<slug>` session"));
+        assert!(first.contains("requires a live `computer://<slug>` session"));
         assert!(first.contains("<computer_skill>"));
         assert!(first.contains("### watch"));
         let second = first_tool.call(invalid()).await.unwrap_err().to_string();

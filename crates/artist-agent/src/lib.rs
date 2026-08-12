@@ -8,15 +8,22 @@ pub mod compaction;
 mod computer_tool;
 mod contracts;
 mod conversation;
+mod dap;
+mod debug_tool;
 mod delegate;
 #[cfg(test)]
 mod delegate_tests;
 mod dictionary;
+mod eval_tool;
 mod fallback;
+mod forge_tool;
+mod framed_rpc;
 pub mod gemini_cache;
 pub mod handoff;
 mod identity;
 mod lifecycle;
+mod lsp;
+mod lsp_tool;
 pub mod mcp;
 pub mod memory;
 mod messaging;
@@ -28,6 +35,7 @@ mod profile_hook;
 pub mod profiles;
 mod prompt_config;
 mod provider_retry;
+mod relationships;
 mod resources;
 mod rig_provider;
 mod run_tool;
@@ -64,7 +72,7 @@ use artist_rules::state::RulesHandle;
 use artist_rules::types::Firing;
 use artist_session::{
     ContentBlock, ModelTurn, Recorder, RuleFired, RuleInjection, RunFinished, RunStarted,
-    ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent,
+    ToolContext as SessionToolContext, ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent,
 };
 use artist_tools::ToolBundle;
 use base64::Engine;
@@ -82,6 +90,7 @@ use rig_core::{
     streaming::{StreamedAssistantContent, StreamedUserContent},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
 use capture::{CaptureHook, ToolMeta};
@@ -1099,6 +1108,8 @@ where
                 None,
             ),
             pages: pagination::PageStore::memory(),
+            relationships: relationships::RelationshipStore::for_project(tools.project_root())?,
+            tool_registry: handles.tools.clone(),
             extension_runs: tool_context
                 .extensions
                 .as_ref()
@@ -1119,6 +1130,44 @@ where
             disabled: tool_context.disabled.to_vec(),
         };
         let registered = tool_set::build(profile, &env);
+        // Capture the exact surface before converting dynamic tools into Rig's
+        // provider representation. A later extension/profile change must not
+        // retarget how this model action is interpreted by Muse.
+        let mut model_tool_names = registered
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect::<Vec<_>>();
+        model_tool_names.sort();
+        let tool_definitions = registered
+            .iter()
+            .map(|tool| {
+                let definition = tool.definition();
+                serde_json::json!({
+                    "name": definition.name.as_str(),
+                    "title": definition.title.as_str(),
+                    "description": definition.description.as_str(),
+                    "input_schema": &definition.input_schema,
+                    "output_schema": &definition.output_schema,
+                    "category": definition.category,
+                    "annotations": definition.annotations,
+                })
+            })
+            .collect::<Vec<_>>();
+        let tool_definitions_digest = digest_json(&tool_definitions)?;
+        let yield_schema_digest = profile.yield_schema.as_ref().map(digest_json).transpose()?;
+        let instructions_digest = digest_bytes(profile.instructions.as_bytes());
+        let extensions = tool_context
+            .extensions
+            .as_ref()
+            .map(|extensions| extensions.provenance())
+            .unwrap_or_default();
+        let profile_digest = digest_json(&serde_json::json!({
+            "name": profile.name.as_str(),
+            "description": profile.description.as_str(),
+            "instructions": profile.instructions.as_str(),
+            "yield_schema": &profile.yield_schema,
+            "tool_surface": &model_tool_names,
+        }))?;
         // Publish what the model actually got, so a canvas cannot reach a tool
         // the profile denied nor miss one it allowed.
         handles.tools.publish(registered.clone());
@@ -1175,6 +1224,19 @@ where
             agent: Some(identity.name.clone()),
             actor: Some(identity.actor.clone()),
             profile: Some(profile.name.clone()),
+        });
+        run_recorder.record(SessionToolContext {
+            surface_version: "artist-tool-surface-v2".into(),
+            profile: profile.name.clone(),
+            profile_digest,
+            tools: model_tool_names,
+            tool_definitions_digest,
+            tool_definitions,
+            yield_schema_digest,
+            yield_schema: profile.yield_schema.clone(),
+            instructions_digest,
+            instructions: profile.instructions.clone(),
+            extensions,
         });
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
@@ -1416,15 +1478,37 @@ where
                     let meta = tool_meta.take(&internal_call_id);
                     let (outcome, duration_ms) = meta.unwrap_or((ToolOutcomeRecord::Success, 0));
                     if let Some((name, arguments)) = captured_tool_calls.remove(&internal_call_id) {
-                        let ingest_file_operation =
-                            matches!(name.as_str(), "read" | "edit" | "write");
+                        // Files remain the mandatory baseline, while new
+                        // path-first runtimes also carry model-visible source
+                        // semantics that the Artist→Muse adapter must retain.
+                        // Ingestion is best-effort and cannot alter the tool
+                        // result already delivered to the model.
+                        let ingest_muse_operation = muse_source_tool(&name);
                         let operation = name.clone();
+                        let presentation = artist_session::presentation::ModelPresentation::literal(
+                            content.clone(),
+                        );
+                        let presentation = arguments
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|path| !path.is_empty())
+                            .map(|path| {
+                                presentation.clone().with_source(
+                                    artist_session::presentation::PresentationSource {
+                                        path: path.to_owned(),
+                                        anchors: Vec::new(),
+                                        occurrence: Some(format!("tool:{internal_call_id}")),
+                                    },
+                                )
+                            })
+                            .unwrap_or(presentation);
                         run_recorder.record(ToolResultEvent {
                             internal_call_id: internal_call_id.clone(),
                             tool_call_id: Some(tool_result.id.clone()),
                             name,
                             arguments,
                             result: content.clone(),
+                            presentation: Some(presentation),
                             outcome: outcome.clone(),
                             duration_ms: Some(duration_ms),
                         });
@@ -1440,7 +1524,7 @@ where
                                     .collect(),
                             });
                         }
-                        if ingest_file_operation {
+                        if ingest_muse_operation {
                             ingest_muse_after_file_tool(&handles, tools.project_root(), &operation)
                                 .await;
                         }
@@ -1575,6 +1659,25 @@ where
     }
 }
 
+/// Tool results whose observations may have changed or revealed model-relevant
+/// workspace source. Session events retain every tool result; this narrower
+/// set additionally refreshes Muse's deterministic file-source projection.
+fn muse_source_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read"
+            | "edit"
+            | "write"
+            | "run"
+            | "bash"
+            | "eval"
+            | "debug"
+            | "lsp"
+            | "forge"
+            | "relationship"
+    )
+}
+
 /// Provider parameters shared by every request attempt in a turn.
 pub(crate) fn request_params(
     provider: llm_provider::ProviderKind,
@@ -1632,17 +1735,21 @@ pub(crate) fn request_params(
 /// Log rule bookkeeping; Rig conversation memory persists the reminder prompt
 /// when the retried run succeeds.
 pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firing: &Firing) {
+    let provenance = ttsr.rule_provenance(&firing.rule);
     recorder.record(RuleFired {
         rule: firing.rule.0.clone(),
         target: firing.target.as_str().to_owned(),
         matched: firing.matched.clone(),
         turn: ttsr.turn(),
         per_turn: firing.fire == artist_rules::types::FirePolicy::PerTurn,
+        provenance: provenance.clone(),
+        action: Some("abort_and_retry".into()),
     });
     recorder.record(RuleInjection {
         rule: firing.rule.0.clone(),
         reminder: firing.reminder.clone(),
         session_persistent: firing.persistence == artist_rules::types::Persistence::Session,
+        provenance,
     });
 }
 
@@ -1667,7 +1774,19 @@ pub fn available_skills(project: &std::path::Path) -> Vec<AvailableSkill> {
     resources::Resources::discover(project).available_skills()
 }
 
-/// Best-effort semantic ingestion at the only allowed file-observation points.
+fn digest_json(value: &impl serde::Serialize) -> Result<String> {
+    let bytes = serde_json::to_vec(value).context("serialize model-visible source context")?;
+    Ok(digest_bytes(&bytes))
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Best-effort semantic ingestion after a captured model-visible observation.
 /// The log is flushed first so Muse receives captured original envelopes, never
 /// an editable transcript or a reconstructed display event. Any failure is
 /// retained under `memory://diagnostics` and deliberately cannot turn an
@@ -1729,7 +1848,7 @@ pub async fn stream_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::request_params;
+    use super::{muse_source_tool, request_params};
     use llm_provider::ProviderKind;
 
     /// Anchor state is keyed by actor, so a session reaching a real turn on the
@@ -1862,5 +1981,13 @@ mod tests {
         let subscription =
             request_params(ProviderKind::Chatgpt, None, "cache", None, None, true).unwrap();
         assert_eq!(subscription["service_tier"], "priority");
+    }
+
+    #[test]
+    fn muse_source_refresh_includes_runtime_execution_tools() {
+        for name in ["run", "bash", "eval", "debug", "lsp", "forge"] {
+            assert!(muse_source_tool(name), "{name} must refresh Muse source");
+        }
+        assert!(!muse_source_tool("todo"));
     }
 }

@@ -26,14 +26,21 @@ pub(crate) struct AskTool {
     registry: AskRegistry,
     sessions: SessionHub,
     project: PathBuf,
+    relationships: crate::relationships::RelationshipStore,
 }
 
 impl AskTool {
-    pub fn new(registry: AskRegistry, sessions: SessionHub, project: PathBuf) -> Self {
+    pub fn new(
+        registry: AskRegistry,
+        sessions: SessionHub,
+        project: PathBuf,
+        relationships: crate::relationships::RelationshipStore,
+    ) -> Self {
         Self {
             registry,
             sessions,
             project,
+            relationships,
         }
     }
 }
@@ -135,7 +142,7 @@ impl PortableTool for AskTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Post one or more human questions as a durable ask session and return ask:<slug> immediately. Options are always multi-select; omit options for free response. Every option must include recommended.".into()
+        "Post one or more human questions as a durable ask session and return its canonical ask://<id> path immediately. Options are always multi-select; omit options for free response. Every option must include recommended.".into()
     }
 
     fn parameters(&self) -> Value {
@@ -180,6 +187,13 @@ impl PortableTool for AskTool {
                 id: record.id.clone(),
             }),
         );
+        self.relationships
+            .add(
+                &format!("agent://{}", self.sessions.artist()),
+                "child",
+                &canonical_ask_path(&record.id),
+            )
+            .map_err(|error| AskError(error.to_string()))?;
 
         if let Some(timeout) = auto_resolve_timeout(&self.project) {
             let registry = self.registry.clone();
@@ -189,7 +203,7 @@ impl PortableTool for AskTool {
                 let _ = registry.auto_resolve(&id);
             });
         }
-        Ok(record.id)
+        Ok(canonical_ask_path(&record.id))
     }
 }
 
@@ -236,6 +250,10 @@ fn into_questions(session: &str, args: AskArgs) -> Vec<Question> {
                 .collect(),
         })
         .collect()
+}
+
+fn canonical_ask_path(id: &str) -> String {
+    format!("ask://{id}")
 }
 
 #[derive(Default, Deserialize)]
@@ -286,7 +304,38 @@ mod tests {
     }
 
     #[test]
-    fn model_projection_never_contains_internal_ids_or_source() {
+    fn creation_returns_a_canonical_typed_ask_path() {
+        assert_eq!(canonical_ask_path("ask:pick"), "ask://ask:pick");
+    }
+
+    #[tokio::test]
+    async fn created_ask_is_an_explicit_agent_child_relationship() {
+        let project = tempfile::tempdir().unwrap();
+        let relationships =
+            crate::relationships::RelationshipStore::for_project(project.path()).unwrap();
+        let tool = AskTool::new(
+            AskRegistry::for_project(project.path(), None),
+            SessionHub::standard(project.path(), "ada", None),
+            project.path().to_path_buf(),
+            relationships.clone(),
+        );
+        let path = tool
+            .call(AskArgs {
+                questions: vec![AskQuestion {
+                    question: "Continue?".into(),
+                    options: Vec::new(),
+                }],
+            })
+            .await
+            .unwrap();
+        let edge = relationships
+            .list(Some("agent://ada"), Some(&path), Some("child"))
+            .unwrap();
+        assert_eq!(edge.len(), 1);
+    }
+
+    #[test]
+    fn model_projection_never_contains_internal_ids_but_keeps_answer_provenance() {
         let q = Question {
             id: "q-secret".into(),
             ask_session: "ask:pick".into(),
@@ -312,7 +361,7 @@ mod tests {
         let rendered = model_snapshot(&serde_json::to_value(state).unwrap()).to_string();
         assert!(!rendered.contains("q-secret"));
         assert!(!rendered.contains("o-secret"));
-        assert!(!rendered.contains("Human"));
+        assert!(rendered.contains("Human"));
         assert!(rendered.contains("chose 1"));
     }
 }

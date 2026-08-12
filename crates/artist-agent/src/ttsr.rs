@@ -72,6 +72,11 @@ impl TtsrShared {
         })
     }
 
+    /// Provenance for the immutable rule-set snapshot held by this run.
+    pub fn rule_provenance(&self, rule: &RuleId) -> Option<serde_json::Value> {
+        self.rules.provenance(rule)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, TtsrInner> {
         self.inner
             .lock()
@@ -288,4 +293,20 @@ fn fire_reason(shared: &TtsrShared, firing: Option<Firing>) -> Option<String> {
         let rule = firing.rule.clone();
         shared.fire(firing).then(|| format!("ttsr:{rule}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistent_rules_render_as_the_shared_request_patch_document() {
+        let document = injection_document(&[(
+            RuleId("no-leak".into()),
+            "Do not expose private data.".into(),
+        )]);
+        assert_eq!(document.id, "artist-stream-rules");
+        assert!(document.text.contains("<system-reminder rule=\"no-leak\">"));
+        assert!(document.text.contains("Do not expose private data."));
+    }
 }

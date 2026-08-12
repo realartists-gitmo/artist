@@ -32,6 +32,9 @@ futures = "0.3"
 fs2 = "0.4"
 fff-search = "0.10.1"
 neo_frizbee = "0.11.0"
+# The relationship graph is deliberately a separate Mnestic database from
+# Artist memory/Muse.  The package exports the historical `cozo` crate name.
+mnestic = { path = "../../../../mnestic-src/cozo-core", default-features = false, features = ["storage-rocksdb"] }
 globset = "0.4"
 ignore = "0.4"
 regex = "1"
@@ -63,7 +66,7 @@ sha2 = "0.11"
 teca = "0.1.0"
 toml = "1.1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "time", "process", "io-util"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 rig-agent = "0.41.0"

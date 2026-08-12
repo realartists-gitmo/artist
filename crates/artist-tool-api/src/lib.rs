@@ -125,10 +125,19 @@ pub struct ArtistFailure {
     pub field_errors: Vec<FieldError>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub partial_data: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<String>,
 }
 
 impl ArtistFailure {
     pub fn from_tool_error(error: &ToolExecutionError) -> Self {
+        if let Some(structured) = error.downcast_ref::<StructuredFailure>() {
+            return structured.failure.clone();
+        }
         Self {
             code: error
                 .code()
@@ -145,8 +154,20 @@ impl ArtistFailure {
             retry_after_ms: None,
             field_errors: Vec::new(),
             partial_data: None,
+            path: None,
+            expected_revision: None,
+            actual_revision: None,
         }
     }
+}
+
+/// Artist-owned typed facts attached to a framework execution error.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct StructuredFailure {
+    message: String,
+    failure: ArtistFailure,
+    next_actions: Vec<NextAction>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -407,9 +428,17 @@ impl ArtistDynamicTool {
             move |arguments| {
                 let tool = tool.clone();
                 Box::pin(async move {
-                    tool.execute(arguments)
-                        .await
-                        .map(|output| output.presentation)
+                    match tool.execute(arguments).await {
+                        Ok(output) => Ok(output.presentation),
+                        // Provider-native tool APIs have no reliable, shared error
+                        // payload.  Returning a framework error here used to make
+                        // this surface the one exception to Artist's result ABI:
+                        // MCP callers received `{ok:false,...}`, while an agent
+                        // received provider-specific prose.  Preserve the failure
+                        // as a normal tool result so every model-facing execution
+                        // path carries the same typed envelope.
+                        Err(error) => Ok(failure_tool_output(&error).presentation),
+                    }
                 })
             },
         )
@@ -567,6 +596,55 @@ pub fn failure_envelope(
     value
 }
 
+/// Create an execution error that retains Artist's typed failure facts across
+/// both MCP and provider-native tool transports.
+pub fn structured_failure_error(
+    failure: ArtistFailure,
+    next_actions: Vec<NextAction>,
+) -> ToolExecutionError {
+    ToolExecutionError::other(failure.message.clone())
+        .with_code(failure.code.clone())
+        .with_retryable(failure.retryable)
+        .with_model_feedback(failure.message.clone())
+        .with_source(StructuredFailure {
+            message: failure.message.clone(),
+            failure,
+            next_actions,
+        })
+}
+
+/// Return Artist-specific failure facts and authored recovery actions when an
+/// error carries them, otherwise derive the standard common failure object.
+pub fn failure_parts(error: &ToolExecutionError) -> (ArtistFailure, Vec<NextAction>) {
+    if let Some(structured) = error.downcast_ref::<StructuredFailure>() {
+        return (structured.failure.clone(), structured.next_actions.clone());
+    }
+    (ArtistFailure::from_tool_error(error), Vec::new())
+}
+
+/// Render a failed tool invocation for transports which only accept a normal
+/// tool-result payload (for example, provider-native function calling).
+///
+/// MCP can additionally set `isError`; its structured content is built from
+/// [`failure_envelope`] by the MCP server.  The portable path cannot rely on
+/// that flag, so its JSON presentation is deliberately the exact same object.
+pub fn failure_tool_output(error: &ToolExecutionError) -> ArtistToolOutput {
+    let (failure, mut next_actions) = failure_parts(error);
+    if next_actions.is_empty()
+        && error.retryable().unwrap_or(matches!(
+            error.kind(),
+            ToolErrorKind::Timeout | ToolErrorKind::RateLimited | ToolErrorKind::Network
+        ))
+    {
+        next_actions.push(NextAction::Retry { after_ms: None });
+    }
+    let structured = failure_envelope(failure, next_actions, None);
+    ArtistToolOutput {
+        presentation: ToolOutput::json(structured.clone()),
+        structured,
+    }
+}
+
 pub fn set_result_meta(value: &mut Value, meta: ResultMeta) {
     if let Some(object) = value.as_object_mut() {
         object.insert(
@@ -655,7 +733,10 @@ pub fn result_output_schema(mut data_schema: Value) -> Value {
             "retryable": {"type": "boolean"},
             "retryAfterMs": {"type": "integer", "minimum": 0},
             "fieldErrors": {"type": "array", "items": field_error_schema},
-            "partialData": {}
+            "partialData": {},
+            "path": {"type": "string"},
+            "expectedRevision": {"type": "string"},
+            "actualRevision": {"type": "string"}
         },
         "required": ["code", "message", "retryable"],
         "additionalProperties": false
@@ -839,5 +920,52 @@ mod tests {
             .unwrap()
             .structured;
         assert_eq!(structured, json!({"delivered": 2}));
+    }
+
+    #[test]
+    fn portable_failures_use_the_shared_typed_envelope() {
+        let error =
+            ToolExecutionError::timeout("backend did not respond").with_code("backend_timeout");
+        let output = failure_tool_output(&error);
+        assert_eq!(
+            output.structured,
+            json!({
+                "ok": false,
+                "error": {
+                    "code": "backend_timeout",
+                    "message": "backend did not respond",
+                    "retryable": true,
+                },
+                "nextActions": [{"kind": "retry"}],
+            })
+        );
+        assert_eq!(output.presentation.as_json(), Some(&output.structured));
+    }
+
+    #[test]
+    fn structured_failures_retain_path_revision_and_recovery() {
+        let error = structured_failure_error(
+            ArtistFailure {
+                code: "stale_revision".into(),
+                message: "src/lib.rs changed; refresh it.".into(),
+                retryable: false,
+                retry_after_ms: None,
+                field_errors: Vec::new(),
+                partial_data: None,
+                path: Some("src/lib.rs".into()),
+                expected_revision: Some("old".into()),
+                actual_revision: Some("new".into()),
+            },
+            vec![NextAction::RetryWith {
+                tool: "read".into(),
+                arguments: json!({"path":"src/lib.rs"}),
+                reason: "Refresh the resource.".into(),
+            }],
+        );
+        let output = failure_tool_output(&error);
+        assert_eq!(output.structured["error"]["path"], "src/lib.rs");
+        assert_eq!(output.structured["error"]["expectedRevision"], "old");
+        assert_eq!(output.structured["error"]["actualRevision"], "new");
+        assert_eq!(output.structured["nextActions"][0]["tool"], "read");
     }
 }

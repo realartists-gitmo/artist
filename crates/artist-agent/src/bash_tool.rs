@@ -31,6 +31,7 @@ impl BashTool {
     ) -> Result<String, BashError> {
         self.start_session_as("bash", "bash", command, cwd, env, interactive)
             .await
+            .map(|id| format!("bash://{id}"))
     }
 
     /// Spawn a native executable as a one-shot process resource. It shares the
@@ -66,6 +67,10 @@ impl BashTool {
                 json!({
                     "resourceType": resource_type,
                     "interactive": interactive,
+                    "terminalEmulator": {
+                        "name": "wezterm-term",
+                        "revision": artist_tools::WEZTERM_TERM_REVISION,
+                    },
                     "readiness": if interactive { Value::String("running".into()) } else { Value::Null },
                     "output": ""
                 }),
@@ -147,6 +152,10 @@ impl BashSession {
             };
         let snapshot = json!({
             "resourceType": self.resource_type,
+            "terminalEmulator": {
+                "name": "wezterm-term",
+                "revision": artist_tools::WEZTERM_TERM_REVISION,
+            },
             "interactive": self.interactive,
             "readiness": readiness,
             "exitCode": result.exit_code,
@@ -209,7 +218,7 @@ impl PortableTool for BashTool {
     type Output = String;
 
     fn description(&self) -> String {
-        "Spawn a shell/process session and return bash:<slug> immediately. interactive defaults to false; use universal poll/abort/send/list for lifecycle and input.".into()
+        "Spawn a shell/process session and return its canonical bash://<id> path immediately. interactive defaults to false; use universal poll/stop/send/read for lifecycle and input.".into()
     }
 
     fn parameters(&self) -> Value {

@@ -15,11 +15,11 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::calls::cli::collect_type_callers;
-use crate::calls::cli_helpers::{resolve_target_full, ResolvedTarget, SymbolKind};
+use crate::calls::cli_helpers::{ResolvedTarget, SymbolKind, resolve_target_full};
 use crate::calls::graph::{CallEdge, CallGraph, CallTarget, Confidence, Qn};
 use crate::calls::traverse::{self, CallHit};
-use crate::deps::traverse as dep_traverse;
 use crate::deps::DepGraph;
+use crate::deps::traverse as dep_traverse;
 use crate::file_filter::is_test_file;
 use crate::graph_cache;
 
@@ -919,11 +919,7 @@ fn colorize_confidence(c: &str) -> String {
 fn colorize_file_path(qn: &str, file: &str, line: u32) -> String {
     let display = if qn.contains("::") {
         let parts: Vec<&str> = qn.splitn(2, "::").collect();
-        if parts.len() == 2 {
-            parts[0]
-        } else {
-            file
-        }
+        if parts.len() == 2 { parts[0] } else { file }
     } else {
         file
     };

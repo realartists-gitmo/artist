@@ -15,7 +15,7 @@
 //!   written, so no handle exists for them.
 
 use crate::{ToolError, Workspace, outline, output};
-use hashline_tools::ReadFileRequest;
+use hashline_tools::{BatchWrite, ReadFileRequest, WriteCondition};
 use rig_core::tool::PortableTool;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -444,7 +444,8 @@ impl PortableTool for CodeDepsTool {
         };
         let depth = args.depth.unwrap_or(3).min(10);
 
-        let body = if args.direction.as_deref() == Some("reverse") {
+        let reverse = args.direction.as_deref() == Some("reverse");
+        let hits = if reverse {
             // In the reverse walk each edge's `target` is the *importer*, so
             // that is what the test-path filter applies to.
             let exclude_tests = args.exclude_tests.unwrap_or(false);
@@ -457,16 +458,53 @@ impl PortableTool for CodeDepsTool {
                     !exclude_tests || !artist_ast::file_filter::is_test_file(&edge.target, &root)
                 },
             );
-            artist_ast::deps::render::render_reverse_deps_text(deps, &file, &hits)
+            hits
         } else {
-            let hits = artist_ast::deps::traverse::forward_limited(
+            artist_ast::deps::traverse::forward_limited(
                 deps,
                 &file,
                 depth,
                 args.limit.unwrap_or(200),
-            );
-            artist_ast::deps::render::render_deps_text(deps, &file, &hits, true)
+            )
         };
+        // The vendored dependency renderers report a bare file plus a line
+        // number that belongs to the *importing* file. Render at this boundary
+        // instead, so every actual edge location is an Artist anchor on its
+        // true source file, never a misleading target-file line.
+        let mut locator = crate::locate::Locator::new(&self.0);
+        let mut body = if reverse {
+            format!("{} ← imported by:\n", self.0.display(&file))
+        } else {
+            format!("{} imports:\n", self.0.display(&file))
+        };
+        if hits.is_empty() {
+            body.push_str(if reverse {
+                "  (no importers)\n"
+            } else {
+                "  (no imports)\n"
+            });
+        }
+        for hit in &hits {
+            let indent = "  ".repeat(hit.depth);
+            let location = if hit.line == 0 {
+                String::new()
+            } else {
+                format!(
+                    " via {}",
+                    locator.locate(&hit.origin, hit.line).await.render()
+                )
+            };
+            let alias = hit
+                .local_name
+                .as_deref()
+                .map(|alias| format!(" [as {alias}]"))
+                .unwrap_or_default();
+            body.push_str(&format!(
+                "{indent}{} ({}){alias}{location}\n",
+                self.0.display(&hit.file),
+                hit.kind.label(),
+            ));
+        }
         Ok(output::head(body, output::OUTPUT_CAP))
     }
 }
@@ -1229,32 +1267,28 @@ impl AstRewriteTool {
             }
         }
 
-        // Write through the coordinator so the anchor ledger is updated with the
-        // new content. Writing the file directly would leave every anchor issued
-        // for it pointing at text that no longer exists, with nothing to tell the
-        // model its handles went stale.
-        //
-        // `ContentHash` makes each write a compare-and-swap against the exact
-        // bytes the preview was computed from, so a file that moved between the
-        // re-plan above and this loop fails at the coordinator rather than being
-        // silently overwritten.
-        let mut written = Vec::new();
-        for change in &fresh {
-            let display = self.0.display(&change.path);
-            self.0
-                .files
-                .write_file(
-                    &self.0.actor,
-                    display.clone(),
-                    change.after.clone(),
-                    hashline_tools::WriteCondition::ContentHash {
-                        hash: hashline_tools::content_hash(change.before.as_bytes()),
-                    },
-                )
-                .await?;
-            self.0.refresh_index(&change.path);
-            written.push(display);
-        }
+        // Commit through the coordinator's multi-file transaction. Every
+        // content-hash predicate is validated while all affected path locks
+        // are held before the first replacement, so a stale member rejects the
+        // whole codemod rather than committing an arbitrary prefix of it.
+        let writes = fresh
+            .iter()
+            .map(|change| BatchWrite {
+                path: self.0.display(&change.path),
+                content: change.after.clone(),
+                condition: WriteCondition::ContentHash {
+                    hash: hashline_tools::content_hash(change.before.as_bytes()),
+                },
+            })
+            .collect();
+        self.0.write_files_atomic(writes).await?;
+        let written = fresh
+            .iter()
+            .map(|change| {
+                self.0.refresh_index(&change.path);
+                self.0.display(&change.path)
+            })
+            .collect::<Vec<_>>();
 
         // A codemod is the operation most likely to move the architecture —
         // it is the only one that edits many files at once — and it was the

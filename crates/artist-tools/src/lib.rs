@@ -19,7 +19,7 @@ pub mod skeleton;
 mod workspace;
 mod write;
 
-pub use bash::{BashResult, BashStatus, BashTool};
+pub use bash::{BashResult, BashStatus, BashTool, WEZTERM_TERM_REVISION};
 pub use code::{
     AstQueryTool, AstRewriteTool, CodeCallsTool, CodeCyclesTool, CodeDepsTool, CodeImpactTool,
     CodeImplementsTool, CodeMapTool, CodeShowTool, CodeSurfaceTool, CodeTraceTool,
@@ -29,7 +29,7 @@ pub use edit::EditTool;
 pub use find::{FindArgs, FindTool};
 pub use grep::{GrepArgs, GrepTool};
 pub use locate::{Located, Locator};
-pub use read::{ReadArgs, ReadTool};
+pub use read::{ReadArgs, ReadManyTool, ReadTool};
 pub use short_id::short_id;
 pub use workspace::{Workspace, forget_conversation};
 pub use write::WriteTool;
@@ -46,6 +46,12 @@ pub enum ToolError {
     Hashline(#[from] hashline_tools::HashlineError),
     #[error("PTY error: {0}")]
     Pty(String),
+    #[error("stale_revision: {path}; refresh it with read(path=\"{path}\")")]
+    StaleRevision {
+        path: String,
+        expected_revision: Option<String>,
+        actual_revision: Option<String>,
+    },
 }
 impl From<Box<dyn std::error::Error + Send + Sync>> for ToolError {
     fn from(value: Box<dyn std::error::Error + Send + Sync>) -> Self {
@@ -53,10 +59,60 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for ToolError {
     }
 }
 
+impl ToolError {
+    pub fn stale_revision(
+        path: impl Into<String>,
+        expected_revision: Option<String>,
+        actual_revision: Option<String>,
+    ) -> Self {
+        Self::StaleRevision {
+            path: path.into(),
+            expected_revision,
+            actual_revision,
+        }
+    }
+
+    /// Preserve path/revision facts across the portable tool boundary instead
+    /// of asking each transport to parse an explanatory string.
+    pub fn into_execution_error(self) -> rig_core::tool::ToolExecutionError {
+        match self {
+            Self::StaleRevision {
+                path,
+                expected_revision,
+                actual_revision,
+            } => {
+                let message = format!(
+                    "{path} changed or its continuation revision is unavailable; refresh it with read(path=\"{path}\")"
+                );
+                artist_tool_api::structured_failure_error(
+                    artist_tool_api::ArtistFailure {
+                        code: "stale_revision".into(),
+                        message,
+                        retryable: false,
+                        retry_after_ms: None,
+                        field_errors: Vec::new(),
+                        partial_data: None,
+                        path: Some(path.clone()),
+                        expected_revision,
+                        actual_revision,
+                    },
+                    vec![artist_tool_api::NextAction::RetryWith {
+                        tool: "read".into(),
+                        arguments: serde_json::json!({"path": path}),
+                        reason: "Refresh the resource and use its returned revision.".into(),
+                    }],
+                )
+            }
+            error => rig_core::tool::ToolExecutionError::from_error(error),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolBundle {
     pub bash: BashTool,
     pub read: ReadTool,
+    pub read_many: ReadManyTool,
     pub find: FindTool,
     pub grep: GrepTool,
     pub edit: EditTool,
@@ -79,6 +135,7 @@ impl ToolBundle {
         Self {
             bash: BashTool::new(workspace.clone()),
             read: ReadTool(workspace.clone()),
+            read_many: ReadManyTool(workspace.clone()),
             find: FindTool(workspace.clone()),
             grep: GrepTool(workspace.clone()),
             edit: EditTool(workspace.clone()),

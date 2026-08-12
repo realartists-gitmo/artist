@@ -559,17 +559,21 @@ mod tests {
     #[test]
     fn markdown_uses_the_shared_tree_structural_path() {
         let values = ids("README.md", "# Title\n\ntext\n");
-        assert!(values[0]
-            .windows(MODE_STRUCTURED.len())
-            .any(|w| w == MODE_STRUCTURED));
+        assert!(
+            values[0]
+                .windows(MODE_STRUCTURED.len())
+                .any(|w| w == MODE_STRUCTURED)
+        );
     }
 
     #[test]
     fn sql_uses_artist_structural_declarations() {
         let values = ids("schema.sql", "CREATE TABLE users (\n  id INT\n);\n");
-        assert!(values[0]
-            .windows(MODE_STRUCTURED.len())
-            .any(|w| w == MODE_STRUCTURED));
+        assert!(
+            values[0]
+                .windows(MODE_STRUCTURED.len())
+                .any(|w| w == MODE_STRUCTURED)
+        );
     }
 
     #[test]

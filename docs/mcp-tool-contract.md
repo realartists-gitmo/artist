@@ -1,6 +1,6 @@
 # MCP tool execution contract
 
-Artist publishes one common result envelope for every MCP tool while retaining each tool's specific `data` schema.
+Artist publishes one common result envelope for every tool surface while retaining each tool's specific `data` schema. MCP failures additionally set `isError=true`; provider-native tool calling carries the same failure object as its normal JSON tool result.
 
 Successful calls return:
 
@@ -26,7 +26,10 @@ Empty optional arrays are omitted. Failed calls set MCP `isError=true` and retur
     "code": "input_validation_failed",
     "message": "...",
     "retryable": false,
-    "fieldErrors": []
+    "fieldErrors": [],
+    "path": "src/lib.rs",
+    "expectedRevision": "...",
+    "actualRevision": "..."
   },
   "nextActions": [],
   "meta": {
@@ -36,7 +39,12 @@ Empty optional arrays are omitted. Failed calls set MCP `isError=true` and retur
 }
 ```
 
-Known recovery actions are typed. Examples include retrying, starting a timed-out shell command in the background, recovering an idempotent operation, selecting a workspace, and reading the next page of a bounded result. Tool and transport output cannot inject these actions; the Artist server creates them.
+Known recovery actions are typed. Examples include retrying, starting a timed-out shell command in the background, recovering an idempotent operation, selecting a workspace, and reading the next page of a bounded result. Artist's common tool implementation and server create these actions; untrusted tool presentation cannot inject them.
+
+Path-sensitive failures additionally carry the canonical `path` and, when the
+operation observed them, `expectedRevision` and `actualRevision`. A stale
+revision supplies a typed `retry_with` action for `read({path})`; consumers must
+use the returned revision rather than replaying the stale mutation.
 
 ## Annotations
 

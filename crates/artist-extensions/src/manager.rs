@@ -5,6 +5,7 @@ use artist_tool_api::{
     text_output_schema,
 };
 use rig_core::tool::ToolExecutionError;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -247,6 +248,30 @@ impl Manager {
         ids
     }
 
+    /// Exact active extension material at one tool-surface boundary. The
+    /// manifest is retained verbatim and the component digest distinguishes a
+    /// hot-reloaded implementation from an identically named extension.
+    pub fn provenance(&self) -> Vec<serde_json::Value> {
+        let live = self.live.read().expect("extension state poisoned");
+        let mut entries = live
+            .registry
+            .extensions
+            .iter()
+            .filter(|extension| live.instances.contains_key(&extension.manifest.id))
+            .map(|extension| {
+                let wasm = std::fs::read(&extension.wasm).ok();
+                serde_json::json!({
+                    "id": extension.manifest.id,
+                    "manifest": extension.manifest,
+                    "wasmSha256": wasm.as_ref().map(|bytes| hex_digest(bytes)),
+                    "wasmPath": extension.wasm.file_name().and_then(|name| name.to_str()),
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+        entries
+    }
+
     pub fn tools(&self) -> Vec<ArtistDynamicTool> {
         let live = self.live.read().expect("extension state poisoned");
         live.registry
@@ -472,6 +497,13 @@ impl Manager {
         tasks.status = self.start_status_refresh();
         tasks.event = self.start_event_forwarding();
     }
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Keep the old declaration/module pairing visible when the new pairing did

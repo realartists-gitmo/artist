@@ -11,6 +11,10 @@ use crate::deps::graph::{DepEdge, DepGraph, ImportKind};
 #[derive(Debug, Clone)]
 pub struct DepHit {
     pub depth: usize,
+    /// File containing the import edge. `line` is meaningful only inside this
+    /// source file; keeping it separate from `file` prevents renderers from
+    /// attaching an import location to its target by mistake.
+    pub origin: PathBuf,
     pub file: PathBuf,
     pub kind: ImportKind,
     pub line: u32,
@@ -96,6 +100,7 @@ where
                 reported.insert(e.target.clone());
                 out.push(DepHit {
                     depth: depth + 1,
+                    origin: cur.clone(),
                     file: e.target.clone(),
                     kind: e.kind,
                     line: e.line,
@@ -148,4 +153,32 @@ pub fn neighbourhood_depths(
         }
     }
     depths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deps::graph::{DepEdge, DepGraph, ImportKind};
+
+    #[test]
+    fn dependency_hit_keeps_the_importer_that_owns_its_line() {
+        let root = PathBuf::from("/project");
+        let source = root.join("src/lib.rs");
+        let target = root.join("src/dep.rs");
+        let mut graph = DepGraph::empty(root);
+        graph.forward.insert(
+            source.clone(),
+            vec![DepEdge {
+                target: target.clone(),
+                kind: ImportKind::Use,
+                line: 7,
+                local_name: None,
+                raw_path: None,
+            }],
+        );
+        let hit = forward(&graph, &source, 1).pop().unwrap();
+        assert_eq!(hit.origin, source);
+        assert_eq!(hit.file, target);
+        assert_eq!(hit.line, 7);
+    }
 }

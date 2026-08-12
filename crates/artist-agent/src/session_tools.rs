@@ -1,10 +1,11 @@
 //! Universal model-facing lifecycle operations for durable Artist sessions.
 //!
 //! The universal tools know nothing about concrete session kinds. Kinds register
-//! their poll boundary, active-observation behaviour, send validation, and list
-//! projection in [`SessionHub`]. Local execution handles are similarly erased
+//! their poll boundary, active-observation behaviour, and send validation in
+//! [`SessionHub`]. Local execution handles are similarly erased
 //! behind [`OwnedSession`]. This is what permits a future `debug:<slug>` kind to
-//! join the surface without modifying `poll`, `abort`, `send`, or `list`.
+//! join the surface without modifying `poll`, `stop`, or `send`. Typed roots
+//! are enumerated through `read`, not a separate session-list API.
 
 use std::{
     collections::BTreeMap,
@@ -518,58 +519,6 @@ impl SessionHub {
         serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
-    async fn abort(&self, args: AbortArgs) -> Result<String, SessionError> {
-        let ids = Self::target_ids(args.session, args.sessions)?;
-        let mut results = Vec::with_capacity(ids.len());
-        for id in ids {
-            let result = match self.sessions.request_cancel(&id) {
-                Ok((CancelDisposition::LocalOwner, record)) => {
-                    if let Some(local) = self.local.get(&id).map(|entry| Arc::clone(entry.value()))
-                    {
-                        match local.abort().await {
-                            Ok(()) => {
-                                match self.sessions.finish(&id, SessionStatus::Cancelled, None) {
-                                    Ok(record) => json!({"session":id,"state":record.lifecycle}),
-                                    Err(error) => json!({"session":id,"error":error.to_string()}),
-                                }
-                            }
-                            Err(error) => {
-                                json!({"session":id,"cancelRequested":true,"error":error})
-                            }
-                        }
-                    } else {
-                        json!({"session":id,"cancelRequested":true,"state":record.lifecycle})
-                    }
-                }
-                Ok((CancelDisposition::ForeignOwner(owner), record)) => match owner.wake() {
-                    Ok(()) => json!({"session":id,"cancelRequested":true,"state":record.lifecycle}),
-                    Err(_) => match self.sessions.get(&id) {
-                        Ok(Some(record)) => {
-                            json!({"session":id,"cancelRequested":record.cancel_requested,"state":record.lifecycle})
-                        }
-                        _ => {
-                            json!({"session":id,"error":"owner disappeared while cancellation was requested"})
-                        }
-                    },
-                },
-                Ok((CancelDisposition::AlreadyStopped, record)) => {
-                    json!({"session":id,"state":record.lifecycle})
-                }
-                Ok((CancelDisposition::Abandoned, record)) => {
-                    json!({"session":id,"state":record.lifecycle})
-                }
-                Err(error) => json!({"session":id,"error":error.to_string()}),
-            };
-            results.push(result);
-        }
-        let rendered = if results.len() == 1 {
-            results.into_iter().next().unwrap_or(Value::Null)
-        } else {
-            Value::Array(results)
-        };
-        serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
-    }
-
     async fn stop(&self, args: AbortArgs) -> Result<String, SessionError> {
         let ids = Self::target_ids(args.session, args.sessions)?;
         let mut results = Vec::with_capacity(ids.len());
@@ -605,14 +554,39 @@ impl SessionHub {
         serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
+    fn delete_with_relationships(
+        &self,
+        args: DeleteArgs,
+        relationships: &crate::relationships::RelationshipStore,
+    ) -> Result<String, SessionError> {
+        self.delete_inner(args, Some(relationships))
+    }
+
+    /// Test and compatibility entrypoint for callers that predate typed
+    /// relationships. Runtime deletion always uses `delete_with_relationships`.
+    #[cfg(test)]
     fn delete(&self, args: DeleteArgs) -> Result<String, SessionError> {
+        self.delete_inner(args, None)
+    }
+
+    fn delete_inner(
+        &self,
+        args: DeleteArgs,
+        relationships: Option<&crate::relationships::RelationshipStore>,
+    ) -> Result<String, SessionError> {
         let ids = Self::target_ids(args.session, args.sessions)?;
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
             match self.sessions.delete_stopped(&id) {
                 Ok(record) => {
                     self.local.remove(&id);
-                    results.push(json!({"session": id, "deleted": true, "kind": record.kind}));
+                    let path = deleted_resource_path(&record);
+                    let removed_relationships = relationships
+                        .map(|store| store.remove_for_resource(&path))
+                        .transpose()
+                        .map_err(|error| SessionError(error.to_string()))?
+                        .unwrap_or(0);
+                    results.push(json!({"session": id, "path": path, "deleted": true, "kind": record.kind, "removedRelationships": removed_relationships}));
                 }
                 Err(error) => results.push(json!({
                     "session": id,
@@ -692,48 +666,35 @@ impl SessionHub {
         serde_json::to_string_pretty(&rendered).map_err(|error| SessionError(error.to_string()))
     }
 
-    fn list(&self, args: ListArgs) -> Result<String, SessionError> {
-        let scope = args.scope.as_deref().unwrap_or("mine");
-        if !matches!(scope, "mine" | "project") {
-            return Err(SessionError("scope must be `mine` or `project`".into()));
-        }
-        let kind_filter = args.kind.as_deref().filter(|kind| *kind != "all");
-        let values = self
-            .sessions
-            .list()
-            .map_err(registry_error)?
-            .into_iter()
-            .filter(|record| record.lifecycle.is_live())
-            .filter(|record| {
-                scope == "project"
-                    || record.artist == &*self.artist
-                    || record.parent_artist.as_deref() == Some(&*self.artist)
-            })
-            .filter(|record| kind_filter.is_none_or(|kind| record.kind == kind))
-            .map(|record| {
-                let summary = self
-                    .kind(&record.kind)
-                    .map(|kind| (kind.summary)(&record))
-                    .unwrap_or_else(|_| record.snapshot.clone());
-                json!({
-                    "session": record.id,
-                    "kind": record.kind,
-                    "owner": record.artist,
-                    "createdAt": record.created_at,
-                    "state": record.lifecycle,
-                    "summary": summary
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::to_string_pretty(&values).map_err(|error| SessionError(error.to_string()))
-    }
-
     fn record(&self, id: &str) -> Result<SessionRecord, SessionError> {
         self.sessions
             .get(id)
             .map_err(registry_error)?
             .ok_or_else(|| SessionError(format!("unknown session `{id}`")))
     }
+}
+
+fn deleted_resource_path(record: &artist_registry::SessionRecord) -> String {
+    let scheme = match record.kind.as_str() {
+        "subagent" => "agent",
+        "ask" => "ask",
+        "canvas" => "canvas",
+        "computer" => "computer",
+        "bash"
+            if record.snapshot.get("resourceType").and_then(Value::as_str) == Some("process") =>
+        {
+            "process"
+        }
+        "bash" => "bash",
+        other => other,
+    };
+    let id = match scheme {
+        "process" => record.id.strip_prefix("process:").unwrap_or(&record.id),
+        "eval" => record.id.strip_prefix("eval:").unwrap_or(&record.id),
+        "debug" => record.id.strip_prefix("debug:").unwrap_or(&record.id),
+        _ => &record.id,
+    };
+    format!("{scheme}://{id}")
 }
 
 /// Lifecycle verbs accept the canonical path returned by `read` as well as a
@@ -750,9 +711,22 @@ fn canonical_session_id(target: &str) -> Result<String, SessionError> {
                     | ResourceScheme::Ask
                     | ResourceScheme::Canvas
                     | ResourceScheme::Computer
+                    | ResourceScheme::Process
+                    | ResourceScheme::Eval
+                    | ResourceScheme::Debug
             ) && segments.len() == 1 =>
         {
-            Ok(segments.into_iter().next().expect("one segment"))
+            let id = segments.into_iter().next().expect("one segment");
+            Ok(match scheme {
+                ResourceScheme::Process if !id.starts_with("process:") => {
+                    format!("process:{id}")
+                }
+                ResourceScheme::Eval if !id.starts_with("eval:") => format!("eval:{id}"),
+                ResourceScheme::Debug if !id.starts_with("debug:") => {
+                    format!("debug:{id}")
+                }
+                _ => id,
+            })
         }
         ResourcePath::Virtual { scheme, .. } => Err(SessionError(format!(
             "{target} is not a runnable session resource; use a direct {scheme}://<id> path or the resource's owning tool"
@@ -858,30 +832,7 @@ pub(crate) struct AbortArgs {
     sessions: Option<Vec<String>>,
 }
 
-#[derive(Clone)]
-pub(crate) struct AbortTool(pub SessionHub);
-
-impl PortableTool for AbortTool {
-    const NAME: &'static str = "abort";
-    type Error = SessionError;
-    type Args = AbortArgs;
-    type Output = String;
-
-    fn description(&self) -> String {
-        "Request that one or more sessions stop. Foreign cancellation is durable and asynchronous; use poll to observe settlement.".into()
-    }
-
-    fn parameters(&self) -> Value {
-        target_schema(None)
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.0.abort(args).await
-    }
-}
-
-/// The canonical lifecycle verb. `AbortTool` remains an internal compatibility
-/// adapter while profiles and callers migrate from the old spelling.
+/// The canonical lifecycle verb.
 #[derive(Clone)]
 pub(crate) struct StopTool(pub SessionHub);
 
@@ -912,7 +863,19 @@ pub(crate) struct DeleteArgs {
 }
 
 #[derive(Clone)]
-pub(crate) struct DeleteTool(pub SessionHub);
+pub(crate) struct DeleteTool {
+    hub: SessionHub,
+    relationships: crate::relationships::RelationshipStore,
+}
+
+impl DeleteTool {
+    pub(crate) fn new(
+        hub: SessionHub,
+        relationships: crate::relationships::RelationshipStore,
+    ) -> Self {
+        Self { hub, relationships }
+    }
+}
 
 impl PortableTool for DeleteTool {
     const NAME: &'static str = "delete";
@@ -929,7 +892,8 @@ impl PortableTool for DeleteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.0.delete(args)
+        self.hub
+            .delete_with_relationships(args, &self.relationships)
     }
 }
 
@@ -985,42 +949,6 @@ impl PortableTool for SendTool {
             }
         }
         self.hub.send(args).await
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ListArgs {
-    scope: Option<String>,
-    kind: Option<String>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ListTool(pub SessionHub);
-
-impl PortableTool for ListTool {
-    const NAME: &'static str = "list";
-    type Error = SessionError;
-    type Args = ListArgs;
-    type Output = String;
-
-    fn description(&self) -> String {
-        "List live/current sessions. Defaults to sessions owned by this artist; scope=project includes the shared project registry. kind is an open session-kind string.".into()
-    }
-
-    fn parameters(&self) -> Value {
-        json!({
-            "type":"object",
-            "properties":{
-                "scope":{"enum":["mine","project"],"default":"mine"},
-                "kind":{"type":"string","default":"all"}
-            },
-            "additionalProperties":false
-        })
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        self.0.list(args)
     }
 }
 
@@ -1161,41 +1089,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_records_are_pollable_but_not_listed() {
-        let root = tempfile::tempdir().unwrap();
-        let hub = SessionHub::new(root.path(), "Goethe", None);
-        hub.register_standard_kinds();
-        let record = hub
-            .registry()
-            .create_exact("Goethe", "subagent", "Goethe", None, Value::Null)
-            .unwrap();
-        hub.registry()
-            .finish(
-                &record.id,
-                SessionStatus::Completed,
-                Some(json!({"output":"done"})),
-            )
-            .unwrap();
-        let listed = hub
-            .list(ListArgs {
-                scope: None,
-                kind: None,
-            })
-            .unwrap();
-        assert_eq!(listed, "[]");
-        let polled = hub
-            .poll(PollArgs {
-                session: Some("Goethe".into()),
-                sessions: None,
-                match_pattern: None,
-                timeout_ms: Some(0),
-            })
-            .await
-            .unwrap();
-        assert!(polled.contains("completed"));
-    }
-
-    #[tokio::test]
     async fn poll_match_observes_current_terminal_output_and_returns_a_cursor() {
         let root = tempfile::tempdir().unwrap();
         let hub = SessionHub::standard(root.path(), "Goethe", None);
@@ -1282,6 +1175,48 @@ mod tests {
             })
             .unwrap();
         assert!(deleted.contains("\"deleted\": true"), "{deleted}");
+    }
+
+    #[test]
+    fn process_paths_resolve_to_the_legacy_registry_key_only_at_the_boundary() {
+        assert_eq!(
+            canonical_session_id("process://worker").unwrap(),
+            "process:worker"
+        );
+        assert_eq!(
+            canonical_session_id("process://process:worker").unwrap(),
+            "process:worker"
+        );
+    }
+
+    #[test]
+    fn deleting_an_eval_session_removes_edges_at_its_public_path() {
+        let root = tempfile::tempdir().unwrap();
+        let hub = SessionHub::standard(root.path(), "ada", None);
+        let record = hub
+            .registry()
+            .create_exact("eval:ada", "eval", "ada", None, Value::Null)
+            .unwrap();
+        hub.registry()
+            .finish(&record.id, SessionStatus::Completed, None)
+            .unwrap();
+        let relationships =
+            crate::relationships::RelationshipStore::for_project(root.path()).unwrap();
+        relationships
+            .add("agent://ada", "child", "eval://ada")
+            .unwrap();
+
+        let deleted = hub
+            .delete_with_relationships(
+                DeleteArgs {
+                    session: Some("eval://ada".into()),
+                    sessions: None,
+                },
+                &relationships,
+            )
+            .unwrap();
+        assert!(deleted.contains("\"removedRelationships\": 1"), "{deleted}");
+        assert!(relationships.list(None, None, None).unwrap().is_empty());
     }
 
     #[tokio::test]

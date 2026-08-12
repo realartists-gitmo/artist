@@ -4,6 +4,12 @@
 //! well-formed before a particular environment has a resolver for its scheme.
 //! That keeps callers from accidentally treating `agent://goethe` as a funny
 //! relative filesystem path.
+//!
+//! Production extension roots have stable shapes: `eval://<session>`,
+//! `debug://<session>`, `forge://<provider>/<repository>/...`,
+//! `code://<workspace>/<projection>/...`, `relation://<source>/<edge>/...`,
+//! and `rules://<package>/<rule>/...`. A root remains a typed path even before
+//! its specialized resolver is installed.
 
 use std::fmt;
 
@@ -35,6 +41,15 @@ pub enum ResourceScheme {
     Ask,
     Canvas,
     Computer,
+    /// One-shot native executable snapshots. These share the terminal backend
+    /// with `bash://` but have their own canonical public identity.
+    Process,
+    Eval,
+    Debug,
+    Forge,
+    Code,
+    Relation,
+    Rules,
     Artifact,
     Dict,
     Memory,
@@ -44,12 +59,19 @@ pub enum ResourceScheme {
 }
 
 impl ResourceScheme {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 18] = [
         Self::Agent,
         Self::Bash,
         Self::Ask,
         Self::Canvas,
         Self::Computer,
+        Self::Process,
+        Self::Eval,
+        Self::Debug,
+        Self::Forge,
+        Self::Code,
+        Self::Relation,
+        Self::Rules,
         Self::Artifact,
         Self::Dict,
         Self::Memory,
@@ -65,6 +87,13 @@ impl ResourceScheme {
             Self::Ask => "ask",
             Self::Canvas => "canvas",
             Self::Computer => "computer",
+            Self::Process => "process",
+            Self::Eval => "eval",
+            Self::Debug => "debug",
+            Self::Forge => "forge",
+            Self::Code => "code",
+            Self::Relation => "relation",
+            Self::Rules => "rules",
             Self::Artifact => "artifact",
             Self::Dict => "dict",
             Self::Memory => "memory",
@@ -91,6 +120,13 @@ impl TryFrom<&str> for ResourceScheme {
             "ask" => Ok(Self::Ask),
             "canvas" => Ok(Self::Canvas),
             "computer" => Ok(Self::Computer),
+            "process" => Ok(Self::Process),
+            "eval" => Ok(Self::Eval),
+            "debug" => Ok(Self::Debug),
+            "forge" => Ok(Self::Forge),
+            "code" => Ok(Self::Code),
+            "relation" => Ok(Self::Relation),
+            "rules" => Ok(Self::Rules),
             "artifact" => Ok(Self::Artifact),
             "dict" => Ok(Self::Dict),
             "memory" => Ok(Self::Memory),
@@ -162,7 +198,7 @@ impl fmt::Display for ResourcePath {
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum ResourcePathError {
     #[error(
-        "unknown Artist virtual-path scheme `{0}`; use one of agent://, bash://, ask://, canvas://, computer://, artifact://, dict://, memory://, profile://, skill://, or tools://"
+        "unknown Artist virtual-path scheme `{0}`; use one of agent://, bash://, ask://, canvas://, computer://, process://, eval://, debug://, forge://, code://, relation://, rules://, artifact://, dict://, memory://, profile://, skill://, or tools://"
     )]
     UnknownScheme(String),
     #[error("malformed Artist resource path `{0}`")]

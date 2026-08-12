@@ -13,7 +13,7 @@ use muse_occurrence::{
 use muse_registry::RegistrySnapshot;
 use serde_json::Value;
 
-use crate::{ARTIST_EVENT_FORMALIZER_VERSION, ArtistAdapterError, ArtistStructuredEvent};
+use crate::{ArtistAdapterError, ArtistStructuredEvent, event_formalizer_version_for_schema};
 
 /// Deterministic total formalizer for known Artist event envelopes.
 #[derive(Clone, Debug)]
@@ -48,7 +48,7 @@ impl ArtistEventFormalizer {
             ontology: self.ontology.clone(),
             derivation: Derivation::DeterministicStructured {
                 adapter: "artist-event".into(),
-                version: ARTIST_EVENT_FORMALIZER_VERSION.into(),
+                version: event_formalizer_version_for_schema(event.schema_version).into(),
             },
             source_spans: BTreeMap::from([(
                 span_id.clone(),
@@ -321,6 +321,76 @@ fn add_event_specific_semantics(
     span: &SourceSpanId,
 ) {
     match event.kind.as_str() {
+        "rule.fired" | "rule.injection" => {
+            let Some(rule) = event.payload.get("rule").and_then(Value::as_str) else {
+                return;
+            };
+            let digest = event
+                .payload
+                .get("provenance")
+                .and_then(|value| value.get("digest"))
+                .and_then(Value::as_str)
+                .unwrap_or("historical-unknown");
+            let rule_id = ReferentId::from(format!("artist-rule-snapshot:{rule}:{digest}"));
+            document
+                .referents
+                .entry(rule_id.clone())
+                .or_insert_with(|| {
+                    referent(
+                        rule_id.clone(),
+                        "artist:ArtistRuleSnapshot",
+                        [DiscourseRole::External],
+                        span,
+                        [("artist_rule", rule)],
+                    )
+                });
+            relation_statement(
+                document,
+                ordinal,
+                presenter,
+                if event.kind == "rule.fired" {
+                    "artist:ruleFiringRule"
+                } else {
+                    "artist:ruleInjectionRule"
+                },
+                vec![Term::Referent(record.clone()), Term::Referent(rule_id)],
+                span,
+            );
+            if event.kind == "rule.fired" {
+                if let Some(matched) = event.payload.get("matched").and_then(Value::as_str) {
+                    literal_relation(
+                        document,
+                        ordinal,
+                        presenter,
+                        record,
+                        "artist:ruleMatchedExcerpt",
+                        Literal::String(matched.to_owned()),
+                        span,
+                    );
+                }
+                if let Some(action) = event.payload.get("action").and_then(Value::as_str) {
+                    literal_relation(
+                        document,
+                        ordinal,
+                        presenter,
+                        record,
+                        "artist:ruleResponseAction",
+                        Literal::String(action.to_owned()),
+                        span,
+                    );
+                }
+            } else if let Some(reminder) = event.payload.get("reminder").and_then(Value::as_str) {
+                literal_relation(
+                    document,
+                    ordinal,
+                    presenter,
+                    record,
+                    "artist:ruleInjectedReminder",
+                    Literal::String(reminder.to_owned()),
+                    span,
+                );
+            }
+        }
         "task.started" | "task.updated" | "task.finished" => {
             let Some(task) = event.payload.get("task").and_then(Value::as_str) else {
                 return;
@@ -549,6 +619,7 @@ fn event_record_type(event: &ArtistStructuredEvent) -> Option<&'static str> {
         "change.recorded" => "artist:ArtistChangeRecord",
         "task.started" | "task.updated" | "task.finished" => "artist:ArtistTaskRecord",
         "rule.fired" => "artist:ArtistRuleFiringRecord",
+        "rule.injection" => "artist:ArtistRuleInjectionRecord",
         "handoff.performed" => "artist:ArtistHandoffRecord",
         "computer.stage_opened" | "computer.stage_closed" => "artist:ArtistComputerStageRecord",
         "computer.launched" => "artist:ArtistComputerLaunchRecord",
@@ -610,13 +681,15 @@ mod tests {
     #[test]
     fn every_known_event_kind_has_a_total_classification() {
         for kind in crate::ARTIST_KNOWN_EVENT_KINDS {
-            assert!(crate::is_known_event_kind(kind), "{kind}");
+            assert!(crate::is_known_event_kind(1, kind), "{kind}");
         }
     }
 
     #[test]
     fn provider_private_payload_stays_exact_json() {
         let event = ArtistStructuredEvent {
+            schema_version: 1,
+            adapter_version: crate::ARTIST_V1_ADAPTER_VERSION.into(),
             source: crate::source_for(
                 &crate::ArtistEnvelope {
                     v: 1,
@@ -649,6 +722,105 @@ mod tests {
             PropositionExpr::Relation { relation, arguments }
                 if relation.as_str() == "artist:eventRecordPayload"
                     && matches!(arguments.get(1), Some(Term::Literal(Literal::Json(value))) if value.contains("\"a\":2"))
+        )));
+    }
+
+    #[test]
+    fn rule_injection_is_formalized_as_control_provenance_not_agent_prose() {
+        let event = ArtistStructuredEvent {
+            schema_version: 5,
+            adapter_version: "test".into(),
+            source: crate::source_for(
+                &crate::ArtistEnvelope {
+                    v: 5,
+                    seq: 7,
+                    ts: 9,
+                    session: "s".into(),
+                    run: None,
+                    lineage: "main".into(),
+                    kind: "rule.injection".into(),
+                    payload: serde_json::json!({}),
+                },
+                None,
+            )
+            .unwrap(),
+            sequence: 7,
+            timestamp_millis: 9,
+            session: "s".into(),
+            run: None,
+            lineage: "main".into(),
+            kind: "rule.injection".into(),
+            payload: serde_json::json!({
+                "rule":"no-leak",
+                "reminder":"Do not leak.",
+                "provenance":{"digest":"sha256:abc"}
+            }),
+        };
+        let document = ArtistEventFormalizer {
+            ontology: snapshot(),
+        }
+        .formalize(&event)
+        .unwrap();
+        assert!(document.referents.values().any(|referent| {
+            referent
+                .types
+                .contains(&ConceptId::from("artist:ArtistRuleInjectionRecord"))
+        }));
+        assert!(document.referents.values().any(|referent| {
+            referent
+                .types
+                .contains(&ConceptId::from("artist:ArtistRuleSnapshot"))
+        }));
+    }
+
+    #[test]
+    fn rule_firing_records_control_effect_separately_from_matched_evidence() {
+        let event = ArtistStructuredEvent {
+            schema_version: 6,
+            adapter_version: "test".into(),
+            source: crate::source_for(
+                &crate::ArtistEnvelope {
+                    v: 6,
+                    seq: 7,
+                    ts: 9,
+                    session: "s".into(),
+                    run: None,
+                    lineage: "main".into(),
+                    kind: "rule.fired".into(),
+                    payload: serde_json::json!({}),
+                },
+                None,
+            )
+            .unwrap(),
+            sequence: 7,
+            timestamp_millis: 9,
+            session: "s".into(),
+            run: None,
+            lineage: "main".into(),
+            kind: "rule.fired".into(),
+            payload: serde_json::json!({
+                "rule":"no-leak",
+                "matched":"Box::leak",
+                "action":"abort_and_retry",
+                "provenance":{"digest":"sha256:abc"}
+            }),
+        };
+        let document = ArtistEventFormalizer {
+            ontology: snapshot(),
+        }
+        .formalize(&event)
+        .unwrap();
+        assert!(document.propositions.values().any(|proposition| matches!(
+            &proposition.expression,
+            PropositionExpr::Relation { relation, arguments }
+                if relation.as_str() == "artist:ruleResponseAction"
+                    && matches!(arguments.get(1), Some(Term::Literal(Literal::String(value))) if value == "abort_and_retry")
+        )));
+        assert!(document.propositions.values().any(|proposition| matches!(
+            &proposition.expression,
+            PropositionExpr::Relation { relation, arguments }
+                if relation.as_str() == "artist:ruleMatchedExcerpt"
+                    && matches!(arguments.get(1), Some(Term::Literal(Literal::String(value))) if value == "Box::leak")
         )));
     }
 }

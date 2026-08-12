@@ -43,6 +43,9 @@ impl PortableTool for WriteTool {
             "additionalProperties": false
         })
     }
+    fn map_error(&self, error: ToolError) -> rig_core::tool::ToolExecutionError {
+        error.into_execution_error()
+    }
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
         crate::edit::reject_unresolved_virtual_mutation(&args.path)?;
         let target = self.0.resolve_new(&args.path)?;
@@ -85,10 +88,7 @@ impl PortableTool for WriteTool {
             .map_err(|error| {
                 let detail = error.to_string();
                 if detail.contains("content hash mismatch") {
-                    ToolError::Message(format!(
-                        "stale_revision: {} changed after it was read; start a fresh read(path=\"{}\") before replacing it",
-                        args.path, args.path
-                    ))
+                    ToolError::stale_revision(&args.path, args.revision.clone(), None)
                 } else {
                     ToolError::Anyhow(error)
                 }

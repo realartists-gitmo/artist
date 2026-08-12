@@ -370,6 +370,7 @@ mod tests {
             tool_call_id: None,
             name: name.into(),
             arguments: serde_json::json!({}),
+            presentation: None,
             result: result.into(),
             outcome: ToolOutcomeRecord::Success,
             duration_ms: Some(3),

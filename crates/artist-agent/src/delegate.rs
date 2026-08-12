@@ -13,7 +13,8 @@ use crate::{
 };
 use artist_session::{
     ContentBlock, ConversationMessages, DelegateFinished, DelegateStarted, ModelTurn, RunFinished,
-    RunStarted, ToolOutcomeRecord, ToolResultEvent, ToolResultImagesEvent,
+    RunStarted, ToolContext as SessionToolContext, ToolOutcomeRecord, ToolResultEvent,
+    ToolResultImagesEvent,
 };
 use artist_tool_api::ArtistDynamicTool;
 use artist_tools::ToolBundle;
@@ -146,6 +147,13 @@ pub(crate) struct Delegate {
     /// directory can answer "everyone under Monet". `None` where the spawner
     /// has no identity, which is only the case in tests.
     spawner_name: Option<String>,
+    /// The parent's artifact store, carried so a child's yield is captured into
+    /// the same durable namespace the spawner reads through `artifact://`,
+    /// rather than a per-child store that dies with the subagent.
+    pages: crate::pagination::PageStore,
+    /// Navigation metadata is deliberately separate from the lifecycle
+    /// registry's parent field, so path traversal does not infer scheduling.
+    relationships: crate::relationships::RelationshipStore,
 }
 
 struct DelegateRun {
@@ -222,6 +230,8 @@ impl Delegate {
             extension_runs: env.extension_runs.clone(),
             extension_manager: env.extension_manager.clone(),
             spawner_name: env.inbox.as_ref().map(|inbox| inbox.name.to_string()),
+            pages: env.pages.clone(),
+            relationships: env.relationships.clone(),
         }
     }
 
@@ -315,7 +325,8 @@ impl PortableTool for Delegate {
     type Output = String;
 
     fn description(&self) -> String {
-        "Spawn a focused subagent and return its bare artist session id immediately.".into()
+        "Spawn a focused subagent and return its canonical agent://<artist> path immediately."
+            .into()
     }
 
     fn parameters(&self) -> Value {
@@ -342,7 +353,7 @@ impl PortableTool for AgentCreation {
     type Output = String;
 
     fn description(&self) -> String {
-        "Claim a retained Artist roster name and start it immediately; returns the canonical agent id."
+        "Claim a retained Artist roster name and start it immediately; returns the canonical agent://<artist> path."
             .into()
     }
 
@@ -402,6 +413,15 @@ impl Delegate {
             .registry()
             .set_name_lease(&public_id, identity.lease_key.clone())
             .map_err(|error| DelegateError::Failed(error.to_string()))?;
+        self.relationships
+            .add(
+                &format!("agent://{}", self.sessions.artist()),
+                "child",
+                &canonical_agent_path(&public_id),
+            )
+            .map_err(|error| {
+                DelegateError::Failed(format!("creating child relationship: {error}"))
+            })?;
 
         let state = Arc::new(tokio::sync::RwLock::new(OwnedState::live(json!({
             "profile": profile_name,
@@ -429,6 +449,8 @@ impl Delegate {
 
         let delegate = self.clone();
         let task_profile = profile_name.clone();
+        let yield_actor = actor.clone();
+        let yield_agent = public_id.clone();
         let task = tokio::spawn(async move {
             let next = match delegate
                 .run_agent(args.prompt, task_profile.clone(), actor, identity)
@@ -442,18 +464,40 @@ impl Delegate {
                     let value = serde_json::from_str(&output)
                         .unwrap_or_else(|_| Value::String(output.clone()));
                     match yield_profile.validate_yield(&value) {
-                        Ok(()) => OwnedState::stopped(
-                            artist_registry::SessionStatus::Completed,
-                            json!({
-                                "profile": task_profile,
-                                "output": output,
-                                "yields": [{
-                                    "sequence": 1,
+                        Ok(()) => {
+                            // The yield is captured into the parent's artifact
+                            // store automatically, so a completed work unit is
+                            // durable and addressable through `artifact://` in
+                            // the same namespace the spawner reads — with the
+                            // profile as provenance and the exact value as the
+                            // payload — without the yielder writing one by hand.
+                            let artifact = capture_yield(&delegate.pages, &task_profile, &value);
+                            delegate
+                                .handles
+                                .recorder
+                                .child_lineage(&yield_actor)
+                                .record(artist_session::WorkUnitYield {
+                                    agent: yield_agent.clone(),
+                                    sequence: 1,
+                                    profile: task_profile.clone(),
+                                    yield_schema: yield_profile.yield_schema.clone(),
+                                    value: value.clone(),
+                                    artifact: artifact.clone(),
+                                });
+                            OwnedState::stopped(
+                                artist_registry::SessionStatus::Completed,
+                                json!({
                                     "profile": task_profile,
-                                    "value": value,
-                                }],
-                            }),
-                        ),
+                                    "output": output,
+                                    "yields": [{
+                                        "sequence": 1,
+                                        "profile": task_profile,
+                                        "value": value,
+                                        "artifact": artifact,
+                                    }],
+                                }),
+                            )
+                        }
                         Err(error) => OwnedState::stopped(
                             artist_registry::SessionStatus::Failed,
                             json!({
@@ -477,7 +521,7 @@ impl Delegate {
         });
         *abort.lock().unwrap_or_else(|error| error.into_inner()) = Some(task.abort_handle());
 
-        Ok(public_id)
+        Ok(canonical_agent_path(&public_id))
     }
 
     async fn run_agent(
@@ -769,6 +813,10 @@ impl Delegate {
                 context.push(seed_prompt.clone());
                 context
             });
+            // A child must callback only into its own filtered surface. Sharing
+            // the root registry here would let Python eval observe a parent
+            // profile after the child was deliberately restricted.
+            let child_tool_registry = crate::ToolRegistryHandle::default();
             let env = tool_set::ToolEnv {
                 bundle: child_tools.clone(),
                 // The delegate's own lineage recorder, so `artist computer log`
@@ -815,14 +863,69 @@ impl Delegate {
                     Some(run.permit.clone()),
                 ),
                 pages: crate::pagination::PageStore::memory(),
+                relationships: crate::relationships::RelationshipStore::for_project(
+                    child_tools.project_root(),
+                )
+                .map_err(|error| {
+                    DelegateError::Failed(format!("opening relationship store: {error}"))
+                })?,
+                tool_registry: child_tool_registry.clone(),
                 dynamic: self.dynamic.clone(),
                 extension_runs: self.extension_runs.clone(),
                 extension_manager: self.extension_manager.clone(),
                 disabled: self.disabled_tools.clone(),
             };
+            let registered = tool_set::build(role, &env);
+            // A delegate has an independently filtered tool surface and can
+            // outlive the parent attempt. Retain exactly what this child saw,
+            // never reconstruct it from the profile that happens to be live
+            // during a later Muse replay.
+            let mut model_tool_names = registered
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect::<Vec<_>>();
+            model_tool_names.sort();
+            let tool_definitions = registered
+                .iter()
+                .map(|tool| {
+                    let definition = tool.definition();
+                    json!({
+                        "name": definition.name.as_str(),
+                        "title": definition.title.as_str(),
+                        "description": definition.description.as_str(),
+                        "input_schema": &definition.input_schema,
+                        "output_schema": &definition.output_schema,
+                        "category": definition.category,
+                        "annotations": definition.annotations,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let tool_definitions_digest = crate::digest_json(&tool_definitions)
+                .map_err(|error| DelegateError::Failed(error.to_string()))?;
+            let yield_schema_digest = role
+                .yield_schema
+                .as_ref()
+                .map(crate::digest_json)
+                .transpose()
+                .map_err(|error| DelegateError::Failed(error.to_string()))?;
+            let instructions_digest = crate::digest_bytes(role.instructions.as_bytes());
+            let profile_digest = crate::digest_json(&json!({
+                "name": role.name.as_str(),
+                "description": role.description.as_str(),
+                "instructions": role.instructions.as_str(),
+                "yield_schema": &role.yield_schema,
+                "tool_surface": &model_tool_names,
+            }))
+            .map_err(|error| DelegateError::Failed(error.to_string()))?;
+            let extensions = self
+                .extension_manager
+                .as_ref()
+                .map(|extensions| extensions.provenance())
+                .unwrap_or_default();
+            child_tool_registry.publish(registered.clone());
             let agent = builder
                 .dynamic_tools(
-                    tool_set::build(role, &env)
+                    registered
                         .into_iter()
                         .map(|tool| rig_agent::tool::DynamicTool::from(tool.portable()))
                         .collect(),
@@ -852,6 +955,19 @@ impl Delegate {
                 agent: Some(identity.name.clone()),
                 actor: Some(identity.actor.clone()),
                 profile: Some(role.name.clone()),
+            });
+            run_recorder.record(SessionToolContext {
+                surface_version: "artist-tool-surface-v3".into(),
+                profile: role.name.clone(),
+                profile_digest,
+                tools: model_tool_names,
+                tool_definitions_digest,
+                tool_definitions,
+                yield_schema_digest,
+                yield_schema: role.yield_schema.clone(),
+                instructions_digest,
+                instructions: role.instructions.clone(),
+                extensions,
             });
 
             let mut stream = agent
@@ -1044,12 +1160,31 @@ impl Delegate {
                             let ingest_file_operation =
                                 matches!(name.as_str(), "read" | "edit" | "write");
                             let operation = name.clone();
+                            let presentation =
+                                artist_session::presentation::ModelPresentation::literal(
+                                    content.clone(),
+                                );
+                            let presentation = arguments
+                                .get("path")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|path| !path.is_empty())
+                                .map(|path| {
+                                    presentation.clone().with_source(
+                                        artist_session::presentation::PresentationSource {
+                                            path: path.to_owned(),
+                                            anchors: Vec::new(),
+                                            occurrence: Some(format!("tool:{internal_call_id}")),
+                                        },
+                                    )
+                                })
+                                .unwrap_or(presentation);
                             run_recorder.record(ToolResultEvent {
                                 internal_call_id: internal_call_id.clone(),
                                 tool_call_id: Some(tool_result.id.clone()),
                                 name,
                                 arguments,
                                 result: content.clone(),
+                                presentation: Some(presentation),
                                 outcome: outcome.clone(),
                                 duration_ms: Some(duration_ms),
                             });
@@ -1199,9 +1334,30 @@ fn shorten(value: &str, max: usize) -> String {
     format!("{}\n[truncated]", &value[..end])
 }
 
+fn canonical_agent_path(artist: &str) -> String {
+    format!("agent://{artist}")
+}
+
+/// Capture a completed work-unit yield into the parent's artifact store,
+/// returning its id. Best-effort: a yield is never withheld because the
+/// artifact write failed.
+fn capture_yield(
+    pages: &crate::pagination::PageStore,
+    profile: &str,
+    value: &Value,
+) -> Option<String> {
+    pages
+        .capture_text(
+            &format!("{profile}:yield"),
+            "application/json",
+            &serde_json::to_string(value).unwrap_or_default(),
+        )
+        .ok()
+}
+
 #[cfg(test)]
 mod identity_tests {
-    use super::{PermitSlot, delegate_context_window};
+    use super::{PermitSlot, canonical_agent_path, delegate_context_window};
 
     /// A seat from a pool of this test's own, so identity allocation is tested
     /// without also standing up the project-wide concurrency limit.
@@ -1227,6 +1383,11 @@ mod identity_tests {
         assert_eq!(delegate_context_window("small", None, Some(100_000)), None);
     }
 
+    #[test]
+    fn delegated_agents_return_their_typed_noun_path() {
+        assert_eq!(canonical_agent_path("monet"), "agent://monet");
+    }
+
     /// The seat pool is the project's, not the process's: a second holder
     /// pointed at the same directory sees the first one's seat. This is the
     /// property the on-disk pool exists for, and the one an in-process
@@ -1244,5 +1405,48 @@ mod identity_tests {
 
         held.yield_seat().await;
         assert!(contender.try_acquire("other-process").unwrap().is_some());
+    }
+}
+
+#[cfg(test)]
+mod yield_artifact_tests {
+    use super::capture_yield;
+
+    #[test]
+    fn a_completed_yield_is_captured_with_profile_provenance() {
+        let pages = crate::pagination::PageStore::memory();
+        let id = capture_yield(
+            &pages,
+            "reviewer",
+            &serde_json::json!({"answer": "done", "notes": "uphill both ways"}),
+        )
+        .expect("yield captured");
+        let info = pages.artifact(&id).expect("read back").expect("exists");
+        assert_eq!(info.tool, "reviewer:yield");
+        assert_eq!(info.content_type, "application/json");
+        assert!(info.media_type.is_none());
+        // The exact yield value is the artifact payload, so the payload text is
+        // addressable through the raw projection without re-entering model text.
+        assert!(info.total_bytes > 0);
+        assert_eq!(pages.artifact(&id).expect("read").expect("present").id, id);
+    }
+
+    #[test]
+    fn repeated_identical_yields_are_occurrence_distinct_artifacts() {
+        let pages = crate::pagination::PageStore::memory();
+        let value = serde_json::json!({"answer": "same"});
+        let first = capture_yield(&pages, "planner", &value).unwrap();
+        let second = capture_yield(&pages, "planner", &value).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn distinct_profiles_do_not_collide_in_one_store() {
+        let pages = crate::pagination::PageStore::memory();
+        let value = serde_json::json!({"answer": "done"});
+        let reviewer = capture_yield(&pages, "reviewer", &value).unwrap();
+        let planner = capture_yield(&pages, "planner", &value).unwrap();
+        assert_ne!(reviewer, planner);
+        assert_eq!(pages.artifacts().unwrap().len(), 2);
     }
 }

@@ -15,8 +15,8 @@ mod state;
 pub use agent::{AgentId, AgentIdentity};
 pub use anchor_table::{not_issued_message, stale_anchor_message, AnchorTable};
 pub use coordinator::{
-    content_hash, CoordinatedEditResult, CoordinatedReadResult, FileCoordinator, WriteCondition,
-    ANCHOR_USAGE,
+    content_hash, BatchWrite, CoordinatedEditResult, CoordinatedReadResult, FileCoordinator,
+    WriteCondition, ANCHOR_USAGE,
 };
 pub use error::{HashlineError, HashlineErrorCode};
 pub use file_tools::{

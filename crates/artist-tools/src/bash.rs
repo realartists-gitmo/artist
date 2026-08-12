@@ -14,6 +14,10 @@ use wezterm_term::{Terminal, TerminalConfiguration, TerminalSize, color::ColorPa
 
 const EXEC_CAP: usize = 50 * 1024;
 const INPUT_SESSION_ID: &str = "artist-input-shell";
+/// Exact upstream terminal emulator revision whose screen semantics Artist
+/// exposes. This remains a source-level provenance value in addition to the
+/// Cargo.lock pin so replay does not depend on resolving a dependency graph.
+pub const WEZTERM_TERM_REVISION: &str = "e723cf5005098fde4ef05cf73d7f40d29d85ad5f";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -157,14 +161,13 @@ struct Session {
     output: Arc<Mutex<String>>,
     terminal: Arc<Mutex<Terminal>>,
     cursor: Arc<Mutex<usize>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
 }
 
 /// Artist owns no visual terminal UI, but must model the same terminal state
 /// a user would see. The upstream emulator may emit query responses while it
-/// parses output; the PTY-facing writer remains owned by the session, so those
-/// UI-only responses are intentionally discarded here.
+/// parses output; live sessions route those replies to their PTY writer.
 #[derive(Debug)]
 struct ArtistTerminalConfig;
 
@@ -186,7 +189,38 @@ impl Write for DiscardTerminalResponses {
     }
 }
 
+/// Bridges wezterm-term's synchronous terminal-response callback to the same
+/// PTY input channel used by `send`. Query replies are protocol traffic, not
+/// model input, so they must never be appended to the visible transcript.
+struct PtyTerminalResponses {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+impl Write for PtyTerminalResponses {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| std::io::Error::other("terminal response writer lock poisoned"))?;
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|_| std::io::Error::other("terminal response writer lock poisoned"))?;
+        writer.flush()
+    }
+}
+
 fn new_terminal() -> Terminal {
+    new_terminal_with_responses(Box::new(DiscardTerminalResponses))
+}
+
+fn new_terminal_with_responses(responses: Box<dyn Write + Send>) -> Terminal {
     Terminal::new(
         TerminalSize {
             rows: 24,
@@ -198,7 +232,7 @@ fn new_terminal() -> Terminal {
         Arc::new(ArtistTerminalConfig),
         "Artist",
         env!("CARGO_PKG_VERSION"),
-        Box::new(DiscardTerminalResponses),
+        responses,
     )
 }
 
@@ -554,9 +588,14 @@ impl BashTool {
                 return Err(error.into());
             }
         };
+        let writer = Arc::new(Mutex::new(writer));
         let output = Arc::new(Mutex::new(String::new()));
         let sink = output.clone();
-        let terminal = Arc::new(Mutex::new(new_terminal()));
+        let terminal = Arc::new(Mutex::new(new_terminal_with_responses(Box::new(
+            PtyTerminalResponses {
+                writer: Arc::clone(&writer),
+            },
+        ))));
         let terminal_sink = Arc::clone(&terminal);
         let cursor = Arc::new(Mutex::new(0usize));
         std::thread::spawn(move || {
@@ -605,7 +644,7 @@ impl BashTool {
                 output,
                 terminal,
                 cursor,
-                writer: Mutex::new(writer),
+                writer,
                 child: Mutex::new(child),
             }),
         );
@@ -775,6 +814,43 @@ mod tests {
         let mut terminal = new_terminal();
         terminal.advance_bytes(b"one\rT");
         assert_eq!(render_terminal_screen(&terminal), "Tne");
+    }
+
+    #[test]
+    fn wezterm_screen_restores_primary_screen_after_alternate_screen() {
+        let mut terminal = new_terminal();
+        terminal.advance_bytes(b"primary\x1b[?1049halt\x1b[?1049l");
+        assert_eq!(render_terminal_screen(&terminal), "primary");
+    }
+
+    #[test]
+    fn terminal_provenance_is_pinned_with_the_renderer_contract() {
+        assert_eq!(
+            WEZTERM_TERM_REVISION,
+            "e723cf5005098fde4ef05cf73d7f40d29d85ad5f"
+        );
+    }
+
+    #[test]
+    fn terminal_query_responses_use_the_live_pty_writer_not_the_transcript() {
+        struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for CapturingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut responses = PtyTerminalResponses {
+            writer: Arc::new(Mutex::new(Box::new(CapturingWriter(Arc::clone(&captured))))),
+        };
+        responses.write_all(b"\x1b[?1;2c").unwrap();
+        assert_eq!(&*captured.lock().unwrap(), b"\x1b[?1;2c");
     }
 
     #[tokio::test]

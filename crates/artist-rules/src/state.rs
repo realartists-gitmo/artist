@@ -340,6 +340,8 @@ mod tests {
                     target: "assistant-text".into(),
                     matched: "x".into(),
                     turn: 1,
+                    provenance: None,
+                    action: None,
                     per_turn: true,
                 })
                 .unwrap(),
@@ -356,6 +358,7 @@ mod tests {
                     rule: "r".into(),
                     reminder: "don't".into(),
                     session_persistent: true,
+                    provenance: None,
                 })
                 .unwrap(),
             },
@@ -387,11 +390,74 @@ mod tests {
                 rule: "r".into(),
                 reminder: "once".into(),
                 session_persistent: false,
+                provenance: None,
             })
             .unwrap(),
         }];
         let handle = RulesHandle::default();
         handle.restore_from_log(&events);
         assert!(handle.injections().is_empty());
+    }
+
+    #[test]
+    fn restore_ignores_rule_state_hidden_by_a_rewind() {
+        use artist_session::{HistoryRewind, RuleFired, RuleInjection, SCHEMA_VERSION};
+        let events = vec![
+            Envelope {
+                v: SCHEMA_VERSION,
+                seq: 1,
+                ts: 0,
+                session: "s".into(),
+                run: None,
+                lineage: "main".into(),
+                kind: "rule.fired".into(),
+                payload: serde_json::to_value(RuleFired {
+                    rule: "r".into(),
+                    target: "assistant-text".into(),
+                    matched: "x".into(),
+                    turn: 1,
+                    per_turn: false,
+                    provenance: None,
+                    action: Some("abort_and_retry".into()),
+                })
+                .unwrap(),
+            },
+            Envelope {
+                v: SCHEMA_VERSION,
+                seq: 2,
+                ts: 0,
+                session: "s".into(),
+                run: None,
+                lineage: "main".into(),
+                kind: "rule.injection".into(),
+                payload: serde_json::to_value(RuleInjection {
+                    rule: "r".into(),
+                    reminder: "do not".into(),
+                    session_persistent: true,
+                    provenance: None,
+                })
+                .unwrap(),
+            },
+            Envelope {
+                v: SCHEMA_VERSION,
+                seq: 3,
+                ts: 0,
+                session: "s".into(),
+                run: None,
+                lineage: "main".into(),
+                kind: "history.rewind".into(),
+                payload: serde_json::to_value(HistoryRewind {
+                    to_seq: 0,
+                    reason: "user".into(),
+                    by: "user".into(),
+                })
+                .unwrap(),
+            },
+        ];
+        let handle = RulesHandle::default();
+        handle.restore_from_log(&events);
+        assert!(handle.is_armed(&RuleId("r".into())));
+        assert!(handle.injections().is_empty());
+        assert!(handle.hits().is_empty());
     }
 }
