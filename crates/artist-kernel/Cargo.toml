@@ -14,7 +14,7 @@ tokio = { version = "1", features = ["sync", "time"] }
 url = { version = "2", features = ["serde"] }
 base64 = "0.23"
 tempfile = "3"
-teca = "0.2.0"
+teca = "1.0.0"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 
