@@ -7,10 +7,7 @@ use crate::{
     AnchorSet, AnchoredLine, AnchoredText, KernelError, LineEnding, ResourceUri,
     StructuralAnalyzer, StructuralLine,
 };
-use fff_search::{
-    FFFMode, FilePicker, FilePickerOptions, GrepMode, GrepSearchOptions, SharedFilePicker,
-    SharedFrecency,
-};
+use fff_search::{FFFMode, FilePicker, FilePickerOptions, SharedFilePicker, SharedFrecency};
 use regex::Regex;
 use std::{
     collections::BTreeMap,
@@ -132,7 +129,10 @@ impl SearchService {
 
     pub fn find_files(&self, root: &Path, pattern: &Pattern) -> Result<Vec<PathBuf>, KernelError> {
         if root.is_file() {
-            let candidate = root.to_string_lossy();
+            let candidate = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
             let matched = match pattern {
                 Pattern::Literal(query) => candidate.contains(query),
                 Pattern::Regex(query) => Regex::new(query)
@@ -179,7 +179,11 @@ impl SearchService {
                 .filter(|item| !item.is_deleted())
                 .filter_map(|item| {
                     let path = item.absolute_path(picker, &index.root);
-                    path.to_string_lossy().contains(query).then_some(path)
+                    let candidate = path
+                        .strip_prefix(&index.root)
+                        .unwrap_or(&path)
+                        .to_string_lossy();
+                    candidate.contains(query).then_some(path)
                 })
                 .collect(),
             Pattern::Regex(query) => {
@@ -192,13 +196,17 @@ impl SearchService {
                     .filter(|item| !item.is_deleted())
                     .filter_map(|item| {
                         let path = item.absolute_path(picker, &index.root);
-                        regex.is_match(&path.to_string_lossy()).then_some(path)
+                        let candidate = path
+                            .strip_prefix(&index.root)
+                            .unwrap_or(&path)
+                            .to_string_lossy();
+                        regex.is_match(&candidate).then_some(path)
                     })
                     .collect()
             }
         };
-        paths.sort();
-        paths.dedup();
+        let mut seen = std::collections::HashSet::new();
+        paths.retain(|path| seen.insert(path.clone()));
         Ok(paths)
     }
 
@@ -214,11 +222,6 @@ impl SearchService {
             file.parent().unwrap_or(file)
         };
         let index = self.index(root)?;
-        let (mode, query) = match pattern {
-            Pattern::Literal(value) => (GrepMode::PlainText, value.as_str()),
-            Pattern::Regex(value) => (GrepMode::Regex, value.as_str()),
-            Pattern::Fuzzy(value) => (GrepMode::Fuzzy, value.as_str()),
-        };
         let guard = index.shared.read().map_err(|error| KernelError::Handler {
             message: error.to_string(),
         })?;
@@ -238,51 +241,25 @@ impl SearchService {
                 Ok((path, source))
             })
             .collect::<Result<BTreeMap<_, _>, KernelError>>()?;
-        let result = picker.grep_raw(
-            query,
-            &GrepSearchOptions {
-                mode,
-                page_limit: usize::MAX,
-                max_file_size: u64::MAX,
-                time_budget_ms: 0,
-                max_matches_per_file: usize::MAX,
-                smart_case: false,
-                ..Default::default()
-            },
-        );
-        if result.next_file_offset != 0 {
-            return Err(KernelError::Handler {
-                message: "search returned a partial page".to_owned(),
-            });
-        }
+        // Search the bytes captured above, not the live filesystem. This is
+        // the strict snapshot boundary: matching and anchor derivation both
+        // consume exactly the same byte sequence, so an A→B→A edit cannot
+        // silently produce anchors for bytes FFF never searched.
         let mut grouped = BTreeMap::<PathBuf, Vec<usize>>::new();
-        for hit in &result.matches {
-            let path = result.files[hit.file_index].absolute_path(picker, &index.root);
-            if file.is_dir() || path == file {
-                grouped
-                    .entry(path)
-                    .or_default()
-                    .push(hit.line_number.saturating_sub(1) as usize);
-            }
-        }
-        // FFF's line scanner is LF-oriented. Preserve Artist's explicit
-        // CR-only line-ending contract with the same Artist matcher when the
-        // searched snapshot uses CR separators.
         for (path, source) in &source_before {
-            if source.contains(&b'\r') && !source.contains(&b'\n') {
-                let (_, lines) = structure.analyze(path, source);
-                let indices = lines
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, line)| {
-                        line_matches(&line.line_text, pattern).then_some(index)
-                    })
-                    .collect::<Vec<_>>();
-                if indices.is_empty() {
-                    grouped.remove(path);
-                } else {
-                    grouped.insert(path.clone(), indices);
-                }
+            let (query, mode) = match pattern {
+                Pattern::Literal(value) => (value.as_str(), fff_search::GrepMode::PlainText),
+                Pattern::Regex(value) => (value.as_str(), fff_search::GrepMode::Regex),
+                Pattern::Fuzzy(value) => (value.as_str(), fff_search::GrepMode::Fuzzy),
+            };
+            let hits = fff_search::grep_snapshot(source, query, mode)
+                .map_err(|message| KernelError::InvalidPattern { message })?;
+            let indices = hits
+                .into_iter()
+                .map(|hit| hit.line_number.saturating_sub(1) as usize)
+                .collect::<Vec<_>>();
+            if !indices.is_empty() {
+                grouped.insert(path.clone(), indices);
             }
         }
         grouped
@@ -362,17 +339,6 @@ impl SearchService {
                 })
             })
             .collect())
-    }
-}
-
-fn line_matches(line: &[u8], pattern: &Pattern) -> bool {
-    let text = String::from_utf8_lossy(line);
-    match pattern {
-        Pattern::Literal(value) => text.contains(value),
-        Pattern::Regex(value) => Regex::new(value)
-            .map(|regex| regex.is_match(&text))
-            .unwrap_or(false),
-        Pattern::Fuzzy(value) => fff_search::fuzzy_line_matches(value, &text),
     }
 }
 
@@ -522,6 +488,50 @@ mod tests {
         }
         assert!(found_nested, "resident index did not observe new directory");
         std::fs::remove_dir_all(&nested).unwrap();
+    }
+
+    #[test]
+    fn fuzzy_find_preserves_score_order_and_all_patterns_use_relative_names() {
+        let root = tempdir().unwrap();
+        let names = ["zz_answer.rs", "answer.rs", "src_answer.rs"];
+        for name in names {
+            std::fs::write(root.path().join(name), "x\n").unwrap();
+        }
+        let service = SearchService::new();
+        let pattern = Pattern::parse("fz:answer").unwrap();
+        let mut found = None;
+        for _ in 0..80 {
+            let paths = service.find_files(root.path(), &pattern).unwrap();
+            if paths.len() == names.len() {
+                found = Some(paths);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let paths = found.expect("resident index did not observe fuzzy fixtures");
+        let mut expected = names
+            .iter()
+            .filter_map(|name| {
+                fff_search::fuzzy_match_score("answer", name)
+                    .map(|score| (score, root.path().join(name)))
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        assert_eq!(
+            paths,
+            expected
+                .into_iter()
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>()
+        );
+
+        let absolute_query = Pattern::parse(&format!("lit:{}", root.path().display())).unwrap();
+        assert!(
+            service
+                .find_files(root.path(), &absolute_query)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

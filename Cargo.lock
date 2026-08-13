@@ -296,6 +296,7 @@ dependencies = [
  "artist-ast",
  "base64 0.23.0",
  "fff-search",
+ "futures",
  "regex",
  "serde",
  "serde_json",

@@ -561,9 +561,10 @@ impl TypedHandler for RepositoryHandler {
         match operation {
             Operation::Read(requests) => requests.iter().all(|request| {
                 matches!(request.uri.scheme(), "repo" | "file")
-                    && self
-                        .file_and_suffix(&ResourceAddress::uri(request.uri.clone()))
-                        .is_ok()
+                    && (request.uri.scheme() == "repo"
+                        || self
+                            .file_and_suffix(&ResourceAddress::uri(request.uri.clone()))
+                            .is_ok())
             }),
             Operation::Find(request) => request
                 .roots
@@ -592,21 +593,49 @@ impl TypedHandler for RepositoryHandler {
                         .into_iter()
                         .map(|request| {
                             let target = ResourceAddress::uri(request.uri.clone());
-                            let (file, suffix) = self.file_and_suffix(&target)?;
-                            if !suffix.is_empty() {
-                                return Err(KernelError::WrongKind {
-                                    message: "typed repository read requires a source file"
-                                        .to_owned(),
+                            let (file, suffix) =
+                                self.file_and_suffix(&target).unwrap_or_else(|_| {
+                                    (
+                                        self.root.join(".artist-projection.json"),
+                                        vec!["projection".to_owned()],
+                                    )
                                 });
+                            if !suffix.is_empty() {
+                                let value = self.read_resource(&target)?;
+                                let source =
+                                    serde_json::to_string_pretty(&value).map_err(|error| {
+                                        KernelError::Handler {
+                                            message: format!(
+                                                "serialize repository projection: {error}"
+                                            ),
+                                        }
+                                    })?;
+                                let text = repository_anchored_text(
+                                    request.uri.clone(),
+                                    &file,
+                                    source.as_bytes(),
+                                    &self.structure,
+                                )?;
+                                return Ok(ReadResult::Text(select_repository_read_window(
+                                    text,
+                                    request.at.as_ref(),
+                                    request.before,
+                                    request.after,
+                                )?));
                             }
                             let source = fs::read(&file).map_err(|error| KernelError::Handler {
                                 message: format!("read {}: {error}", file.display()),
                             })?;
-                            Ok(ReadResult::Text(repository_anchored_text(
-                                request.uri,
-                                &file,
-                                &source,
-                                &self.structure,
+                            Ok(ReadResult::Text(select_repository_read_window(
+                                repository_anchored_text(
+                                    request.uri,
+                                    &file,
+                                    &source,
+                                    &self.structure,
+                                )?,
+                                request.at.as_ref(),
+                                request.before,
+                                request.after,
                             )?))
                         })
                         .collect();
@@ -618,8 +647,8 @@ impl TypedHandler for RepositoryHandler {
                         let target = ResourceAddress::uri(root);
                         paths.extend(self.find_paths(&target, &request.query)?);
                     }
-                    paths.sort();
-                    paths.dedup();
+                    let mut seen = std::collections::HashSet::new();
+                    paths.retain(|path| seen.insert(path.clone()));
                     Ok(OperationResult::Find(
                         paths
                             .into_iter()
@@ -637,7 +666,7 @@ impl TypedHandler for RepositoryHandler {
                     for uri in uris {
                         let target = ResourceAddress::uri(uri.clone());
                         let root = self.file_and_suffix(&target)?.0;
-                        for item in self.search.grep_file(
+                        for mut item in self.search.grep_file(
                             &root,
                             &Pattern::parse(&request.pattern)?,
                             &self.structure,
@@ -659,20 +688,8 @@ impl TypedHandler for RepositoryHandler {
                             } else {
                                 file_uri.clone()
                             };
-                            let file = file_uri.as_ref().to_file_path().map_err(|_| {
-                                KernelError::InvalidUri {
-                                    message: item_uri.to_string(),
-                                }
-                            })?;
-                            let source = fs::read(&file).map_err(|error| KernelError::Handler {
-                                message: format!("read {}: {error}", file.display()),
-                            })?;
-                            matches.push(repository_anchored_text(
-                                item_uri,
-                                &file,
-                                &source,
-                                &self.structure,
-                            )?);
+                            item.uri = item_uri;
+                            matches.push(item);
                         }
                     }
                     Ok(OperationResult::Grep(Ok(matches)))
@@ -684,6 +701,55 @@ impl TypedHandler for RepositoryHandler {
             }
         })
     }
+}
+
+fn select_repository_read_window(
+    mut text: AnchoredText,
+    at: Option<&crate::Position>,
+    before: Option<u32>,
+    after: Option<u32>,
+) -> Result<AnchoredText, KernelError> {
+    const DEFAULT_READ_WINDOW: usize = 200;
+    let at = at.unwrap_or(&crate::Position::Top);
+    if matches!(at, crate::Position::Top) && before.is_some()
+        || matches!(at, crate::Position::Bottom) && after.is_some()
+    {
+        return Err(KernelError::InvalidRequest {
+            message: "read window is invalid for its position".to_owned(),
+        });
+    }
+    let count = text.lines.len();
+    let index = match at {
+        crate::Position::Top => 0,
+        crate::Position::Bottom => count,
+        crate::Position::At(anchor) => text
+            .lines
+            .iter()
+            .position(|line| &line.anchor == anchor)
+            .ok_or_else(|| KernelError::StaleAnchor {
+                message: format!("read anchor does not resolve: {anchor}"),
+            })?,
+    };
+    let (before, after) = match at {
+        crate::Position::Top => (0, after.map_or(DEFAULT_READ_WINDOW, |value| value as usize)),
+        crate::Position::Bottom => (
+            before.map_or(DEFAULT_READ_WINDOW, |value| value as usize),
+            0,
+        ),
+        crate::Position::At(_) => (
+            before.map_or(0, |value| value as usize),
+            after.map_or(DEFAULT_READ_WINDOW, |value| value as usize),
+        ),
+    };
+    let (start, end) = match at {
+        crate::Position::Bottom => (count.saturating_sub(before), count),
+        _ => (
+            index.saturating_sub(before),
+            index.saturating_add(after.saturating_add(1)).min(count),
+        ),
+    };
+    text.lines = text.lines[start..end].to_vec();
+    Ok(text)
 }
 
 impl RepositoryHandler {
@@ -706,7 +772,7 @@ impl RepositoryHandler {
             return Ok(vec![file.display().to_string()]);
         }
         let prefix = url.path().trim_matches('/');
-        let mut output = self
+        let output = self
             .search
             .find_files(&self.root, &Pattern::parse(query)?)?
             .into_iter()
@@ -716,7 +782,6 @@ impl RepositoryHandler {
                     .then(|| format!("repo://{}/{}", self.project, relative_path))
             })
             .collect::<Vec<_>>();
-        output.sort();
         Ok(output)
     }
 
@@ -977,6 +1042,50 @@ mod tests {
         assert_eq!(text.uri, uri);
         assert_eq!(text.lines[0].text, "fn main() {}");
         assert!(!text.lines[0].anchor.tokens().is_empty());
+    }
+
+    #[tokio::test]
+    async fn typed_repository_reads_projections_and_returns_only_grep_matches() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        fs::write(&file, "fn first() {}\nfn answer() -> u8 { 42 }\n").unwrap();
+        let handler = RepositoryHandler::new(root.path()).unwrap();
+        let project = handler.project().to_owned();
+        let file_uri = ResourceUri::parse(&file.display().to_string()).unwrap();
+        let repo_uri = ResourceUri::parse(&format!("repo://{project}/main.rs/symbols")).unwrap();
+        let kernel = Kernel::new();
+        kernel.register_typed(handler).await;
+
+        let read = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: repo_uri,
+                at: Some(crate::Position::Top),
+                before: None,
+                after: Some(20),
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Read(mut values) = read else {
+            panic!("wrong typed projection result")
+        };
+        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
+            panic!("projection was not exposed as typed text")
+        };
+        assert!(!text.lines.is_empty());
+
+        let grep = kernel
+            .execute_operation(crate::Operation::Grep(crate::GrepRequest {
+                pattern: "answer".to_owned(),
+                source: crate::GrepSource::Resources(vec![file_uri]),
+            }))
+            .await
+            .unwrap();
+        let crate::OperationResult::Grep(Ok(matches)) = grep else {
+            panic!("wrong typed grep result")
+        };
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].lines.len(), 1);
+        assert!(matches[0].lines[0].text.contains("answer"));
     }
 
     #[tokio::test]

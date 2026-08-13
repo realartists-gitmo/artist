@@ -9,6 +9,7 @@ pub struct ResourceUri(Url);
 
 impl ResourceUri {
     pub fn parse(value: &str) -> Result<Self, KernelError> {
+        let directory_hint = value.ends_with('/') || value.ends_with('\\');
         let url = match Url::parse(value) {
             Ok(url) => url,
             Err(_) => {
@@ -29,6 +30,10 @@ impl ResourceUri {
                 })?
             }
         };
+        let mut url = url;
+        if directory_hint && url.scheme() == "file" && !url.path().ends_with('/') {
+            url.set_path(&format!("{}/", url.path()));
+        }
         if url.scheme().is_empty() {
             return Err(KernelError::InvalidUri {
                 message: format!("{value:?}: URI has no scheme"),

@@ -1734,6 +1734,16 @@ pub struct TypedComponentHost {
     engine: wasmtime::Engine,
     component: wasmtime::component::Component,
     capabilities: HashSet<String>,
+    dependencies: Vec<Arc<DynamicDependency>>,
+}
+
+#[derive(Clone)]
+struct DynamicDependency {
+    contract: String,
+    engine: wasmtime::Engine,
+    component: wasmtime::component::Component,
+    capabilities: HashSet<String>,
+    dependencies: Vec<Arc<DynamicDependency>>,
 }
 
 fn validate_typed_contract_names(
@@ -1771,16 +1781,43 @@ impl TypedComponentHost {
     where
         I: IntoIterator<Item = String>,
     {
+        Self::new_with_dependencies(bytes, capabilities, Vec::new())
+    }
+
+    pub fn new_with_dependencies<I>(
+        bytes: &[u8],
+        capabilities: I,
+        dependencies: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self, ComponentError>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         let engine = wasmtime::Engine::new(&config)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
         let component = wasmtime::component::Component::from_binary(&engine, bytes)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(format!("{e:#}"))))?;
+        let capabilities = capabilities.into_iter().collect::<HashSet<_>>();
+        let dependencies = dependencies
+            .into_iter()
+            .map(|(contract, bytes)| {
+                let component = wasmtime::component::Component::from_binary(&engine, &bytes)
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+                Ok(Arc::new(DynamicDependency {
+                    contract,
+                    engine: engine.clone(),
+                    component,
+                    capabilities: capabilities.clone(),
+                    dependencies: Vec::new(),
+                }))
+            })
+            .collect::<Result<Vec<_>, ComponentError>>()?;
         Ok(Self {
             engine,
             component,
-            capabilities: capabilities.into_iter().collect(),
+            capabilities,
+            dependencies,
         })
     }
 
@@ -1858,29 +1895,12 @@ impl TypedComponentHost {
     }
 
     fn dynamic_linker(&self) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
-        let mut linker = wasmtime::component::Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        macro_rules! add {
-            ($world:ty) => {
-                <$world>::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-                    &mut linker,
-                    |state: &mut HostState| state,
-                )
-                .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-            };
-        }
-        add!(read_bindings::ReadWorld);
-        add!(write_bindings::WriteWorld);
-        add!(edit_bindings::EditWorld);
-        add!(find_bindings::FindWorld);
-        add!(grep_bindings::GrepWorld);
-        add!(run_bindings::RunWorld);
-        add!(send_bindings::SendWorld);
-        add!(abort_bindings::AbortWorld);
-        add!(delete_bindings::DeleteWorld);
-        add!(poll_bindings::PollWorld);
-        Ok(linker)
+        dynamic_linker_for(
+            &self.engine,
+            &self.component,
+            &self.capabilities,
+            &self.dependencies,
+        )
     }
 
     /// Invoke an arbitrary package-local WIT contract through the Component
@@ -1957,6 +1977,25 @@ impl TypedComponentHost {
             })?;
         if instance.get_func(&mut store, "invoke").is_none()
             && instance.get_func(&mut store, export_name).is_none()
+        {
+            return Err(ComponentError::Build {
+                diagnostics: format!(
+                    "package-local WIT component exports neither invoke nor {export_name}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_dynamic_export_shape(&self, export_name: &str) -> Result<(), ComponentError> {
+        let component_type = self.component.component_type();
+        let exports = component_type
+            .exports(&self.engine)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        if !exports
+            .iter()
+            .any(|name| *name == "invoke" || *name == export_name)
         {
             return Err(ComponentError::Build {
                 diagnostics: format!(
@@ -2134,6 +2173,172 @@ impl TypedComponentHost {
             }
         }
     }
+}
+
+fn dynamic_linker_for(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+    _capabilities: &HashSet<String>,
+    dependencies: &[Arc<DynamicDependency>],
+) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
+    let mut linker = wasmtime::component::Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+    macro_rules! add {
+        ($world:ty) => {
+            <$world>::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+                &mut linker,
+                |state: &mut HostState| state,
+            )
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        };
+    }
+    add!(read_bindings::ReadWorld);
+    add!(write_bindings::WriteWorld);
+    add!(edit_bindings::EditWorld);
+    add!(find_bindings::FindWorld);
+    add!(grep_bindings::GrepWorld);
+    add!(run_bindings::RunWorld);
+    add!(send_bindings::SendWorld);
+    add!(abort_bindings::AbortWorld);
+    add!(delete_bindings::DeleteWorld);
+    add!(poll_bindings::PollWorld);
+
+    for (import_name, _) in component.component_type().imports(engine) {
+        if import_name.starts_with("wasi:") || import_name.starts_with("artist:tool/") {
+            continue;
+        }
+        let dependency = dependencies.iter().find(|dependency| {
+            contract_matches_import(&dependency.contract, import_name)
+                || dependency
+                    .component
+                    .component_type()
+                    .exports(&dependency.engine)
+                    .any(|(_, export)| export.is_implements(import_name))
+        });
+        let Some(dependency) = dependency else {
+            return Err(ComponentError::Load(anyhow::anyhow!(format!(
+                "no active custom tool satisfies component import {import_name}"
+            ))));
+        };
+        let mut instance = linker
+            .instance(import_name)
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        define_dependency_exports(&mut instance, Arc::clone(dependency))?;
+    }
+    Ok(linker)
+}
+
+fn contract_matches_import(contract: &str, import_name: &str) -> bool {
+    if contract == import_name {
+        return true;
+    }
+    let Some((identity, major)) = contract.rsplit_once('@') else {
+        return false;
+    };
+    let Some((namespace, interface)) = identity.rsplit_once(':') else {
+        return false;
+    };
+    let prefix = format!("{namespace}:{interface}/");
+    import_name
+        .strip_prefix(&prefix)
+        .and_then(|value| value.rsplit_once('@'))
+        .is_some_and(|(_, version)| version.split('.').next() == Some(major))
+}
+
+fn define_dependency_exports(
+    instance: &mut wasmtime::component::LinkerInstance<'_, HostState>,
+    dependency: Arc<DynamicDependency>,
+) -> Result<(), ComponentError> {
+    for (name, export) in dependency
+        .component
+        .component_type()
+        .exports(&dependency.engine)
+    {
+        match &export.ty {
+            wasmtime::component::types::ComponentItem::ComponentFunc(_) => {
+                let dependency = Arc::clone(&dependency);
+                let name = name.to_owned();
+                let export_name = name.clone();
+                instance
+                    .func_new(&name, move |mut store, _ty, params, results| {
+                        let linker = dynamic_linker_for(
+                            &dependency.engine,
+                            &dependency.component,
+                            &dependency.capabilities,
+                            &dependency.dependencies,
+                        )
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let imported = linker
+                            .instantiate(&mut store, &dependency.component)
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let function =
+                            imported.get_func(&mut store, &export_name).ok_or_else(|| {
+                                wasmtime::Error::msg(format!(
+                                    "dependency export disappeared: {export_name}"
+                                ))
+                            })?;
+                        function
+                            .call(&mut store, params, results)
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))
+                    })
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+            }
+            wasmtime::component::types::ComponentItem::ComponentInstance(component_instance) => {
+                let mut nested = instance
+                    .instance(name)
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+                define_dependency_instance_exports(
+                    &mut nested,
+                    Arc::clone(&dependency),
+                    component_instance,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn define_dependency_instance_exports(
+    instance: &mut wasmtime::component::LinkerInstance<'_, HostState>,
+    dependency: Arc<DynamicDependency>,
+    component_instance: &wasmtime::component::types::ComponentInstance,
+) -> Result<(), ComponentError> {
+    for (name, export) in component_instance.exports(&dependency.engine) {
+        if matches!(
+            export.ty,
+            wasmtime::component::types::ComponentItem::ComponentFunc(_)
+        ) {
+            let dependency = Arc::clone(&dependency);
+            let name = name.to_owned();
+            let export_name = name.clone();
+            instance
+                .func_new(&name, move |mut store, _ty, params, results| {
+                    let linker = dynamic_linker_for(
+                        &dependency.engine,
+                        &dependency.component,
+                        &dependency.capabilities,
+                        &dependency.dependencies,
+                    )
+                    .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                    let imported = linker
+                        .instantiate(&mut store, &dependency.component)
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                    let function =
+                        imported.get_func(&mut store, &export_name).ok_or_else(|| {
+                            wasmtime::Error::msg(format!(
+                                "dependency export disappeared: {export_name}"
+                            ))
+                        })?;
+                    function
+                        .call(&mut store, params, results)
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))
+                })
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        }
+    }
+    Ok(())
 }
 
 fn json_to_component_val(
@@ -2844,7 +3049,7 @@ pub mod package {
                 &bytes,
                 options.granted_capabilities.clone(),
             )?;
-            host.validate_dynamic_export(
+            host.validate_dynamic_export_shape(
                 &package
                     .contract
                     .as_ref()
@@ -3310,6 +3515,15 @@ pub mod runtime {
             package: &ToolPackage,
             options: &BuildOptions,
         ) -> Result<ActiveVersion, ComponentError> {
+            self.reload_with_dependencies(package, options, Vec::new())
+        }
+
+        pub fn reload_with_dependencies(
+            &self,
+            package: &ToolPackage,
+            options: &BuildOptions,
+            dependencies: Vec<(String, Vec<u8>)>,
+        ) -> Result<ActiveVersion, ComponentError> {
             let build = package.build(options)?;
             let bytes = fs::read(&build.artifact).map_err(|error| {
                 ComponentError::Load(anyhow::anyhow!(
@@ -3342,10 +3556,18 @@ pub mod runtime {
                 };
                 (None, Some(typed_host), None, info)
             } else if package.wit.is_some() {
-                let dynamic_host = Arc::new(TypedComponentHost::new_with_capabilities(
+                let dynamic_host = Arc::new(TypedComponentHost::new_with_dependencies(
                     &bytes,
                     options.granted_capabilities.clone(),
+                    dependencies,
                 )?);
+                dynamic_host.validate_dynamic_export(
+                    &package
+                        .contract
+                        .as_ref()
+                        .map(|contract| contract.interface.as_str())
+                        .unwrap_or("invoke"),
+                )?;
                 let info = ComponentInfo {
                     name: package.manifest.name.clone(),
                     version: package.manifest.version.clone(),
@@ -4029,12 +4251,65 @@ pub mod tools {
             if current.is_some() && !dirty {
                 return Ok(current.unwrap());
             }
+            let dependencies = if package.wit.is_some()
+                && package
+                    .contract
+                    .as_ref()
+                    .is_some_and(|contract| contract.verb.is_none())
+            {
+                self.custom_dependencies(&package)?
+            } else {
+                Vec::new()
+            };
             let active = self
                 .registry
-                .reload(&package, &self.options)
+                .reload_with_dependencies(&package, &self.options, dependencies)
                 .map_err(component_error)?;
             self.dirty.lock().unwrap().remove(&key);
             Ok(active)
+        }
+
+        fn custom_dependencies(
+            &self,
+            current: &ToolPackage,
+        ) -> Result<Vec<(String, Vec<u8>)>, KernelError> {
+            let mut dependencies = Vec::new();
+            for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
+                message: format!("read tools root {}: {error}", self.root.display()),
+            })? {
+                let entry = entry.map_err(|error| KernelError::Handler {
+                    message: format!("read tools directory entry: {error}"),
+                })?;
+                if !entry
+                    .file_type()
+                    .map_err(|error| KernelError::Handler {
+                        message: format!("inspect tools directory entry: {error}"),
+                    })?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let package = ToolPackage::discover(entry.path()).map_err(component_error)?;
+                let Some(contract) = package.contract.as_ref() else {
+                    continue;
+                };
+                if package.manifest.name == current.manifest.name
+                    || contract.verb.is_some()
+                    || package.wit.is_none()
+                {
+                    continue;
+                }
+                let build = package.build(&self.options).map_err(component_error)?;
+                let bytes =
+                    std::fs::read(&build.artifact).map_err(|error| KernelError::Handler {
+                        message: format!(
+                            "read dependency artifact {}: {error}",
+                            build.artifact.display()
+                        ),
+                    })?;
+                dependencies.push((contract.to_string(), bytes));
+            }
+            Ok(dependencies)
         }
 
         fn package_path_for_name(&self, name: &str) -> Result<PathBuf, KernelError> {
@@ -5209,6 +5484,18 @@ mod tests {
             })
             .unwrap();
         assert!(registry.resolve(&contract).is_some());
+    }
+
+    #[test]
+    fn custom_contract_versions_match_component_import_names() {
+        assert!(contract_matches_import(
+            "acme:format@2",
+            "acme:format/format@2.0.0"
+        ));
+        assert!(!contract_matches_import(
+            "acme:format@2",
+            "acme:format/format@3.0.0"
+        ));
     }
 
     #[test]

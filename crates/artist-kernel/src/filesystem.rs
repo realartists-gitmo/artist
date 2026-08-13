@@ -334,9 +334,15 @@ fn select_read_window(
     before: Option<u32>,
     after: Option<u32>,
 ) -> Result<AnchoredText, KernelError> {
-    let Some(at) = at else {
-        return Ok(text);
-    };
+    const DEFAULT_READ_WINDOW: usize = 200;
+    let at = at.unwrap_or(&crate::Position::Top);
+    if matches!(at, crate::Position::Top) && before.is_some()
+        || matches!(at, crate::Position::Bottom) && after.is_some()
+    {
+        return Err(KernelError::InvalidRequest {
+            message: "read window is invalid for its position".to_owned(),
+        });
+    }
     let count = text.lines.len();
     let index = match at {
         crate::Position::Top => 0,
@@ -349,8 +355,17 @@ fn select_read_window(
                 message: format!("read anchor does not resolve: {anchor}"),
             })?,
     };
-    let before = before.unwrap_or(0) as usize;
-    let after = after.unwrap_or(0) as usize;
+    let (before, after) = match at {
+        crate::Position::Top => (0, after.map_or(DEFAULT_READ_WINDOW, |value| value as usize)),
+        crate::Position::Bottom => (
+            before.map_or(DEFAULT_READ_WINDOW, |value| value as usize),
+            0,
+        ),
+        crate::Position::At(_) => (
+            before.map_or(0, |value| value as usize),
+            after.map_or(DEFAULT_READ_WINDOW, |value| value as usize),
+        ),
+    };
     let (start, end) = match at {
         crate::Position::Bottom => (count.saturating_sub(before), count),
         _ => (index.saturating_sub(before), (index + after + 1).min(count)),
@@ -626,12 +641,25 @@ impl TypedHandler for FileHandler {
                                         message: error.to_string(),
                                     })?
                                     .map(|entry| {
-                                        let path = entry
+                                        let entry =
+                                            entry.map_err(|error| KernelError::Handler {
+                                                message: error.to_string(),
+                                            })?;
+                                        let path = entry.path();
+                                        if entry
+                                            .file_type()
                                             .map_err(|error| KernelError::Handler {
                                                 message: error.to_string(),
                                             })?
-                                            .path();
-                                        crate::ResourceUri::parse(&path.display().to_string())
+                                            .is_dir()
+                                        {
+                                            crate::ResourceUri::parse(&format!(
+                                                "{}/",
+                                                path.display()
+                                            ))
+                                        } else {
+                                            crate::ResourceUri::parse(&path.display().to_string())
+                                        }
                                     })
                                     .collect::<Result<Vec<_>, _>>()?;
                                 entries.sort_by_key(ToString::to_string);
@@ -731,8 +759,8 @@ impl TypedHandler for FileHandler {
                             &Pattern::parse(&request.query)?,
                         )?);
                     }
-                    paths.sort();
-                    paths.dedup();
+                    let mut seen = std::collections::HashSet::new();
+                    paths.retain(|path| seen.insert(path.clone()));
                     Ok(OperationResult::Find(
                         paths
                             .into_iter()
@@ -1158,5 +1186,72 @@ mod tests {
             values.remove(0),
             Err(crate::KernelError::NotEmpty { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn typed_read_applies_default_window_rejects_invalid_edges_and_marks_directories() {
+        let root = tempdir().unwrap();
+        let directory = root.path().join("dir");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("child"), "one\n").unwrap();
+        fs::create_dir(directory.join("nested")).unwrap();
+        let file = root.path().join("many.txt");
+        fs::write(
+            &file,
+            (0..250).map(|i| format!("line{i}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let kernel = Kernel::new();
+        kernel
+            .register_typed(FileHandler::new(root.path()).unwrap())
+            .await;
+
+        let read = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: crate::ResourceUri::parse(&file.display().to_string()).unwrap(),
+                at: None,
+                before: None,
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Read(mut values) = read else {
+            panic!("wrong read result")
+        };
+        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
+            panic!("wrong read value")
+        };
+        assert_eq!(text.lines.len(), 201);
+
+        let invalid = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: crate::ResourceUri::parse(&file.display().to_string()).unwrap(),
+                at: Some(crate::Position::Top),
+                before: Some(1),
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        assert!(matches!(
+            invalid,
+            crate::OperationResult::Read(values) if matches!(values[0], Err(crate::KernelError::InvalidRequest { .. }))
+        ));
+
+        let read_directory = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: crate::ResourceUri::parse(&directory.display().to_string()).unwrap(),
+                at: None,
+                before: None,
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Read(mut values) = read_directory else {
+            panic!("wrong directory result")
+        };
+        let Ok(crate::ReadResult::Directory { entries, .. }) = values.remove(0) else {
+            panic!("wrong directory value")
+        };
+        assert!(entries.iter().any(|entry| entry.to_string().ends_with('/')));
     }
 }

@@ -5,6 +5,66 @@ use rayon::prelude::*;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// A line match produced from caller-owned bytes. This is the snapshot-safe
+/// counterpart to the resident picker API: FFF never reopens a path here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotMatch {
+    pub line_number: u64,
+    pub line_content: String,
+}
+
+pub fn grep_snapshot(
+    bytes: &[u8],
+    pattern: &str,
+    mode: super::types::GrepMode,
+) -> Result<Vec<SnapshotMatch>, String> {
+    let regex = match mode {
+        super::types::GrepMode::Regex => {
+            Some(regex::Regex::new(pattern).map_err(|error| error.to_string())?)
+        }
+        _ => None,
+    };
+    let mut matches = Vec::new();
+    let mut start = 0;
+    let mut line_number = 1;
+    for end in 0..=bytes.len() {
+        let terminator = end == bytes.len()
+            || bytes[end] == b'\n'
+            || (bytes[end] == b'\r' && bytes.get(end + 1) != Some(&b'\n'));
+        if !terminator {
+            continue;
+        }
+        let mut line = &bytes[start..end];
+        if line.ends_with(b"\r") {
+            line = &line[..line.len() - 1];
+        }
+        let text = String::from_utf8_lossy(line).into_owned();
+        let matched = match mode {
+            super::types::GrepMode::PlainText => text.contains(pattern),
+            super::types::GrepMode::Regex => {
+                regex.as_ref().is_some_and(|regex| regex.is_match(&text))
+            }
+            super::types::GrepMode::Fuzzy => fuzzy_line_matches(pattern, &text),
+        };
+        if matched {
+            matches.push(SnapshotMatch {
+                line_number,
+                line_content: text,
+            });
+        }
+        if end == bytes.len() {
+            break;
+        }
+        start = if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
+            end + 2
+        } else {
+            end + 1
+        };
+        line_number += 1;
+    }
+    Ok(matches)
+}
+
 use super::sink::{
     char_indices_to_byte_offsets, classify_definition, strip_line_terminators,
     truncate_display_bytes,

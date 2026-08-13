@@ -6,8 +6,8 @@
 
 use crate::{
     Anchor, AnchoredLine, AnchoredText, BoxFuture, Handler, HandlerDescriptor, KernelError,
-    KernelHandle, Operation, OperationResult, PollAtom, Request, ResourceAddress, TypedHandler,
-    Verb,
+    KernelHandle, Operation, OperationResult, PollAtom, ReadResult, Request, ResourceAddress,
+    TypedHandler, Verb, WriteResult,
 };
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -201,6 +201,36 @@ impl SessionHandler {
             Err(KernelError::NotFound { uri: key })
         }
     }
+
+    async fn poll_cursors(&self, targets: &[crate::PollTarget]) -> Result<Vec<u64>, KernelError> {
+        let mut cursors = Vec::with_capacity(targets.len());
+        for target in targets {
+            let session = self
+                .lookup(&ResourceAddress::uri(target.uri.clone()))
+                .await?;
+            let state = session.state.lock().await;
+            cursors.push(match target.from_position.as_ref() {
+                None | Some(crate::Position::Bottom) => state.next_seq,
+                Some(crate::Position::Top) => 0,
+                Some(crate::Position::At(anchor)) => {
+                    let token =
+                        anchor
+                            .tokens()
+                            .first()
+                            .ok_or_else(|| KernelError::StaleAnchor {
+                                message: format!("poll anchor does not resolve: {anchor}"),
+                            })?;
+                    let seq = token.parse::<u64>().map_err(|_| KernelError::StaleAnchor {
+                        message: format!("poll anchor does not resolve: {anchor}"),
+                    })?;
+                    seq.checked_add(1).ok_or_else(|| KernelError::StaleAnchor {
+                        message: format!("poll anchor does not resolve: {anchor}"),
+                    })?
+                }
+            });
+        }
+        Ok(cursors)
+    }
 }
 
 impl Handler for SessionHandler {
@@ -246,12 +276,21 @@ impl TypedHandler for SessionHandler {
         HandlerDescriptor {
             name: "session-typed".to_owned(),
             schemes: vec!["session".to_owned()],
-            verbs: vec![Verb::Send, Verb::Poll, Verb::Abort, Verb::Delete],
+            verbs: vec![
+                Verb::Read,
+                Verb::Write,
+                Verb::Send,
+                Verb::Poll,
+                Verb::Abort,
+                Verb::Delete,
+            ],
         }
     }
 
     fn claims_operation(&self, operation: &Operation) -> bool {
         let uris: Vec<&crate::ResourceUri> = match operation {
+            Operation::Read(requests) => requests.iter().map(|request| &request.uri).collect(),
+            Operation::Write(requests) => requests.iter().map(|request| &request.uri).collect(),
             Operation::Send(requests) => requests.iter().map(|request| &request.uri).collect(),
             Operation::Poll(request) => request.targets.iter().map(|target| &target.uri).collect(),
             Operation::Abort(uris) | Operation::Delete(uris) => uris.iter().collect(),
@@ -268,6 +307,46 @@ impl TypedHandler for SessionHandler {
     ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
         Box::pin(async move {
             match operation {
+                Operation::Read(requests) => {
+                    let mut results = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        let target = ResourceAddress::uri(request.uri.clone());
+                        let result = match self.lookup(&target).await {
+                            Ok(session) => {
+                                let state = session.state.lock().await;
+                                let value = snapshot(&state, 0);
+                                session_read_window(
+                                    &request.uri,
+                                    &value,
+                                    request.at.as_ref(),
+                                    request.before,
+                                    request.after,
+                                )
+                            }
+                            Err(error) => Err(error),
+                        };
+                        results.push(result);
+                    }
+                    Ok(OperationResult::Read(
+                        results
+                            .into_iter()
+                            .map(|result| result.map(ReadResult::Text))
+                            .collect(),
+                    ))
+                }
+                Operation::Write(requests) => {
+                    let mut results = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        let target = ResourceAddress::uri(request.uri.clone());
+                        results.push(self.create(&target).await.map(|_| WriteResult {
+                            text: AnchoredText {
+                                uri: request.uri,
+                                lines: Vec::new(),
+                            },
+                        }));
+                    }
+                    Ok(OperationResult::Write(results))
+                }
                 Operation::Send(requests) => {
                     let mut results = Vec::with_capacity(requests.len());
                     for request in requests {
@@ -313,18 +392,11 @@ impl TypedHandler for SessionHandler {
                         .unwrap_or_else(|| crate::PollCondition::Atom(PollAtom::Changed(0)));
                     validate_poll_condition(&condition, request.targets.len())?;
                     let started = Instant::now();
-                    let timeout_ms = poll_atoms(&condition)
-                        .into_iter()
-                        .filter_map(|atom| match atom {
-                            PollAtom::Timeout(ms) => Some(ms),
-                            _ => None,
-                        })
-                        .min();
+                    let cursors = self.poll_cursors(&request.targets).await?;
                     let mut snapshots = Vec::new();
-                    let satisfied = loop {
+                    let mut satisfied = loop {
                         snapshots.clear();
-                        for target in &request.targets {
-                            let since = position_to_seq(target.from_position.as_ref());
+                        for (target, since) in request.targets.iter().zip(&cursors) {
                             let value = self
                                 .poll(
                                     &ResourceAddress::uri(target.uri.clone()),
@@ -337,13 +409,24 @@ impl TypedHandler for SessionHandler {
                                 .await?;
                             snapshots.push(value);
                         }
-                        let timed_out = timeout_ms
-                            .is_some_and(|ms| started.elapsed() >= Duration::from_millis(ms));
-                        let (ok, atoms) = evaluate_condition(&condition, &snapshots, timed_out);
-                        if ok || timed_out {
+                        let elapsed = started.elapsed();
+                        let (ok, atoms) = evaluate_condition(&condition, &snapshots, elapsed);
+                        if ok {
                             break atoms;
                         }
                     };
+                    // A bounded cross-handler poll may ask this handler to
+                    // wake on a short timeout. Preserve terminal state in the
+                    // typed result so the kernel can still evaluate a
+                    // caller's Terminated atom after combining handlers.
+                    for (index, value) in snapshots.iter().enumerate() {
+                        if value["status"].as_str() == Some("aborted") {
+                            let atom = PollAtom::Terminated(index as u32);
+                            if !satisfied.contains(&atom) {
+                                satisfied.push(atom);
+                            }
+                        }
+                    }
                     let text = request
                         .targets
                         .iter()
@@ -368,15 +451,6 @@ impl TypedHandler for SessionHandler {
                 }),
             }
         })
-    }
-}
-
-fn poll_atoms(condition: &crate::PollCondition) -> Vec<PollAtom> {
-    match condition {
-        crate::PollCondition::Atom(atom) => vec![atom.clone()],
-        crate::PollCondition::All(children) | crate::PollCondition::Any(children) => {
-            children.iter().flat_map(poll_atoms).collect()
-        }
     }
 }
 
@@ -421,24 +495,12 @@ fn validate_poll_condition(
     walk(condition, targets)
 }
 
-fn position_to_seq(position: Option<&crate::Position>) -> u64 {
-    match position {
-        None | Some(crate::Position::Top) => 0,
-        Some(crate::Position::Bottom) => u64::MAX,
-        Some(crate::Position::At(anchor)) => anchor
-            .tokens()
-            .first()
-            .and_then(|token| token.parse().ok())
-            .unwrap_or(0),
-    }
-}
-
 fn evaluate_condition(
     condition: &crate::PollCondition,
     snapshots: &[Value],
-    timed_out: bool,
+    elapsed: Duration,
 ) -> (bool, Vec<PollAtom>) {
-    fn eval_atom(atom: &PollAtom, snapshots: &[Value], timed_out: bool) -> (bool, Vec<PollAtom>) {
+    fn eval_atom(atom: &PollAtom, snapshots: &[Value], elapsed: Duration) -> (bool, Vec<PollAtom>) {
         let result = match atom {
             PollAtom::Changed(target) => snapshots
                 .get(*target as usize)
@@ -449,16 +511,17 @@ fn evaluate_condition(
                 .and_then(|value| value["events"].as_array())
                 .is_some_and(|events| {
                     events.iter().any(|event| {
-                        event["data"]
-                            .as_str()
-                            .is_some_and(|text| text.contains(&regex.pattern))
+                        event["data"].as_str().is_some_and(|text| {
+                            regex::Regex::new(&regex.pattern)
+                                .is_ok_and(|regex| regex.is_match(text))
+                        })
                     })
                 }),
             PollAtom::Terminated(target) => snapshots
                 .get(*target as usize)
                 .and_then(|value| value["status"].as_str())
                 .is_some_and(|status| status == "aborted"),
-            PollAtom::Timeout(milliseconds) => timed_out || *milliseconds == 0,
+            PollAtom::Timeout(milliseconds) => elapsed >= Duration::from_millis(*milliseconds),
         };
         (
             result,
@@ -466,11 +529,11 @@ fn evaluate_condition(
         )
     }
     match condition {
-        crate::PollCondition::Atom(atom) => eval_atom(atom, snapshots, timed_out),
+        crate::PollCondition::Atom(atom) => eval_atom(atom, snapshots, elapsed),
         crate::PollCondition::All(children) => {
             let values = children
                 .iter()
-                .map(|child| evaluate_condition(child, snapshots, timed_out))
+                .map(|child| evaluate_condition(child, snapshots, elapsed))
                 .collect::<Vec<_>>();
             (
                 values.iter().all(|(ok, _)| *ok),
@@ -480,7 +543,7 @@ fn evaluate_condition(
         crate::PollCondition::Any(children) => {
             let values = children
                 .iter()
-                .map(|child| evaluate_condition(child, snapshots, timed_out))
+                .map(|child| evaluate_condition(child, snapshots, elapsed))
                 .collect::<Vec<_>>();
             (
                 values.iter().any(|(ok, _)| *ok),
@@ -515,6 +578,61 @@ fn anchored_session_window(
     let after = after.unwrap_or(u32::MAX) as usize;
     let start = lines.len().saturating_sub(before.saturating_add(1));
     let end = (start + after + 1).min(lines.len());
+    Ok(AnchoredText {
+        uri: uri.clone(),
+        lines: lines[start..end].to_vec(),
+    })
+}
+
+const DEFAULT_READ_WINDOW: usize = 200;
+
+fn session_read_window(
+    uri: &crate::ResourceUri,
+    value: &Value,
+    at: Option<&crate::Position>,
+    before: Option<u32>,
+    after: Option<u32>,
+) -> Result<AnchoredText, KernelError> {
+    let events = value["events"].as_array().cloned().unwrap_or_default();
+    let lines = events
+        .iter()
+        .filter_map(|event| {
+            Some(AnchoredLine {
+                anchor: Anchor::from_tokens(vec![event["seq"].as_u64()?.to_string()]),
+                text: event["data"].as_str()?.to_owned(),
+                ending: crate::LineEnding::Lf,
+            })
+        })
+        .collect::<Vec<_>>();
+    let at = at.unwrap_or(&crate::Position::Top);
+    let index = match at {
+        crate::Position::Top => 0,
+        crate::Position::Bottom => lines.len(),
+        crate::Position::At(anchor) => lines
+            .iter()
+            .position(|line| &line.anchor == anchor)
+            .ok_or_else(|| KernelError::StaleAnchor {
+                message: format!("read anchor does not resolve: {anchor}"),
+            })?,
+    };
+    if matches!(at, crate::Position::Top) && before.is_some()
+        || matches!(at, crate::Position::Bottom) && after.is_some()
+    {
+        return Err(KernelError::InvalidRequest {
+            message: "read window is invalid for its position".to_owned(),
+        });
+    }
+    let before = before.map_or(DEFAULT_READ_WINDOW, |value| value as usize);
+    let after = after.map_or(DEFAULT_READ_WINDOW, |value| value as usize);
+    let (start, end) = match at {
+        crate::Position::Bottom => (index.saturating_sub(before), index),
+        _ => (
+            index.saturating_sub(before),
+            index
+                .saturating_add(after.saturating_add(1))
+                .min(lines.len()),
+        ),
+    };
     Ok(AnchoredText {
         uri: uri.clone(),
         lines: lines[start..end].to_vec(),
@@ -603,12 +721,14 @@ mod tests {
         kernel.register(handler.clone()).await;
         kernel.register_typed(handler).await;
         let uri = ResourceUri::parse("session://local/typed").unwrap();
-        assert!(
-            kernel
-                .execute(request(Verb::Write, "session://local/typed", Value::Null))
-                .await
-                .ok
-        );
+        let created = kernel
+            .execute_operation(crate::Operation::Write(vec![crate::WriteRequest {
+                uri: uri.clone(),
+                content: String::new(),
+            }]))
+            .await
+            .unwrap();
+        assert!(matches!(created, crate::OperationResult::Write(ref values) if values[0].is_ok()));
         let send = kernel
             .execute_operation(crate::Operation::Send(vec![crate::SendRequest {
                 uri: uri.clone(),
@@ -617,11 +737,23 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(send, crate::OperationResult::Send(ref values) if values[0].is_ok()));
+        let read = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: uri.clone(),
+                at: Some(crate::Position::Top),
+                before: None,
+                after: Some(10),
+            }]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(read, crate::OperationResult::Read(ref values) if values[0].as_ref().is_ok_and(|value| matches!(value, crate::ReadResult::Text(text) if text.lines[0].text == "hello")))
+        );
         let poll = kernel
             .execute_operation(crate::Operation::Poll(crate::PollRequest {
                 targets: vec![crate::PollTarget {
                     uri: uri.clone(),
-                    from_position: None,
+                    from_position: Some(crate::Position::Top),
                 }],
                 until: None,
                 before: None,
@@ -633,6 +765,95 @@ mod tests {
             panic!("wrong typed poll result")
         };
         assert_eq!(value.text[0].lines[0].text, "hello");
+    }
+
+    #[test]
+    fn poll_timeout_atoms_have_independent_deadlines_and_regex_semantics() {
+        let condition = crate::PollCondition::All(vec![
+            crate::PollCondition::Atom(PollAtom::Timeout(1_000)),
+            crate::PollCondition::Atom(PollAtom::Timeout(5_000)),
+        ]);
+        assert!(!evaluate_condition(&condition, &[], Duration::from_millis(1_000)).0);
+        assert!(evaluate_condition(&condition, &[], Duration::from_millis(5_000)).0);
+
+        let regex = crate::PollCondition::Atom(PollAtom::Regex(crate::RegexAtom {
+            target: 0,
+            pattern: "^hello$".to_owned(),
+        }));
+        let snapshots = vec![json!({"events": [{"data": "say hello there"}]})];
+        assert!(!evaluate_condition(&regex, &snapshots, Duration::ZERO).0);
+        let snapshots = vec![json!({"events": [{"data": "hello"}]})];
+        assert!(evaluate_condition(&regex, &snapshots, Duration::ZERO).0);
+    }
+
+    #[tokio::test]
+    async fn typed_poll_bottom_is_invocation_cursor_and_anchor_is_exclusive() {
+        let handler = SessionHandler::new();
+        let kernel = Kernel::new();
+        kernel.register_typed(handler.clone()).await;
+        kernel.register(handler.clone()).await;
+        let uri = ResourceUri::parse("session://local/cursors").unwrap();
+        kernel
+            .execute(request(Verb::Write, "session://local/cursors", Value::Null))
+            .await;
+        kernel
+            .execute(request(
+                Verb::Send,
+                "session://local/cursors",
+                json!({"value": "before"}),
+            ))
+            .await;
+
+        let poll = kernel.clone();
+        let waiting = tokio::spawn(async move {
+            poll.execute_operation(crate::Operation::Poll(crate::PollRequest {
+                targets: vec![crate::PollTarget {
+                    uri: uri.clone(),
+                    from_position: None,
+                }],
+                until: None,
+                before: None,
+                after: None,
+            }))
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!waiting.is_finished());
+        kernel
+            .execute(request(
+                Verb::Send,
+                "session://local/cursors",
+                json!({"value": "after"}),
+            ))
+            .await;
+        let result = waiting.await.unwrap().unwrap();
+        let crate::OperationResult::Poll(Ok(result)) = result else {
+            panic!("wrong poll result")
+        };
+        assert_eq!(result.text[0].lines[0].text, "after");
+
+        let first_anchor = Anchor::from_tokens(vec!["0".to_owned()]);
+        let poll = kernel
+            .execute_operation(crate::Operation::Poll(crate::PollRequest {
+                targets: vec![crate::PollTarget {
+                    uri: ResourceUri::parse("session://local/cursors").unwrap(),
+                    from_position: Some(crate::Position::At(first_anchor)),
+                }],
+                until: Some(crate::PollCondition::Atom(PollAtom::Changed(0))),
+                before: None,
+                after: None,
+            }))
+            .await
+            .unwrap();
+        let crate::OperationResult::Poll(Ok(result)) = poll else {
+            panic!("wrong anchored poll result")
+        };
+        assert!(
+            result.text[0]
+                .lines
+                .iter()
+                .all(|line| line.text != "before")
+        );
     }
 
     #[tokio::test]

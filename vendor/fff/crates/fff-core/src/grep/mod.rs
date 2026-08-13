@@ -8,7 +8,7 @@ mod grep;
 pub use grep::*;
 
 mod fuzzy_grep;
-pub use fuzzy_grep::{fuzzy_line_matches, fuzzy_match_score};
+pub use fuzzy_grep::{SnapshotMatch, fuzzy_line_matches, fuzzy_match_score, grep_snapshot};
 mod multi_pattern;
 mod prefilter;
 mod regex;

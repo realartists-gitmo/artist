@@ -17,6 +17,7 @@ tempfile = "3"
 teca = "1.0.0"
 fff-search = { path = "../../vendor/fff/crates/fff-core" }
 regex = "1"
+futures = "0.3"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 

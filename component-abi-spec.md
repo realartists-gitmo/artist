@@ -100,6 +100,10 @@ may instead declare its own `tool.wit`; it must export a root `invoke` function
 (or the interface name declared by its contract). The host reflects that
 function's WIT parameter/result types only at the outer provider adapter,
 while component-to-kernel calls still use the shared typed host worlds.
+Package-local WIT imports are resolved against active package contracts during
+activation. The registry links imported typed exports to the active dependency
+generation; an unsatisfied or incompatible custom import rejects activation
+before the new version becomes visible.
 
 The legacy generic component world remains available only for compatibility
 with pre-typed packages and is not a universal-verb or package-local execution

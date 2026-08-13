@@ -55,33 +55,45 @@ fn poll_timeout(condition: &Option<crate::PollCondition>) -> Option<u64> {
 fn evaluate_poll_condition(
     condition: Option<&crate::PollCondition>,
     results: &[crate::PollResult],
-    timed_out: bool,
+    elapsed: tokio::time::Duration,
 ) -> (bool, Vec<crate::PollAtom>) {
     let default = crate::PollCondition::Atom(crate::PollAtom::Changed(0));
     fn atom(
         atom: &crate::PollAtom,
         results: &[crate::PollResult],
-        timed_out: bool,
+        elapsed: tokio::time::Duration,
     ) -> (bool, Vec<crate::PollAtom>) {
         let ok = match atom {
             crate::PollAtom::Changed(target) => results.get(*target as usize).is_some_and(|result| result.text.iter().any(|text| !text.lines.is_empty())),
-            crate::PollAtom::Regex(regex) => results.get(regex.target as usize).is_some_and(|result| result.text.iter().flat_map(|text| &text.lines).any(|line| line.text.contains(&regex.pattern))),
+            crate::PollAtom::Regex(regex) => results
+                .get(regex.target as usize)
+                .is_some_and(|result| {
+                    regex::Regex::new(&regex.pattern).is_ok_and(|regex| {
+                        result
+                            .text
+                            .iter()
+                            .flat_map(|text| &text.lines)
+                            .any(|line| regex.is_match(&line.text))
+                    })
+                }),
             crate::PollAtom::Terminated(target) => results.get(*target as usize).is_some_and(|result| result.satisfied.iter().any(|item| matches!(item, crate::PollAtom::Terminated(found) if found == target))),
-            crate::PollAtom::Timeout(milliseconds) => timed_out || *milliseconds == 0,
+            crate::PollAtom::Timeout(milliseconds) => {
+                elapsed >= tokio::time::Duration::from_millis(*milliseconds)
+            }
         };
         (ok, ok.then(|| vec![atom.clone()]).unwrap_or_default())
     }
     fn walk(
         condition: &crate::PollCondition,
         results: &[crate::PollResult],
-        timed_out: bool,
+        elapsed: tokio::time::Duration,
     ) -> (bool, Vec<crate::PollAtom>) {
         match condition {
-            crate::PollCondition::Atom(atom_value) => atom(atom_value, results, timed_out),
+            crate::PollCondition::Atom(atom_value) => atom(atom_value, results, elapsed),
             crate::PollCondition::All(children) => {
                 let values = children
                     .iter()
-                    .map(|child| walk(child, results, timed_out))
+                    .map(|child| walk(child, results, elapsed))
                     .collect::<Vec<_>>();
                 (
                     values.iter().all(|(ok, _)| *ok),
@@ -91,7 +103,7 @@ fn evaluate_poll_condition(
             crate::PollCondition::Any(children) => {
                 let values = children
                     .iter()
-                    .map(|child| walk(child, results, timed_out))
+                    .map(|child| walk(child, results, elapsed))
                     .collect::<Vec<_>>();
                 (
                     values.iter().any(|(ok, _)| *ok),
@@ -104,7 +116,7 @@ fn evaluate_poll_condition(
             }
         }
     }
-    walk(condition.unwrap_or(&default), results, timed_out)
+    walk(condition.unwrap_or(&default), results, elapsed)
 }
 
 /// URI router and universal operation dispatcher.
@@ -372,8 +384,8 @@ impl Kernel {
                 }
             }
         }
-        paths.sort_by_key(ToString::to_string);
-        paths.dedup();
+        let mut seen = std::collections::HashSet::new();
+        paths.retain(|path| seen.insert(path.clone()));
         Ok(OperationResult::Find(Ok(paths)))
     }
 
@@ -463,35 +475,41 @@ impl Kernel {
         let started = tokio::time::Instant::now();
         let timeout_ms = poll_timeout(&request.until);
         loop {
-            let mut results = Vec::with_capacity(request.targets.len());
-            for target in &request.targets {
+            let slice_ms = timeout_ms
+                .map(|ms| {
+                    ms.saturating_sub(started.elapsed().as_millis() as u64)
+                        .min(50)
+                })
+                .unwrap_or(50);
+            let futures = request.targets.iter().map(|target| {
                 let operation = Operation::Poll(crate::PollRequest {
                     targets: vec![target.clone()],
-                    until: None,
+                    until: Some(crate::PollCondition::Atom(crate::PollAtom::Timeout(
+                        slice_ms,
+                    ))),
                     before: request.before,
                     after: request.after,
                 });
-                let result = self
-                    .execute_typed_item(handlers, operation, host.clone(), context.clone())
-                    .await?;
-                let OperationResult::Poll(result) = result else {
+                self.execute_typed_item(handlers, operation, host.clone(), context.clone())
+            });
+            let mut results = Vec::with_capacity(request.targets.len());
+            for result in futures::future::join_all(futures).await {
+                let OperationResult::Poll(result) = result? else {
                     return Err(KernelError::Handler {
                         message: "typed poll returned the wrong result variant".to_owned(),
                     });
                 };
                 results.push(result?);
             }
-            let timed_out = timeout_ms
-                .is_some_and(|ms| started.elapsed() >= tokio::time::Duration::from_millis(ms));
+            let elapsed = started.elapsed();
             let (satisfied, atoms) =
-                evaluate_poll_condition(request.until.as_ref(), &results, timed_out);
-            if satisfied || timed_out {
+                evaluate_poll_condition(request.until.as_ref(), &results, elapsed);
+            if satisfied {
                 return Ok(OperationResult::Poll(Ok(crate::PollResult {
                     text: results.into_iter().flat_map(|result| result.text).collect(),
                     satisfied: atoms,
                 })));
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     }
 
