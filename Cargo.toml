@@ -1,16 +1,13 @@
-cargo-features = ["profile-rustflags"]
-
 [workspace]
 members = [
+    "crates/artist-kernel",
+    "crates/artist-ast",
     "crates/llm-provider",
     "crates/artist-cli",
     "crates/artist-agent",
     "crates/artist-herdr",
-    "crates/artist-tools",
     "crates/artist-session",
-    "crates/artist-rules",
-    "crates/hashline-tools",
-    "crates/artist-extensions",
+    "crates/artist-component",
 ]
 resolver = "3"
 
@@ -23,7 +20,6 @@ rust-version = "1.97"
 split-debuginfo = "unpacked"
 
 [profile.release]
-rustflags = ["-Z", "threads=0"]
 # Incremental release artifacts can produce missing LLVM-local symbols when
 # combined with parallel backend codegen, particularly in Wasmtime-heavy crates.
 incremental = false
@@ -45,7 +41,6 @@ overflow-checks = false
 strip = true
 lto = "fat"
 codegen-units = 1
-rustflags = ["-C", "target-cpu=native", "-Z", "tune-cpu=native"]
 
 # Profiling builds: release codegen + debug symbols, separate cache so samply
 # runs never invalidate the plain release artifacts.

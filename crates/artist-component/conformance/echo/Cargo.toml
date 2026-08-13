@@ -1,0 +1,24 @@
+[package]
+name = "artist-component-echo"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57.1"
+
+[package.metadata]
+artist-component-abi = "0.1"
+
+[profile.product]
+inherits = "release"
+opt-level = 3
+incremental = false
+overflow-checks = false
+strip = true
+lto = "fat"
+codegen-units = 1

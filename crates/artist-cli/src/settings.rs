@@ -3,12 +3,8 @@
 //! override layer (CLI flags / in-session changes).
 //!
 //! Resolution rules:
-//! - **Scalars** (`model`, `reasoning_effort`, compaction fields) take the
+//! - **Scalars** (`model`, `reasoning_effort`) take the
 //!   value from the highest-precedence layer that sets them: override > project > global.
-//! - **Restriction lists** (denied tools) are **unioned** across every layer,
-//!   including the pre-existing global `disabled_tools` in `providers.toml`, so
-//!   a project can only ever *tighten* access, never silently loosen it.
-//!
 //! `settings.toml` is deliberately separate from `providers.toml`: the latter
 //! holds provider identity and secrets, the former holds overridable behaviour.
 
@@ -32,72 +28,6 @@ pub struct Settings {
     /// The reasoning effort in this scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
-    #[serde(default, skip_serializing_if = "CompactionSettings::is_empty")]
-    pub compaction: CompactionSettings,
-    #[serde(default, skip_serializing_if = "Permissions::is_empty")]
-    pub permissions: Permissions,
-}
-
-/// Optional per-layer compaction values. The effective defaults match Pi.
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CompactionSettings {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    #[serde(
-        default,
-        alias = "reserveTokens",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub reserve_tokens: Option<u64>,
-    #[serde(
-        default,
-        alias = "keepRecentTokens",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub keep_recent_tokens: Option<u64>,
-}
-
-impl CompactionSettings {
-    fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.reserve_tokens.is_none() && self.keep_recent_tokens.is_none()
-    }
-}
-
-/// Resolved compaction policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompactionConfig {
-    pub enabled: bool,
-    pub reserve_tokens: u64,
-    pub keep_recent_tokens: u64,
-}
-
-impl Default for CompactionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
-        }
-    }
-}
-
-/// The access-policy section. Today the only primitive is a tool denylist; it
-/// is structured as its own table so richer policy can be added without
-/// reshaping the file.
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Permissions {
-    /// Tool names the agent may not use in this scope. Unioned with the global
-    /// `disabled_tools` and across layers.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<String>,
-}
-
-impl Permissions {
-    fn is_empty(&self) -> bool {
-        self.deny.is_empty()
-    }
 }
 
 impl Settings {
@@ -126,22 +56,12 @@ pub struct Overrides {
 pub struct EffectiveSettings {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
-    pub compaction: CompactionConfig,
-    /// The full set of tool names the agent may not use — the union of the
-    /// global `disabled_tools` and every layer's `permissions.deny`.
-    pub denied_tools: Vec<String>,
 }
 
 impl EffectiveSettings {
     /// Resolve the global and project layers plus the override layer.
     /// `base_denied` is the pre-existing global tool gating (the
-    /// `providers.toml` `disabled_tools`), folded into the union.
-    pub fn resolve(
-        global: &Settings,
-        project: &Settings,
-        overrides: &Overrides,
-        base_denied: &[String],
-    ) -> Self {
+    pub fn resolve(global: &Settings, project: &Settings, overrides: &Overrides) -> Self {
         let model = overrides
             .model
             .clone()
@@ -152,39 +72,9 @@ impl EffectiveSettings {
             .clone()
             .or_else(|| project.reasoning_effort.clone())
             .or_else(|| global.reasoning_effort.clone());
-        let defaults = CompactionConfig::default();
-        let compaction = CompactionConfig {
-            enabled: project
-                .compaction
-                .enabled
-                .or(global.compaction.enabled)
-                .unwrap_or(defaults.enabled),
-            reserve_tokens: project
-                .compaction
-                .reserve_tokens
-                .or(global.compaction.reserve_tokens)
-                .unwrap_or(defaults.reserve_tokens),
-            keep_recent_tokens: project
-                .compaction
-                .keep_recent_tokens
-                .or(global.compaction.keep_recent_tokens)
-                .unwrap_or(defaults.keep_recent_tokens),
-        };
-        let mut denied_tools = Vec::new();
-        for name in base_denied
-            .iter()
-            .chain(&global.permissions.deny)
-            .chain(&project.permissions.deny)
-        {
-            if !denied_tools.iter().any(|existing| existing == name) {
-                denied_tools.push(name.clone());
-            }
-        }
         Self {
             model,
             reasoning_effort,
-            compaction,
-            denied_tools,
         }
     }
 
@@ -205,22 +95,15 @@ impl EffectiveSettings {
 
 /// Load and resolve the effective settings for a project: the global file at
 /// `<config_root>/settings.toml` and the project file at
-/// `<project>/.artist/settings.toml`, folding in `base_denied` (the global
-/// `disabled_tools`) and any CLI/session `overrides`.
+/// `<project>/.artist/settings.toml` and any CLI/session `overrides`.
 pub fn load_effective(
     config_root: &Path,
     project: &Path,
     overrides: &Overrides,
-    base_denied: &[String],
 ) -> Result<EffectiveSettings> {
     let global = Settings::load(&config_root.join(SETTINGS_FILE))?;
     let project = Settings::load(&project.join(".artist").join(SETTINGS_FILE))?;
-    Ok(EffectiveSettings::resolve(
-        &global,
-        &project,
-        overrides,
-        base_denied,
-    ))
+    Ok(EffectiveSettings::resolve(&global, &project, overrides))
 }
 
 #[cfg(test)]
@@ -257,7 +140,7 @@ mod tests {
     fn project_scalar_overrides_global() {
         let global = from_str("model = \"global-model\"\nreasoning_effort = \"low\"\n");
         let project = from_str("model = \"project-model\"\n");
-        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
+        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default());
         // Project wins for model; global fills in the unset reasoning.
         assert_eq!(effective.model.as_deref(), Some("project-model"));
         assert_eq!(effective.reasoning_effort.as_deref(), Some("low"));
@@ -271,7 +154,7 @@ mod tests {
             model: Some("cli-model".to_owned()),
             reasoning_effort: None,
         };
-        let effective = EffectiveSettings::resolve(&global, &project, &overrides, &[]);
+        let effective = EffectiveSettings::resolve(&global, &project, &overrides);
         assert_eq!(effective.model.as_deref(), Some("cli-model"));
     }
 
@@ -281,44 +164,9 @@ mod tests {
             &Settings::default(),
             &Settings::default(),
             &Overrides::default(),
-            &[],
         );
         assert_eq!(effective.model, None);
         assert_eq!(effective.reasoning_effort, None);
-        assert!(effective.denied_tools.is_empty());
-    }
-
-    #[test]
-    fn compaction_defaults_and_project_overrides_resolve_per_field() {
-        let global = from_str(
-            "[compaction]\nenabled = false\nreserve_tokens = 12000\nkeepRecentTokens = 9000\n",
-        );
-        let project = from_str("[compaction]\nenabled = true\nreserveTokens = 8000\n");
-
-        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
-
-        assert_eq!(
-            effective.compaction,
-            CompactionConfig {
-                enabled: true,
-                reserve_tokens: 8_000,
-                keep_recent_tokens: 9_000,
-            }
-        );
-        assert_eq!(
-            EffectiveSettings::default().compaction,
-            CompactionConfig::default()
-        );
-    }
-
-    #[test]
-    fn denied_tools_union_across_layers_and_base_without_duplicates() {
-        let global = from_str("[permissions]\ndeny = [\"write\", \"bash\"]\n");
-        let project = from_str("[permissions]\ndeny = [\"edit\", \"bash\"]\n");
-        // providers.toml already disabled `write`.
-        let base = ["write".to_owned()];
-        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &base);
-        assert_eq!(effective.denied_tools, ["write", "bash", "edit"]);
     }
 
     #[test]
@@ -330,26 +178,19 @@ mod tests {
         std::fs::create_dir_all(project.join(".artist")).unwrap();
         std::fs::write(
             config_root.join("settings.toml"),
-            "model = \"global\"\nreasoning_effort = \"low\"\n[permissions]\ndeny = [\"bash\"]\n",
+            "model = \"global\"\nreasoning_effort = \"low\"\n",
         )
         .unwrap();
         std::fs::write(
             project.join(".artist/settings.toml"),
-            "model = \"project\"\n[permissions]\ndeny = [\"write\"]\n",
+            "model = \"project\"\n",
         )
         .unwrap();
 
-        let effective = load_effective(
-            &config_root,
-            &project,
-            &Overrides::default(),
-            &["edit".to_owned()],
-        )
-        .unwrap();
+        let effective = load_effective(&config_root, &project, &Overrides::default()).unwrap();
 
         assert_eq!(effective.model.as_deref(), Some("project"));
         assert_eq!(effective.reasoning_effort.as_deref(), Some("low"));
-        assert_eq!(effective.denied_tools, ["edit", "bash", "write"]);
     }
 
     #[test]
@@ -365,19 +206,8 @@ mod tests {
             &dir.path().join("config"),
             &dir.path().join("project"),
             &Overrides::default(),
-            &[],
         )
         .unwrap();
         assert_eq!(effective, EffectiveSettings::default());
-    }
-
-    #[test]
-    fn project_cannot_loosen_a_global_denial() {
-        // A project setting has no way to *remove* a global/base denial — the
-        // union only adds. `write` stays denied even though the project omits it.
-        let global = from_str("[permissions]\ndeny = [\"write\"]\n");
-        let project = from_str("model = \"m\"\n");
-        let effective = EffectiveSettings::resolve(&global, &project, &Overrides::default(), &[]);
-        assert!(effective.denied_tools.iter().any(|t| t == "write"));
     }
 }

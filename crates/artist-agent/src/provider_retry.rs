@@ -83,10 +83,6 @@ mod tests {
             prompt_cache_key(project, "model", "main:one"),
             prompt_cache_key(project, "model", "main:two")
         );
-        assert_ne!(
-            prompt_cache_key(project, "model", "main:one"),
-            prompt_cache_key(project, "model", "delegate:one")
-        );
     }
 
     #[test]

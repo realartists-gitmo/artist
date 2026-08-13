@@ -1,46 +1,27 @@
 //! The Artist agent loop, built on Rig.
 
 mod capture;
-pub mod compaction;
 mod conversation;
-mod delegate;
-mod delegate_jobs;
-#[cfg(test)]
-mod delegate_tests;
 mod lifecycle;
-pub mod mcp;
 pub mod openai_responses;
 mod prompt_config;
 mod provider_retry;
-mod resources;
+mod resource_tool;
 mod rig_provider;
-mod ttsr;
-#[cfg(test)]
-mod ttsr_tests;
+mod steering;
 
 pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
-pub use resources::AvailableSkill;
-mod steering;
-mod subagents;
-mod tool_prompt;
-
 pub use steering::SteeringHandle;
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use artist_rules::matcher::RuleSet;
-use artist_rules::state::RulesHandle;
-use artist_rules::types::Firing;
-use artist_session::{
-    Recorder, RuleFired, RuleInjection, RunFinished, RunStarted, ToolOutcomeRecord,
-};
-use artist_tools::ToolBundle;
+use artist_session::{Recorder, RunFinished, RunStarted, ToolOutcomeRecord};
 use base64::Engine;
 use futures::StreamExt;
 use llm_provider::SavedProvider;
 use rig_agent::client::AgentClientExt;
-use rig_agent::{agent::MultiTurnStreamItem, prelude::PromptError, streaming::StreamingPrompt};
+use rig_agent::{agent::MultiTurnStreamItem, streaming::StreamingPrompt};
 use rig_core::{
     OneOrMany,
     client::CompletionClient,
@@ -54,31 +35,13 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use capture::{CaptureHook, ToolMeta};
-use ttsr::{TtsrHook, TtsrShared, reminder_message};
+use resource_tool::named_tools;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PromptEvent {
     ReasoningSummaryDelta(String),
     TextDelta(String),
-    /// A delegated agent began running. Its subsequent stream events are
-    /// wrapped in [`PromptEvent::SubagentEvent`] with the same id.
-    SubagentStarted {
-        id: String,
-        role: String,
-        prompt: String,
-    },
-    /// One event from a delegated agent's own streaming tool loop.
-    SubagentEvent {
-        id: String,
-        event: Box<PromptEvent>,
-    },
-    /// A delegated agent stopped. `outcome` mirrors the persisted
-    /// `delegate.finished` lifecycle value.
-    SubagentFinished {
-        id: String,
-        outcome: String,
-    },
     ToolCall {
         id: String,
         name: String,
@@ -101,13 +64,6 @@ pub enum PromptEvent {
     CompletionUsage {
         total_tokens: u64,
     },
-    /// A stream rule matched: the run aborted, the reminder was injected,
-    /// and the run is retrying from the same point. The UI should clear any
-    /// partial streaming output and show the rule card.
-    RuleFired {
-        rule: String,
-        matched: String,
-    },
 }
 
 /// How a `stream_chat` run ended (errors surface via `Result`).
@@ -118,24 +74,22 @@ pub enum RunOutcome {
 }
 
 /// Everything a run needs beyond the prompt: shared handles owned by the
-/// CLI session. `Default` gives inert handles (no recording, no rules, no
+/// CLI session. `Default` gives inert handles (no recording, no
 /// cancellation) — the configuration tests and simple embedders want.
 #[derive(Clone)]
 pub struct SessionHandles {
+    /// The universal resource kernel from which named model tools are built
+    /// for each agent attempt.
+    pub kernel: artist_kernel::Kernel,
     pub steering: SteeringHandle,
-    pub rules: RulesHandle,
-    pub rule_set: Arc<RuleSet>,
     pub recorder: Recorder,
     pub memory: Arc<dyn ConversationMemory>,
     pub conversation_id: String,
     /// Provider-private opaque context; currently only consumed by the opt-in OpenAI adapter.
     pub provider_context: artist_session::ProviderContextHandle,
-    /// Effective model context window from the normalized catalog. Unknown
-    /// models use the adapter's conservative fallback.
-    pub effective_context_window: Option<u64>,
     /// Request OpenAI priority processing for this session.
     pub fast_mode: bool,
-    /// Non-display lifecycle notifications remain live for background delegates.
+    /// Non-display lifecycle notifications remain live across turns.
     pub lifecycle: LifecycleEmitter,
     pub cancel: CancellationToken,
 }
@@ -143,14 +97,12 @@ pub struct SessionHandles {
 impl Default for SessionHandles {
     fn default() -> Self {
         Self {
+            kernel: artist_kernel::Kernel::new(),
             steering: SteeringHandle::default(),
-            rules: RulesHandle::default(),
-            rule_set: Arc::new(RuleSet::compile(Vec::new())),
             recorder: Recorder::noop(),
             memory: Arc::new(InMemoryConversationMemory::new()),
             conversation_id: "default".to_owned(),
             provider_context: artist_session::ProviderContextHandle::noop(),
-            effective_context_window: None,
             fast_mode: false,
             lifecycle: LifecycleEmitter::default(),
             cancel: CancellationToken::new(),
@@ -228,17 +180,8 @@ impl From<String> for ChatInput {
     }
 }
 
-/// The tool surfaces available to a run: native tools, MCP proxies,
-/// extension-provided tools, and the user's disabled-tool list.
-pub struct ToolContext<'a> {
-    pub native: &'a ToolBundle,
-    pub mcp: &'a mcp::McpManager,
-    pub extensions: Option<&'a artist_extensions::Manager>,
-    pub disabled: &'a [String],
-}
-
 /// Sends the small completion used by provider health checks through the same
-/// typed Rig client dispatch as normal and delegated runs.
+/// typed Rig client dispatch as normal runs.
 pub async fn provider_health_check(provider: &SavedProvider, model: &str) -> Result<String> {
     provider_health_check_with_device_flow(provider, model, false).await
 }
@@ -264,97 +207,94 @@ pub async fn provider_health_check_with_device_flow(
 pub async fn stream_chat(
     provider: &SavedProvider,
     input: &ChatInput,
-    tool_context: ToolContext<'_>,
     handles: SessionHandles,
     on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome> {
     match rig_provider::RigClient::build(provider)? {
         rig_provider::RigClient::ArtistOpenAi(client) => {
-            let client = client
-                .with_provider_context(
-                    handles.conversation_id.clone(),
-                    handles.provider_context.clone(),
-                )
-                .with_effective_context_window(handles.effective_context_window);
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            let client = client.with_provider_context(
+                handles.conversation_id.clone(),
+                handles.provider_context.clone(),
+            );
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Copilot(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::OpenAiChat(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Anthropic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Cohere(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Gemini(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::DeepSeek(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Groq(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::HuggingFace(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Hyperbolic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Mira(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Mistral(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::OpenRouter(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Perplexity(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Together(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::XAi(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Azure(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Llamafile(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Ollama(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Minimax(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::MinimaxAnthropic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::Moonshot(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::MoonshotAnthropic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::XiaomiMiMo(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::XiaomiMiMoAnthropic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::ZAi(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
         rig_provider::RigClient::ZAiAnthropic(client) => {
-            stream_chat_with(client, provider, input, tool_context, handles, on_event).await
+            stream_chat_with(client, provider, input, handles, on_event).await
         }
     }
 }
@@ -363,75 +303,36 @@ async fn stream_chat_with<C: CompletionClient>(
     client: C,
     provider: &SavedProvider,
     input: &ChatInput,
-    tool_context: ToolContext<'_>,
     handles: SessionHandles,
     mut on_event: impl FnMut(PromptEvent) -> Result<()>,
 ) -> Result<RunOutcome>
 where
     C::CompletionModel: 'static,
 {
-    let tools = tool_context.native;
-    let mcp = tool_context.mcp;
     let model = provider
         .model
         .as_deref()
         .context("no model selected; run `artist model` first")?;
 
-    let resources = resources::Resources::discover(tools.project_root());
-    let subagents = subagents::Subagents::discover(tools.project_root());
-    handles.rules.note_user_turn();
-
-    let mut seed_history = handles
+    let seed_history = handles
         .memory
         .load(&handles.conversation_id)
         .await
         .context("load conversation memory")?;
     let durable_history_len = seed_history.len();
-    let mut seed_prompt = user_message(input);
-    // Skill instructions depend on what the user just typed, so ride them on
-    // the user turn instead of folding them into the (otherwise stable)
-    // preamble — that keeps the preamble a stable prompt-cache prefix so the
-    // history behind it can be reused turn to turn.
-    let skill_section = resources.explicit_skill_section(&input.text);
-    if !skill_section.is_empty()
-        && let Message::User { content } = &mut seed_prompt
-    {
-        content.insert(0, UserContent::text(skill_section));
-    }
-    let fork_context = Arc::new({
-        let mut context = seed_history.clone();
-        context.push(seed_prompt.clone());
-        context
-    });
-    // Delegate tools execute inside `stream.next()`. A separate channel lets
-    // their events wake this outer driver while that future is still pending,
-    // instead of buffering the entire child transcript until the tool returns.
-    let (subagent_events_tx, mut subagent_events_rx) =
-        tokio::sync::mpsc::unbounded_channel::<PromptEvent>();
-    let visible_steering = handles.steering.clone();
+    let seed_prompt = user_message(input);
     let tool_meta = ToolMeta::default();
-    let mcp_tools = mcp.tools().await;
 
-    // Per-run abort-retry budget: spans this turn's retries but is isolated
-    // from concurrent delegate runs (each has its own counter).
-    let retry_budget = handles.rules.retry_budget();
-    let mut retries_used = 0u32;
     // Keep cache affinity within a conversation rather than pinning every main
-    // agent and delegate in the project to the same provider route.
+    // agent in the project to the same provider route.
     let mut overload_retry = provider_retry::OverloadRetry::new(
-        tools.project_root(),
+        std::path::Path::new("."),
         model,
         &format!("main:{}", handles.conversation_id),
     );
     'retry: loop {
         let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
         let run_recorder = handles.recorder.with_run(&run_id);
-        let ttsr = TtsrShared::new(
-            handles.rules.clone(),
-            Arc::clone(&handles.rule_set),
-            false,
-            retries_used < retry_budget,
-        );
 
         let mut builder = client.agent(model);
         // These fields belong to the ChatGPT subscription transport. Keep them
@@ -442,37 +343,10 @@ where
             provider.api,
             overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
-            handles.effective_context_window,
             handles.fast_mode,
         ) {
             builder = builder.additional_params(params);
         }
-        let mut registered: Vec<rig_core::tool::PortableDynamicTool> = vec![
-            tool_prompt::dynamic(tools.bash.clone()),
-            tool_prompt::dynamic(tools.read.clone()),
-            tool_prompt::dynamic(tools.find.clone()),
-            tool_prompt::dynamic(tools.grep.clone()),
-            tool_prompt::dynamic(tools.edit.clone()),
-            tool_prompt::dynamic(tools.write.clone()),
-            tool_prompt::dynamic(resources.skill_tool()),
-            tool_prompt::dynamic(delegate::Delegate::new(
-                provider.clone(),
-                tools.clone(),
-                Arc::clone(&fork_context),
-                resources.clone(),
-                delegate::DelegateRuntime {
-                    handles: handles.clone(),
-                    events: subagent_events_tx.clone(),
-                },
-                tool_context.disabled.to_vec(),
-                subagents.clone(),
-            )),
-        ];
-        registered.extend(mcp_tools.iter().cloned());
-        if let Some(extensions) = tool_context.extensions {
-            registered.extend(extensions.tools());
-        }
-        tool_prompt::retain_enabled(&mut registered, tool_context.disabled);
         let (main_prompt, prompt_diagnostics) = prompt_config::main_prompt();
         let prompt_diagnostics = prompt_diagnostics
             .iter()
@@ -482,13 +356,9 @@ where
             "{}\n\n{}{}{}\nCurrent working directory: {}",
             main_prompt,
             prompt_diagnostics,
-            tool_prompt::render(&registered),
-            format!(
-                "{}<available_subagents>{}</available_subagents>",
-                resources.prompt_section(),
-                subagents.catalog()
-            ),
-            tools.project_root().display()
+            "Use the registered named tools for filesystem, repository, and live-resource operations. Tool definitions may be inspected and modified through the tools:// namespace when explicitly needed.",
+            "",
+            std::path::Path::new(".").display()
         );
         let persistence = conversation::PersistenceStatus::default();
         let attempt_memory = conversation::AttemptMemory::new(
@@ -500,17 +370,11 @@ where
         );
         let agent = builder
             .preamble(&system_prompt)
+            .dynamic_tools(named_tools(handles.kernel.clone()).await)
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
-            .dynamic_tools(
-                registered
-                    .into_iter()
-                    .map(rig_agent::tool::DynamicTool::from)
-                    .collect(),
-            )
             .add_hook(steering::SteeringHook(handles.steering.clone()))
             .add_hook(CaptureHook::new(tool_meta.clone()))
-            .add_hook(TtsrHook(Arc::clone(&ttsr)))
             .default_max_turns(usize::MAX)
             .build();
 
@@ -522,38 +386,28 @@ where
 
         let mut stream = agent.stream_prompt(seed_prompt.clone()).await;
         let mut streamed_assistant_text = String::new();
-        let mut streamed_turn = ttsr.turn();
-        // Retrying after any visible model or tool event could duplicate output
-        // or side effects. Provider overloads are retried only while pristine.
+        // Provider overloads are retried only while pristine.
         let mut attempt_observed = false;
         loop {
-            // A tool round trip can advance Rig to a new model turn before
-            // that turn emits text. Never retain the preceding turn's text as
-            // though it were a partial answer from the failed turn.
-            let current_turn = ttsr.turn();
-            if current_turn != streamed_turn {
-                streamed_assistant_text.clear();
-                streamed_turn = current_turn;
-            }
             let item = tokio::select! {
                 biased;
-                event = subagent_events_rx.recv() => {
-                    if let Some(event) = event {
-                        attempt_observed = true;
-                        on_event(event)?;
-                    }
-                    continue;
-                }
                 item = stream.next() => item,
                 _ = handles.cancel.cancelled() => {
                     drop(stream);
-                    let (committed, _) = ttsr.committed();
-                    let mut cancelled_delta = if committed.is_empty() {
+                    // Rig commits completed tool round trips straight through
+                    // AttemptMemory, so the durable session memory is the best
+                    // committed-state available on cancel.
+                    let committed = handles
+                        .memory
+                        .load(&handles.conversation_id)
+                        .await
+                        .unwrap_or_else(|_| seed_history.clone());
+                    let mut cancelled_delta = if committed.len() > durable_history_len {
+                        committed
+                    } else {
                         let mut fallback = seed_history.clone();
                         fallback.push(seed_prompt.clone());
                         fallback
-                    } else {
-                        committed
                     };
                     cancelled_delta = cancelled_delta
                         [durable_history_len.min(cancelled_delta.len())..]
@@ -575,14 +429,8 @@ where
                 run_recorder.record(RunFinished::Error {
                     error: error.to_string(),
                 });
-                let (committed, _) = ttsr.committed();
-                let mut interrupted_delta = if committed.is_empty() {
-                    let mut fallback = seed_history.clone();
-                    fallback.push(seed_prompt.clone());
-                    fallback
-                } else {
-                    committed
-                };
+                let mut interrupted_delta = seed_history.clone();
+                interrupted_delta.push(seed_prompt.clone());
                 interrupted_delta =
                     interrupted_delta[durable_history_len.min(interrupted_delta.len())..].to_vec();
                 conversation::retain_provider_interrupted_turn(
@@ -613,46 +461,17 @@ where
                 Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                     text,
                 ))) => {
-                    let turn = ttsr.turn();
-                    if turn != streamed_turn {
-                        streamed_assistant_text.clear();
-                        streamed_turn = turn;
-                    }
                     streamed_assistant_text.push_str(&text.text);
                     on_event(PromptEvent::TextDelta(text.text))?;
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
                     StreamedAssistantContent::ReasoningDelta {
                         // Handle both summary deltas (`id: None`) and raw
-                        // reasoning deltas (`id: Some`); the latter used to fall
-                        // through and be dropped, so reasoning-target rules
-                        // silently failed to match whenever the backend streamed
-                        // raw reasoning instead of a summary.
+                        // reasoning deltas (`id: Some`) for the live UI.
                         id: _,
                         reasoning,
                     },
                 )) => {
-                    // rig has no hook event for reasoning deltas, so
-                    // reasoning rules match here on the driver side.
-                    if ttsr.push_reasoning(&reasoning) {
-                        let firing = ttsr
-                            .take_pending()
-                            .expect("push_reasoning stashed the firing");
-                        drop(stream);
-                        let (committed, _) = ttsr.committed();
-                        seed_history = committed;
-                        // `committed` includes the current seed prompt; the
-                        // reminder becomes the new prompt.
-                        record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
-                            rule: firing.rule.0.clone(),
-                            matched: firing.matched.clone(),
-                        })?;
-                        run_recorder.record(RunFinished::Cancelled);
-                        seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
-                    }
                     on_event(PromptEvent::ReasoningSummaryDelta(reasoning))?;
                 }
                 Ok(MultiTurnStreamItem::StreamAssistantItem(
@@ -700,7 +519,8 @@ where
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let content = visible_steering
+                    let content = handles
+                        .steering
                         .take_original_result(&internal_call_id)
                         .unwrap_or(content);
                     let meta = tool_meta.take(&internal_call_id);
@@ -717,23 +537,6 @@ where
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    // A TTSR abort surfaces as PromptCancelled with the
-                    // committed history (rig excludes the partial turn).
-                    if let Some(firing) = ttsr.take_pending()
-                        && let rig_agent::agent::StreamingError::Prompt(boxed) = &error
-                        && let PromptError::PromptCancelled { chat_history, .. } = boxed.as_ref()
-                    {
-                        seed_history = chat_history.clone();
-                        record_firing_events(&run_recorder, &ttsr, &firing);
-                        on_event(PromptEvent::RuleFired {
-                            rule: firing.rule.0.clone(),
-                            matched: firing.matched.clone(),
-                        })?;
-                        run_recorder.record(RunFinished::Cancelled);
-                        seed_prompt = reminder_message(&firing);
-                        retries_used += 1;
-                        continue 'retry;
-                    }
                     let error_text = error.to_string();
                     run_recorder.record(RunFinished::Error {
                         error: error_text.clone(),
@@ -766,14 +569,8 @@ where
 
                     // Preserve the prompt and any partial answer just like a
                     // user cancellation, but tell the next turn why it ended.
-                    let (committed, _) = ttsr.committed();
-                    let mut interrupted_delta = if committed.is_empty() {
-                        let mut fallback = seed_history.clone();
-                        fallback.push(seed_prompt.clone());
-                        fallback
-                    } else {
-                        committed
-                    };
+                    let mut interrupted_delta = seed_history.clone();
+                    interrupted_delta.push(seed_prompt.clone());
                     interrupted_delta = interrupted_delta
                         [durable_history_len.min(interrupted_delta.len())..]
                         .to_vec();
@@ -799,7 +596,6 @@ pub(crate) fn request_params(
     api: Option<llm_provider::OpenAiApi>,
     cache_key: &str,
     reasoning_effort: Option<&str>,
-    effective_context_window: Option<u64>,
     fast_mode: bool,
 ) -> Option<serde_json::Value> {
     if provider == llm_provider::ProviderKind::Openai
@@ -813,16 +609,10 @@ pub(crate) fn request_params(
     {
         return None;
     }
-    // Leave output headroom within the catalog's already-normalized effective
-    // window. Only unknown metadata uses the conservative fixed fallback.
-    let compact_threshold = effective_context_window
-        .map(|window| window.saturating_mul(9) / 10)
-        .unwrap_or(100_000);
     let mut params = json!({
         "store": false,
         "include": ["reasoning.encrypted_content"],
         "prompt_cache_key": cache_key,
-        "context_management": [{"type": "compaction", "compact_threshold": compact_threshold}]
     });
     // Request a provider-generated trace for the live UI even when the model's
     // default effort is in use. Rig's memory policy is independent: streaming
@@ -847,23 +637,6 @@ pub(crate) fn request_params(
     Some(params)
 }
 
-/// Log rule bookkeeping; Rig conversation memory persists the reminder prompt
-/// when the retried run succeeds.
-pub(crate) fn record_firing_events(recorder: &Recorder, ttsr: &TtsrShared, firing: &Firing) {
-    recorder.record(RuleFired {
-        rule: firing.rule.0.clone(),
-        target: firing.target.as_str().to_owned(),
-        matched: firing.matched.clone(),
-        turn: ttsr.turn(),
-        per_turn: firing.fire == artist_rules::types::FirePolicy::PerTurn,
-    });
-    recorder.record(RuleInjection {
-        rule: firing.rule.0.clone(),
-        reminder: firing.reminder.clone(),
-        session_persistent: firing.persistence == artist_rules::types::Persistence::Session,
-    });
-}
-
 pub(crate) fn user_message(input: &ChatInput) -> Message {
     let mut content = vec![UserContent::text(input.text.clone())];
     content.extend(input.images.iter().map(|attachment| {
@@ -881,35 +654,6 @@ pub(crate) fn user_message(input: &ChatInput) -> Message {
     }
 }
 
-pub fn available_skills(project: &std::path::Path) -> Vec<AvailableSkill> {
-    resources::Resources::discover(project).available_skills()
-}
-
-/// Executes a prompt without prior context.
-pub async fn stream_prompt(
-    provider: &SavedProvider,
-    input: &str,
-    tools: &ToolBundle,
-    mcp: &mcp::McpManager,
-    handles: SessionHandles,
-    on_event: impl FnMut(PromptEvent) -> Result<()>,
-) -> Result<RunOutcome> {
-    let input = ChatInput::from(input.to_owned());
-    stream_chat(
-        provider,
-        &input,
-        ToolContext {
-            native: tools,
-            mcp,
-            extensions: None,
-            disabled: &[],
-        },
-        handles,
-        on_event,
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::request_params;
@@ -917,20 +661,13 @@ mod tests {
 
     #[test]
     fn reasoning_requests_a_live_summary_trace() {
-        let params = request_params(
-            ProviderKind::Chatgpt,
-            None,
-            "cache",
-            Some("high"),
-            None,
-            false,
-        )
-        .unwrap();
+        let params =
+            request_params(ProviderKind::Chatgpt, None, "cache", Some("high"), false).unwrap();
         assert_eq!(params["reasoning"]["effort"], "high");
         assert_eq!(params["reasoning"]["summary"], "auto");
 
         let default_effort =
-            request_params(ProviderKind::Chatgpt, None, "cache", None, None, false).unwrap();
+            request_params(ProviderKind::Chatgpt, None, "cache", None, false).unwrap();
         assert_eq!(default_effort["reasoning"]["summary"], "auto");
         assert!(default_effort["reasoning"].get("effort").is_none());
     }
@@ -943,7 +680,6 @@ mod tests {
                 Some(llm_provider::OpenAiApi::Responses),
                 "cache",
                 Some("high"),
-                None,
                 false,
             )
             .unwrap()["prompt_cache_key"],
@@ -955,7 +691,6 @@ mod tests {
                 Some(llm_provider::OpenAiApi::ChatCompletions),
                 "cache",
                 None,
-                None,
                 false,
             )
             .is_none()
@@ -963,41 +698,11 @@ mod tests {
     }
 
     #[test]
-    fn compaction_threshold_uses_effective_model_window() {
-        let params = request_params(
-            ProviderKind::Openai,
-            Some(llm_provider::OpenAiApi::Responses),
-            "cache",
-            None,
-            Some(200_000),
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            params["context_management"][0]["compact_threshold"],
-            180_000
-        );
-        let unknown = request_params(
-            ProviderKind::Openai,
-            Some(llm_provider::OpenAiApi::Responses),
-            "cache",
-            None,
-            None,
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            unknown["context_management"][0]["compact_threshold"],
-            100_000
-        );
-    }
-    #[test]
     fn fast_mode_requests_openai_priority_tier() {
         let params = request_params(
             ProviderKind::Openai,
             Some(llm_provider::OpenAiApi::Responses),
             "cache",
-            None,
             None,
             true,
         )
@@ -1009,14 +714,13 @@ mod tests {
             Some(llm_provider::OpenAiApi::Responses),
             "cache",
             None,
-            None,
             false,
         )
         .unwrap();
         assert!(normal.get("service_tier").is_none());
 
         let subscription =
-            request_params(ProviderKind::Chatgpt, None, "cache", None, None, true).unwrap();
+            request_params(ProviderKind::Chatgpt, None, "cache", None, true).unwrap();
         assert_eq!(subscription["service_tier"], "priority");
     }
 }

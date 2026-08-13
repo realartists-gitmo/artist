@@ -6,7 +6,7 @@ use rig_core::{
 use serde_json::json;
 
 #[test]
-fn request_serializes_artist_extensions_and_rig_messages_tools() {
+fn request_serializes_rig_messages_tools_and_reasoning() {
     let core = completion::CompletionRequest {
         model: None,
         preamble: Some("be concise".into()),
@@ -32,30 +32,23 @@ fn request_serializes_artist_extensions_and_rig_messages_tools() {
         ..Default::default()
     });
     request.prompt_cache_key = Some("thread-1".into());
-    request.context_management = vec![ContextManagement {
-        kind: "compaction".into(),
-        extra: serde_json::from_value(json!({"compact_threshold":12000})).unwrap(),
-    }];
 
     let wire = serde_json::to_value(request).unwrap();
     assert_eq!(wire["store"], false);
     assert_eq!(wire["reasoning"]["context"]["encrypted_content"], "cipher");
-    assert_eq!(wire["context_management"][0]["type"], "compaction");
     assert_eq!(wire["input"][0]["content"][0]["text"], "hello");
     assert_eq!(wire["tools"][0]["name"], "lookup");
 }
 
 #[test]
-fn output_items_roundtrip_losslessly_with_phase_compaction_and_unknown() {
+fn output_items_roundtrip_losslessly_with_phase_and_unknown() {
     let fixture = json!([
         {"type":"message","id":"m1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"hi","annotations":[]}]},
-        {"type":"compaction","id":"c1","encrypted_content":"opaque","future_field":{"x":1}},
         {"type":"future_item","id":"z1","payload":[1,2,3]}
     ]);
     let items: Vec<OutputItem> = serde_json::from_value(fixture.clone()).unwrap();
     assert_eq!(items[0].phase(), Some("commentary"));
-    assert!(matches!(items[1], OutputItem::Compaction(_)));
-    assert!(matches!(items[2], OutputItem::Unknown(_)));
+    assert!(matches!(items[1], OutputItem::Unknown(_)));
     assert_eq!(serde_json::to_value(items).unwrap(), fixture);
 }
 

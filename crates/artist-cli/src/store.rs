@@ -1,4 +1,3 @@
-use crate::status_bar::StatusBarConfig;
 use anyhow::{Context, Result, bail};
 use llm_provider::{ProviderId, SavedProvider};
 use serde::{Deserialize, Serialize};
@@ -15,10 +14,6 @@ pub struct ProviderStore {
     pub default_provider: Option<ProviderId>,
     #[serde(default)]
     pub providers: Vec<SavedProvider>,
-    #[serde(default)]
-    pub status_bar: StatusBarConfig,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disabled_tools: Vec<String>,
 }
 fn version() -> u8 {
     4
@@ -46,7 +41,6 @@ impl ProviderStore {
             .and_then(toml::Value::as_integer)
             .unwrap_or(1);
         migrate_provider_credentials(&mut document, previous_version);
-        migrate_session_tokens(&mut document, previous_version);
         let store: Self = document.try_into().context("decode providers.toml")?;
         store.validate()?;
         Ok(store)
@@ -139,29 +133,6 @@ fn migrate_provider_credentials(document: &mut toml::Value, previous_version: i6
     }
 }
 
-/// Version 2 rendered cumulative tokens as part of `context`. Preserve the
-/// existing visible bar by enabling the new independent item once; version 3
-/// then respects users who disable it.
-fn migrate_session_tokens(document: &mut toml::Value, previous_version: i64) {
-    if previous_version >= 3 {
-        return;
-    }
-    let Some(items) = document
-        .get_mut("status_bar")
-        .and_then(|status| status.get_mut("items"))
-        .and_then(toml::Value::as_array_mut)
-    else {
-        return;
-    };
-    let has_context = items.iter().any(|item| item.as_str() == Some("context"));
-    let has_tokens = items
-        .iter()
-        .any(|item| item.as_str() == Some("session_tokens"));
-    if has_context && !has_tokens {
-        items.push(toml::Value::String("session_tokens".into()));
-    }
-}
-
 pub fn config_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("ARTIST_CONFIG_DIR") {
         return Ok(PathBuf::from(path).join("providers.toml"));
@@ -218,7 +189,6 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status_bar::StatusItem;
     use llm_provider::{Auth, Credentials, ProviderKind, SavedProvider, Secret};
     #[test]
     fn preserves_legacy_api_key_providers() {
@@ -289,41 +259,6 @@ type = "none"
             Credentials::CopilotOauth { .. }
         ));
         assert_eq!(store.providers[2].credentials, Credentials::None);
-    }
-
-    #[test]
-    fn old_config_gets_default_status_bar() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("providers.toml");
-        fs::write(&path, "version = 2\nproviders = []\n").unwrap();
-        let store = ProviderStore::load(&path).unwrap();
-        assert_eq!(store.status_bar, StatusBarConfig::default());
-    }
-
-    #[test]
-    fn migrates_combined_context_tokens_once_then_respects_disable() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("providers.toml");
-        fs::write(
-            &path,
-            "version = 2\nproviders = []\n[status_bar]\nitems = ['context']\n",
-        )
-        .unwrap();
-
-        let mut store = ProviderStore::load(&path).unwrap();
-        assert_eq!(
-            store.status_bar.items,
-            [StatusItem::Context, StatusItem::SessionTokens]
-        );
-        store
-            .status_bar
-            .items
-            .retain(|item| *item != StatusItem::SessionTokens);
-        store.save(&path).unwrap();
-
-        let reloaded = ProviderStore::load(&path).unwrap();
-        assert_eq!(reloaded.version, 4);
-        assert_eq!(reloaded.status_bar.items, [StatusItem::Context]);
     }
 
     fn write_file(path: &Path, contents: &str) {
@@ -426,7 +361,6 @@ type = "none"
             version: 1,
             ..Default::default()
         };
-        store.disabled_tools = vec!["bash".into()];
         store.add(SavedProvider::chatgpt(
             ProviderId::new("one").unwrap(),
             "ChatGPT",
@@ -446,7 +380,6 @@ type = "none"
         }
         let loaded = ProviderStore::load(&path).unwrap();
         assert_eq!(loaded.providers.len(), 1);
-        assert_eq!(loaded.disabled_tools, ["bash"]);
         assert_eq!(loaded.default_provider.unwrap().as_str(), "one");
         #[cfg(unix)]
         {

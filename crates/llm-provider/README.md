@@ -32,7 +32,6 @@ Provider records live in `$ARTIST_CONFIG_DIR/providers.toml` (normally
 ```toml
 version = 4
 default_provider = "local"
-disabled_tools = ["bash"]             # optional global restrictions
 
 [[providers]]
 id = "local"

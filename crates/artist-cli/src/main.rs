@@ -1,41 +1,22 @@
-mod activity_indicator;
 mod args;
 mod chat_ui;
-mod clipboard;
 mod command_ui;
-mod compaction;
-mod custom_commands;
-mod extension_control;
 mod herdr;
-mod input_atoms;
-mod input_border;
-mod input_images;
-mod interaction;
+mod kernel;
 mod login;
-mod message_box;
 mod models;
 mod prompt;
 mod provider_commands;
-mod response_output;
 mod sessions;
 mod settings;
-mod slash_commands;
-mod startup_splash;
-mod status_bar;
 mod store;
-mod subagent_ui;
 mod termination;
 mod test_provider;
-mod text_wrap;
-mod theme;
-mod tool_ui;
 
 use anyhow::{Context, Result, bail};
-use args::{Cli, Command, RulesCommand, SessionsCommand};
-use artist_tools::{ToolBundle, Workspace};
+use args::{Cli, Command, SessionsCommand};
 use clap::Parser;
 use llm_provider::ChatGptOAuth;
-use rig_core::memory::ConversationMemory;
 use sessions::{ActiveSession, SessionStore};
 use std::{
     io::IsTerminal,
@@ -61,6 +42,20 @@ async fn main() {
 async fn run(herdr: herdr::Lifecycle) -> Result<()> {
     let mut cli = Cli::parse();
     enter_positional_project(&mut cli)?;
+    if let Some(Command::Resource(args)) = cli.command.as_ref() {
+        if cli.prompt.is_some() || cli.resume.is_some() || cli.print_prompt.is_some() {
+            bail!("resource commands cannot be combined with prompts or --resume");
+        }
+        let root = std::env::current_dir().context("find current project directory")?;
+        let kernel = kernel::build(&root).await?;
+        let result = kernel::dispatch(&kernel, args.verb.verb(), &args.target, &args.args).await?;
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return if result.ok {
+            Ok(())
+        } else {
+            bail!("resource operation failed")
+        };
+    }
     let path = config_path()?;
     let mut store = ProviderStore::load(&path)?;
     let config_root = path.parent().context("providers path has no parent")?;
@@ -75,20 +70,7 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
         if let Some(extra) = cli.prompt {
             bail!("with -p, the positional argument must be a project directory: {extra}");
         }
-        let mcp = artist_agent::mcp::McpManager::load(config_root).await?;
-        let extension_control = extension_control::ExtensionControl::default();
-        let extensions = extension_manager(config_root, &store, extension_control.clone()).await?;
-        return execute_prompt(
-            &mut store,
-            &path,
-            &prompt,
-            cli.resume.as_deref(),
-            &mcp,
-            &extensions,
-            &extension_control,
-            &herdr,
-        )
-        .await;
+        return execute_prompt(&mut store, &path, &prompt, cli.resume.as_deref(), &herdr).await;
     }
     match cli.command {
         Some(Command::Model) if cli.prompt.is_none() && cli.resume.is_none() => {
@@ -98,11 +80,6 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
             }
             models::select(&mut store.providers[selected]).await?;
             store.save(&path)?;
-        }
-        Some(Command::Rules(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
-            match args.action {
-                RulesCommand::New { name } => scaffold_rule(&name)?,
-            }
         }
         Some(Command::Sessions(args)) if cli.prompt.is_none() && cli.resume.is_none() => {
             let sessions = SessionStore::new(config_root);
@@ -122,14 +99,10 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
                 .then(|| default_index(&store))
                 .transpose()?;
             let project = std::env::current_dir().context("find current project directory")?;
-            // Layered settings (global ~/.config/artist + project .artist) resolve the
-            // model/reasoning overrides and the effective tool denylist.
-            let effective = settings::load_effective(
-                config_root,
-                &project,
-                &settings::Overrides::default(),
-                &store.disabled_tools,
-            )?;
+            let kernel = kernel::build(&project).await?;
+            // Layered settings resolve model/reasoning overrides.
+            let effective =
+                settings::load_effective(config_root, &project, &settings::Overrides::default())?;
             // Catch a missing effective model before the TUI takes over. Legacy
             // settings scalars supply ChatGPT only; other providers must have a
             // provider-local selection.
@@ -147,39 +120,22 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
             }
             // Resolve an interactive resume before entering inline TUI mode so the
             // selector cannot be painted underneath the splash and input viewport.
-            // Draw the startup UI before loading models, extensions, indexes, or
-            // servers, then initialize integrations concurrently below.
+            // Draw the startup UI before loading the provider and session.
             let sessions = SessionStore::new(config_root);
             let resumed = load_resumed(&sessions, &project, cli.resume.as_deref())?;
             let show_splash = resumed.is_none() && cli.prompt.is_none();
-            let extension_control = extension_control::ExtensionControl::default();
             let mut refreshed_provider = selected.map(|index| store.providers[index].clone());
-            let (mcp, extensions, refreshed) = tokio::join!(
-                artist_agent::mcp::McpManager::load(config_root),
-                extension_manager(config_root, &store, extension_control.clone()),
-                async {
-                    match refreshed_provider.as_mut() {
-                        Some(provider) => refresh_if_needed(provider).await,
-                        None => Ok(false),
-                    }
-                }
-            );
-            let mcp = mcp?;
-            let extensions = extensions?;
-            let terminal = chat_ui::start_terminal(
-                show_splash,
-                cli.prompt.is_some(),
-                &extensions.extension_ids(),
-                selected.is_none(),
-            )?;
-            if refreshed? {
+            let refreshed = match refreshed_provider.as_mut() {
+                Some(provider) => refresh_if_needed(provider).await?,
+                None => false,
+            };
+            let terminal =
+                chat_ui::start_terminal(show_splash, cli.prompt.is_some(), selected.is_none())?;
+            if refreshed {
                 let selected = selected.expect("a refreshed provider is selected");
                 store.providers[selected] = refreshed_provider.expect("refreshed provider exists");
                 store.save(&path)?;
             }
-            let tools = tool_bundle(config_root, &project)?;
-            let rules_engine = artist_rules::RulesEngine::discover(&project);
-            let rules_handle = artist_rules::state::RulesHandle::default();
             chat_ui::run(
                 terminal,
                 &mut store,
@@ -188,14 +144,9 @@ async fn run(herdr: herdr::Lifecycle) -> Result<()> {
                 chat_ui::ChatResources {
                     sessions: &sessions,
                     project: &project,
-                    tools: &tools,
-                    mcp: &mcp,
-                    extensions: &extensions,
-                    extension_control: &extension_control,
-                    rules_engine: &rules_engine,
-                    rules_handle: &rules_handle,
                     settings: &effective,
                     herdr: &herdr,
+                    kernel: kernel.clone(),
                 },
                 resumed,
                 cli.prompt,
@@ -287,9 +238,6 @@ async fn execute_prompt(
     path: &std::path::Path,
     input: &str,
     resume: Option<&str>,
-    mcp: &artist_agent::mcp::McpManager,
-    extensions: &Arc<artist_extensions::Manager>,
-    extension_control: &extension_control::ExtensionControl,
     herdr: &herdr::Lifecycle,
 ) -> Result<()> {
     let selected = default_index(store)?;
@@ -299,249 +247,75 @@ async fn execute_prompt(
     let config_root = path.parent().context("providers path has no parent")?;
     let sessions = SessionStore::new(config_root);
     let project = std::env::current_dir().context("find current project directory")?;
-    let effective = settings::load_effective(
-        config_root,
-        &project,
-        &settings::Overrides::default(),
-        &store.disabled_tools,
-    )?;
+    let kernel = kernel::build(&project).await?;
+    let effective =
+        settings::load_effective(config_root, &project, &settings::Overrides::default())?;
     // Session-scoped provider carrying the settings model/reasoning override
     // (a throwaway clone, never persisted).
     let session_provider = effective.apply_to(store.providers[selected].clone());
-    let tools = tool_bundle(config_root, &project)?;
     let (active, _) = match load_resumed(&sessions, &project, resume)? {
         Some(resumed) => resumed,
         None => (sessions.create(&project, Some(input))?, Vec::new()),
     };
     herdr.report_session(&active.session.id);
     let turn_lifecycle = herdr.start_turn();
-    compact_noninteractive_if_needed(&active, &session_provider, effective.compaction, input)
-        .await?;
-    let rules_engine = artist_rules::RulesEngine::discover(&project);
     let steering = artist_agent::SteeringHandle::default();
     let cancel = tokio_util::sync::CancellationToken::new();
-    let effective_context_window =
-        models::catalog(&session_provider)
-            .await
-            .ok()
-            .and_then(|catalog| {
-                catalog
-                    .iter()
-                    .find(|model| Some(&model.slug) == session_provider.model.as_ref())
-                    .and_then(|model| model.effective_context_window())
-            });
     let handles = artist_agent::SessionHandles {
+        kernel,
         steering: steering.clone(),
-        rules: artist_rules::state::RulesHandle::default(),
-        rule_set: rules_engine.snapshot(),
         recorder: active.recorder.clone(),
         memory: Arc::new(active.memory.clone()),
         conversation_id: active.session.id.clone(),
         provider_context: active.provider_context.clone(),
-        effective_context_window,
         fast_mode: false,
         lifecycle: turn_lifecycle.emitter(),
         cancel: cancel.clone(),
     };
-    extension_control.set_steering(Some(steering));
-    extensions
-        .update_context(|context| context.agent_state = serde_json::json!({"state":"thinking"}));
-    let _ = extensions.publish(artist_extensions::Event {
-        kind: "state_transition".into(),
-        payload: serde_json::json!({"state":"thinking"}),
-    });
     let styled = std::io::stdout().is_terminal();
     let mut reasoning = false;
     let mut response = String::new();
     let agent_input = artist_agent::ChatInput::from(input.to_owned());
     let outcome = {
-        let chat = artist_agent::stream_chat(
-            &session_provider,
-            &agent_input,
-            artist_agent::ToolContext {
-                native: &tools,
-                mcp,
-                extensions: Some(extensions),
-                disabled: &effective.denied_tools,
-            },
-            handles,
-            |event| {
-                publish_prompt_event(extensions, &event);
-                use artist_agent::PromptEvent;
-                use std::io::Write;
-                let mut output = std::io::stdout().lock();
-                match event {
-                    PromptEvent::ReasoningSummaryDelta(delta) => {
-                        reasoning = true;
-                        if styled {
-                            write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
-                        } else {
-                            write!(output, "{delta}")?;
-                        }
-                    }
-                    PromptEvent::TextDelta(delta) => {
-                        response.push_str(&delta);
-                        if std::mem::take(&mut reasoning) {
-                            writeln!(output)?;
-                        }
+        let chat = artist_agent::stream_chat(&session_provider, &agent_input, handles, |event| {
+            use artist_agent::PromptEvent;
+            use std::io::Write;
+            let mut output = std::io::stdout().lock();
+            match event {
+                PromptEvent::ReasoningSummaryDelta(delta) => {
+                    reasoning = true;
+                    if styled {
+                        write!(output, "\x1b[90;3m{delta}\x1b[0m")?;
+                    } else {
                         write!(output, "{delta}")?;
                     }
-                    PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
-                    PromptEvent::ToolExecutionStart { .. } => {}
-                    PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
-                    PromptEvent::SubagentStarted { role, .. } => {
-                        eprintln!("Starting {role} subagent...")
-                    }
-                    PromptEvent::SubagentEvent { .. } => {}
-                    PromptEvent::SubagentFinished { .. } => {
-                        eprintln!("Subagent completed.")
-                    }
-                    PromptEvent::CompletionUsage { .. } => {}
-                    PromptEvent::RuleFired { rule, matched } => {
-                        let excerpt: String = matched.chars().take(60).collect();
-                        eprintln!("rule {rule} fired on \"{excerpt}\" — rewound, retrying");
-                    }
                 }
-                output.flush()?;
-                Ok(())
-            },
-        );
-        // An extension may request a stop mid-run; that maps onto the
-        // cooperative cancellation token (the run records its cancelled
-        // state and preserves accumulated output as a partial turn).
-        tokio::pin!(chat);
-        loop {
-            tokio::select! {
-                result = &mut chat => break result,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if extension_control.take_stop() {
-                        cancel.cancel();
+                PromptEvent::TextDelta(delta) => {
+                    response.push_str(&delta);
+                    if std::mem::take(&mut reasoning) {
+                        writeln!(output)?;
                     }
+                    write!(output, "{delta}")?;
                 }
+                PromptEvent::ToolCall { name, .. } => eprintln!("Calling {name}..."),
+                PromptEvent::ToolExecutionStart { .. } => {}
+                PromptEvent::ToolResult { .. } => eprintln!("Tool completed."),
+                PromptEvent::CompletionUsage { .. } => {}
             }
-        }
+            output.flush()?;
+            Ok(())
+        });
+        chat.await
     };
-    extension_control.set_steering(None);
     turn_lifecycle.finish(matches!(
         outcome.as_ref().ok(),
         Some(artist_agent::RunOutcome::Cancelled)
     ));
-    extensions.update_context(|context| context.agent_state = serde_json::json!({"state":"idle"}));
-    let _ = extensions.publish(artist_extensions::Event {
-        kind: "state_transition".into(),
-        payload: serde_json::json!({"state":"idle"}),
-    });
     let outcome = outcome?;
     let _ = outcome;
     println!();
-    let session_id = active.session.id.clone();
     active.close().await?;
-    for followup in extension_control.take_prompts() {
-        Box::pin(execute_prompt(
-            store,
-            path,
-            &followup,
-            Some(&session_id),
-            mcp,
-            extensions,
-            extension_control,
-            herdr,
-        ))
-        .await?;
-    }
     Ok(())
-}
-
-async fn compact_noninteractive_if_needed(
-    active: &ActiveSession,
-    provider: &llm_provider::SavedProvider,
-    settings: settings::CompactionConfig,
-    prompt: &str,
-) -> Result<()> {
-    if !settings.enabled {
-        return Ok(());
-    }
-    let history = active
-        .memory
-        .load(&active.session.id)
-        .await
-        .context("load conversation for compaction check")?;
-    if history.is_empty() {
-        return Ok(());
-    }
-    let capacity = models::catalog(provider).await.ok().and_then(|catalog| {
-        catalog
-            .iter()
-            .find(|model| Some(&model.slug) == provider.model.as_ref())
-            .and_then(|model| model.effective_context_window())
-    });
-    let projected = compaction::projected_context_tokens(&history, None, prompt, 0);
-    if capacity.is_some_and(|window| compaction::should_compact(projected, window, settings)) {
-        eprintln!("Compacting context…");
-        match compaction::compact(active, provider, settings, None, "threshold", None).await {
-            Ok(Some(result)) => eprintln!(
-                "Compacted {} messages; ~{} context tokens retained.",
-                result.summarized_messages,
-                artist_session::compaction::estimate_messages_tokens(&result.history)
-            ),
-            Ok(None) => {}
-            Err(error) => eprintln!("Warning: automatic compaction failed: {error:#}"),
-        }
-    }
-    Ok(())
-}
-
-async fn extension_manager(
-    config_root: &std::path::Path,
-    store: &ProviderStore,
-    control: extension_control::ExtensionControl,
-) -> Result<Arc<artist_extensions::Manager>> {
-    let project = std::env::current_dir().context("find current project directory")?;
-    // Model/reasoning come from the resolved settings now, not the provider.
-    let effective = settings::load_effective(
-        config_root,
-        &project,
-        &settings::Overrides::default(),
-        &store.disabled_tools,
-    )
-    .unwrap_or_default();
-    let context = artist_extensions::ExtensionContext {
-        project,
-        model: effective.model.clone(),
-        reasoning: effective.reasoning_effort.clone(),
-        agent_state: serde_json::json!({"state": "idle"}),
-        recent_events: Vec::new(),
-    };
-    Ok(Arc::new(
-        artist_extensions::Manager::load(
-            config_root.join("extensions"),
-            context,
-            Arc::new(control),
-        )
-        .await,
-    ))
-}
-
-fn publish_prompt_event(manager: &artist_extensions::Manager, event: &artist_agent::PromptEvent) {
-    use artist_agent::PromptEvent;
-    let state = match event {
-        PromptEvent::ReasoningSummaryDelta(_) => Some("thinking"),
-        PromptEvent::TextDelta(_) => Some("responding"),
-        PromptEvent::ToolCall { .. } | PromptEvent::ToolExecutionStart { .. } => Some("working"),
-        PromptEvent::ToolResult { .. } => Some("thinking"),
-        PromptEvent::SubagentStarted { .. } | PromptEvent::SubagentEvent { .. } => Some("working"),
-        PromptEvent::SubagentFinished { .. } => Some("thinking"),
-        PromptEvent::RuleFired { .. } => Some("rewinding"),
-        PromptEvent::CompletionUsage { .. } => None,
-    };
-    if let Some(state) = state {
-        manager.update_context(|context| context.agent_state = serde_json::json!({"state": state}));
-    }
-    let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
-    let _ = manager.publish(artist_extensions::Event {
-        kind: "prompt_event".into(),
-        payload,
-    });
 }
 
 fn sessions_list(sessions: &SessionStore) -> Result<()> {
@@ -655,62 +429,6 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// `artist rules new <name>`: write a commented rule template into the
-/// project's .artist/rules/ directory.
-fn scaffold_rule(name: &str) -> Result<()> {
-    let valid = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if !valid {
-        bail!("rule names are lowercase-kebab-case (got {name:?})");
-    }
-    let dir = std::env::current_dir()?.join(".artist/rules");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{name}.md"));
-    if path.exists() {
-        bail!("{} already exists", path.display());
-    }
-    let template = format!(
-        r#"---
-name: {name}
-description: One line describing what this rule catches
-# What to match against. Any of: assistant-text, tool-args, reasoning-summary.
-targets: [assistant-text]
-# Linear-time regexes; a match mid-stream aborts the request, injects the
-# reminder below, and retries from the same point.
-patterns:
-  - 'REPLACE ME'
-# Only for tool-args targets: restrict to these tools (empty = all).
-# tools: [write, edit, bash]
-# fire: once        # once per session (default) | per-turn
-# persistence: session  # keep reminding every turn (default) | message
-# scope: [main, delegate]
----
-Write the reminder the model receives here. Say what NOT to do and what to
-do instead.
-"#
-    );
-    std::fs::write(&path, template)?;
-    println!("created {}", path.display());
-    println!(
-        "test it against a session with: /rules dry-run {}",
-        path.display()
-    );
-    Ok(())
-}
-
-fn tool_bundle(config_root: &std::path::Path, project: &std::path::Path) -> Result<ToolBundle> {
-    use std::hash::{Hash, Hasher};
-    let canonical = std::fs::canonicalize(project)?;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    let state = config_root
-        .join("tools")
-        .join(format!("{:x}", hasher.finish()));
-    Ok(ToolBundle::new(Workspace::open(canonical, state)?))
-}
-
 fn list(store: &ProviderStore) {
     if store.providers.is_empty() {
         println!("No providers saved.");
@@ -757,12 +475,8 @@ async fn test_selected(store: &mut ProviderStore, path: &std::path::Path) -> Res
     }
     let config_root = path.parent().context("providers path has no parent")?;
     let project = std::env::current_dir().context("find current project directory")?;
-    let effective = settings::load_effective(
-        config_root,
-        &project,
-        &settings::Overrides::default(),
-        &store.disabled_tools,
-    )?;
+    let effective =
+        settings::load_effective(config_root, &project, &settings::Overrides::default())?;
     let provider = effective.apply_to(store.providers[selected].clone());
     print!("Testing {}... ", provider.name);
     std::io::Write::flush(&mut std::io::stdout())?;

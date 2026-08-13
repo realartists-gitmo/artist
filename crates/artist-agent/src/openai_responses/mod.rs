@@ -11,18 +11,10 @@ mod transport;
 
 pub use conversion::ConversionError;
 pub use output::OutputItem;
-pub use request::{ContextManagement, Reasoning, Request};
+pub use request::{Reasoning, Request};
 pub use transport::{
     ArtistOpenAiModel, Client as ArtistOpenAiClient, Credentials, Response, StreamResponse,
 };
-
-/// Only explicit client capability/route failures permit local fallback.
-pub(crate) fn is_unsupported_compaction(error: &rig_core::completion::CompletionError) -> bool {
-    let text = error.to_string();
-    ["HTTP 400", "HTTP 404", "HTTP 422"]
-        .iter()
-        .any(|status| text.contains(status))
-}
 
 #[cfg(test)]
 mod tests;

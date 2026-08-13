@@ -110,17 +110,13 @@ impl ProviderContextHandle {
     }
 
     /// Replace the canonical provider suffix and its framework-history checkpoint.
-    /// If a compaction item exists, only the latest compaction and its suffix survive.
     pub async fn commit_checkpoint(
         &self,
         conversation_id: &str,
         provider: &str,
-        mut items: Vec<Value>,
+        items: Vec<Value>,
         input_fingerprints: Vec<String>,
     ) {
-        if let Some(index) = items.iter().rposition(is_compaction) {
-            items.drain(..index);
-        }
         let mut contexts = self.inner.lock().await;
         contexts.insert(
             (conversation_id.to_owned(), provider.to_owned()),
@@ -138,8 +134,4 @@ impl ProviderContextHandle {
         });
         self.recorder.flush().await;
     }
-}
-
-fn is_compaction(value: &Value) -> bool {
-    value.get("type").and_then(Value::as_str) == Some("compaction")
 }

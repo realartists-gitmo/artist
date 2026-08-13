@@ -11,8 +11,7 @@ use rig_core::completion::Message;
 use rig_core::memory::{ConversationMemory, MemoryError};
 
 use crate::{
-    AttachmentStore, ConversationCompacted, ConversationMessages, EventLogReader, HistoryOptions,
-    Recorder, build_history,
+    AttachmentStore, ConversationMessages, EventLogReader, HistoryOptions, Recorder, build_history,
 };
 
 /// A durable [`ConversationMemory`] scoped to one Artist session.
@@ -102,26 +101,6 @@ impl SessionMemory {
             messages,
             reset: true,
             display_from: 0,
-        });
-        self.recorder.flush().await;
-        self.health()
-    }
-
-    /// Replace only model context after compaction. The reset snapshot is
-    /// hidden from display projections so the append-only transcript remains
-    /// intact while future turns use the summary and retained suffix.
-    pub async fn compact(
-        &self,
-        messages: Vec<Message>,
-        event: ConversationCompacted,
-    ) -> Result<(), MemoryError> {
-        let display_from = messages.len();
-        self.cache(messages.clone())?;
-        self.recorder.record(event);
-        self.recorder.record(ConversationMessages {
-            messages,
-            reset: true,
-            display_from,
         });
         self.recorder.flush().await;
         self.health()

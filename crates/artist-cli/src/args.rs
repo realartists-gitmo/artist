@@ -20,10 +20,51 @@ pub struct Cli {
 pub enum Command {
     /// Select the model and reasoning effort for the default provider.
     Model,
-    /// Manage stream rules.
-    Rules(RulesArgs),
     /// Inspect and maintain stored sessions.
     Sessions(SessionsArgs),
+    /// Dispatch one universal resource operation through the kernel.
+    Resource(ResourceArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ResourceArgs {
+    /// Universal operation to dispatch.
+    #[arg(value_enum)]
+    pub verb: ResourceVerb,
+    /// Native path or virtual resource URI.
+    pub target: String,
+    /// JSON request arguments, defaulting to null.
+    #[arg(long, default_value = "null")]
+    pub args: String,
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum ResourceVerb {
+    Read,
+    Write,
+    Edit,
+    Send,
+    Poll,
+    Abort,
+    Delete,
+    Find,
+    Grep,
+}
+
+impl ResourceVerb {
+    pub fn verb(&self) -> artist_kernel::Verb {
+        match self {
+            Self::Read => artist_kernel::Verb::Read,
+            Self::Write => artist_kernel::Verb::Write,
+            Self::Edit => artist_kernel::Verb::Edit,
+            Self::Send => artist_kernel::Verb::Send,
+            Self::Poll => artist_kernel::Verb::Poll,
+            Self::Abort => artist_kernel::Verb::Abort,
+            Self::Delete => artist_kernel::Verb::Delete,
+            Self::Find => artist_kernel::Verb::Find,
+            Self::Grep => artist_kernel::Verb::Grep,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -50,18 +91,6 @@ pub enum SessionsCommand {
         #[arg(long)]
         dry_run: bool,
     },
-}
-
-#[derive(Debug, Args)]
-pub struct RulesArgs {
-    #[command(subcommand)]
-    pub action: RulesCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum RulesCommand {
-    /// Scaffold a new declarative rule in .artist/rules/.
-    New { name: String },
 }
 
 #[cfg(test)]

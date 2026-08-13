@@ -2,25 +2,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 /// A response output item classified for callers while retaining its complete
-/// wire representation. In particular, unknown and compaction items are never
-/// discarded, and message `phase` remains in the raw object.
+/// wire representation. In particular, unknown items are never discarded, and
+/// message `phase` remains in the raw object.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutputItem {
     Message(Value),
     Reasoning(Value),
     FunctionCall(Value),
-    Compaction(Value),
     Unknown(Value),
 }
 
 impl OutputItem {
     pub fn wire(&self) -> &Value {
         match self {
-            Self::Message(v)
-            | Self::Reasoning(v)
-            | Self::FunctionCall(v)
-            | Self::Compaction(v)
-            | Self::Unknown(v) => v,
+            Self::Message(v) | Self::Reasoning(v) | Self::FunctionCall(v) | Self::Unknown(v) => v,
         }
     }
 
@@ -46,7 +41,6 @@ impl<'de> Deserialize<'de> for OutputItem {
             Some("message") => Self::Message(value),
             Some("reasoning") => Self::Reasoning(value),
             Some("function_call") => Self::FunctionCall(value),
-            Some("compaction") => Self::Compaction(value),
             _ => Self::Unknown(value),
         })
     }

@@ -27,8 +27,6 @@ pub struct Request {
     pub reasoning: Option<Reasoning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub context_management: Vec<ContextManagement>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -42,16 +40,6 @@ pub struct Reasoning {
     /// Opaque encrypted reasoning context returned by OpenAI.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<Value>,
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-/// A context-management policy (including compaction policies). Kept open so
-/// newly introduced policy fields survive deserialize/serialize cycles.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ContextManagement {
-    #[serde(rename = "type")]
-    pub kind: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

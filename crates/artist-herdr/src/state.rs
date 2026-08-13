@@ -21,7 +21,6 @@ struct ActivityState {
     current_turn: Option<u64>,
     closed_through: u64,
     tools: HashSet<(u64, String)>,
-    subagents: HashSet<(u64, String)>,
     blockers: HashSet<String>,
     last_emitted: Option<HerdrState>,
 }
@@ -31,10 +30,7 @@ impl ActivityState {
         self.claimed.then(|| {
             if !self.blockers.is_empty() {
                 HerdrState::Blocked
-            } else if self.current_turn.is_some()
-                || !self.tools.is_empty()
-                || !self.subagents.is_empty()
-            {
+            } else if self.current_turn.is_some() || !self.tools.is_empty() {
                 HerdrState::Working
             } else {
                 HerdrState::Idle
@@ -122,55 +118,37 @@ pub struct TurnActivity {
 
 impl TurnActivity {
     pub fn tool_started(&self, id: impl Into<String>) {
-        self.start_item(id.into(), true);
+        self.start_item(id.into());
     }
 
     pub fn tool_finished(&self, id: &str) {
-        self.finish_item(id, true);
-    }
-
-    pub fn subagent_started(&self, id: impl Into<String>) {
-        self.start_item(id.into(), false);
-    }
-
-    pub fn subagent_finished(&self, id: &str) {
-        self.finish_item(id, false);
+        self.finish_item(id);
     }
 
     pub fn finish(&self) {
-        self.close(false);
+        self.close();
     }
 
     pub fn cancel(&self) {
-        self.close(true);
+        self.close();
     }
 
-    fn start_item(&self, id: String, tool: bool) {
+    fn start_item(&self, id: String) {
         self.activity.update(|state| {
             if self.generation <= state.closed_through {
                 return;
             }
-            let items = if tool {
-                &mut state.tools
-            } else {
-                &mut state.subagents
-            };
-            items.insert((self.generation, id));
+            state.tools.insert((self.generation, id));
         });
     }
 
-    fn finish_item(&self, id: &str, tool: bool) {
+    fn finish_item(&self, id: &str) {
         self.activity.update(|state| {
-            let items = if tool {
-                &mut state.tools
-            } else {
-                &mut state.subagents
-            };
-            items.remove(&(self.generation, id.to_owned()));
+            state.tools.remove(&(self.generation, id.to_owned()));
         });
     }
 
-    fn close(&self, cancelled: bool) {
+    fn close(&self) {
         self.activity.update(|state| {
             if state.current_turn == Some(self.generation) {
                 state.current_turn = None;
@@ -179,11 +157,6 @@ impl TurnActivity {
             state
                 .tools
                 .retain(|(generation, _)| *generation != self.generation);
-            if cancelled {
-                state
-                    .subagents
-                    .retain(|(generation, _)| *generation != self.generation);
-            }
         });
     }
 }
@@ -204,20 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn aggregates_turn_tools_and_background_subagents() {
+    fn aggregates_turn_tools() {
         let (activity, emitted) = fixture();
         activity.claim_idle();
         let turn = activity.start_turn();
         turn.tool_started("tool");
-        turn.subagent_started("child");
         turn.tool_finished("tool");
         turn.finish();
-        assert_eq!(
-            states(&emitted),
-            vec![HerdrState::Idle, HerdrState::Working]
-        );
-
-        turn.subagent_finished("child");
         assert_eq!(
             states(&emitted),
             vec![HerdrState::Idle, HerdrState::Working, HerdrState::Idle]
@@ -253,12 +219,8 @@ mod tests {
         let (activity, emitted) = fixture();
         let turn = activity.start_turn();
         turn.tool_started("tool");
-        turn.subagent_started("child");
         turn.cancel();
         turn.tool_started("late-tool");
-        turn.subagent_started("late-child");
-        turn.tool_finished("tool");
-        turn.subagent_finished("child");
         assert_eq!(
             states(&emitted),
             vec![HerdrState::Working, HerdrState::Idle]

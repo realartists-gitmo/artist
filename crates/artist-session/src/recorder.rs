@@ -1,7 +1,7 @@
 //! The [`Recorder`] handle producers append through, and the single writer
 //! task that assigns seqs and performs file I/O.
 //!
-//! All producers (CLI, capture hooks, delegate hooks) clone one `Recorder`;
+//! All producers (CLI, capture hooks) clone one `Recorder`;
 //! events funnel through an unbounded channel into one blocking writer loop,
 //! giving a total order and O(1) appends without any producer doing I/O.
 
@@ -94,13 +94,6 @@ impl Recorder {
         }
     }
 
-    /// A recorder scoped to a child lineage, e.g. `delegate-<uuid>`.
-    pub fn child_lineage(&self, child: &str) -> Self {
-        let mut scoped = self.clone();
-        scoped.lineage = format!("{}/{}", self.lineage, child);
-        scoped
-    }
-
     /// A recorder that stamps events with the given run id.
     pub fn with_run(&self, run: &str) -> Self {
         let mut scoped = self.clone();
@@ -113,7 +106,7 @@ impl Recorder {
     }
 
     /// Highest seq the writer task has durably committed, if any. The live
-    /// watermark TTSR uses to snapshot committed in-run history.
+    /// watermark used to snapshot committed in-run history.
     pub fn last_committed_seq(&self) -> Option<u64> {
         self.watermark.load()
     }
@@ -229,17 +222,17 @@ mod tests {
         let writer = EventLogWriter::open(dir.path(), "s-1").unwrap();
         let (recorder, task) = spawn_writer(writer, None);
 
-        let delegate = recorder.child_lineage("delegate-1").with_run("r-2");
+        let child = recorder.with_run("r-2");
         recorder.record(user_turn("main"));
-        delegate.record(user_turn("inner"));
-        drop(delegate);
+        child.record(user_turn("inner"));
+        drop(child);
         drop(recorder);
         task.close().await.unwrap();
 
         let events = EventLogReader::new(dir.path()).read_all().unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].lineage, "main");
-        assert_eq!(events[1].lineage, "main/delegate-1");
+        assert_eq!(events[1].lineage, "main");
         assert_eq!(events[1].run.as_deref(), Some("r-2"));
         assert_eq!(events[1].seq, 1);
     }

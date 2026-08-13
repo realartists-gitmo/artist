@@ -181,8 +181,8 @@ pub fn build(
                     _ => messages.push(Message::user(&turn.content)),
                 }
             }
-            // Lifecycle, steering-display, delegate, and rule bookkeeping
-            // events carry no model-facing content.
+            // Lifecycle and steering-display events carry no model-facing
+            // content.
             _ => {}
         }
     }
@@ -445,11 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn delegate_lineage_is_excluded_from_main_history() {
+    fn child_lineage_is_excluded_from_main_history() {
         let (_dir, store) = attachments();
         let mut log = LogBuilder::new();
         log.push(user("go"));
-        log.push_lineage(assistant_text("delegate inner"), "main/delegate-1");
+        log.push_lineage(assistant_text("child inner"), "main/child-1");
         log.push(assistant_text("main answer"));
 
         let history = build(&log.events, &store, &HistoryOptions::default()).unwrap();

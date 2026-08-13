@@ -15,10 +15,6 @@ use rig_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
 
 #[derive(Clone, Debug)]
 pub enum Credentials {
@@ -36,8 +32,6 @@ pub struct Client {
     credentials: Credentials,
     provider_context: artist_session::ProviderContextHandle,
     conversation_id: String,
-    effective_context_window: Option<u64>,
-    unsupported_context_management: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Client {
@@ -48,8 +42,6 @@ impl Client {
             credentials: Credentials::ApiKey(key.into()),
             provider_context: artist_session::ProviderContextHandle::noop(),
             conversation_id: "default".into(),
-            effective_context_window: None,
-            unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn chatgpt(
@@ -66,8 +58,6 @@ impl Client {
             },
             provider_context: artist_session::ProviderContextHandle::noop(),
             conversation_id: "default".into(),
-            effective_context_window: None,
-            unsupported_context_management: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn with_provider_context(
@@ -78,58 +68,6 @@ impl Client {
         self.conversation_id = conversation_id.into();
         self.provider_context = provider_context;
         self
-    }
-    pub fn with_effective_context_window(mut self, window: Option<u64>) -> Self {
-        self.effective_context_window = window;
-        self
-    }
-
-    /// Compact the full canonical sidecar plus current context. The sidecar is
-    /// replaced only after a successful, parseable response.
-    pub async fn compact(
-        &self,
-        model: &str,
-        current: Vec<Value>,
-    ) -> Result<Vec<Value>, CompletionError> {
-        let (saved, checkpoint) = self
-            .provider_context
-            .snapshot(&self.conversation_id, &self.context_namespace())
-            .await;
-        let fingerprints = current.iter().map(wire_fingerprint).collect::<Vec<_>>();
-        let input = reconcile_inputs(saved, &checkpoint, current, &fingerprints);
-        let response = self
-            .http
-            .post(format!(
-                "{}/responses/compact",
-                self.endpoint.trim_end_matches('/')
-            ))
-            .headers(self.headers()?)
-            .json(&json!({"model": model, "input": input, "store": false}))
-            .send()
-            .await
-            .map_err(transport)?;
-        let status = response.status();
-        let text = response.text().await.map_err(transport)?;
-        if !status.is_success() {
-            return Err(CompletionError::ProviderError(format!(
-                "Responses compact HTTP {status}: {}",
-                sanitize(&text)
-            )));
-        }
-        let wire: Value = serde_json::from_str(&text)?;
-        let items = parse_output(&wire)?
-            .into_iter()
-            .map(|item| item.wire().clone())
-            .collect::<Vec<_>>();
-        self.provider_context
-            .commit_checkpoint(
-                &self.conversation_id,
-                &self.context_namespace(),
-                items.clone(),
-                fingerprints,
-            )
-            .await;
-        Ok(items)
     }
 
     fn context_namespace(&self) -> String {
@@ -289,51 +227,25 @@ impl CompletionModel for ArtistOpenAiModel {
     ) -> Result<completion::CompletionResponse<Response>, CompletionError> {
         let body = Request::try_from((self.model.clone(), request))
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
-        let (mut body, checkpoint) = self.prepare(body).await;
-        if self
+        let (body, checkpoint) = self.prepare(body).await;
+        let response = self
             .client
-            .unsupported_context_management
-            .lock()
-            .unwrap()
-            .contains(&self.model)
-        {
-            body.context_management.clear();
-        }
-        let mut retried = false;
-        let response = loop {
-            let response = self
-                .client
-                .http
-                .post(self.client.url())
-                .headers(self.client.headers()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(transport)?;
-            let status = response.status();
-            let text = response.text().await.map_err(transport)?;
-            if status.is_success() {
-                break text;
-            }
-            if !retried
-                && !body.context_management.is_empty()
-                && context_management_unsupported(status.as_u16(), &text)
-            {
-                retried = true;
-                body.context_management.clear();
-                self.client
-                    .unsupported_context_management
-                    .lock()
-                    .unwrap()
-                    .insert(self.model.clone());
-                continue;
-            }
+            .http
+            .post(self.client.url())
+            .headers(self.client.headers()?)
+            .json(&body)
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        let text = response.text().await.map_err(transport)?;
+        if !status.is_success() {
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
             )));
-        };
-        let wire: Value = serde_json::from_str(&response)?;
+        }
+        let wire: Value = serde_json::from_str(&text)?;
         let output = parse_output(&wire)?;
         validate_success(&wire)?;
         let upstream: rig_core::providers::openai::responses_api::CompletionResponse =
@@ -358,49 +270,23 @@ impl CompletionModel for ArtistOpenAiModel {
             .map_err(|e| CompletionError::ResponseError(e.to_string()))?;
         let (mut body, checkpoint) = self.prepare(body).await;
         body.stream = Some(true);
-        if self
+        let response = self
             .client
-            .unsupported_context_management
-            .lock()
-            .unwrap()
-            .contains(&self.model)
-        {
-            body.context_management.clear();
-        }
-        let mut retried = false;
-        let response = loop {
-            let response = self
-                .client
-                .http
-                .post(self.client.url())
-                .headers(self.client.headers()?)
-                .json(&body)
-                .send()
-                .await
-                .map_err(transport)?;
-            let status = response.status();
-            if status.is_success() {
-                break response;
-            }
+            .http
+            .post(self.client.url())
+            .headers(self.client.headers()?)
+            .json(&body)
+            .send()
+            .await
+            .map_err(transport)?;
+        let status = response.status();
+        if !status.is_success() {
             let text = response.text().await.map_err(transport)?;
-            if !retried
-                && !body.context_management.is_empty()
-                && context_management_unsupported(status.as_u16(), &text)
-            {
-                retried = true;
-                body.context_management.clear();
-                self.client
-                    .unsupported_context_management
-                    .lock()
-                    .unwrap()
-                    .insert(self.model.clone());
-                continue;
-            }
             return Err(CompletionError::ProviderError(format!(
                 "Responses HTTP {status}: {}",
                 sanitize(&text)
             )));
-        };
+        }
         let mut bytes = response.bytes_stream();
         let context = self.provider_context.clone();
         let conversation_id = self.conversation_id.clone();
@@ -624,14 +510,6 @@ fn reconcile_inputs(
     merged
 }
 
-fn context_management_unsupported(status: u16, body: &str) -> bool {
-    matches!(status, 400 | 404 | 422)
-        && body.to_ascii_lowercase().contains("context_management")
-        && ["unsupported", "unknown", "unrecognized", "not supported"]
-            .iter()
-            .any(|needle| body.to_ascii_lowercase().contains(needle))
-}
-
 fn sanitize(body: &str) -> String {
     let msg = serde_json::from_str::<Value>(body).ok().and_then(|v| {
         v.pointer("/error/message")
@@ -782,7 +660,7 @@ mod transport_tests {
     };
 
     #[test]
-    fn checkpoint_replay_adds_only_new_history_across_turns_tools_and_compaction() {
+    fn checkpoint_replay_adds_only_new_history_across_turns_and_tools() {
         let user1 =
             json!({"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]});
         let user2 =
@@ -938,57 +816,6 @@ mod transport_tests {
     }
 
     #[test]
-    fn unsupported_detection_is_explicit_and_conservative() {
-        assert!(context_management_unsupported(
-            400,
-            r#"{"error":{"message":"context_management is unsupported"}}"#
-        ));
-        assert!(!context_management_unsupported(
-            500,
-            "context_management unsupported"
-        ));
-        assert!(!context_management_unsupported(
-            400,
-            "unrelated bad request"
-        ));
-    }
-
-    #[tokio::test]
-    async fn standalone_compact_sends_canonical_context_and_replaces_sidecar() {
-        let response = r#"{"output":[{"type":"compaction","encrypted_content":"new"},{"type":"message","role":"assistant","content":[]}]}"#;
-        let (url, captured) = server(response, "application/json").await;
-        let context = artist_session::ProviderContextHandle::noop();
-        let client =
-            Client::api_key(url, "secret").with_provider_context("conversation", context.clone());
-        context
-            .commit(
-                "conversation",
-                &client.context_namespace(),
-                vec![serde_json::json!({"type":"reasoning","encrypted_content":"old"})],
-            )
-            .await;
-        let output = client
-            .compact(
-                "gpt-test",
-                vec![serde_json::json!({"role":"user","content":"now"})],
-            )
-            .await
-            .unwrap();
-        assert_eq!(output[0]["encrypted_content"], "new");
-        assert_eq!(
-            context
-                .items("conversation", &client.context_namespace())
-                .await,
-            output
-        );
-        let sent = captured.await.unwrap();
-        assert!(sent.starts_with("POST /responses/compact"));
-        assert!(sent.contains("\"store\":false"));
-        assert!(sent.contains("\"encrypted_content\":\"old\""));
-        assert!(sent.contains("\"content\":\"now\""));
-    }
-
-    #[test]
     fn streamed_text_synthesizes_normalized_terminal_without_mutating_opaque_output() {
         let raw = json!({
             "id":"resp_1", "object":"response", "created_at":1, "status":"completed",
@@ -1013,8 +840,8 @@ mod transport_tests {
     }
 
     #[tokio::test]
-    async fn chatgpt_headers_and_sse_text_reasoning_tool_compaction() {
-        let terminal = r#"{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"codex","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"output":[{"type":"compaction","id":"cmp_1","encrypted_content":"opaque"}],"tools":[]}"#;
+    async fn chatgpt_headers_and_sse_text_reasoning_tool() {
+        let terminal = r#"{"id":"resp_1","object":"response","created_at":1,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"codex","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"output":[{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}],"tools":[]}"#;
         let body = format!(
             r#"data: {{"type":"response.output_text.delta","delta":"hi"}}\n\ndata: {{"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"why"}}\n\ndata: {{"type":"response.output_item.done","item":{{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{{}}"}}}}\n\ndata: {{"type":"response.completed","response":{terminal}}}\n\ndata: [DONE]\n\n"#
         );
@@ -1033,7 +860,7 @@ mod transport_tests {
         ))
         .unwrap();
         assert!(
-            matches!(&completed[0], RawStreamingChoice::FinalResponse(r) if matches!(r.output[0], OutputItem::Compaction(_)) && r.usage.total_tokens == 5)
+            matches!(&completed[0], RawStreamingChoice::FinalResponse(r) if matches!(r.output[0], OutputItem::Unknown(_)) && r.usage.total_tokens == 5)
         );
         assert!(
             matches!(&parse_event(r#"{"type":"response.output_text.delta","delta":"hi"}"#).unwrap()[0], RawStreamingChoice::Message(s) if s == "hi")

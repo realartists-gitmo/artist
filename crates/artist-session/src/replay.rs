@@ -13,14 +13,13 @@ pub enum ReplayItem {
     Reasoning(String),
     Tool { name: String, preview: String },
     Steering(String),
-    RuleFired { rule: String, matched: String },
 }
 
 const TOOL_PREVIEW_CAP: usize = 160;
 
 /// Build the resume replay from a session's events (main lineage, masked
 /// ranges honored) — unlike the old markdown parser, this shows tool
-/// activity, reasoning, and rule firings.
+/// activity and reasoning.
 pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
     let masks = resolve_masks(events, None);
     let mut items = Vec::new();
@@ -80,12 +79,6 @@ pub fn replay_for_ui(events: &[Envelope]) -> Vec<ReplayItem> {
             }
             SessionEvent::SteeringDelivered(steering) => {
                 items.push(ReplayItem::Steering(steering.content));
-            }
-            SessionEvent::RuleFired(fired) => {
-                items.push(ReplayItem::RuleFired {
-                    rule: fired.rule,
-                    matched: fired.matched,
-                });
             }
             SessionEvent::LegacyTurn(turn) => match turn.role.as_str() {
                 "assistant" => items.push(ReplayItem::Assistant(turn.content)),
@@ -209,10 +202,7 @@ pub fn markdown_fragment(envelope: &Envelope) -> Option<String> {
         }
         SessionEvent::TurnUser(turn) => {
             let text = turn.display.unwrap_or_else(|| blocks_text(&turn.content));
-            match turn.source.as_str() {
-                "rule" => None, // rendered by the RuleInjection fragment
-                _ => Some(format!("\n## User\n\n{text}\n")),
-            }
+            Some(format!("\n## User\n\n{text}\n"))
         }
         SessionEvent::ModelTurn(turn) => {
             let text = blocks_text(&turn.content);
@@ -237,11 +227,6 @@ pub fn markdown_fragment(envelope: &Envelope) -> Option<String> {
         SessionEvent::SteeringDelivered(steering) => {
             Some(format!("\n## User (steering)\n\n{}\n", steering.content))
         }
-        SessionEvent::RuleFired(fired) => Some(format!(
-            "\n> ⚠ stream rule `{}` fired on `{}` — rewound and retried\n",
-            fired.rule,
-            fired.matched.replace('`', "'")
-        )),
         SessionEvent::LegacyTurn(turn) => Some(format!(
             "\n## {}\n\n{}\n",
             if turn.role == "assistant" {
@@ -288,8 +273,8 @@ pub fn render_markdown(events: &[Envelope]) -> String {
 mod tests {
     use super::*;
     use crate::event::{
-        ConversationMessages, ModelTurn, RuleFired, SCHEMA_VERSION, ToolOutcomeRecord,
-        ToolResultEvent, TurnUser,
+        ConversationMessages, ModelTurn, SCHEMA_VERSION, ToolOutcomeRecord, ToolResultEvent,
+        TurnUser,
     };
     use rig_core::OneOrMany;
     use rig_core::completion::message::{Message, UserContent};
@@ -308,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_shows_tools_reasoning_and_rules() {
+    fn replay_shows_tools_and_reasoning() {
         let events = vec![
             envelope(
                 0,
@@ -358,7 +343,7 @@ mod tests {
             ),
             envelope(
                 3,
-                "main/delegate-1",
+                "main/child-1",
                 SessionEvent::ModelTurn(ModelTurn {
                     turn: 1,
                     content: vec![ContentBlock::Text {
@@ -366,17 +351,6 @@ mod tests {
                     }],
                     total_tokens: 0,
                     partial: false,
-                }),
-            ),
-            envelope(
-                4,
-                "main",
-                SessionEvent::RuleFired(RuleFired {
-                    rule: "no-mock".into(),
-                    target: "assistant-text".into(),
-                    matched: "mock data".into(),
-                    turn: 2,
-                    per_turn: false,
                 }),
             ),
         ];
@@ -389,10 +363,6 @@ mod tests {
                 ReplayItem::Tool {
                     name: "read".into(),
                     preview: "line one".into()
-                },
-                ReplayItem::RuleFired {
-                    rule: "no-mock".into(),
-                    matched: "mock data".into()
                 },
             ]
         );
@@ -441,7 +411,7 @@ mod tests {
     fn replay_uses_only_the_display_text_of_a_multi_part_user_prompt() {
         let prompt = Message::User {
             content: OneOrMany::many(vec![
-                UserContent::text("internal skill instructions"),
+                UserContent::text("internal instructions"),
                 UserContent::text("actual prompt"),
             ])
             .unwrap(),
@@ -494,61 +464,5 @@ mod tests {
         let markdown = render_markdown(&events);
         assert!(!markdown.contains("stale"));
         assert!(markdown.contains("replacement"));
-    }
-
-    #[test]
-    fn markdown_renders_and_rule_turns_are_not_duplicated() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text { text: "hi".into() }],
-                    display: None,
-                    source: "prompt".into(),
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text {
-                        text: "<system-reminder>…</system-reminder>".into(),
-                    }],
-                    display: Some("rule: r".into()),
-                    source: "rule".into(),
-                }),
-            ),
-        ];
-        let markdown = render_markdown(&events);
-        assert!(markdown.contains("## User\n\nhi"));
-        assert!(!markdown.contains("system-reminder"));
-    }
-
-    #[test]
-    fn user_prompts_skip_rule_injections() {
-        let events = vec![
-            envelope(
-                0,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text { text: "one".into() }],
-                    display: None,
-                    source: "prompt".into(),
-                }),
-            ),
-            envelope(
-                1,
-                "main",
-                SessionEvent::TurnUser(TurnUser {
-                    content: vec![ContentBlock::Text {
-                        text: "rule".into(),
-                    }],
-                    display: None,
-                    source: "rule".into(),
-                }),
-            ),
-        ];
-        assert_eq!(user_prompts(&events), vec!["one".to_owned()]);
     }
 }

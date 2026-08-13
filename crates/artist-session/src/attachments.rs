@@ -100,7 +100,7 @@ impl Write for TempFile {
 
 fn tempfile_in(dir: &Path) -> Result<TempFile> {
     // The temp name must be unique per staging write, not just per process:
-    // the same store is shared across concurrent background delegates, so a
+    // the same store is shared across concurrent background agents, so a
     // pid-only name lets two simultaneous `put()`s truncate each other's file
     // and publish torn bytes under a content-addressed name. A process-local
     // atomic counter makes every concurrent writer's staging path distinct.

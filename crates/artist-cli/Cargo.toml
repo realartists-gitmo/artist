@@ -11,11 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 artist-agent = { path = "../artist-agent" }
-artist-extensions = { path = "../artist-extensions" }
+artist-component = { path = "../artist-component" }
 artist-herdr = { path = "../artist-herdr" }
-artist-rules = { path = "../artist-rules", features = ["wasm"] }
+artist-kernel = { path = "../artist-kernel" }
 artist-session = { path = "../artist-session" }
-artist-tools = { path = "../artist-tools" }
 fs2 = "0.4"
 ansi-to-tui = "8.0.1"
 arboard = { version = "3", features = ["wayland-data-control"] }

@@ -4,8 +4,6 @@ use std::sync::Arc;
 pub enum LifecycleEvent {
     ToolStarted(String),
     ToolFinished(String),
-    SubagentStarted(String),
-    SubagentFinished(String),
 }
 
 #[derive(Clone, Default)]

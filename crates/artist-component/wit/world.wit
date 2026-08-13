@@ -1,0 +1,98 @@
+package artist:component@0.1.0;
+
+interface types {
+    type json = string;
+
+    record component-info {
+        name: string,
+        version: string,
+        abi-version: string,
+        interfaces: list<string>,
+        required-capabilities: list<string>,
+    }
+
+    enum handle-ownership {
+        borrowed,
+        owned,
+    }
+
+    record resource-handle {
+        id: string,
+        ownership: handle-ownership,
+    }
+
+    record invocation {
+        id: string,
+        operation: string,
+        target: string,
+        input: json,
+        context: context,
+    }
+
+    record context {
+        cancellation-token: string,
+        deadline-ms: option<u64>,
+        correlation-id: string,
+    }
+
+    record response {
+        output: json,
+        metadata: json,
+    }
+
+    record stream-chunk {
+        sequence: u64,
+        final: bool,
+        output: json,
+        metadata: json,
+    }
+
+    record host-request {
+        operation: string,
+        target: string,
+        input: json,
+        capability: option<string>,
+        handle: option<resource-handle>,
+    }
+
+    record host-response {
+        output: json,
+        metadata: json,
+    }
+
+    enum error-kind {
+        invalid-request,
+        host-failure,
+        cancelled,
+        trap,
+        incompatible,
+    }
+
+    record error {
+        kind: error-kind,
+        message: string,
+        details: option<json>,
+    }
+}
+
+interface host {
+    use types.{host-request, host-response, error, resource-handle};
+
+    invoke: func(request: host-request) -> result<host-response, error>;
+    acquire: func(target: string) -> result<resource-handle, error>;
+    borrow-handle: func(handle: resource-handle) -> result<resource-handle, error>;
+    release: func(handle: resource-handle) -> result<_, error>;
+}
+
+interface component {
+    use types.{component-info, invocation, response, stream-chunk, error};
+
+    info: func() -> component-info;
+    invoke: func(request: invocation) -> result<response, error>;
+    invoke-stream: func(request: invocation) -> result<list<stream-chunk>, error>;
+}
+
+world artist-world {
+    import host;
+    export component;
+}

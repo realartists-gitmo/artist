@@ -2,7 +2,7 @@ use artist_session::{EventLogReader, EventLogWriter, ProviderContextHandle, spaw
 use serde_json::json;
 
 #[tokio::test]
-async fn roundtrip_restart_and_latest_compaction_pruning() {
+async fn roundtrip_restart_persists_provider_context() {
     let dir = tempfile::tempdir().unwrap();
     let writer = EventLogWriter::open(dir.path(), "s1").unwrap();
     let (recorder, task) = spawn_writer(writer, None);
@@ -13,18 +13,15 @@ async fn roundtrip_restart_and_latest_compaction_pruning() {
             "openai.responses",
             vec![
                 json!({"type":"reasoning","encrypted_content":"secret"}),
-                json!({"type":"compaction","encrypted_content":"old"}),
                 json!({"type":"message","phase":"commentary"}),
-                json!({"type":"compaction","encrypted_content":"new"}),
-                json!({"type":"future","opaque":true}),
             ],
         )
         .await;
     assert_eq!(
         handle.items("conversation", "openai.responses").await,
         vec![
-            json!({"type":"compaction","encrypted_content":"new"}),
-            json!({"type":"future","opaque":true})
+            json!({"type":"reasoning","encrypted_content":"secret"}),
+            json!({"type":"message","phase":"commentary"})
         ]
     );
     drop(handle);

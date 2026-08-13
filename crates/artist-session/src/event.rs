@@ -21,11 +21,11 @@ pub struct Envelope {
     /// Unix milliseconds.
     pub ts: u64,
     pub session: String,
-    /// One `stream_chat` invocation. TTSR retries mint a new run id, so
-    /// aborted branches stay distinguishable in the log.
+    /// One `stream_chat` invocation. Retries mint a new run id, so aborted
+    /// branches stay distinguishable in the log.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
-    /// Agent scope: `main` or `main/delegate-<uuid>`.
+    /// Agent scope: `main` or a nested child lineage.
     pub lineage: String,
     pub kind: String,
     pub payload: serde_json::Value,
@@ -50,15 +50,9 @@ pub enum SessionEvent {
     ModelTurn(ModelTurn),
     ToolResult(ToolResultEvent),
     SteeringDelivered(SteeringDelivered),
-    DelegateStarted(DelegateStarted),
-    DelegateFinished(DelegateFinished),
     ConversationMessages(ConversationMessages),
-    ConversationCompacted(ConversationCompacted),
     HistoryRewind(HistoryRewind),
     LegacyTurn(LegacyTurn),
-    RuleFired(RuleFired),
-    RuleInjection(RuleInjection),
-    RuleRetroFindings(RuleRetroFindings),
     ProviderContext(ProviderContext),
     /// Forward-compat: a kind this binary does not understand.
     Unknown {
@@ -114,23 +108,13 @@ event_kinds!(
     (ModelTurn, ModelTurn, "model.turn"),
     (ToolResult, ToolResultEvent, "tool.result"),
     (SteeringDelivered, SteeringDelivered, "steering.delivered"),
-    (DelegateStarted, DelegateStarted, "delegate.started"),
-    (DelegateFinished, DelegateFinished, "delegate.finished"),
     (
         ConversationMessages,
         ConversationMessages,
         "conversation.messages"
     ),
-    (
-        ConversationCompacted,
-        ConversationCompacted,
-        "conversation.compacted"
-    ),
     (HistoryRewind, HistoryRewind, "history.rewind"),
     (LegacyTurn, LegacyTurn, "legacy.turn"),
-    (RuleFired, RuleFired, "rule.fired"),
-    (RuleInjection, RuleInjection, "rule.injection"),
-    (RuleRetroFindings, RuleRetroFindings, "rule.retro_findings"),
     (ProviderContext, ProviderContext, "provider.context.v1"),
 );
 
@@ -232,7 +216,7 @@ pub struct TurnUser {
     /// Pre-expansion text as typed in the TUI, for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
-    /// "prompt" | "queued" | "rule"
+    /// "prompt" | "queued"
     pub source: String,
 }
 
@@ -285,19 +269,6 @@ pub struct SteeringDelivered {
     pub after_internal_call_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct DelegateStarted {
-    pub prompt: String,
-    pub read_only: bool,
-    pub fork: bool,
-    pub background: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct DelegateFinished {
-    pub outcome: String,
-}
-
 /// Rig-native conversation messages committed after a successful agent run.
 /// `reset` replaces prior conversation batches; otherwise this batch appends.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -311,27 +282,12 @@ pub struct ConversationMessages {
     pub display_from: usize,
 }
 
-/// Audit metadata for a successful model-context compaction. The adjacent
-/// reset snapshot is authoritative; this event is operational and never enters
-/// the model conversation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ConversationCompacted {
-    pub summary: String,
-    pub tokens_before: u64,
-    pub kept_messages: usize,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub read_files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub modified_files: Vec<String>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct HistoryRewind {
     /// Events with `to_seq < seq <= rewind event's seq` are masked.
     pub to_seq: u64,
     pub reason: String,
-    /// "user" | "stream-rules"
+    /// "user"
     pub by: String,
 }
 
@@ -340,37 +296,6 @@ pub struct LegacyTurn {
     /// "user" | "assistant"
     pub role: String,
     pub content: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RuleFired {
-    pub rule: String,
-    pub target: String,
-    pub matched: String,
-    pub turn: u32,
-    /// Whether the rule re-arms each user turn. Recorded so a resumed session
-    /// can re-arm per-turn rules instead of leaving them permanently fired.
-    /// Absent in pre-existing logs (treated as `false`, i.e. once-per-session).
-    #[serde(default)]
-    pub per_turn: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RuleInjection {
-    pub rule: String,
-    pub reminder: String,
-    /// Whether this reminder persists for the whole session (vs the single
-    /// retry message). Recorded so resume only re-activates session-persistent
-    /// injections. Absent in pre-existing logs (treated as `false`).
-    #[serde(default)]
-    pub session_persistent: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RuleRetroFindings {
-    pub rule: String,
-    pub count: u64,
-    pub examples: Vec<String>,
 }
 
 #[cfg(test)]

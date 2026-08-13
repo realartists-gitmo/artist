@@ -48,8 +48,6 @@ impl Turn {
         LifecycleEmitter::new(move |event| match event {
             LifecycleEvent::ToolStarted(id) => activity.tool_started(id),
             LifecycleEvent::ToolFinished(id) => activity.tool_finished(&id),
-            LifecycleEvent::SubagentStarted(id) => activity.subagent_started(id),
-            LifecycleEvent::SubagentFinished(id) => activity.subagent_finished(&id),
         })
     }
 
