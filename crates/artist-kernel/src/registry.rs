@@ -57,7 +57,7 @@ fn evaluate_poll_condition(
     results: &[crate::PollResult],
     elapsed: tokio::time::Duration,
 ) -> (bool, Vec<crate::PollAtom>) {
-    let default = crate::PollCondition::Atom(crate::PollAtom::Changed(0));
+    let default = crate::default_poll_condition(results.len());
     fn atom(
         atom: &crate::PollAtom,
         results: &[crate::PollResult],
@@ -559,12 +559,24 @@ impl Kernel {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, KernelError> {
+        self.execute_tool_with_context(name, args, InvocationContext::default())
+            .await
+    }
+
+    pub async fn execute_tool_with_context(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        context: InvocationContext,
+    ) -> Result<serde_json::Value, KernelError> {
         let providers = self.inner.tool_providers.read().await;
         let host = self.handle();
         for provider in providers.iter() {
             let definitions = provider.tool_definitions();
             if definitions.iter().any(|definition| definition.name == name) {
-                return provider.execute_tool(name, args, host).await;
+                return provider
+                    .execute_tool_with_context(name, args, host, context)
+                    .await;
             }
         }
         Err(KernelError::Handler {

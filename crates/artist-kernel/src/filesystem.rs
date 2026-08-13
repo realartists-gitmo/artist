@@ -658,7 +658,11 @@ impl TypedHandler for FileHandler {
                                                 path.display()
                                             ))
                                         } else {
-                                            crate::ResourceUri::parse(&path.display().to_string())
+                                            crate::ResourceUri::parse(&format!(
+                                                "{}{}",
+                                                path.display(),
+                                                if path.is_dir() { "/" } else { "" }
+                                            ))
                                         }
                                     })
                                     .collect::<Result<Vec<_>, _>>()?;
@@ -764,7 +768,13 @@ impl TypedHandler for FileHandler {
                     Ok(OperationResult::Find(
                         paths
                             .into_iter()
-                            .map(|path| crate::ResourceUri::parse(&path.display().to_string()))
+                            .map(|path| {
+                                crate::ResourceUri::parse(&format!(
+                                    "{}{}",
+                                    path.display(),
+                                    if path.is_dir() { "/" } else { "" }
+                                ))
+                            })
                             .collect(),
                     ))
                 }

@@ -1058,6 +1058,15 @@ where
     .expect("WIT error types share the canonical error representation")
 }
 
+fn typed_error_from_kernel<E>(error: artist_kernel::KernelError, target: Option<String>) -> E
+where
+    E: serde::de::DeserializeOwned,
+{
+    let error = kernel_error_to_typed(error, target);
+    serde_json::from_value(serde_json::to_value(error).expect("typed error is serializable"))
+        .expect("WIT error types share the canonical error representation")
+}
+
 /// Execute a contract-shaped kernel operation. JSON is used only to adapt the
 /// already-computed typed result to the generated WIT record; it is not used
 /// to construct, route, or execute the kernel operation.
@@ -1088,10 +1097,12 @@ where
     };
     let context = state.context.clone();
     let result = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-        runtime
-            .block_on(kernel.execute_operation_with_context(operation, context))
-            .map_err(|error| error.to_string())
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            artist_kernel::KernelError::Handler {
+                message: error.to_string(),
+            }
+        })?;
+        runtime.block_on(kernel.execute_operation_with_context(operation, context))
     })
     .join()
     .map_err(|_| {
@@ -1101,20 +1112,9 @@ where
             target.clone(),
         )
     })?
-    .map_err(|message| {
-        typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            message,
-            target.clone(),
-        )
-    })?;
-    let value = operation_primary_value(result).map_err(|error| {
-        typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            error.to_string(),
-            target,
-        )
-    })?;
+    .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
+    let value = operation_primary_value(result)
+        .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
     let mut value = serde_json::to_value(value).map_err(|error| {
         typed_error_for(
             tool_bindings::artist::tool::types::ErrorCode::Internal,
@@ -1216,7 +1216,6 @@ fn typed_error(
 
 // Retained only as source archaeology while downstream legacy components are
 // removed. Universal typed worlds never call this JSON bridge.
-#[cfg(any())]
 fn kernel_error_to_typed(
     error: artist_kernel::KernelError,
     target: Option<String>,
@@ -1746,6 +1745,13 @@ struct DynamicDependency {
     dependencies: Vec<Arc<DynamicDependency>>,
 }
 
+#[derive(Clone)]
+struct DependencySpec {
+    contract: String,
+    bytes: Vec<u8>,
+    dependencies: Vec<DependencySpec>,
+}
+
 fn validate_typed_contract_names(
     verb: contracts::Verb,
     exports: &[String],
@@ -1792,6 +1798,25 @@ impl TypedComponentHost {
     where
         I: IntoIterator<Item = String>,
     {
+        let dependencies = dependencies
+            .into_iter()
+            .map(|(contract, bytes)| DependencySpec {
+                contract,
+                bytes,
+                dependencies: Vec::new(),
+            })
+            .collect();
+        Self::new_with_dependency_specs(bytes, capabilities, dependencies)
+    }
+
+    fn new_with_dependency_specs<I>(
+        bytes: &[u8],
+        capabilities: I,
+        dependencies: Vec<DependencySpec>,
+    ) -> Result<Self, ComponentError>
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut config = wasmtime::Config::new();
         config.wasm_component_model(true);
         let engine = wasmtime::Engine::new(&config)
@@ -1799,20 +1824,30 @@ impl TypedComponentHost {
         let component = wasmtime::component::Component::from_binary(&engine, bytes)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(format!("{e:#}"))))?;
         let capabilities = capabilities.into_iter().collect::<HashSet<_>>();
-        let dependencies = dependencies
-            .into_iter()
-            .map(|(contract, bytes)| {
-                let component = wasmtime::component::Component::from_binary(&engine, &bytes)
-                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-                Ok(Arc::new(DynamicDependency {
-                    contract,
-                    engine: engine.clone(),
-                    component,
-                    capabilities: capabilities.clone(),
-                    dependencies: Vec::new(),
-                }))
-            })
-            .collect::<Result<Vec<_>, ComponentError>>()?;
+        fn load_dependencies(
+            engine: &wasmtime::Engine,
+            capabilities: &HashSet<String>,
+            specs: Vec<DependencySpec>,
+        ) -> Result<Vec<Arc<DynamicDependency>>, ComponentError> {
+            specs
+                .into_iter()
+                .map(|spec| {
+                    let component =
+                        wasmtime::component::Component::from_binary(engine, &spec.bytes).map_err(
+                            |error| ComponentError::Load(anyhow::anyhow!(error.to_string())),
+                        )?;
+                    let dependencies = load_dependencies(engine, capabilities, spec.dependencies)?;
+                    Ok(Arc::new(DynamicDependency {
+                        contract: spec.contract,
+                        engine: engine.clone(),
+                        component,
+                        capabilities: capabilities.clone(),
+                        dependencies,
+                    }))
+                })
+                .collect()
+        }
+        let dependencies = load_dependencies(&engine, &capabilities, dependencies)?;
         Ok(Self {
             engine,
             component,
@@ -1913,9 +1948,24 @@ impl TypedComponentHost {
         export_name: &str,
         kernel: artist_kernel::KernelHandle,
     ) -> Result<serde_json::Value, ComponentError> {
+        self.invoke_dynamic_json_with_context(
+            input,
+            export_name,
+            kernel,
+            artist_kernel::InvocationContext::default(),
+        )
+    }
+
+    pub fn invoke_dynamic_json_with_context(
+        &self,
+        input: &serde_json::Value,
+        export_name: &str,
+        kernel: artist_kernel::KernelHandle,
+        context: artist_kernel::InvocationContext,
+    ) -> Result<serde_json::Value, ComponentError> {
         let mut store = wasmtime::Store::new(
             &self.engine,
-            HostState::with_kernel(self.capabilities.iter().cloned(), kernel),
+            HostState::with_kernel_context(self.capabilities.iter().cloned(), kernel, context),
         );
         let linker = self.dynamic_linker()?;
         let instance = linker
@@ -3352,6 +3402,7 @@ pub mod runtime {
         generation: u64,
         fingerprint: String,
         provenance: PathBuf,
+        artifact: Arc<Vec<u8>>,
         info: ComponentInfo,
         host: Option<Arc<ComponentHost>>,
         typed_host: Option<Arc<TypedComponentHost>>,
@@ -3373,6 +3424,10 @@ pub mod runtime {
 
         pub fn provenance(&self) -> &PathBuf {
             &self.provenance
+        }
+
+        pub(crate) fn artifact_bytes(&self) -> Arc<Vec<u8>> {
+            Arc::clone(&self.artifact)
         }
 
         pub fn info(&self) -> &ComponentInfo {
@@ -3411,8 +3466,23 @@ pub mod runtime {
             input: &str,
             kernel: artist_kernel::KernelHandle,
         ) -> Result<String, ComponentError> {
+            self.invoke_tool_json_with_context(
+                verb,
+                input,
+                kernel,
+                artist_kernel::InvocationContext::default(),
+            )
+        }
+
+        pub fn invoke_tool_json_with_context(
+            &self,
+            verb: super::contracts::Verb,
+            input: &str,
+            kernel: artist_kernel::KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<String, ComponentError> {
             if let Some(host) = &self.typed_host {
-                host.invoke_json(verb, input, kernel)
+                host.invoke_json_with_context(verb, input, kernel, context)
             } else {
                 let response = self.invoke_with_kernel(
                     Invocation {
@@ -3421,9 +3491,9 @@ pub mod runtime {
                         target: String::new(),
                         input: input.to_owned(),
                         context: super::Context {
-                            cancellation_token: String::new(),
-                            deadline_ms: None,
-                            correlation_id: String::new(),
+                            cancellation_token: context.cancellation_token.unwrap_or_default(),
+                            deadline_ms: context.deadline_ms,
+                            correlation_id: context.correlation_id.unwrap_or_default(),
                         },
                     },
                     kernel,
@@ -3438,6 +3508,21 @@ pub mod runtime {
             export_name: &str,
             kernel: artist_kernel::KernelHandle,
         ) -> Result<serde_json::Value, ComponentError> {
+            self.invoke_dynamic_json_with_context(
+                input,
+                export_name,
+                kernel,
+                artist_kernel::InvocationContext::default(),
+            )
+        }
+
+        pub fn invoke_dynamic_json_with_context(
+            &self,
+            input: &serde_json::Value,
+            export_name: &str,
+            kernel: artist_kernel::KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<serde_json::Value, ComponentError> {
             self.dynamic_host
                 .as_ref()
                 .ok_or_else(|| {
@@ -3445,7 +3530,7 @@ pub mod runtime {
                         "component has no package-local WIT host"
                     ))
                 })?
-                .invoke_dynamic_json(input, export_name, kernel)
+                .invoke_dynamic_json_with_context(input, export_name, kernel, context)
         }
 
         pub fn invoke_stream(
@@ -3482,6 +3567,7 @@ pub mod runtime {
                 generation: self.generation,
                 fingerprint: self.fingerprint.clone(),
                 provenance: self.provenance.clone(),
+                artifact: Arc::clone(&self.artifact),
                 info: self.info.clone(),
                 host: self.host.as_ref().map(Arc::clone),
                 typed_host: self.typed_host.as_ref().map(Arc::clone),
@@ -3524,6 +3610,23 @@ pub mod runtime {
             options: &BuildOptions,
             dependencies: Vec<(String, Vec<u8>)>,
         ) -> Result<ActiveVersion, ComponentError> {
+            let dependencies = dependencies
+                .into_iter()
+                .map(|(contract, bytes)| super::DependencySpec {
+                    contract,
+                    bytes,
+                    dependencies: Vec::new(),
+                })
+                .collect();
+            self.reload_with_dependency_specs(package, options, dependencies)
+        }
+
+        pub(crate) fn reload_with_dependency_specs(
+            &self,
+            package: &ToolPackage,
+            options: &BuildOptions,
+            dependencies: Vec<super::DependencySpec>,
+        ) -> Result<ActiveVersion, ComponentError> {
             let build = package.build(options)?;
             let bytes = fs::read(&build.artifact).map_err(|error| {
                 ComponentError::Load(anyhow::anyhow!(
@@ -3556,7 +3659,7 @@ pub mod runtime {
                 };
                 (None, Some(typed_host), None, info)
             } else if package.wit.is_some() {
-                let dynamic_host = Arc::new(TypedComponentHost::new_with_dependencies(
+                let dynamic_host = Arc::new(TypedComponentHost::new_with_dependency_specs(
                     &bytes,
                     options.granted_capabilities.clone(),
                     dependencies,
@@ -3601,6 +3704,7 @@ pub mod runtime {
                 generation,
                 fingerprint: build.fingerprint,
                 provenance: build.provenance,
+                artifact: Arc::new(bytes),
                 info,
                 host,
                 typed_host,
@@ -3763,6 +3867,15 @@ pub mod tool_adapter {
         }
 
         pub fn invoke(&self, args: Value, kernel: KernelHandle) -> Result<Value, KernelError> {
+            self.invoke_with_context(args, kernel, artist_kernel::InvocationContext::default())
+        }
+
+        pub fn invoke_with_context(
+            &self,
+            args: Value,
+            kernel: KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<Value, KernelError> {
             // The model adapter owns JSON shape conversion, but it must retain
             // the complete per-verb request. In particular, it must never
             // synthesize a target, discard read windows, or replace edit
@@ -3796,7 +3909,7 @@ pub mod tool_adapter {
                 })?;
             let output = self
                 .component
-                .invoke_tool_json(self.verb, &input, kernel)
+                .invoke_tool_json_with_context(self.verb, &input, kernel, context)
                 .map_err(component_error)?;
             serde_json::from_str(&output).map_err(|error| KernelError::Handler {
                 message: format!("component returned invalid output JSON: {error}"),
@@ -4263,7 +4376,7 @@ pub mod tools {
             };
             let active = self
                 .registry
-                .reload_with_dependencies(&package, &self.options, dependencies)
+                .reload_with_dependency_specs(&package, &self.options, dependencies)
                 .map_err(component_error)?;
             self.dirty.lock().unwrap().remove(&key);
             Ok(active)
@@ -4272,8 +4385,8 @@ pub mod tools {
         fn custom_dependencies(
             &self,
             current: &ToolPackage,
-        ) -> Result<Vec<(String, Vec<u8>)>, KernelError> {
-            let mut dependencies = Vec::new();
+        ) -> Result<Vec<super::DependencySpec>, KernelError> {
+            let mut discovered = Vec::new();
             for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
                 message: format!("read tools root {}: {error}", self.root.display()),
             })? {
@@ -4299,17 +4412,77 @@ pub mod tools {
                 {
                     continue;
                 }
-                let build = package.build(&self.options).map_err(component_error)?;
-                let bytes =
+                let bytes = if let Ok(active) = self.registry.current(&package.manifest.name) {
+                    (*active.artifact_bytes()).clone()
+                } else {
+                    let build = package.build(&self.options).map_err(component_error)?;
                     std::fs::read(&build.artifact).map_err(|error| KernelError::Handler {
                         message: format!(
                             "read dependency artifact {}: {error}",
                             build.artifact.display()
                         ),
-                    })?;
-                dependencies.push((contract.to_string(), bytes));
+                    })?
+                };
+                discovered.push((contract.to_string(), bytes));
             }
-            Ok(dependencies)
+            let artifacts = discovered
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            let mut config = wasmtime::Config::new();
+            config.wasm_component_model(true);
+            let engine = wasmtime::Engine::new(&config).map_err(|error| KernelError::Handler {
+                message: error.to_string(),
+            })?;
+            fn make_spec(
+                contract: &str,
+                artifacts: &std::collections::HashMap<String, Vec<u8>>,
+                engine: &wasmtime::Engine,
+                visiting: &mut std::collections::HashSet<String>,
+            ) -> Result<super::DependencySpec, KernelError> {
+                let bytes = artifacts
+                    .get(contract)
+                    .ok_or_else(|| KernelError::NotFound {
+                        uri: contract.to_owned(),
+                    })?;
+                if !visiting.insert(contract.to_owned()) {
+                    return Ok(super::DependencySpec {
+                        contract: contract.to_owned(),
+                        bytes: bytes.clone(),
+                        dependencies: Vec::new(),
+                    });
+                }
+                let component = wasmtime::component::Component::from_binary(engine, bytes)
+                    .map_err(|error| KernelError::Handler {
+                        message: format!("load dependency {contract}: {error}"),
+                    })?;
+                let mut dependencies = Vec::new();
+                for (import, _) in component.component_type().imports(engine) {
+                    if let Some(child) = artifacts
+                        .keys()
+                        .find(|candidate| super::contract_matches_import(candidate, import))
+                    {
+                        if !visiting.contains(child) {
+                            dependencies.push(make_spec(child, artifacts, engine, visiting)?);
+                        }
+                    }
+                }
+                visiting.remove(contract);
+                Ok(super::DependencySpec {
+                    contract: contract.to_owned(),
+                    bytes: bytes.clone(),
+                    dependencies,
+                })
+            }
+            let mut output = Vec::new();
+            for contract in artifacts.keys() {
+                output.push(make_spec(
+                    contract,
+                    &artifacts,
+                    &engine,
+                    &mut std::collections::HashSet::new(),
+                )?);
+            }
+            Ok(output)
         }
 
         fn package_path_for_name(&self, name: &str) -> Result<PathBuf, KernelError> {
@@ -4421,6 +4594,21 @@ pub mod tools {
             args: Value,
             host: KernelHandle,
         ) -> Result<Value, KernelError> {
+            self.execute_named_inner_with_context(
+                name,
+                args,
+                host,
+                artist_kernel::InvocationContext::default(),
+            )
+        }
+
+        fn execute_named_inner_with_context(
+            &self,
+            name: &str,
+            args: Value,
+            host: KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<Value, KernelError> {
             let registration = self
                 .registrations()?
                 .into_iter()
@@ -4431,11 +4619,16 @@ pub mod tools {
             let package_root = self.package_path_for_name(&registration.package)?;
             let active = self.activate(&package_root)?;
             if let Some(verb) = registration.contract.verb {
-                return ComponentTool::new(active, verb).invoke(args, host);
+                return ComponentTool::new(active, verb).invoke_with_context(args, host, context);
             }
 
             active
-                .invoke_dynamic_json(&args, &registration.contract.interface, host)
+                .invoke_dynamic_json_with_context(
+                    &args,
+                    &registration.contract.interface,
+                    host,
+                    context,
+                )
                 .map_err(component_error)
         }
     }
@@ -4547,6 +4740,18 @@ pub mod tools {
             host: KernelHandle,
         ) -> BoxFuture<'a, Result<Value, KernelError>> {
             Box::pin(async move { self.execute_named_inner(name, args, host) })
+        }
+
+        fn execute_tool_with_context<'a>(
+            &'a self,
+            name: &'a str,
+            args: Value,
+            host: KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> BoxFuture<'a, Result<Value, KernelError>> {
+            Box::pin(
+                async move { self.execute_named_inner_with_context(name, args, host, context) },
+            )
         }
     }
 

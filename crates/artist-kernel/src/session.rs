@@ -389,7 +389,7 @@ impl TypedHandler for SessionHandler {
                     }
                     let condition = request
                         .until
-                        .unwrap_or_else(|| crate::PollCondition::Atom(PollAtom::Changed(0)));
+                        .unwrap_or_else(|| crate::default_poll_condition(request.targets.len()));
                     validate_poll_condition(&condition, request.targets.len())?;
                     let started = Instant::now();
                     let cursors = self.poll_cursors(&request.targets).await?;

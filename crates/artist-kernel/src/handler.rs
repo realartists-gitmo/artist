@@ -68,6 +68,16 @@ pub trait ToolProvider: Send + Sync {
         args: Value,
         host: KernelHandle,
     ) -> BoxFuture<'a, Result<Value, KernelError>>;
+
+    fn execute_tool_with_context<'a>(
+        &'a self,
+        name: &'a str,
+        args: Value,
+        host: KernelHandle,
+        _context: InvocationContext,
+    ) -> BoxFuture<'a, Result<Value, KernelError>> {
+        self.execute_tool(name, args, host)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

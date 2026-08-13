@@ -652,7 +652,17 @@ impl TypedHandler for RepositoryHandler {
                     Ok(OperationResult::Find(
                         paths
                             .into_iter()
-                            .map(|path| crate::ResourceUri::parse(&path))
+                            .map(|path| {
+                                crate::ResourceUri::parse(&format!(
+                                    "{}{}",
+                                    path,
+                                    if std::path::Path::new(&path).is_dir() {
+                                        "/"
+                                    } else {
+                                        ""
+                                    }
+                                ))
+                            })
                             .collect::<Result<Vec<_>, _>>(),
                     ))
                 }

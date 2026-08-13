@@ -141,6 +141,21 @@ pub struct PollRequest {
     pub after: Option<u32>,
 }
 
+/// The semantic default for a poll with no `until` condition: wake when any
+/// target produces new output or reaches a terminal state.
+pub fn default_poll_condition(target_count: usize) -> PollCondition {
+    PollCondition::Any(
+        (0..target_count)
+            .flat_map(|target| {
+                [
+                    PollCondition::Atom(PollAtom::Changed(target as u32)),
+                    PollCondition::Atom(PollAtom::Terminated(target as u32)),
+                ]
+            })
+            .collect(),
+    )
+}
+
 /// A complete universal invocation. Each variant has its WIT operation shape;
 /// there is no universal target or untyped argument bag here.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

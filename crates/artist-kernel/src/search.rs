@@ -151,56 +151,55 @@ impl SearchService {
         let picker = guard.as_ref().ok_or_else(|| KernelError::Handler {
             message: "search index unavailable".to_owned(),
         })?;
+        let mut candidates = picker
+            .get_files()
+            .iter()
+            .filter(|item| !item.is_deleted())
+            .map(|item| {
+                let path = item.absolute_path(picker, &index.root);
+                let name = path
+                    .strip_prefix(&index.root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .into_owned();
+                (path, name)
+            })
+            .collect::<Vec<_>>();
+        candidates.extend(
+            picker
+                .get_dirs()
+                .iter()
+                .filter(|item| !item.is_deleted())
+                .map(|item| {
+                    let path = item.absolute_path(picker, &index.root);
+                    let name = item.relative_path(picker);
+                    (path, name)
+                }),
+        );
         let mut paths: Vec<PathBuf> = match pattern {
             Pattern::Fuzzy(query) => {
-                let candidates = picker
-                    .get_files()
-                    .iter()
-                    .filter(|item| !item.is_deleted())
-                    .map(|item| item.relative_path(picker))
-                    .collect::<Vec<_>>();
                 let mut scored = candidates
                     .iter()
-                    .filter_map(|candidate| {
-                        fff_search::fuzzy_match_score(query, candidate)
-                            .map(|score| (score, candidate))
+                    .filter_map(|(path, candidate)| {
+                        fff_search::fuzzy_match_score(query, candidate).map(|score| (score, path))
                     })
                     .collect::<Vec<_>>();
                 scored
                     .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
-                scored
-                    .into_iter()
-                    .map(|(_, candidate)| index.root.join(candidate))
-                    .collect()
+                scored.into_iter().map(|(_, path)| path.clone()).collect()
             }
-            Pattern::Literal(query) => picker
-                .get_files()
+            Pattern::Literal(query) => candidates
                 .iter()
-                .filter(|item| !item.is_deleted())
-                .filter_map(|item| {
-                    let path = item.absolute_path(picker, &index.root);
-                    let candidate = path
-                        .strip_prefix(&index.root)
-                        .unwrap_or(&path)
-                        .to_string_lossy();
-                    candidate.contains(query).then_some(path)
-                })
+                .filter_map(|(path, candidate)| candidate.contains(query).then_some(path.clone()))
                 .collect(),
             Pattern::Regex(query) => {
                 let regex = Regex::new(query).map_err(|error| KernelError::InvalidPattern {
                     message: error.to_string(),
                 })?;
-                picker
-                    .get_files()
+                candidates
                     .iter()
-                    .filter(|item| !item.is_deleted())
-                    .filter_map(|item| {
-                        let path = item.absolute_path(picker, &index.root);
-                        let candidate = path
-                            .strip_prefix(&index.root)
-                            .unwrap_or(&path)
-                            .to_string_lossy();
-                        regex.is_match(&candidate).then_some(path)
+                    .filter_map(|(path, candidate)| {
+                        regex.is_match(candidate).then_some(path.clone())
                     })
                     .collect()
             }
@@ -228,16 +227,25 @@ impl SearchService {
         let picker = guard.as_ref().ok_or_else(|| KernelError::Handler {
             message: "search index unavailable".to_owned(),
         })?;
-        let source_before = picker
-            .get_files()
-            .iter()
-            .filter(|item| !item.is_deleted())
-            .map(|item| item.absolute_path(picker, &index.root))
-            .filter(|path| file.is_dir() || path == file)
+        let source_paths = if file.is_file() {
+            vec![file.to_path_buf()]
+        } else {
+            picker
+                .get_files()
+                .iter()
+                .filter(|item| !item.is_deleted())
+                .map(|item| item.absolute_path(picker, &index.root))
+                .filter(|path| file.is_dir() && path.starts_with(file))
+                .collect()
+        };
+        let source_before = source_paths
+            .into_iter()
             .map(|path| {
-                let source = std::fs::read(&path).map_err(|error| KernelError::Handler {
-                    message: format!("read {}: {error}", path.display()),
-                })?;
+                let source = picker
+                    .snapshot_file(&path)
+                    .ok_or_else(|| KernelError::NotFound {
+                        uri: path.display().to_string(),
+                    })?;
                 Ok((path, source))
             })
             .collect::<Result<BTreeMap<_, _>, KernelError>>()?;

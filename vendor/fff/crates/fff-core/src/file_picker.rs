@@ -45,7 +45,7 @@ use crate::simd_path::ArenaPtr;
 use crate::stable_vec::StableVec;
 use crate::types::{
     ContentCacheBudget, DirItem, DirSearchResult, FileItem, MixedItemRef, MixedSearchResult,
-    PaginationArgs, Score, ScoringContext, SearchResult,
+    MmapSlot, PaginationArgs, Score, ScoringContext, SearchResult,
 };
 use crate::walk::WalkOutput;
 use crate::watch::BackgroundWatcher;
@@ -718,6 +718,24 @@ impl FilePicker {
     /// For frecency-sorted results, use search() which sorts matched results.
     pub fn get_files(&self) -> &[FileItem] {
         self.sync_data.files()
+    }
+
+    /// Return the exact resident/search snapshot for an indexed file. The
+    /// content cache and mmap path are reused, so callers do not need to
+    /// reopen every file merely to perform a snapshot-safe search.
+    pub fn snapshot_file(&self, path: impl AsRef<Path>) -> Option<Vec<u8>> {
+        let file = self.get_file_by_path(path)?;
+        let arena = self.arena_for(file);
+        let mut buffer = Vec::new();
+        let mut mmap_slot = MmapSlot::default();
+        let content = file.get_content_for_search(
+            &mut buffer,
+            &mut mmap_slot,
+            arena,
+            &self.base_path,
+            &self.cache_budget,
+        )?;
+        Some(content.to_vec())
     }
 
     /// Count of live (non-tombstoned) files. O(1).
