@@ -3955,6 +3955,7 @@ pub mod tools {
     };
     use serde_json::Value;
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -3972,6 +3973,7 @@ pub mod tools {
         registry: ComponentRegistry,
         options: BuildOptions,
         dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+        known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -4034,6 +4036,7 @@ pub mod tools {
                     ..BuildOptions::default()
                 },
                 dirty: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                known_packages: Arc::new(Mutex::new(HashMap::new())),
             })
         }
 
@@ -4064,17 +4067,14 @@ pub mod tools {
                 if !entry.path().join("tool.md").is_file() {
                     continue;
                 }
-                let package =
-                    ToolPackage::discover(entry.path()).map_err(|error| KernelError::Handler {
-                        message: format!(
-                            "discover tool package {}: {error}",
-                            entry.path().display()
-                        ),
-                    })?;
+                let package = match ToolPackage::discover(entry.path()) {
+                    Ok(package) => package,
+                    Err(_) => continue,
+                };
                 let Some(contract) = package.contract else {
                     continue;
                 };
-                registrations.push(ToolRegistration {
+                let registration = ToolRegistration {
                     package: package.manifest.name,
                     contract,
                     description: package.manifest.description,
@@ -4082,8 +4082,21 @@ pub mod tools {
                     input_schema: package.manifest.input_schema,
                     output_schema: package.manifest.output_schema,
                     capabilities: package.manifest.capabilities,
-                });
+                };
+                self.known_packages.lock().unwrap().insert(
+                    registration.package.clone(),
+                    (entry.path(), registration.clone()),
+                );
             }
+            registrations.extend(
+                self.known_packages
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .map(|(_, registration)| registration.clone()),
+            );
+            registrations.sort_by(|left, right| left.package.cmp(&right.package));
+            registrations.dedup_by(|left, right| left.package == right.package);
             registrations
                 .sort_by(|left, right| left.contract.to_string().cmp(&right.contract.to_string()));
             Ok(registrations)
@@ -4310,12 +4323,29 @@ pub mod tools {
             &self,
             package_root: &Path,
         ) -> Result<super::runtime::ActiveVersion, KernelError> {
-            let package = ToolPackage::discover(package_root).map_err(component_error)?;
+            let package = match ToolPackage::discover(package_root) {
+                Ok(package) => package,
+                Err(error) => {
+                    let known = self
+                        .known_packages
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .find(|(path, _)| path == package_root)
+                        .map(|(_, registration)| registration.package.clone());
+                    if let Some(package_name) = known {
+                        if let Ok(active) = self.registry.current(&package_name) {
+                            return Ok(active);
+                        }
+                    }
+                    return Err(component_error(error));
+                }
+            };
             let key = package_root.to_owned();
             let current = self.registry.current(&package.manifest.name).ok();
             let dirty = self.dirty.lock().unwrap().contains(&key);
-            if current.is_some() && !dirty {
-                return Ok(current.unwrap());
+            if let Some(active) = current.clone().filter(|_| !dirty) {
+                return Ok(active);
             }
             let dependencies = if package.wit.is_some()
                 && package
@@ -4323,14 +4353,21 @@ pub mod tools {
                     .as_ref()
                     .is_some_and(|contract| contract.verb.is_none())
             {
-                self.custom_dependencies(&package)?
+                match self.custom_dependencies(&package) {
+                    Ok(dependencies) => dependencies,
+                    Err(error) => return current.ok_or(error),
+                }
             } else {
                 Vec::new()
             };
-            let active = self
-                .registry
-                .reload_with_dependency_specs(&package, &self.options, dependencies)
-                .map_err(component_error)?;
+            let active = match self.registry.reload_with_dependency_specs(
+                &package,
+                &self.options,
+                dependencies,
+            ) {
+                Ok(active) => active,
+                Err(error) => return current.ok_or_else(|| component_error(error)),
+            };
             self.dirty.lock().unwrap().remove(&key);
             Ok(active)
         }
@@ -4464,6 +4501,9 @@ pub mod tools {
         }
 
         fn package_path_for_name(&self, name: &str) -> Result<PathBuf, KernelError> {
+            if let Some((path, _)) = self.known_packages.lock().unwrap().get(name) {
+                return Ok(path.clone());
+            }
             for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
                 message: format!("read tools root {}: {error}", self.root.display()),
             })? {
@@ -4479,7 +4519,13 @@ pub mod tools {
                 {
                     continue;
                 }
-                let package = ToolPackage::discover(entry.path()).map_err(component_error)?;
+                if !entry.path().join("tool.md").is_file() {
+                    continue;
+                }
+                let package = match ToolPackage::discover(entry.path()) {
+                    Ok(package) => package,
+                    Err(_) => continue,
+                };
                 if package.manifest.name == name {
                     return Ok(entry.path());
                 }
@@ -5030,6 +5076,7 @@ pub mod tools {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolsHandler;
     use std::{path::PathBuf, process::Command};
 
     fn fixture() -> Vec<u8> {
@@ -5684,6 +5731,44 @@ mod tests {
             package.contract,
             Some(contracts::ContractId::universal(contracts::Verb::Read))
         );
+    }
+
+    #[test]
+    fn malformed_tool_packages_are_isolated_from_valid_and_cached_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let valid = root.path().join("valid");
+        std::fs::create_dir(&valid).unwrap();
+        std::fs::write(
+            valid.join("tool.md"),
+            "---\nname: valid-tool\ndescription: Valid tool\nversion: 0.1.0\ncontract: artist:tool:read@1\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            valid.join("tool.wasm"),
+            b"not activated in this discovery test",
+        )
+        .unwrap();
+
+        let malformed = root.path().join("malformed");
+        std::fs::create_dir(&malformed).unwrap();
+        std::fs::write(malformed.join("tool.md"), "not frontmatter").unwrap();
+
+        let handler = ToolsHandler::new(root.path(), []).unwrap();
+        let registrations = handler.registrations().unwrap();
+        assert_eq!(
+            registrations
+                .iter()
+                .map(|registration| registration.package.as_str())
+                .collect::<Vec<_>>(),
+            vec!["valid-tool"]
+        );
+
+        // A half-edited package must not erase its last known registration or
+        // prevent lookup of an unrelated valid package.
+        std::fs::write(valid.join("tool.md"), "not frontmatter either").unwrap();
+        let registrations = handler.registrations().unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].package, "valid-tool");
     }
 
     #[test]

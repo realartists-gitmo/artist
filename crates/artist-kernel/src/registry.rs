@@ -315,6 +315,35 @@ mod tests {
                 if matches!(values[0], Err(KernelError::NoHandler { .. }))
         ));
     }
+
+    #[tokio::test]
+    async fn duplicate_write_uris_are_rejected_before_any_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("duplicate.txt");
+        std::fs::write(&path, "original\n").unwrap();
+        let kernel = Kernel::new();
+        kernel
+            .register_typed(crate::FileHandler::new(root.path()).unwrap())
+            .await;
+        let uri = ResourceUri::parse(&path.display().to_string()).unwrap();
+        let result = kernel
+            .execute_operation(Operation::Write(vec![
+                crate::WriteRequest {
+                    uri: uri.clone(),
+                    content: "first\n".to_owned(),
+                },
+                crate::WriteRequest {
+                    uri,
+                    content: "second\n".to_owned(),
+                },
+            ]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, OperationResult::Write(ref values) if values.len() == 1 && matches!(values[0], Err(KernelError::Conflict { .. })))
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
+    }
 }
 
 fn operation_uri(operation: &Operation) -> String {
@@ -510,6 +539,14 @@ impl Kernel {
                 Ok(OperationResult::Read(output))
             }
             Operation::Write(requests) => {
+                let mut seen = std::collections::HashSet::with_capacity(requests.len());
+                if let Some(duplicate) = requests.iter().find_map(|request| {
+                    (!seen.insert(request.uri.clone())).then_some(request.uri.clone())
+                }) {
+                    return Ok(OperationResult::Write(vec![Err(KernelError::Conflict {
+                        uri: duplicate.to_string(),
+                    })]));
+                }
                 let mut output = Vec::with_capacity(requests.len());
                 for request in requests {
                     let result = self
