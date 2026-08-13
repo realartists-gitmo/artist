@@ -49,17 +49,24 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
         ($verb:literal) => {{
             let package = root.join($verb);
             std::fs::create_dir_all(package.join("src"))?;
+            std::fs::create_dir_all(root.join("wit/tool-surface"))?;
+            let manifest = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../artist-component/conformance/verbs/",
+                $verb,
+                "/Cargo.toml"
+            ))
+            .replace(
+                "path = \"../../typed-guest/src/lib.rs\"",
+                "path = \"src/lib.rs\"",
+            );
+            let guest = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../artist-component/conformance/typed-guest/src/lib.rs"
+            ))
+            .replace("../../../wit/tool-surface", "../wit/tool-surface");
             for (relative, bytes) in [
-                (
-                    "Cargo.toml",
-                    include_bytes!(concat!(
-                        env!("CARGO_MANIFEST_DIR"),
-                        "/../artist-component/conformance/verbs/",
-                        $verb,
-                        "/Cargo.toml"
-                    ))
-                    .as_slice(),
-                ),
+                ("Cargo.toml", manifest.as_bytes()),
                 (
                     "Cargo.lock",
                     include_bytes!(concat!(
@@ -80,19 +87,34 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                     ))
                     .as_slice(),
                 ),
+                ("src/lib.rs", guest.as_bytes()),
                 (
-                    "src/lib.rs",
+                    "../wit/tool-surface/world.wit",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../artist-component/conformance/verbs/",
-                        $verb,
-                        "/src/lib.rs"
+                        "/../artist-component/wit/tool-surface/world.wit"
                     ))
                     .as_slice(),
                 ),
             ] {
                 let path = package.join(relative);
-                if !path.exists() {
+                let needs_repair = match relative {
+                    "Cargo.toml" => path
+                        .exists()
+                        .then(|| std::fs::read_to_string(&path).ok())
+                        .flatten()
+                        .is_some_and(|contents| contents.contains("../../typed-guest/src/lib.rs")),
+                    "src/lib.rs" => path
+                        .exists()
+                        .then(|| std::fs::read_to_string(&path).ok())
+                        .flatten()
+                        .is_some_and(|contents| {
+                            contents.contains("../../../wit/tool-surface")
+                                || contents.contains("../../wit/tool-surface")
+                        }),
+                    _ => false,
+                };
+                if !path.exists() || needs_repair {
                     std::fs::write(path, bytes)?;
                 }
             }
@@ -138,6 +160,29 @@ mod tests {
     use super::*;
     use artist_kernel::Verb;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn clean_project_seeds_and_activates_named_read_tool() {
+        let root = tempdir().unwrap();
+        let source = root.path().join("hello.txt");
+        std::fs::write(&source, "hello\n").unwrap();
+        let kernel = build(root.path()).await.unwrap();
+        let seeded = ToolsHandler::new(root.path().join("tools"), Vec::<String>::new())
+            .unwrap()
+            .registrations()
+            .unwrap();
+        assert!(seeded.iter().any(|tool| tool.tool_name() == "read"));
+        let output = kernel
+            .execute_tool(
+                "read",
+                serde_json::json!({
+                    "requests": [{"uri": source.display().to_string(), "at": null, "before": null, "after": null}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(output.to_string().contains("hello"));
+    }
 
     #[test]
     fn canonicalizes_native_paths_before_kernel_dispatch() {

@@ -108,6 +108,8 @@ pub struct EnvironmentEntry {
 /// Invocation metadata is carried by the kernel, not encoded as tool input.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct InvocationContext {
+    pub working_uri: Option<ResourceUri>,
+    pub environment: Vec<EnvironmentEntry>,
     pub cancellation_token: Option<String>,
     pub deadline_ms: Option<u64>,
     pub correlation_id: Option<String>,
@@ -117,8 +119,6 @@ pub struct InvocationContext {
 pub struct RunRequest {
     pub uri: ResourceUri,
     pub args: Vec<String>,
-    pub working_uri: Option<ResourceUri>,
-    pub environment: Vec<EnvironmentEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -137,8 +137,6 @@ pub struct PollTarget {
 pub struct PollRequest {
     pub targets: Vec<PollTarget>,
     pub until: Option<PollCondition>,
-    pub before: Option<u32>,
-    pub after: Option<u32>,
 }
 
 /// A complete universal invocation. Each variant has its WIT operation shape;
@@ -187,8 +185,7 @@ pub struct WriteResult {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EditResult {
-    pub uri: ResourceUri,
-    pub changed: Vec<AnchoredText>,
+    pub text: AnchoredText,
     pub diff: AnchoredDiff,
 }
 

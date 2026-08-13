@@ -36,10 +36,11 @@ component-model streams. Their element types are respectively
 `read-result`, `anchored-text`, and `anchored-text`; adapters must not encode
 these stream elements as arbitrary JSON chunks.
 
-The execution context for `run` is explicit in the typed operation data where
-it is part of the contract (working URI and environment). Cancellation,
-deadline, correlation, and authority are invocation context propagated by the
-kernel out of band; they are never ordinary tool arguments.
+The execution context for `run` is supplied by the invocation context (working
+URI and environment). The typed `run` request contains only its resource URI
+and arguments. Cancellation, deadline, correlation, and authority are also
+invocation context propagated by the kernel out of band; none are ordinary
+tool arguments.
 
 `poll` uses a bounded condition-centered window. Its stream emits newly
 observed anchored text around the condition that completes the poll; regex

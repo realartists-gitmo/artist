@@ -369,6 +369,8 @@ where
             persistence.clone(),
         );
         let invocation_context = artist_kernel::InvocationContext {
+            working_uri: None,
+            environment: Vec::new(),
             cancellation_token: Some(format!("run:{run_id}")),
             deadline_ms: None,
             correlation_id: Some(run_id.clone()),

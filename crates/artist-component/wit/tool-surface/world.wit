@@ -51,7 +51,6 @@ interface types {
         not-empty,
         aborted,
         internal,
-        invalid-state,
     }
 
     record diff-hunk {
@@ -119,8 +118,7 @@ interface types {
     }
 
     record edit-result {
-        uri: uri,
-        changed: list<anchored-text>,
+        text: anchored-text,
         diff: anchored-diff,
     }
 
@@ -142,13 +140,6 @@ interface types {
     record run-request {
         uri: uri,
         args: list<string>,
-        working-uri: option<uri>,
-        environment: list<environment-entry>,
-    }
-
-    record environment-entry {
-        name: string,
-        value: string,
     }
 
     record send-request {
@@ -187,8 +178,6 @@ interface types {
     record poll-request {
         targets: list<poll-target>,
         until: option<poll-condition-wire>,
-        before: option<u32>,
-        after: option<u32>,
     }
 
     record poll-result {

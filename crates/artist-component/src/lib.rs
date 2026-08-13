@@ -733,25 +733,6 @@ impl run_bindings::artist::tool::host_run::Host for HostState {
                         Some(target.clone()),
                     )
                 })?;
-                let working_uri = request
-                    .working_uri
-                    .map(|value| artist_kernel::ResourceUri::parse(&value))
-                    .transpose()
-                    .map_err(|error| {
-                        typed_error_for::<run_bindings::artist::tool::types::Error>(
-                            tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
-                            error.to_string(),
-                            Some(target.clone()),
-                        )
-                    })?;
-                let environment = request
-                    .environment
-                    .into_iter()
-                    .map(|entry| artist_kernel::EnvironmentEntry {
-                        name: entry.name,
-                        value: entry.value,
-                    })
-                    .collect();
                 typed_host_invoke_operation(
                     self,
                     "run",
@@ -759,8 +740,6 @@ impl run_bindings::artist::tool::host_run::Host for HostState {
                     artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
                         uri,
                         args: request.args,
-                        working_uri,
-                        environment,
                     }]),
                 )
             })
@@ -914,12 +893,7 @@ impl poll_bindings::artist::tool::host_poll::Host for HostState {
             self,
             "poll",
             target,
-            artist_kernel::Operation::Poll(artist_kernel::PollRequest {
-                targets,
-                until,
-                before: request.before,
-                after: request.after,
-            }),
+            artist_kernel::Operation::Poll(artist_kernel::PollRequest { targets, until }),
         )
     }
 }
@@ -1303,7 +1277,7 @@ fn kernel_error_to_typed(
             message,
         ),
         KernelError::InvalidState { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::InvalidState,
+            tool_bindings::artist::tool::types::ErrorCode::Internal,
             target,
             message,
         ),
@@ -1456,31 +1430,6 @@ fn execute_typed_kernel_value(
                         .collect()
                 })
                 .unwrap_or_default(),
-            working_uri: args
-                .get("working_uri")
-                .cloned()
-                .filter(|value| !value.is_null())
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })?,
-            environment: serde_json::from_value(
-                args.get("environment")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!([])),
-            )
-            .map_err(|error| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    error.to_string(),
-                    Some(target.clone()),
-                )
-            })?,
         }]),
         "edit" => {
             let mut operations = if args.is_array() {
@@ -1532,18 +1481,7 @@ fn execute_typed_kernel_value(
             } else {
                 None
             };
-            let mut request = artist_kernel::PollRequest {
-                targets,
-                until,
-                before: args
-                    .get("before")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|v| v as u32),
-                after: args
-                    .get("after")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|v| v as u32),
-            };
+            let mut request = artist_kernel::PollRequest { targets, until };
             if request.targets.is_empty() {
                 request.targets.push(artist_kernel::PollTarget {
                     uri: uri.ok_or_else(|| {
@@ -4066,7 +4004,7 @@ pub mod tools {
                         Some(super::contracts::Verb::Edit) => serde_json::json!({"type":"object","properties":{"requests":{"type":"array"},"uri":{"type":"string"},"operations":{"type":"array"}},"oneOf":[{"required":["requests"]},{"required":["uri","operations"]}]}),
                         Some(super::contracts::Verb::Find) => serde_json::json!({"type":"object","required":["roots","query"],"properties":{"roots":{"type":"array","items":{"type":"string"}},"query":{"type":"string"}}}),
                         Some(super::contracts::Verb::Grep) => serde_json::json!({"type":"object","required":["pattern","source"],"properties":{"pattern":{"type":"string"},"source":{}}}),
-                        Some(super::contracts::Verb::Poll) => serde_json::json!({"type":"object","required":["targets"],"properties":{"targets":{"type":"array"},"until":{},"before":{"type":"integer"},"after":{"type":"integer"}}}),
+                        Some(super::contracts::Verb::Poll) => serde_json::json!({"type":"object","required":["targets"],"properties":{"targets":{"type":"array"},"until":{}}}),
                         Some(super::contracts::Verb::Run) | Some(super::contracts::Verb::Send) => serde_json::json!({"type":"object","required":["requests"],"properties":{"requests":{"type":"array"}}}),
                         Some(super::contracts::Verb::Abort) | Some(super::contracts::Verb::Delete) => serde_json::json!({"type":"object","required":["uris"],"properties":{"uris":{"type":"array","items":{"type":"string"}}}}),
                         None => serde_json::json!({"type":"object","additionalProperties":true}),
@@ -4123,7 +4061,16 @@ pub mod tools {
                 {
                     continue;
                 }
-                let package = ToolPackage::discover(entry.path()).map_err(component_error)?;
+                if !entry.path().join("tool.md").is_file() {
+                    continue;
+                }
+                let package =
+                    ToolPackage::discover(entry.path()).map_err(|error| KernelError::Handler {
+                        message: format!(
+                            "discover tool package {}: {error}",
+                            entry.path().display()
+                        ),
+                    })?;
                 let Some(contract) = package.contract else {
                     continue;
                 };
@@ -4311,12 +4258,7 @@ pub mod tools {
                         .into_iter()
                         .map(|result| {
                             result.and_then(|mut value| {
-                                value.uri = self.unmap_typed_uri(value.uri)?;
-                                value.changed = value
-                                    .changed
-                                    .into_iter()
-                                    .map(|text| self.unmap_text(text))
-                                    .collect::<Result<_, _>>()?;
+                                value.text = self.unmap_text(value.text)?;
                                 value.diff = AnchoredDiff {
                                     uri: self.unmap_typed_uri(value.diff.uri)?,
                                     ..value.diff
@@ -5373,8 +5315,7 @@ mod tests {
                             .into_iter()
                             .map(|request| {
                                 Ok(EditResult {
-                                    uri: request.uri.clone(),
-                                    changed: Vec::new(),
+                                    text: line(request.uri.clone()),
                                     diff: AnchoredDiff {
                                         uri: request.uri,
                                         hunks: Vec::new(),
@@ -5449,7 +5390,7 @@ mod tests {
             ),
             (
                 contracts::Verb::Run,
-                "[{\"uri\":\"typed.txt\",\"args\":[],\"working_uri\":null,\"environment\":[]}]",
+                "[{\"uri\":\"typed.txt\",\"args\":[]}]",
             ),
             (
                 contracts::Verb::Send,
@@ -5459,7 +5400,7 @@ mod tests {
             (contracts::Verb::Delete, "[\"missing-delete\"]"),
             (
                 contracts::Verb::Poll,
-                "{\"targets\":[{\"uri\":\"typed.txt\",\"from_position\":null}],\"until\":null,\"before\":null,\"after\":null}",
+                "{\"targets\":[{\"uri\":\"typed.txt\",\"from_position\":null}],\"until\":null}",
             ),
         ];
 

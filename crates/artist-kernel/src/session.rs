@@ -319,8 +319,8 @@ impl TypedHandler for SessionHandler {
                                     &request.uri,
                                     &value,
                                     request.at.as_ref(),
-                                    request.before,
-                                    request.after,
+                                    None,
+                                    None,
                                 )
                             }
                             Err(error) => Err(error),
@@ -434,12 +434,7 @@ impl TypedHandler for SessionHandler {
                         .iter()
                         .zip(snapshots.iter())
                         .map(|(target, value)| {
-                            anchored_session_window(
-                                &target.uri,
-                                value,
-                                request.before,
-                                request.after,
-                            )
+                            anchored_session_window(&target.uri, value, None, None)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(OperationResult::Poll(Ok(crate::PollResult {
@@ -760,7 +755,7 @@ mod tests {
                 uri: uri.clone(),
                 at: Some(crate::Position::Top),
                 before: None,
-                after: Some(10),
+                after: None,
             }]))
             .await
             .unwrap();
@@ -774,8 +769,6 @@ mod tests {
                     from_position: Some(crate::Position::Top),
                 }],
                 until: None,
-                before: None,
-                after: None,
             }))
             .await
             .unwrap();
@@ -830,8 +823,6 @@ mod tests {
                     from_position: None,
                 }],
                 until: None,
-                before: None,
-                after: None,
             }))
             .await
         });
@@ -858,8 +849,6 @@ mod tests {
                     from_position: Some(crate::Position::At(first_anchor)),
                 }],
                 until: Some(crate::PollCondition::Atom(PollAtom::Changed(0))),
-                before: None,
-                after: None,
             }))
             .await
             .unwrap();

@@ -454,8 +454,7 @@ impl FileHandler {
         atomic_replace(path, &rendered)?;
         let new = self.anchored_text(uri.clone(), path, &rendered)?;
         Ok(crate::EditResult {
-            uri: uri.clone(),
-            changed: vec![new.clone()],
+            text: new.clone(),
             diff: crate::AnchoredDiff {
                 uri,
                 hunks: vec![crate::DiffHunk {
@@ -1107,9 +1106,9 @@ mod tests {
         };
         let value = values.remove(0).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\ninserted\ntwo\n");
-        assert_eq!(value.uri, uri);
+        assert_eq!(value.text.uri, uri);
         assert_eq!(value.diff.hunks.len(), 1);
-        assert_eq!(value.changed[0].lines.len(), 3);
+        assert_eq!(value.text.lines.len(), 3);
     }
 
     #[tokio::test]

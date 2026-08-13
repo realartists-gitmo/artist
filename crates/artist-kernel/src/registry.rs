@@ -473,8 +473,6 @@ impl Kernel {
                 let operation = Operation::Poll(crate::PollRequest {
                     targets: vec![target.clone()],
                     until: None,
-                    before: request.before,
-                    after: request.after,
                 });
                 handlers
                     .iter()
@@ -504,8 +502,6 @@ impl Kernel {
                     until: Some(crate::PollCondition::Atom(crate::PollAtom::Timeout(
                         slice_ms,
                     ))),
-                    before: request.before,
-                    after: request.after,
                 });
                 self.execute_typed_item(handlers, operation, host.clone(), context.clone())
             });
