@@ -1247,9 +1247,9 @@ fn kernel_error_to_typed(
             "resource was not found".to_owned(),
         ),
         KernelError::AlreadyExists { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::AlreadyExists,
+            tool_bindings::artist::tool::types::ErrorCode::Conflict,
             Some(uri),
-            "resource already exists".to_owned(),
+            "resource conflict".to_owned(),
         ),
         KernelError::Immutable { uri } => (
             tool_bindings::artist::tool::types::ErrorCode::Immutable,

@@ -42,10 +42,9 @@ and arguments. Cancellation, deadline, correlation, and authority are also
 invocation context propagated by the kernel out of band; none are ordinary
 tool arguments.
 
-`poll` uses a bounded condition-centered window. Its stream emits newly
-observed anchored text around the condition that completes the poll; regex
-matching considers only newly observed material. `Terminated` is valid only
-for resources advertising termination capability. The initial reload trigger
+`poll` accumulates newly observed anchored text from each target's poll cursor;
+regex matching considers only newly observed material. `Terminated` is valid
+only for resources advertising termination capability. The initial reload trigger
 is explicit; the runtime also exposes a debounced trigger that calls the same
 transactional build/validate/activate path.
 

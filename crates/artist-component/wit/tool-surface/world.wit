@@ -40,7 +40,6 @@ interface types {
         invalid-input,
         invalid-pattern,
         not-found,
-        already-exists,
         wrong-kind,
         invalid-anchor,
         stale-anchor,
