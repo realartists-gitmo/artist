@@ -15,7 +15,134 @@ struct Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Anchor, AnchoredLine, AnchoredText, LineEnding, PollResult, RegexAtom};
+    use crate::{
+        Anchor, AnchoredLine, AnchoredText, BoxFuture, EnvironmentEntry, LineEnding, PollResult,
+        RegexAtom,
+    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct FakeState {
+        resources: HashMap<String, (String, bool)>,
+        contexts: HashMap<String, InvocationContext>,
+        runs: u64,
+    }
+
+    #[derive(Clone)]
+    struct FakeNamespace {
+        state: Arc<Mutex<FakeState>>,
+        create_on_send: bool,
+        distinct_run: bool,
+    }
+
+    impl FakeNamespace {
+        fn new(create_on_send: bool, distinct_run: bool) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeState::default())),
+                create_on_send,
+                distinct_run,
+            }
+        }
+
+        fn uri(&self, value: &str) -> ResourceUri {
+            ResourceUri::parse(value).unwrap()
+        }
+
+        fn input(&self, value: &str) -> String {
+            self.state
+                .lock()
+                .unwrap()
+                .resources
+                .get(value)
+                .map(|(input, _)| input.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl TypedHandler for FakeNamespace {
+        fn descriptor(&self) -> HandlerDescriptor {
+            HandlerDescriptor {
+                name: "fake-namespace".to_owned(),
+                schemes: vec!["fake".to_owned()],
+                verbs: vec![Verb::Run, Verb::Send],
+            }
+        }
+
+        fn claims_operation(&self, operation: &Operation) -> bool {
+            let uris = match operation {
+                Operation::Run(requests) => requests
+                    .iter()
+                    .map(|request| &request.uri)
+                    .collect::<Vec<_>>(),
+                Operation::Send(requests) => requests
+                    .iter()
+                    .map(|request| &request.uri)
+                    .collect::<Vec<_>>(),
+                _ => return false,
+            };
+            !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "fake")
+        }
+
+        fn execute_typed<'a>(
+            &'a self,
+            operation: Operation,
+            _host: KernelHandle,
+            context: InvocationContext,
+        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+            let state = Arc::clone(&self.state);
+            let create_on_send = self.create_on_send;
+            let distinct_run = self.distinct_run;
+            Box::pin(async move {
+                let mut state = state.lock().unwrap();
+                match operation {
+                    Operation::Run(mut requests) => {
+                        let request = requests.pop().unwrap();
+                        let requested = request.uri.to_string();
+                        if state.resources.contains_key(&requested) {
+                            return Err(KernelError::Conflict { uri: requested });
+                        }
+                        state.runs += 1;
+                        let result = if distinct_run {
+                            format!("fake://execution-{}", state.runs)
+                        } else {
+                            requested
+                        };
+                        state
+                            .resources
+                            .insert(result.clone(), (String::new(), true));
+                        state.contexts.insert(result.clone(), context);
+                        Ok(OperationResult::Run(vec![Ok(
+                            ResourceUri::parse(&result).unwrap()
+                        )]))
+                    }
+                    Operation::Send(requests) => {
+                        let mut results = Vec::new();
+                        for request in requests {
+                            let uri = request.uri.to_string();
+                            if !state.resources.contains_key(&uri) {
+                                if !create_on_send {
+                                    results.push(Err(KernelError::NotFound { uri }));
+                                    continue;
+                                }
+                                state.resources.insert(uri.clone(), (String::new(), true));
+                                state.contexts.insert(uri.clone(), context.clone());
+                            }
+                            let (input, receptive) = state.resources.get_mut(&uri).unwrap();
+                            if !*receptive {
+                                results.push(Err(KernelError::Conflict { uri }));
+                            } else {
+                                input.push_str(&request.content);
+                                results.push(Ok(request.uri));
+                            }
+                        }
+                        Ok(OperationResult::Send(results))
+                    }
+                    _ => unreachable!(),
+                }
+            })
+        }
+    }
 
     #[test]
     fn poll_regex_matches_across_anchored_lines() {
@@ -45,6 +172,148 @@ mod tests {
         assert!(
             evaluate_poll_condition(Some(&condition), &[result], tokio::time::Duration::ZERO,).0
         );
+    }
+
+    #[tokio::test]
+    async fn run_and_send_are_owned_by_uri_handlers() {
+        let kernel = Kernel::new();
+        let namespace = FakeNamespace::new(true, false);
+        kernel.register_typed(namespace.clone()).await;
+        let context = InvocationContext {
+            working_uri: Some(namespace.uri("fake://workspace")),
+            environment: vec![EnvironmentEntry {
+                name: "MODE".to_owned(),
+                value: "test".to_owned(),
+            }],
+            ..InvocationContext::default()
+        };
+        let uri = namespace.uri("fake://run-tests");
+        let run = kernel
+            .execute_operation_with_context(
+                Operation::Run(vec![crate::RunRequest {
+                    uri: uri.clone(),
+                    args: vec!["--release".to_owned()],
+                }]),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(run, OperationResult::Run(ref values) if values[0].as_ref() == Ok(&uri)));
+
+        let rerun = kernel
+            .execute_operation(Operation::Run(vec![crate::RunRequest {
+                uri: uri.clone(),
+                args: Vec::new(),
+            }]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(rerun, OperationResult::Run(ref values) if matches!(values[0], Err(KernelError::Conflict { .. })))
+        );
+
+        let send = kernel
+            .execute_operation_with_context(
+                Operation::Send(vec![
+                    crate::SendRequest {
+                        uri: uri.clone(),
+                        content: "abc".to_owned(),
+                    },
+                    crate::SendRequest {
+                        uri: uri.clone(),
+                        content: "def\n".to_owned(),
+                    },
+                ]),
+                context,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(send, OperationResult::Send(ref values) if values.iter().all(Result::is_ok))
+        );
+        assert_eq!(namespace.input("fake://run-tests"), "abcdef\n");
+        assert_eq!(namespace.state.lock().unwrap().contexts.len(), 1);
+
+        let mut state = namespace.state.lock().unwrap();
+        state.resources.get_mut("fake://run-tests").unwrap().1 = false;
+        drop(state);
+        let rejected = kernel
+            .execute_operation(Operation::Send(vec![crate::SendRequest {
+                uri,
+                content: "replacement".to_owned(),
+            }]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(rejected, OperationResult::Send(ref values) if matches!(values[0], Err(KernelError::Conflict { .. })))
+        );
+        assert_eq!(namespace.input("fake://run-tests"), "abcdef\n");
+
+        let distinct = FakeNamespace::new(true, true);
+        let distinct_kernel = Kernel::new();
+        distinct_kernel.register_typed(distinct.clone()).await;
+        let source = distinct.uri("fake://source");
+        let result = distinct_kernel
+            .execute_operation(Operation::Run(vec![crate::RunRequest {
+                uri: source.clone(),
+                args: Vec::new(),
+            }]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, OperationResult::Run(ref values) if values[0].as_ref().is_ok_and(|value| value != &source))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_creation_order_and_missing_policy_stay_inside_handlers() {
+        let kernel = Kernel::new();
+        let namespace = FakeNamespace::new(true, false);
+        kernel.register_typed(namespace.clone()).await;
+        let uri = namespace.uri("fake://concurrent");
+        let first = kernel.clone();
+        let second = kernel.clone();
+        let (first, second) = tokio::join!(
+            first.execute_operation(Operation::Send(vec![crate::SendRequest {
+                uri: uri.clone(),
+                content: "abc".to_owned()
+            }])),
+            second.execute_operation(Operation::Send(vec![crate::SendRequest {
+                uri: uri.clone(),
+                content: "def\n".to_owned()
+            }])),
+        );
+        assert!(first.is_ok() && second.is_ok());
+        assert_eq!(namespace.state.lock().unwrap().resources.len(), 1);
+        assert!(matches!(
+            namespace.input("fake://concurrent").as_str(),
+            "abcdef\n" | "def\nabc"
+        ));
+
+        let no_create = FakeNamespace::new(false, false);
+        let no_create_kernel = Kernel::new();
+        no_create_kernel.register_typed(no_create.clone()).await;
+        let result = no_create_kernel
+            .execute_operation(Operation::Send(vec![crate::SendRequest {
+                uri: no_create.uri("fake://missing"),
+                content: "ignored".to_owned(),
+            }]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, OperationResult::Send(ref values) if matches!(values[0], Err(KernelError::NotFound { .. })))
+        );
+
+        let unknown = Kernel::new()
+            .execute_operation(Operation::Send(vec![crate::SendRequest {
+                uri: ResourceUri::parse("unknown://missing").unwrap(),
+                content: "ignored".to_owned(),
+            }]))
+            .await;
+        assert!(matches!(
+            unknown,
+            Ok(OperationResult::Send(ref values))
+                if matches!(values[0], Err(KernelError::NoHandler { .. }))
+        ));
     }
 }
 

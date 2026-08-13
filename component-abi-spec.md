@@ -49,6 +49,24 @@ resources advertising termination capability. The initial reload trigger
 is explicit; the runtime also exposes a debounced trigger that calls the same
 transactional build/validate/activate path.
 
+`run(uri, args)` asks the namespace owning `uri` to start or instantiate the
+addressed runnable resource and returns its authoritative execution URI. That
+URI may equal the requested URI or differ; the kernel imposes neither identity
+nor distinction. `args` are launch-time arguments/configuration analogous to
+argv, not stdin or shell command text. An identity-addressed namespace returns
+`conflict` rather than silently restarting an existing resource.
+
+`send(uri, content)` delivers `content` exactly to the addressed resource's
+ongoing input stream: no newline, separator, command interpretation, or
+one-call-per-command assumption is added by the universal layer. A receiving
+namespace may atomically create an absent resource on its first send, but
+missing-resource creation is not a universal guarantee; handlers that do not
+support it return `not-found`. Accepted sends to one URI are serialized in
+order, and concurrent first sends create at most one resource. Creation uses
+the operation's invocation context; later sends do not reset that resource's
+persistent context. Existing non-receptive or terminated resources return
+`conflict`, never resurrection or replacement.
+
 WIT is the interface-definition language. WASM components contain the
 implementation. Provider-facing prose and JSON schemas are a separate layer.
 
@@ -86,6 +104,21 @@ This slice does not:
   generic world.
 
 Those systems consume this ABI in later horizontal slices.
+
+## 3.1 Future persistent shell namespace constraints
+
+These constraints are reserved for a future `bash://` backend; this slice does
+not implement it. One `bash://<name>` identifies one caller-named persistent
+shell execution resource. The first `send` may create it, and explicit
+`run(bash://<name>, [])` may create an empty shell. Shell program text arrives
+through `send`, not `run.args`; parser/state, cwd, variables, functions, and
+aliases persist across sends. Partial syntax and heredocs may span sends.
+
+Stdout and stderr contribute to the same textual resource and anchor space, so
+`read`, `grep`, and `poll` observe it. `abort` requests termination, is
+idempotent, and leaves accumulated text readable. Sending after termination
+returns `conflict`; it never starts a replacement shell. Command completion,
+prompt markers, sentinels, and readiness atoms are intentionally unspecified.
 
 ## 4. Component model
 

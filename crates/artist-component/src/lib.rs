@@ -4745,6 +4745,70 @@ pub mod tools {
         use artist_kernel::{Kernel, Verb as KernelVerb};
         use tempfile::tempdir;
 
+        #[derive(Clone, Default)]
+        struct NamedFakeNamespace {
+            resources: Arc<Mutex<std::collections::HashMap<String, String>>>,
+        }
+
+        impl TypedHandler for NamedFakeNamespace {
+            fn descriptor(&self) -> HandlerDescriptor {
+                HandlerDescriptor {
+                    name: "named-fake".to_owned(),
+                    schemes: vec!["fake".to_owned()],
+                    verbs: vec![KernelVerb::Run, KernelVerb::Send],
+                }
+            }
+
+            fn claims_operation(&self, operation: &Operation) -> bool {
+                let uris = match operation {
+                    Operation::Run(requests) => requests
+                        .iter()
+                        .map(|request| &request.uri)
+                        .collect::<Vec<_>>(),
+                    Operation::Send(requests) => requests
+                        .iter()
+                        .map(|request| &request.uri)
+                        .collect::<Vec<_>>(),
+                    _ => return false,
+                };
+                !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "fake")
+            }
+
+            fn execute_typed<'a>(
+                &'a self,
+                operation: Operation,
+                _host: KernelHandle,
+                _context: artist_kernel::InvocationContext,
+            ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+                let resources = Arc::clone(&self.resources);
+                Box::pin(async move {
+                    let mut resources = resources.lock().unwrap();
+                    match operation {
+                        Operation::Run(mut requests) => {
+                            let request = requests.pop().unwrap();
+                            let uri = request.uri.to_string();
+                            if resources.contains_key(&uri) {
+                                return Err(KernelError::Conflict { uri });
+                            }
+                            resources.insert(uri.clone(), String::new());
+                            Ok(OperationResult::Run(vec![Ok(request.uri)]))
+                        }
+                        Operation::Send(requests) => Ok(OperationResult::Send(
+                            requests
+                                .into_iter()
+                                .map(|request| {
+                                    let uri = request.uri.to_string();
+                                    resources.entry(uri).or_default().push_str(&request.content);
+                                    Ok(request.uri)
+                                })
+                                .collect(),
+                        )),
+                        _ => unreachable!(),
+                    }
+                })
+            }
+        }
+
         #[tokio::test]
         async fn exposes_tool_packages_as_virtual_files() {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
@@ -4920,6 +4984,45 @@ pub mod tools {
                 .await
                 .unwrap();
             assert!(result.to_string().contains("named tool dispatch"));
+        }
+
+        #[tokio::test]
+        async fn named_wasm_run_and_send_reach_a_scheme_claiming_namespace() {
+            let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
+            let namespace = NamedFakeNamespace::default();
+            let kernel = Kernel::new();
+            kernel.register_typed(namespace.clone()).await;
+            kernel
+                .register_tool_handler(
+                    ToolsHandler::new(
+                        &source_root,
+                        ["resource.run".to_owned(), "resource.send".to_owned()],
+                    )
+                    .unwrap(),
+                )
+                .await;
+
+            let uri = "fake://named-shell";
+            let run = kernel
+                .execute_tool(
+                    "run",
+                    serde_json::json!({"requests":[{"uri":uri,"args":[]}]}),
+                )
+                .await
+                .unwrap();
+            assert!(run.to_string().contains(uri));
+            let send = kernel
+                .execute_tool(
+                    "send",
+                    serde_json::json!({"requests":[{"uri":uri,"content":"cargo test\n"}]}),
+                )
+                .await
+                .unwrap();
+            assert!(send.to_string().contains(uri));
+            assert_eq!(
+                namespace.resources.lock().unwrap().get(uri).unwrap(),
+                "cargo test\n"
+            );
         }
     }
 }
