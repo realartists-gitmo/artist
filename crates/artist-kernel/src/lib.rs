@@ -7,6 +7,7 @@
 mod address;
 mod anchors;
 mod error;
+mod fff;
 mod filesystem;
 mod handler;
 mod operation;
@@ -17,6 +18,7 @@ mod resolver;
 mod result;
 mod session;
 mod structure;
+mod typed;
 mod uri;
 
 pub use address::ResourceAddress;
@@ -24,7 +26,7 @@ pub use anchors::{AddressedItem, Anchor, AnchorError, AnchorInput, AnchorSet};
 pub use error::KernelError;
 pub use filesystem::FileHandler;
 pub use handler::{
-    BoxFuture, Handler, HandlerDescriptor, KernelHandle, ToolDefinition, ToolProvider,
+    BoxFuture, Handler, HandlerDescriptor, KernelHandle, ToolDefinition, ToolProvider, TypedHandler,
 };
 pub use operation::Verb;
 pub use registry::Kernel;
@@ -37,4 +39,5 @@ pub use structure::{
     CstError, CstProvider, LineFallbackProvider, RustCstProvider, StructuralAnalyzer,
     StructuralLine,
 };
+pub use typed::*;
 pub use uri::ResourceUri;

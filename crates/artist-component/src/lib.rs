@@ -404,6 +404,10 @@ impl wasmtime_wasi::WasiView for HostState {
 
 impl bindings::artist::component::host::Host for HostState {
     fn invoke(&mut self, request: HostRequest) -> Result<HostResponse, Error> {
+        // This is the quarantined legacy component ABI. Universal verbs are
+        // required to use the typed `artist:tool` worlds below; this bridge is
+        // retained only for pre-existing extension components while arbitrary
+        // package-local WIT contracts are being established.
         if let Some(capability) = request.capability.as_deref()
             && !self.capabilities.contains(capability)
         {
@@ -604,7 +608,7 @@ typed_host_impl_dispatch!(
     run_bindings::artist::tool::types::RunRequest,
     String,
     |request: &run_bindings::artist::tool::types::RunRequest| request.uri.clone(),
-    |request: &run_bindings::artist::tool::types::RunRequest| serde_json::json!({"args": request.args})
+    |request: &run_bindings::artist::tool::types::RunRequest| serde_json::json!({"args": request.args, "working_uri": request.working_uri, "environment": request.environment})
 );
 typed_host_impl_dispatch!(
     send_bindings,
@@ -638,12 +642,8 @@ typed_host_single!(
     find,
     find_bindings::artist::tool::types::FindRequest,
     Vec<String>,
-    |request: &find_bindings::artist::tool::types::FindRequest| request
-        .roots
-        .first()
-        .cloned()
-        .unwrap_or_default(),
-    |request: &find_bindings::artist::tool::types::FindRequest| serde_json::json!({"query": request.query})
+    |_request: &find_bindings::artist::tool::types::FindRequest| String::new(),
+    |request: &find_bindings::artist::tool::types::FindRequest| serde_json::json!({"roots": request.roots, "query": request.query})
 );
 typed_host_single!(
     grep_bindings,
@@ -653,7 +653,8 @@ typed_host_single!(
     grep_bindings::artist::tool::types::GrepRequest,
     Vec<grep_bindings::artist::tool::types::AnchoredText>,
     |_request: &grep_bindings::artist::tool::types::GrepRequest| String::new(),
-    |request: &grep_bindings::artist::tool::types::GrepRequest| serde_json::json!({"pattern": request.pattern})
+    |request: &grep_bindings::artist::tool::types::GrepRequest| serde_json::to_value(request)
+        .unwrap_or_default()
 );
 typed_host_single!(
     poll_bindings,
@@ -725,7 +726,65 @@ where
     };
     result
         .map_err(|error| serde_json::from_value(error).ok().unwrap())
-        .and_then(|value| serde_json::from_value(value).map_err(|_| serde_json::from_value(serde_json::json!({"code":"Internal","uri":null,"message":"typed host response conversion failed"})).ok().unwrap()))
+        .and_then(|mut value| {
+            normalize_typed_value(&mut value);
+            serde_json::from_value(value).map_err(|_| serde_json::from_value(serde_json::json!({"code":"Internal","uri":null,"message":"typed host response conversion failed"})).ok().unwrap())
+        })
+}
+
+/// Adapt only representation details between the kernel's Rust value types
+/// and WIT's scalar aliases. This remains at the component adapter boundary;
+/// no JSON enters kernel dispatch.
+fn normalize_typed_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(anchor) = object.get("anchor").cloned()
+                && let Some(tokens) = anchor.get("tokens").and_then(serde_json::Value::as_array)
+            {
+                let joined = tokens
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                object.insert("anchor".to_owned(), serde_json::Value::String(joined));
+            }
+            for child in object.values_mut() {
+                normalize_typed_value(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                normalize_typed_value(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_anchor_inputs(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for key in ["start", "end", "before", "after"] {
+                if let Some(serde_json::Value::String(anchor)) = object.get(key).cloned() {
+                    object.insert(
+                        key.to_owned(),
+                        serde_json::json!({
+                            "tokens": anchor.split('.').map(str::to_owned).collect::<Vec<_>>()
+                        }),
+                    );
+                }
+            }
+            for child in object.values_mut() {
+                normalize_anchor_inputs(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_anchor_inputs(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn typed_error(
@@ -772,6 +831,16 @@ fn kernel_error_to_typed(
             target,
             message,
         ),
+        KernelError::StaleAnchor { message } => (
+            tool_bindings::artist::tool::types::ErrorCode::StaleAnchor,
+            target,
+            message,
+        ),
+        KernelError::WrongKind { message } => (
+            tool_bindings::artist::tool::types::ErrorCode::WrongKind,
+            target,
+            message,
+        ),
         KernelError::NotFound { uri } => (
             tool_bindings::artist::tool::types::ErrorCode::NotFound,
             Some(uri),
@@ -781,6 +850,36 @@ fn kernel_error_to_typed(
             tool_bindings::artist::tool::types::ErrorCode::Conflict,
             Some(uri),
             "resource already exists".to_owned(),
+        ),
+        KernelError::Immutable { uri } => (
+            tool_bindings::artist::tool::types::ErrorCode::Immutable,
+            Some(uri),
+            "resource is immutable".to_owned(),
+        ),
+        KernelError::PermissionDenied { uri } => (
+            tool_bindings::artist::tool::types::ErrorCode::PermissionDenied,
+            Some(uri),
+            "permission denied".to_owned(),
+        ),
+        KernelError::Conflict { uri } => (
+            tool_bindings::artist::tool::types::ErrorCode::Conflict,
+            Some(uri),
+            "resource conflict".to_owned(),
+        ),
+        KernelError::NotLive { uri } => (
+            tool_bindings::artist::tool::types::ErrorCode::NotLive,
+            Some(uri),
+            "resource is not live".to_owned(),
+        ),
+        KernelError::NotEmpty { uri } => (
+            tool_bindings::artist::tool::types::ErrorCode::NotEmpty,
+            Some(uri),
+            "resource is not empty".to_owned(),
+        ),
+        KernelError::Aborted { message } => (
+            tool_bindings::artist::tool::types::ErrorCode::Aborted,
+            target,
+            message,
         ),
         KernelError::InvalidState { message } | KernelError::Handler { message } => (
             tool_bindings::artist::tool::types::ErrorCode::Internal,
@@ -797,45 +896,227 @@ fn execute_typed_kernel_value(
     target: String,
     args: serde_json::Value,
 ) -> Result<serde_json::Value, tool_bindings::artist::tool::types::Error> {
-    let verb = match verb_name {
-        "read" => KernelVerb::Read,
-        "write" => KernelVerb::Write,
-        "edit" => KernelVerb::Edit,
-        "poll" => KernelVerb::Poll,
-        "send" => KernelVerb::Send,
-        "run" => KernelVerb::Run,
-        "abort" => KernelVerb::Abort,
-        "delete" => KernelVerb::Delete,
-        "find" => KernelVerb::Find,
-        "grep" => KernelVerb::Grep,
+    let uri = (!target.is_empty())
+        .then(|| artist_kernel::ResourceUri::parse(&target))
+        .transpose()
+        .map_err(|error| {
+            typed_error(
+                tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                error.to_string(),
+                (!target.is_empty()).then_some(target.clone()),
+            )
+        })?;
+    let operation = match verb_name {
+        "read" => artist_kernel::Operation::Read(vec![artist_kernel::ReadRequest {
+            uri: uri.clone().ok_or_else(|| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    "read requires a URI".to_owned(),
+                    Some(target.clone()),
+                )
+            })?,
+            at: None,
+            before: None,
+            after: None,
+        }]),
+        "write" => artist_kernel::Operation::Write(vec![artist_kernel::WriteRequest {
+            uri: uri.clone().ok_or_else(|| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    "write requires a URI".to_owned(),
+                    Some(target.clone()),
+                )
+            })?,
+            content: args
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        }]),
+        "find" => artist_kernel::Operation::Find(artist_kernel::FindRequest {
+            roots: args
+                .get("roots")
+                .and_then(serde_json::Value::as_array)
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .filter_map(|root| root.as_str())
+                        .map(artist_kernel::ResourceUri::parse)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()
+                .map_err(|error| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                        error.to_string(),
+                        None,
+                    )
+                })?
+                .unwrap_or_else(|| uri.clone().into_iter().collect()),
+            query: args
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        }),
+        "grep" => artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
+            pattern: args
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            source: args
+                .get("source")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                        error.to_string(),
+                        None,
+                    )
+                })?
+                .unwrap_or_else(|| {
+                    artist_kernel::GrepSource::Resources(uri.clone().into_iter().collect())
+                }),
+        }),
+        "abort" => artist_kernel::Operation::Abort(vec![uri.clone().ok_or_else(|| {
+            typed_error(
+                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                "abort requires a URI".to_owned(),
+                Some(target.clone()),
+            )
+        })?]),
+        "delete" => artist_kernel::Operation::Delete(vec![uri.clone().ok_or_else(|| {
+            typed_error(
+                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                "delete requires a URI".to_owned(),
+                Some(target.clone()),
+            )
+        })?]),
+        "send" => artist_kernel::Operation::Send(vec![artist_kernel::SendRequest {
+            uri: uri.clone().ok_or_else(|| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    "send requires a URI".to_owned(),
+                    Some(target.clone()),
+                )
+            })?,
+            content: args
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        }]),
+        "run" => artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
+            uri: uri.clone().ok_or_else(|| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    "run requires a URI".to_owned(),
+                    Some(target.clone()),
+                )
+            })?,
+            args: args
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            working_uri: args
+                .get("working_uri")
+                .cloned()
+                .filter(|value| !value.is_null())
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                        error.to_string(),
+                        Some(target.clone()),
+                    )
+                })?,
+            environment: serde_json::from_value(
+                args.get("environment")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )
+            .map_err(|error| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    error.to_string(),
+                    Some(target.clone()),
+                )
+            })?,
+        }]),
+        "edit" => {
+            let mut operations = if args.is_array() {
+                args
+            } else {
+                args.get("operations")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]))
+            };
+            normalize_anchor_inputs(&mut operations);
+            let operations = serde_json::from_value(operations).map_err(|error| {
+                typed_error(
+                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                    format!("invalid edit operations: {error}"),
+                    Some(target.clone()),
+                )
+            })?;
+            artist_kernel::Operation::Edit(vec![artist_kernel::EditRequest {
+                uri: uri.ok_or_else(|| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                        "edit requires a URI".to_owned(),
+                        Some(target.clone()),
+                    )
+                })?,
+                operations,
+            }])
+        }
+        "poll" => {
+            let mut request: artist_kernel::PollRequest =
+                serde_json::from_value(args).map_err(|error| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                        format!("invalid poll request: {error}"),
+                        Some(target.clone()),
+                    )
+                })?;
+            if request.targets.is_empty() {
+                request.targets.push(artist_kernel::PollTarget {
+                    uri: uri.ok_or_else(|| {
+                        typed_error(
+                            tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+                            "poll requires a URI".to_owned(),
+                            Some(target.clone()),
+                        )
+                    })?,
+                    from_position: None,
+                });
+            }
+            artist_kernel::Operation::Poll(request)
+        }
         _ => {
             return Err(typed_error(
                 tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                format!("unknown universal verb: {verb_name}"),
+                format!("typed operation {verb_name} is not yet representable"),
                 Some(target),
             ));
         }
     };
-    let target_address = if target.contains("://") {
-        artist_kernel::ResourceUri::parse(&target)
-            .map(artist_kernel::ResourceAddress::uri)
-            .map_err(|error| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
-                    error.to_string(),
-                    Some(target.clone()),
-                )
-            })?
-    } else {
-        artist_kernel::ResourceAddress::path(target.clone())
-    };
     let result = std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-        Ok::<_, String>(runtime.block_on(kernel.execute(KernelRequest::new(
-            verb,
-            target_address,
-            args,
-        ))))
+        runtime
+            .block_on(kernel.execute_operation(operation))
+            .map_err(|error| error.to_string())
     })
     .join()
     .map_err(|_| {
@@ -852,74 +1133,54 @@ fn execute_typed_kernel_value(
             Some(target.clone()),
         )
     })?;
-    if !result.ok {
-        return Err(kernel_error_to_typed(
-            result
-                .error
-                .unwrap_or_else(|| artist_kernel::KernelError::InvalidState {
-                    message: "tool operation failed without an error".to_owned(),
-                }),
-            Some(target),
-        ));
-    }
-    let output = typed_kernel_output_value(
-        verb_name,
-        &target,
-        result.value.unwrap_or(serde_json::Value::Null),
-    )
-    .map_err(|message| {
-        typed_error(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            message,
-            Some(target),
+    let value = match result {
+        artist_kernel::OperationResult::Read(mut values) => values
+            .remove(0)
+            .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))
+            .and_then(|value| {
+                serde_json::to_value(value).map_err(|error| {
+                    typed_error(
+                        tool_bindings::artist::tool::types::ErrorCode::Internal,
+                        error.to_string(),
+                        Some(target.clone()),
+                    )
+                })
+            })?,
+        artist_kernel::OperationResult::Find(value) => serde_json::to_value(
+            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
         )
-    })?;
-    Ok(output)
-}
-
-fn typed_kernel_output_value(
-    verb: &str,
-    target: &str,
-    value: serde_json::Value,
-) -> Result<serde_json::Value, String> {
-    match verb {
-        "read" => {
-            let content = value
-                .get("value")
-                .and_then(|value| value.get("content"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            Ok(serde_json::json!({
-                "Text": {"uri": target, "lines": content.lines().enumerate().map(|(i, line)| serde_json::json!({"anchor": format!("line:{i}"), "text": line, "ending": "Lf"})).collect::<Vec<_>>()}
-            }))
-        }
-        "write" => Ok(serde_json::json!({
-            "Text": {"uri": target, "lines": []}
-        })),
-        "find" => Ok(value
-            .get("paths")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()))),
-        "grep" => {
-            let paths = value
-                .get("paths")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            Ok(serde_json::json!(
-                paths
-                    .into_iter()
-                    .map(|uri| serde_json::json!({"uri": uri, "lines": []}))
-                    .collect::<Vec<_>>()
-            ))
-        }
-        "run" | "send" | "abort" | "delete" => Ok(serde_json::json!([target])),
-        "edit" => Ok(serde_json::json!({
-            "uri": target, "changed": [], "diff": {"uri": target, "hunks": []}
-        })),
-        "poll" => Ok(serde_json::json!({"text": [], "satisfied": []})),
-        _ => Ok(value),
-    }
+        .unwrap(),
+        artist_kernel::OperationResult::Grep(value) => serde_json::to_value(
+            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
+        )
+        .unwrap(),
+        artist_kernel::OperationResult::Write(mut values) => serde_json::to_value(
+            values
+                .remove(0)
+                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
+        )
+        .unwrap(),
+        artist_kernel::OperationResult::Edit(mut values) => serde_json::to_value(
+            values
+                .remove(0)
+                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
+        )
+        .unwrap(),
+        artist_kernel::OperationResult::Poll(value) => serde_json::to_value(
+            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
+        )
+        .unwrap(),
+        artist_kernel::OperationResult::Send(mut values)
+        | artist_kernel::OperationResult::Run(mut values)
+        | artist_kernel::OperationResult::Abort(mut values)
+        | artist_kernel::OperationResult::Delete(mut values) => serde_json::to_value(
+            values
+                .remove(0)
+                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
+        )
+        .unwrap(),
+    };
+    Ok(value)
 }
 
 /// A loaded, validated component instance.
@@ -1613,6 +1874,19 @@ pub mod package {
         let bytes = fs::read(artifact).map_err(|error| ComponentError::Build {
             diagnostics: format!("could not read {}: {error}", artifact.display()),
         })?;
+        if package
+            .contract
+            .as_ref()
+            .is_some_and(|contract| contract.verb.is_none())
+            && package.wit.is_none()
+        {
+            return Err(ComponentError::Build {
+                diagnostics: format!(
+                    "extension contract {} requires a package-local tool.wit",
+                    package.contract.as_ref().expect("checked above")
+                ),
+            });
+        }
         if package.contract.is_some() {
             let contract = package.contract.as_ref().unwrap();
             if let Some(verb) = contract.verb {
@@ -2641,16 +2915,13 @@ pub mod tools {
                 let active = self.activate(&package_root)?;
                 let target = request
                     .args
-                    .get("target")
+                    .get("uri")
+                    .or_else(|| request.args.get("target"))
                     .and_then(Value::as_str)
                     .ok_or_else(|| KernelError::InvalidRequest {
                         message: format!("invoking {} requires args.target", request.verb),
                     })?;
-                let target = if target.contains("://") {
-                    ResourceUri::parse(target).map(ResourceAddress::uri)?
-                } else {
-                    ResourceAddress::path(target)
-                };
+                let target = ResourceUri::parse(target).map(ResourceAddress::uri)?;
                 return ComponentTool::new(active, contract_verb)
                     .invoke_async(target, request.args.clone(), host)
                     .await;
@@ -2661,7 +2932,9 @@ pub mod tools {
                     self.prepare_write(&relative)?;
                 }
                 let mut mapped = request.clone();
-                mapped.target = ResourceAddress::path(&relative);
+                mapped.target =
+                    ResourceUri::parse(&self.root.join(&relative).display().to_string())
+                        .map(ResourceAddress::uri)?;
                 let result = self.files.execute(mapped, host).await?;
                 if matches!(request.verb, KernelVerb::Write | KernelVerb::Edit) {
                     self.mark_dirty(&relative);
@@ -2686,16 +2959,14 @@ pub mod tools {
             let package_root = self.package_path_for_name(&registration.package)?;
             let active = self.activate(&package_root)?;
             if let Some(verb) = registration.contract.verb {
-                let target = args.get("target").and_then(Value::as_str).ok_or_else(|| {
-                    KernelError::InvalidRequest {
+                let target = args
+                    .get("uri")
+                    .or_else(|| args.get("target"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| KernelError::InvalidRequest {
                         message: format!("invoking {name} requires a target argument"),
-                    }
-                })?;
-                let target = if target.contains("://") {
-                    ResourceUri::parse(target).map(ResourceAddress::uri)?
-                } else {
-                    ResourceAddress::path(target)
-                };
+                    })?;
+                let target = ResourceUri::parse(target).map(ResourceAddress::uri)?;
                 return ComponentTool::new(active, verb).invoke(target, args, host);
             }
 
@@ -2863,6 +3134,9 @@ pub mod tools {
                 .register(artist_kernel::FileHandler::new(files_root.path()).unwrap())
                 .await;
             kernel
+                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
+                .await;
+            kernel
                 .register(ToolsHandler::new(&source_root, ["resource.read".to_owned()]).unwrap())
                 .await;
 
@@ -2893,6 +3167,9 @@ pub mod tools {
             let kernel = Kernel::new();
             kernel
                 .register(artist_kernel::FileHandler::new(files_root.path()).unwrap())
+                .await;
+            kernel
+                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
                 .await;
             kernel
                 .register_tool_handler(
@@ -3117,12 +3394,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let kernel = artist_kernel::Kernel::new();
         runtime.block_on(kernel.register(artist_kernel::FileHandler::new(root.path()).unwrap()));
+        runtime
+            .block_on(kernel.register_typed(artist_kernel::FileHandler::new(root.path()).unwrap()));
         let host = ComponentHost::new_with_capabilities(
             &fixture(),
             ["resource.write".to_owned(), "resource.read".to_owned()],
         )
         .unwrap();
-        let target = "component-bridge.txt";
+        let target = root
+            .path()
+            .join("component-bridge.txt")
+            .display()
+            .to_string();
         let write = host
             .invoke_with_kernel(
                 Invocation {
@@ -3173,13 +3456,16 @@ mod tests {
             .unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("typed.txt"), "typed bridge\n").unwrap();
+        let typed_uri = root.path().join("typed.txt").display().to_string();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let kernel = artist_kernel::Kernel::new();
         runtime.block_on(kernel.register(artist_kernel::FileHandler::new(root.path()).unwrap()));
+        runtime
+            .block_on(kernel.register_typed(artist_kernel::FileHandler::new(root.path()).unwrap()));
         let result = host
             .invoke_read(
                 vec![tool_bindings::artist::tool::types::ReadRequest {
-                    uri: "typed.txt".to_owned(),
+                    uri: typed_uri.clone(),
                     at: None,
                     before: None,
                     after: None,
@@ -3195,7 +3481,10 @@ mod tests {
         let routed = active
             .invoke_tool_json(
                 contracts::Verb::Read,
-                r#"[{"uri":"typed.txt","at":null,"before":null,"after":null}]"#,
+                &format!(
+                    r#"[{{"uri":"{}","at":null,"before":null,"after":null}}]"#,
+                    typed_uri
+                ),
                 kernel.handle(),
             )
             .unwrap();
@@ -3244,11 +3533,111 @@ mod tests {
         }
     }
 
+    impl artist_kernel::TypedHandler for MockConformanceHandler {
+        fn descriptor(&self) -> artist_kernel::HandlerDescriptor {
+            artist_kernel::HandlerDescriptor {
+                name: "typed-conformance-mock".to_owned(),
+                schemes: Vec::new(),
+                verbs: artist_kernel::Verb::ALL.to_vec(),
+            }
+        }
+
+        fn claims_operation(&self, _operation: &artist_kernel::Operation) -> bool {
+            true
+        }
+
+        fn execute_typed<'a>(
+            &'a self,
+            operation: artist_kernel::Operation,
+            _host: artist_kernel::KernelHandle,
+        ) -> artist_kernel::BoxFuture<
+            'a,
+            Result<artist_kernel::OperationResult, artist_kernel::KernelError>,
+        > {
+            Box::pin(async move {
+                use artist_kernel::*;
+                let line = |uri: ResourceUri| AnchoredText {
+                    uri,
+                    lines: vec![AnchoredLine {
+                        anchor: Anchor::from_tokens(vec!["1".to_owned()]),
+                        text: "mock text".to_owned(),
+                        ending: LineEnding::Lf,
+                    }],
+                };
+                Ok(match operation {
+                    Operation::Read(requests) => OperationResult::Read(
+                        requests
+                            .into_iter()
+                            .map(|request| Ok(ReadResult::Text(line(request.uri))))
+                            .collect(),
+                    ),
+                    Operation::Write(requests) => OperationResult::Write(
+                        requests
+                            .into_iter()
+                            .map(|request| {
+                                Ok(WriteResult {
+                                    text: line(request.uri),
+                                })
+                            })
+                            .collect(),
+                    ),
+                    Operation::Edit(requests) => OperationResult::Edit(
+                        requests
+                            .into_iter()
+                            .map(|request| {
+                                Ok(EditResult {
+                                    uri: request.uri.clone(),
+                                    changed: Vec::new(),
+                                    diff: AnchoredDiff {
+                                        uri: request.uri,
+                                        hunks: Vec::new(),
+                                    },
+                                })
+                            })
+                            .collect(),
+                    ),
+                    Operation::Find(request) => OperationResult::Find(Ok(request.roots)),
+                    Operation::Grep(request) => OperationResult::Grep(Ok(match request.source {
+                        GrepSource::Resources(uris) => uris.into_iter().map(line).collect(),
+                        GrepSource::Text(text) => text,
+                    })),
+                    Operation::Run(requests) => OperationResult::Run(
+                        requests
+                            .into_iter()
+                            .map(|request| Ok(request.uri))
+                            .collect(),
+                    ),
+                    Operation::Send(requests) => OperationResult::Send(
+                        requests
+                            .into_iter()
+                            .map(|request| Ok(request.uri))
+                            .collect(),
+                    ),
+                    Operation::Abort(uris) => {
+                        OperationResult::Abort(uris.into_iter().map(Ok).collect())
+                    }
+                    Operation::Delete(uris) => {
+                        OperationResult::Delete(uris.into_iter().map(Ok).collect())
+                    }
+                    Operation::Poll(request) => OperationResult::Poll(Ok(PollResult {
+                        text: request
+                            .targets
+                            .into_iter()
+                            .map(|target| line(target.uri))
+                            .collect(),
+                        satisfied: Vec::new(),
+                    })),
+                })
+            })
+        }
+    }
+
     #[test]
     fn exercises_all_typed_verb_components_without_memory_backend() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let kernel = artist_kernel::Kernel::new();
         runtime.block_on(kernel.register(MockConformanceHandler));
+        runtime.block_on(kernel.register_typed(MockConformanceHandler));
 
         let cases = [
             (
@@ -3273,7 +3662,7 @@ mod tests {
             ),
             (
                 contracts::Verb::Run,
-                "[{\"uri\":\"typed.txt\",\"args\":[],\"context\":{\"working_uri\":null,\"environment\":[],\"cancellation_token\":null,\"deadline_ms\":null,\"correlation_id\":null}}]",
+                "[{\"uri\":\"typed.txt\",\"args\":[],\"working_uri\":null,\"environment\":[]}]",
             ),
             (
                 contracts::Verb::Send,

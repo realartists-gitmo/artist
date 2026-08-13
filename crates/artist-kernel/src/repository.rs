@@ -6,9 +6,9 @@
 //! source edits remain native-path `edit` requests, anchored by the kernel.
 
 use crate::{
-    AnchorSet, BoxFuture, Handler, HandlerDescriptor, KernelError, KernelHandle, Request,
-    ResourceAddress, StructuralAnalyzer, StructuralLine, Verb, has_projection, is_file_uri,
-    normalize,
+    AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler, HandlerDescriptor, KernelError,
+    KernelHandle, Operation, OperationResult, ReadResult, Request, ResourceAddress,
+    StructuralAnalyzer, StructuralLine, TypedHandler, Verb, fff, is_file_uri, normalize,
 };
 use serde_json::{Value, json};
 use std::{
@@ -319,9 +319,6 @@ impl RepositoryHandler {
     }
 
     fn file_projection_base(&self, original: &ResourceAddress, file: &Path) -> String {
-        if let Some(path) = original.as_path() {
-            return path.display().to_string();
-        }
         if original.as_uri().is_some_and(|uri| uri.scheme() == "file") {
             return Url::from_file_path(file)
                 .map(|url| url.to_string())
@@ -525,7 +522,6 @@ impl Handler for RepositoryHandler {
         address
             .as_uri()
             .is_some_and(|uri| uri.scheme() == "repo" || uri.scheme() == "file")
-            || address.as_path().is_some_and(|path| has_projection(path))
     }
 
     fn execute<'a>(
@@ -548,16 +544,160 @@ impl Handler for RepositoryHandler {
     }
 }
 
+impl TypedHandler for RepositoryHandler {
+    fn descriptor(&self) -> HandlerDescriptor {
+        HandlerDescriptor {
+            name: "repository-typed".to_owned(),
+            schemes: vec!["repo".to_owned(), "file".to_owned()],
+            verbs: vec![Verb::Read, Verb::Find, Verb::Grep],
+        }
+    }
+
+    fn claims_operation(&self, operation: &Operation) -> bool {
+        match operation {
+            Operation::Read(requests) => requests.iter().all(|request| {
+                matches!(request.uri.scheme(), "repo" | "file")
+                    && self
+                        .file_and_suffix(&ResourceAddress::uri(request.uri.clone()))
+                        .is_ok()
+            }),
+            Operation::Find(request) => request
+                .roots
+                .iter()
+                .all(|uri| matches!(uri.scheme(), "repo" | "file")),
+            Operation::Grep(request) => matches!(
+                &request.source,
+                crate::GrepSource::Resources(uris)
+                    if !uris.is_empty()
+                        && uris.iter().all(|uri| matches!(uri.scheme(), "repo" | "file"))
+            ),
+            _ => false,
+        }
+    }
+
+    fn execute_typed<'a>(
+        &'a self,
+        operation: Operation,
+        _host: KernelHandle,
+    ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+        Box::pin(async move {
+            match operation {
+                Operation::Read(requests) => {
+                    let results = requests
+                        .into_iter()
+                        .map(|request| {
+                            let target = ResourceAddress::uri(request.uri.clone());
+                            let (file, suffix) = self.file_and_suffix(&target)?;
+                            if !suffix.is_empty() {
+                                return Err(KernelError::WrongKind {
+                                    message: "typed repository read requires a source file"
+                                        .to_owned(),
+                                });
+                            }
+                            let source = fs::read(&file).map_err(|error| KernelError::Handler {
+                                message: format!("read {}: {error}", file.display()),
+                            })?;
+                            Ok(ReadResult::Text(repository_anchored_text(
+                                request.uri,
+                                &file,
+                                &source,
+                                &self.structure,
+                            )?))
+                        })
+                        .collect();
+                    Ok(OperationResult::Read(results))
+                }
+                Operation::Find(request) => {
+                    let mut paths = Vec::new();
+                    for root in request.roots {
+                        let target = ResourceAddress::uri(root);
+                        paths.extend(self.find_paths(&target)?);
+                    }
+                    paths.sort();
+                    paths.dedup();
+                    Ok(OperationResult::Find(
+                        paths
+                            .into_iter()
+                            .map(|path| crate::ResourceUri::parse(&path))
+                            .collect::<Result<Vec<_>, _>>(),
+                    ))
+                }
+                Operation::Grep(request) => {
+                    let crate::GrepSource::Resources(uris) = request.source else {
+                        return Err(KernelError::InvalidRequest {
+                            message: "repository grep requires resource sources".to_owned(),
+                        });
+                    };
+                    let mut matches = Vec::new();
+                    for uri in uris {
+                        let target = ResourceAddress::uri(uri.clone());
+                        let root = self.file_and_suffix(&target)?.0;
+                        for item in fff::grep(&root, &request.pattern, &self.structure)? {
+                            let item_uri = if uri.scheme() == "repo" {
+                                crate::ResourceUri::parse(&format!(
+                                    "repo://{}/{}",
+                                    self.project,
+                                    relative(
+                                        &self.root,
+                                        &item
+                                            .uri
+                                            .as_ref()
+                                            .to_file_path()
+                                            .unwrap_or_else(|_| PathBuf::from(item.uri.path()))
+                                    )
+                                ))?
+                            } else {
+                                item.uri
+                            };
+                            let file = item_uri.as_ref().to_file_path().map_err(|_| {
+                                KernelError::InvalidUri {
+                                    message: item_uri.to_string(),
+                                }
+                            })?;
+                            let source = fs::read(&file).map_err(|error| KernelError::Handler {
+                                message: format!("read {}: {error}", file.display()),
+                            })?;
+                            matches.push(repository_anchored_text(
+                                item_uri,
+                                &file,
+                                &source,
+                                &self.structure,
+                            )?);
+                        }
+                    }
+                    Ok(OperationResult::Grep(Ok(matches)))
+                }
+                _ => Err(KernelError::UnsupportedVerb {
+                    verb: "typed-repository".to_owned(),
+                    uri: "repo://".to_owned(),
+                }),
+            }
+        })
+    }
+}
+
 impl RepositoryHandler {
     fn find_paths(&self, target: &ResourceAddress) -> Result<Vec<String>, KernelError> {
         let url = Self::url(target)?;
         if url.scheme() == "file" {
             let (file, _) = self.file_and_suffix(target)?;
+            if file.is_dir() {
+                return Ok(fff::find(&file, "")?
+                    .into_iter()
+                    .map(|path| path.display().to_string())
+                    .collect());
+            }
             return Ok(vec![file.display().to_string()]);
         }
         let prefix = url.path().trim_matches('/');
-        let mut output = Vec::new();
-        collect_files(&self.root, &self.root, prefix, &self.project, &mut output)?;
+        let mut output = fff::find(&self.root, "")?
+            .into_iter()
+            .filter_map(|path| {
+                let relative_path = relative(&self.root, &path);
+                (prefix.is_empty() || relative_path.starts_with(prefix))
+                    .then(|| format!("repo://{}/{}", self.project, relative_path))
+            })
+            .collect::<Vec<_>>();
         output.sort();
         Ok(output)
     }
@@ -568,51 +708,25 @@ impl RepositoryHandler {
                 message: "repository grep requires args.pattern".to_owned(),
             }
         })?;
-        let paths = self.find_paths(target)?;
-        let matches = paths
-            .into_iter()
-            .filter(|path| {
-                if Self::is_local(target) {
-                    return fs::read_to_string(path)
-                        .map(|text| text.contains(pattern))
-                        .unwrap_or(false);
-                }
-                let relative_path = path
-                    .strip_prefix(&format!("repo://{}/", self.project))
-                    .unwrap_or(path);
-                fs::read_to_string(self.root.join(relative_path))
-                    .map(|text| text.contains(pattern))
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
-        Ok(json!({"paths": matches, "pattern": pattern}))
-    }
-}
-
-fn collect_files(
-    root: &Path,
-    current: &Path,
-    prefix: &str,
-    project: &str,
-    output: &mut Vec<String>,
-) -> Result<(), KernelError> {
-    for entry in fs::read_dir(current).map_err(|error| KernelError::Handler {
-        message: format!("read {}: {error}", current.display()),
-    })? {
-        let entry = entry.map_err(|error| KernelError::Handler {
-            message: format!("read repository entry: {error}"),
-        })?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(root, &path, prefix, project, output)?;
-        } else if path.is_file() {
-            let relative_path = relative(root, &path);
-            if prefix.is_empty() || relative_path.starts_with(prefix) {
-                output.push(format!("repo://{project}/{relative_path}"));
+        let root = if Self::is_local(target) {
+            self.file_and_suffix(target)?.0
+        } else {
+            self.root.clone()
+        };
+        let mut matches = fff::grep(&root, pattern, &self.structure)?;
+        if !Self::is_local(target) {
+            for item in &mut matches {
+                let relative_path = item.uri.path().trim_start_matches('/');
+                item.uri = crate::ResourceUri::parse(&format!(
+                    "repo://{}/{}",
+                    self.project, relative_path
+                ))?;
             }
         }
+        Ok(
+            json!({"matches": matches, "paths": matches.iter().map(|item| item.uri.to_string()).collect::<Vec<_>>(), "pattern": pattern}),
+        )
     }
-    Ok(())
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -620,6 +734,63 @@ fn relative(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn repository_anchored_text(
+    uri: crate::ResourceUri,
+    path: &Path,
+    source: &[u8],
+    structure: &StructuralAnalyzer,
+) -> Result<AnchoredText, KernelError> {
+    let (_, lines) = structure.analyze(path, source);
+    if lines.is_empty() {
+        return Ok(AnchoredText {
+            uri,
+            lines: Vec::new(),
+        });
+    }
+    let anchors = AnchorSet::from_inputs(
+        &lines
+            .iter()
+            .map(StructuralLine::anchor_input)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| KernelError::InvalidAnchor {
+        message: error.to_string(),
+    })?;
+    let anchored = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let ending = if source
+                .get(line.end_byte..)
+                .is_some_and(|tail| tail.starts_with(b"\r\n"))
+            {
+                crate::LineEnding::Crlf
+            } else if source
+                .get(line.end_byte..)
+                .is_some_and(|tail| tail.starts_with(b"\n"))
+            {
+                crate::LineEnding::Lf
+            } else if source
+                .get(line.end_byte..)
+                .is_some_and(|tail| tail.starts_with(b"\r"))
+            {
+                crate::LineEnding::Cr
+            } else {
+                crate::LineEnding::None
+            };
+            AnchoredLine {
+                anchor: anchors.items()[index].anchor.clone(),
+                text: String::from_utf8_lossy(&line.line_text).into_owned(),
+                ending,
+            }
+        })
+        .collect();
+    Ok(AnchoredText {
+        uri,
+        lines: anchored,
+    })
 }
 
 fn symbols(
@@ -757,6 +928,35 @@ mod tests {
             .await;
         assert!(result.ok);
         assert_eq!(result.value.unwrap()["items"][0]["name"], "answer");
+    }
+
+    #[tokio::test]
+    async fn typed_repository_read_returns_anchored_source() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("main.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+        let handler = RepositoryHandler::new(root.path()).unwrap();
+        let uri = crate::ResourceUri::parse(&file.display().to_string()).unwrap();
+        let kernel = Kernel::new();
+        kernel.register_typed(handler).await;
+        let result = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: uri.clone(),
+                at: None,
+                before: None,
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Read(mut values) = result else {
+            panic!("wrong typed repository result")
+        };
+        let Ok(crate::ReadResult::Text(text)) = values.remove(0) else {
+            panic!("wrong typed repository value")
+        };
+        assert_eq!(text.uri, uri);
+        assert_eq!(text.lines[0].text, "fn main() {}");
+        assert!(!text.lines[0].anchor.tokens().is_empty());
     }
 
     #[tokio::test]

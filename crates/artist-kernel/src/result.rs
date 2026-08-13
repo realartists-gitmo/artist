@@ -1,3 +1,8 @@
+//! Legacy JSON adapter results.
+//!
+//! Typed component execution returns `OperationResult` directly; this module
+//! is retained for the compatibility path around `Request`.
+
 use crate::{KernelError, ResourceAddress};
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,9 @@
+//! Legacy provider/CLI adapter requests.
+//!
+//! Universal component execution does not use this type. It remains available
+//! only so older JSON-facing callers can be migrated without changing the
+//! typed `Operation`/`OperationResult` kernel surface.
+
 use crate::{ResourceAddress, Verb};
 use serde::{Deserialize, Serialize};
 

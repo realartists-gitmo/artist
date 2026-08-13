@@ -1,1 +1,1 @@
-include!("../../../verb-guest/src/lib.rs");
+include!("../../../typed-guest/src/lib.rs");

@@ -1,12 +1,13 @@
 use crate::{
     BatchRequest, BatchResult, Handler, HandlerDescriptor, ItemResult, KernelError, KernelHandle,
-    Request, ToolDefinition, ToolProvider, Verb,
+    Operation, OperationResult, Request, ToolDefinition, ToolProvider, TypedHandler, Verb,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 struct Inner {
     handlers: RwLock<Vec<Arc<dyn Handler>>>,
+    typed_handlers: RwLock<Vec<Arc<dyn TypedHandler>>>,
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
 }
 
@@ -27,9 +28,40 @@ impl Kernel {
         Self {
             inner: Arc::new(Inner {
                 handlers: RwLock::new(Vec::new()),
+                typed_handlers: RwLock::new(Vec::new()),
                 tool_providers: RwLock::new(Vec::new()),
             }),
         }
+    }
+
+    pub async fn register_typed<H>(&self, handler: H)
+    where
+        H: TypedHandler + 'static,
+    {
+        self.inner
+            .typed_handlers
+            .write()
+            .await
+            .push(Arc::new(handler));
+    }
+
+    /// Dispatches the typed contract surface. This is the component-native
+    /// entry point; `execute(Request)` remains only as an adapter for legacy
+    /// callers while they migrate.
+    pub async fn execute_operation(
+        &self,
+        operation: Operation,
+    ) -> Result<OperationResult, KernelError> {
+        let handlers = self.inner.typed_handlers.read().await;
+        let Some(handler) = handlers
+            .iter()
+            .find(|handler| handler.claims_operation(&operation))
+        else {
+            return Err(KernelError::Handler {
+                message: "no typed handler claims operation".to_owned(),
+            });
+        };
+        handler.execute_typed(operation, self.handle()).await
     }
 
     pub async fn register<H>(&self, handler: H)
@@ -103,13 +135,24 @@ impl Kernel {
 
     pub fn handle(&self) -> KernelHandle {
         let kernel = self.clone();
-        KernelHandle::new(Arc::new(move |request| {
-            let kernel = kernel.clone();
-            Box::pin(async move { kernel.execute(request).await })
-        }))
+        let typed_kernel = kernel.clone();
+        KernelHandle::new(
+            Arc::new(move |request| {
+                let kernel = kernel.clone();
+                Box::pin(async move { kernel.execute(request).await })
+            }),
+            Arc::new(move |operation| {
+                let kernel = typed_kernel.clone();
+                Box::pin(async move { kernel.execute_operation(operation).await })
+            }),
+        )
     }
 
     pub async fn execute(&self, request: Request) -> ItemResult {
+        let request = match crate::normalize(&request.target) {
+            Ok(target) => Request { target, ..request },
+            Err(error) => return ItemResult::failure(request.target, error),
+        };
         let target = request.target.clone();
         let handlers = self.inner.handlers.read().await;
         let Some(handler) = handlers.iter().find(|handler| handler.claims(&target)) else {

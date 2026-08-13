@@ -5,7 +5,8 @@
 //! verbs as ordinary files.
 
 use crate::{
-    BoxFuture, Handler, HandlerDescriptor, KernelError, KernelHandle, Request, ResourceAddress,
+    Anchor, AnchoredLine, AnchoredText, BoxFuture, Handler, HandlerDescriptor, KernelError,
+    KernelHandle, Operation, OperationResult, PollAtom, Request, ResourceAddress, TypedHandler,
     Verb,
 };
 use serde_json::{Value, json};
@@ -240,6 +241,125 @@ impl Handler for SessionHandler {
     }
 }
 
+impl TypedHandler for SessionHandler {
+    fn descriptor(&self) -> HandlerDescriptor {
+        HandlerDescriptor {
+            name: "session-typed".to_owned(),
+            schemes: vec!["session".to_owned()],
+            verbs: vec![Verb::Send, Verb::Poll, Verb::Abort, Verb::Delete],
+        }
+    }
+
+    fn claims_operation(&self, operation: &Operation) -> bool {
+        let uris: Vec<&crate::ResourceUri> = match operation {
+            Operation::Send(requests) => requests.iter().map(|request| &request.uri).collect(),
+            Operation::Poll(request) => request.targets.iter().map(|target| &target.uri).collect(),
+            Operation::Abort(uris) | Operation::Delete(uris) => uris.iter().collect(),
+            _ => return false,
+        };
+        !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "session")
+    }
+
+    fn execute_typed<'a>(
+        &'a self,
+        operation: Operation,
+        _host: KernelHandle,
+    ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+        Box::pin(async move {
+            match operation {
+                Operation::Send(requests) => {
+                    let mut results = Vec::with_capacity(requests.len());
+                    for request in requests {
+                        let target = ResourceAddress::uri(request.uri.clone());
+                        results.push(
+                            self.send(&target, &json!({"value": request.content}))
+                                .await
+                                .map(|_| request.uri),
+                        );
+                    }
+                    Ok(OperationResult::Send(results))
+                }
+                Operation::Abort(uris) => {
+                    let mut results = Vec::with_capacity(uris.len());
+                    for uri in uris {
+                        results.push(
+                            self.abort(&ResourceAddress::uri(uri.clone()))
+                                .await
+                                .map(|_| uri),
+                        );
+                    }
+                    Ok(OperationResult::Abort(results))
+                }
+                Operation::Delete(uris) => {
+                    let mut results = Vec::with_capacity(uris.len());
+                    for uri in uris {
+                        results.push(
+                            self.delete(&ResourceAddress::uri(uri.clone()))
+                                .await
+                                .map(|_| uri),
+                        );
+                    }
+                    Ok(OperationResult::Delete(results))
+                }
+                Operation::Poll(request) => {
+                    let target =
+                        request
+                            .targets
+                            .first()
+                            .ok_or_else(|| KernelError::InvalidRequest {
+                                message: "poll requires at least one target".to_owned(),
+                            })?;
+                    let mut args = json!({
+                        "since": 0,
+                        "timeout_ms": 0,
+                        "lines": 1,
+                    });
+                    if let Some(until) = request.until {
+                        for node in until.nodes {
+                            if let crate::PollNode::Atom(atom) = node {
+                                match atom {
+                                    PollAtom::Changed(lines) => args["lines"] = json!(lines),
+                                    PollAtom::Regex(regex) => args["match"] = json!(regex.pattern),
+                                    PollAtom::Timeout(ms) => args["timeout_ms"] = json!(ms),
+                                    PollAtom::Terminated(_) => {}
+                                }
+                            }
+                        }
+                    }
+                    let value = self
+                        .poll(&ResourceAddress::uri(target.uri.clone()), &args)
+                        .await?;
+                    let text = value["events"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|event| {
+                            Some(AnchoredLine {
+                                anchor: Anchor::from_tokens(vec![
+                                    event["seq"].as_u64()?.to_string(),
+                                ]),
+                                text: event["data"].as_str()?.to_owned(),
+                                ending: crate::LineEnding::Lf,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    Ok(OperationResult::Poll(Ok(crate::PollResult {
+                        text: vec![AnchoredText {
+                            uri: target.uri.clone(),
+                            lines: text,
+                        }],
+                        satisfied: Vec::new(),
+                    })))
+                }
+                _ => Err(KernelError::UnsupportedVerb {
+                    verb: "typed-session".to_owned(),
+                    uri: "session://".to_owned(),
+                }),
+            }
+        })
+    }
+}
+
 fn snapshot(state: &SessionState, since: u64) -> Value {
     json!({
         "status": state.status.as_str(),
@@ -313,6 +433,45 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn typed_live_session_send_and_poll_return_contract_values() {
+        let handler = SessionHandler::new();
+        let kernel = Kernel::new();
+        kernel.register(handler.clone()).await;
+        kernel.register_typed(handler).await;
+        let uri = ResourceUri::parse("session://local/typed").unwrap();
+        assert!(
+            kernel
+                .execute(request(Verb::Write, "session://local/typed", Value::Null))
+                .await
+                .ok
+        );
+        let send = kernel
+            .execute_operation(crate::Operation::Send(vec![crate::SendRequest {
+                uri: uri.clone(),
+                content: "hello".to_owned(),
+            }]))
+            .await
+            .unwrap();
+        assert!(matches!(send, crate::OperationResult::Send(ref values) if values[0].is_ok()));
+        let poll = kernel
+            .execute_operation(crate::Operation::Poll(crate::PollRequest {
+                targets: vec![crate::PollTarget {
+                    uri: uri.clone(),
+                    from_position: None,
+                }],
+                until: None,
+                before: None,
+                after: None,
+            }))
+            .await
+            .unwrap();
+        let crate::OperationResult::Poll(Ok(value)) = poll else {
+            panic!("wrong typed poll result")
+        };
+        assert_eq!(value.text[0].lines[0].text, "hello");
     }
 
     #[tokio::test]

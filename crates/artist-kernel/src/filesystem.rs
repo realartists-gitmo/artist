@@ -1,7 +1,8 @@
 use crate::{
-    Anchor, AnchorError, AnchorSet, BoxFuture, Handler, HandlerDescriptor, KernelError,
-    KernelHandle, Request, ResourceAddress, StructuralAnalyzer, StructuralLine, Verb,
-    address::require_path, has_projection,
+    Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler,
+    HandlerDescriptor, KernelError, KernelHandle, Operation, OperationResult, ReadResult, Request,
+    ResourceAddress, StructuralAnalyzer, StructuralLine, TypedHandler, Verb, address::uri_path,
+    fff, has_projection,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,6 +47,65 @@ impl FileHandler {
     /// line-only identity when no usable parser exists.
     pub fn structural_lines(&self, path: &Path, bytes: &[u8]) -> (String, Vec<StructuralLine>) {
         self.structure.analyze(path, bytes)
+    }
+
+    fn typed_path(&self, uri: &crate::ResourceUri) -> Result<PathBuf, KernelError> {
+        if uri.scheme() != "file" {
+            return Err(KernelError::UnsupportedUri {
+                uri: uri.to_string(),
+            });
+        }
+        let path = uri
+            .as_ref()
+            .to_file_path()
+            .map_err(|_| KernelError::InvalidUri {
+                message: uri.to_string(),
+            })?;
+        self.resolve_existing(&path)
+    }
+
+    fn anchored_text(
+        &self,
+        uri: crate::ResourceUri,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<AnchoredText, KernelError> {
+        let (_, lines) = self.structural_lines(path, bytes);
+        let inputs = lines
+            .iter()
+            .map(StructuralLine::anchor_input)
+            .collect::<Vec<_>>();
+        let anchors = if inputs.is_empty() {
+            None
+        } else {
+            Some(AnchorSet::from_inputs(&inputs).map_err(anchor_error)?)
+        };
+        let output = lines
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let ending = if bytes.get(line.end_byte) == Some(&b'\n') {
+                    crate::LineEnding::Lf
+                } else {
+                    crate::LineEnding::None
+                };
+                let anchor = anchors
+                    .as_ref()
+                    .and_then(|set| set.items().get(index))
+                    .map(|item| item.anchor.clone())
+                    .unwrap_or_else(|| Anchor::from_tokens(vec![(index + 1).to_string()]));
+                Ok(AnchoredLine {
+                    anchor,
+                    text: String::from_utf8(line.line_text).map_err(|error| {
+                        KernelError::Handler {
+                            message: error.to_string(),
+                        }
+                    })?,
+                    ending,
+                })
+            })
+            .collect::<Result<Vec<_>, KernelError>>()?;
+        Ok(AnchoredText { uri, lines: output })
     }
 
     fn resolve_existing(&self, requested: &Path) -> Result<PathBuf, KernelError> {
@@ -143,27 +203,6 @@ impl FileHandler {
                 ),
             })),
         }
-    }
-
-    fn collect_files(path: &Path, output: &mut Vec<String>) -> Result<(), KernelError> {
-        if path.is_file() {
-            output.push(path.display().to_string());
-            return Ok(());
-        }
-        for entry in fs::read_dir(path).map_err(|error| KernelError::Handler {
-            message: format!("read directory {}: {error}", path.display()),
-        })? {
-            let entry = entry.map_err(|error| KernelError::Handler {
-                message: format!("read directory entry: {error}"),
-            })?;
-            let path = entry.path();
-            if path.is_dir() {
-                Self::collect_files(&path, output)?;
-            } else if path.is_file() {
-                output.push(path.display().to_string());
-            }
-        }
-        Ok(())
     }
 
     fn edit(&self, requested: &Path, args: &Value) -> Result<Value, KernelError> {
@@ -286,6 +325,93 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
     Ok(())
 }
 
+impl FileHandler {
+    fn apply_typed_edit(
+        &self,
+        path: &Path,
+        uri: crate::ResourceUri,
+        operations: &[crate::EditOperation],
+    ) -> Result<crate::EditResult, KernelError> {
+        let original = fs::read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        let (_, lines) = self.structural_lines(path, &original);
+        let inputs = lines
+            .iter()
+            .map(StructuralLine::anchor_input)
+            .collect::<Vec<_>>();
+        let anchors = AnchorSet::from_inputs(&inputs).map_err(anchor_error)?;
+        let old = self.anchored_text(uri.clone(), path, &original)?;
+        let mut ranges = Vec::with_capacity(operations.len());
+        for operation in operations {
+            match operation {
+                crate::EditOperation::Replace(replace) => {
+                    let start = anchors.resolve(&replace.start).map_err(anchor_error)?;
+                    let end = replace
+                        .end
+                        .as_ref()
+                        .map(|anchor| anchors.resolve(anchor))
+                        .transpose()
+                        .map_err(anchor_error)?
+                        .unwrap_or(start);
+                    if start > end {
+                        return Err(KernelError::InvalidAnchor {
+                            message: format!("edit range is reversed: {start}..={end}"),
+                        });
+                    }
+                    ranges.push((
+                        lines[start].start_byte,
+                        lines[end].end_byte,
+                        replace.content.as_bytes().to_vec(),
+                    ));
+                }
+                crate::EditOperation::Insert(insert) => {
+                    let offset = match &insert.at {
+                        crate::InsertionPoint::Top => 0,
+                        crate::InsertionPoint::Bottom => original.len(),
+                        crate::InsertionPoint::Before(anchor) => {
+                            let index = anchors.resolve(anchor).map_err(anchor_error)?;
+                            lines[index].start_byte
+                        }
+                        crate::InsertionPoint::After(anchor) => {
+                            let index = anchors.resolve(anchor).map_err(anchor_error)?;
+                            lines[index].end_byte
+                        }
+                    };
+                    ranges.push((offset, offset, insert.content.as_bytes().to_vec()));
+                }
+            }
+        }
+        ranges.sort_by_key(|(start, end, _)| (*start, *end));
+        if ranges.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+            return Err(KernelError::InvalidRequest {
+                message: "filesystem edit ranges overlap".to_owned(),
+            });
+        }
+        let mut rendered = Vec::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, replacement) in ranges {
+            rendered.extend_from_slice(&original[cursor..start]);
+            rendered.extend_from_slice(&replacement);
+            cursor = end;
+        }
+        rendered.extend_from_slice(&original[cursor..]);
+        atomic_replace(path, &rendered)?;
+        let new = self.anchored_text(uri.clone(), path, &rendered)?;
+        Ok(crate::EditResult {
+            uri: uri.clone(),
+            changed: vec![new.clone()],
+            diff: crate::AnchoredDiff {
+                uri,
+                hunks: vec![crate::DiffHunk {
+                    old: old.lines,
+                    new: new.lines.clone(),
+                }],
+            },
+        })
+    }
+}
+
 impl Handler for FileHandler {
     fn descriptor(&self) -> HandlerDescriptor {
         HandlerDescriptor {
@@ -303,7 +429,9 @@ impl Handler for FileHandler {
     }
 
     fn claims(&self, address: &ResourceAddress) -> bool {
-        address.as_path().is_some_and(|path| !has_projection(path))
+        address
+            .as_uri()
+            .is_some_and(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())))
     }
 
     fn execute<'a>(
@@ -312,12 +440,20 @@ impl Handler for FileHandler {
         _host: KernelHandle,
     ) -> BoxFuture<'a, Result<Value, KernelError>> {
         Box::pin(async move {
-            let requested = require_path(&request.target)?;
+            let requested =
+                uri_path(
+                    request
+                        .target
+                        .as_uri()
+                        .ok_or_else(|| KernelError::InvalidUri {
+                            message: request.target.to_string(),
+                        })?,
+                )?;
             match request.verb {
-                Verb::Read => Self::read_value(&self.resolve_existing(requested)?)
+                Verb::Read => Self::read_value(&self.resolve_existing(&requested)?)
                     .map(|value| json!({"path": requested, "value": value})),
                 Verb::Write => {
-                    let path = self.resolve_for_write(requested)?;
+                    let path = self.resolve_for_write(&requested)?;
                     let content = request
                         .args
                         .get("value")
@@ -330,9 +466,9 @@ impl Handler for FileHandler {
                     })?;
                     Ok(json!({"written": true, "path": path}))
                 }
-                Verb::Edit => self.edit(requested, &request.args),
+                Verb::Edit => self.edit(&requested, &request.args),
                 Verb::Delete => {
-                    let path = self.resolve_existing(requested)?;
+                    let path = self.resolve_existing(&requested)?;
                     if path.is_dir() {
                         fs::remove_dir_all(&path)
                     } else {
@@ -344,14 +480,12 @@ impl Handler for FileHandler {
                     Ok(json!({"deleted": true, "path": path}))
                 }
                 Verb::Find => {
-                    let path = self.resolve_existing(requested)?;
-                    let mut files = Vec::new();
-                    Self::collect_files(&path, &mut files)?;
-                    files.sort();
+                    let path = self.resolve_existing(&requested)?;
+                    let files = fff::find(&path, "")?;
                     Ok(json!({"paths": files}))
                 }
                 Verb::Grep => {
-                    let path = self.resolve_existing(requested)?;
+                    let path = self.resolve_existing(&requested)?;
                     let pattern = request
                         .args
                         .get("pattern")
@@ -359,22 +493,170 @@ impl Handler for FileHandler {
                         .ok_or_else(|| KernelError::InvalidRequest {
                             message: "filesystem grep requires an args.pattern string".to_owned(),
                         })?;
-                    let mut files = Vec::new();
-                    Self::collect_files(&path, &mut files)?;
-                    let matches = files
-                        .into_iter()
-                        .filter(|file| {
-                            fs::read_to_string(file)
-                                .map(|content| content.contains(pattern))
-                                .unwrap_or(false)
-                        })
+                    let matches = fff::grep(&path, pattern, &self.structure)?;
+                    let paths = matches
+                        .iter()
+                        .map(|item| item.uri.to_string())
                         .collect::<Vec<_>>();
-                    Ok(json!({"paths": matches, "pattern": pattern}))
+                    Ok(json!({"matches": matches, "paths": paths, "pattern": pattern}))
                 }
                 verb => Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
                     uri: request.target.to_string(),
                 }),
+            }
+        })
+    }
+}
+
+impl TypedHandler for FileHandler {
+    fn descriptor(&self) -> HandlerDescriptor {
+        HandlerDescriptor {
+            name: "filesystem-typed".to_owned(),
+            schemes: vec!["file".to_owned()],
+            verbs: vec![Verb::Read, Verb::Write, Verb::Edit, Verb::Find, Verb::Grep],
+        }
+    }
+
+    fn claims_operation(&self, operation: &Operation) -> bool {
+        match operation {
+            Operation::Read(requests) => requests
+                .iter()
+                .all(|request| self.typed_path(&request.uri).is_ok()),
+            Operation::Write(requests) => requests.iter().all(|request| {
+                request.uri.scheme() == "file" && request.uri.as_ref().to_file_path().is_ok()
+            }),
+            Operation::Edit(requests) => requests.iter().all(|request| {
+                request.uri.scheme() == "file" && request.uri.as_ref().to_file_path().is_ok()
+            }),
+            Operation::Find(request) => {
+                !request.roots.is_empty()
+                    && request.roots.iter().all(|uri| self.typed_path(uri).is_ok())
+            }
+            Operation::Grep(request) => {
+                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| self.typed_path(uri).is_ok()))
+            }
+            _ => false,
+        }
+    }
+
+    fn execute_typed<'a>(
+        &'a self,
+        operation: Operation,
+        _host: KernelHandle,
+    ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+        Box::pin(async move {
+            match operation {
+                Operation::Read(requests) => {
+                    let results = requests
+                        .into_iter()
+                        .map(|request| {
+                            let path = self.typed_path(&request.uri)?;
+                            if path.is_dir() {
+                                let mut entries = fs::read_dir(&path)
+                                    .map_err(|error| KernelError::Handler {
+                                        message: error.to_string(),
+                                    })?
+                                    .map(|entry| {
+                                        let path = entry
+                                            .map_err(|error| KernelError::Handler {
+                                                message: error.to_string(),
+                                            })?
+                                            .path();
+                                        crate::ResourceUri::parse(&path.display().to_string())
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                entries.sort_by_key(ToString::to_string);
+                                Ok(ReadResult::Directory {
+                                    uri: request.uri,
+                                    entries,
+                                })
+                            } else {
+                                let bytes =
+                                    fs::read(&path).map_err(|error| KernelError::Handler {
+                                        message: error.to_string(),
+                                    })?;
+                                Ok(ReadResult::Text(self.anchored_text(
+                                    request.uri,
+                                    &path,
+                                    &bytes,
+                                )?))
+                            }
+                        })
+                        .collect();
+                    Ok(OperationResult::Read(results))
+                }
+                Operation::Write(requests) => {
+                    let results = requests
+                        .into_iter()
+                        .map(|request| {
+                            let requested = request.uri.as_ref().to_file_path().map_err(|_| {
+                                KernelError::InvalidUri {
+                                    message: request.uri.to_string(),
+                                }
+                            })?;
+                            let path = self.resolve_for_write(&requested)?;
+                            if let Some(parent) = path.parent() {
+                                fs::create_dir_all(parent).map_err(|error| {
+                                    KernelError::Handler {
+                                        message: error.to_string(),
+                                    }
+                                })?;
+                            }
+                            fs::write(&path, request.content).map_err(|error| {
+                                KernelError::Handler {
+                                    message: error.to_string(),
+                                }
+                            })?;
+                            let bytes = fs::read(&path).map_err(|error| KernelError::Handler {
+                                message: error.to_string(),
+                            })?;
+                            Ok(crate::WriteResult {
+                                text: self.anchored_text(request.uri, &path, &bytes)?,
+                            })
+                        })
+                        .collect();
+                    Ok(OperationResult::Write(results))
+                }
+                Operation::Edit(requests) => {
+                    let results = requests
+                        .into_iter()
+                        .map(|request| {
+                            let path = self.typed_path(&request.uri)?;
+                            self.apply_typed_edit(&path, request.uri, &request.operations)
+                        })
+                        .collect();
+                    Ok(OperationResult::Edit(results))
+                }
+                Operation::Find(request) => {
+                    let mut paths = Vec::new();
+                    for root in request.roots {
+                        paths.extend(fff::find(&self.typed_path(&root)?, &request.query)?);
+                    }
+                    paths.sort();
+                    paths.dedup();
+                    Ok(OperationResult::Find(
+                        paths
+                            .into_iter()
+                            .map(|path| crate::ResourceUri::parse(&path.display().to_string()))
+                            .collect(),
+                    ))
+                }
+                Operation::Grep(request) => {
+                    let crate::GrepSource::Resources(uris) = request.source else {
+                        unreachable!()
+                    };
+                    let mut matches = Vec::new();
+                    for uri in uris {
+                        matches.extend(fff::grep(
+                            &self.typed_path(&uri)?,
+                            &request.pattern,
+                            &self.structure,
+                        )?);
+                    }
+                    Ok(OperationResult::Grep(Ok(matches)))
+                }
+                _ => unreachable!(),
             }
         })
     }
@@ -583,5 +865,84 @@ mod tests {
                 .iter()
                 .all(|line| line.type_kind_chain.is_empty())
         );
+    }
+
+    #[tokio::test]
+    async fn typed_read_and_grep_use_contract_values_and_fff() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("main.rs");
+        fs::write(&path, "fn main() {\n    let answer = 42;\n}\n").unwrap();
+        let handler = FileHandler::new(root.path()).unwrap();
+        let uri = crate::ResourceUri::parse(&path.display().to_string()).unwrap();
+        let kernel = Kernel::new();
+        kernel.register_typed(handler).await;
+
+        let read = kernel
+            .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
+                uri: uri.clone(),
+                at: None,
+                before: None,
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Read(results) = read else {
+            panic!("wrong typed result")
+        };
+        let Ok(crate::ReadResult::Text(text)) = &results[0] else {
+            panic!("wrong read value")
+        };
+        assert_eq!(text.lines.len(), 3);
+        assert!(!text.lines[1].anchor.tokens().is_empty());
+
+        let grep = kernel
+            .execute_operation(crate::Operation::Grep(crate::GrepRequest {
+                pattern: "answer".to_owned(),
+                source: crate::GrepSource::Resources(vec![uri]),
+            }))
+            .await
+            .unwrap();
+        let crate::OperationResult::Grep(Ok(matches)) = grep else {
+            panic!("wrong grep result")
+        };
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].lines[0].text, "    let answer = 42;");
+    }
+
+    #[tokio::test]
+    async fn typed_edit_returns_diff_and_supports_insertions() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("notes.txt");
+        fs::write(&path, "one\ntwo\n").unwrap();
+        let handler = FileHandler::new(root.path()).unwrap();
+        let uri = crate::ResourceUri::parse(&path.display().to_string()).unwrap();
+        let (_, lines) = handler.structural_lines(&path, b"one\ntwo\n");
+        let anchors = AnchorSet::from_inputs(
+            &lines
+                .iter()
+                .map(StructuralLine::anchor_input)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let kernel = Kernel::new();
+        kernel.register_typed(handler).await;
+        let result = kernel
+            .execute_operation(crate::Operation::Edit(vec![crate::EditRequest {
+                uri: uri.clone(),
+                operations: vec![crate::EditOperation::Insert(crate::InsertOperation {
+                    at: crate::InsertionPoint::Before(anchors.items()[1].anchor.clone()),
+                    content: "inserted\n".to_owned(),
+                })],
+            }]))
+            .await
+            .unwrap();
+        let crate::OperationResult::Edit(mut values) = result else {
+            panic!("wrong typed result")
+        };
+        let value = values.remove(0).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\ninserted\ntwo\n");
+        assert_eq!(value.uri, uri);
+        assert_eq!(value.diff.hunks.len(), 1);
+        assert_eq!(value.changed[0].lines.len(), 3);
     }
 }

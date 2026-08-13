@@ -139,20 +139,13 @@ interface types {
     record run-request {
         uri: uri,
         args: list<string>,
-        context: execution-context,
+        working-uri: option<uri>,
+        environment: list<environment-entry>,
     }
 
     record environment-entry {
         name: string,
         value: string,
-    }
-
-    record execution-context {
-        working-uri: option<uri>,
-        environment: list<environment-entry>,
-        cancellation-token: option<string>,
-        deadline-ms: option<u64>,
-        correlation-id: option<string>,
     }
 
     record send-request {

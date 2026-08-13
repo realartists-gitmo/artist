@@ -11,6 +11,14 @@ pub enum KernelError {
     UnsupportedVerb { verb: String, uri: String },
     InvalidRequest { message: String },
     InvalidAnchor { message: String },
+    StaleAnchor { message: String },
+    WrongKind { message: String },
+    Immutable { uri: String },
+    PermissionDenied { uri: String },
+    Conflict { uri: String },
+    NotLive { uri: String },
+    NotEmpty { uri: String },
+    Aborted { message: String },
     NotFound { uri: String },
     AlreadyExists { uri: String },
     InvalidState { message: String },
@@ -23,6 +31,9 @@ impl fmt::Display for KernelError {
             Self::InvalidUri { message }
             | Self::InvalidRequest { message }
             | Self::InvalidAnchor { message }
+            | Self::StaleAnchor { message }
+            | Self::WrongKind { message }
+            | Self::Aborted { message }
             | Self::InvalidState { message }
             | Self::Handler { message } => formatter.write_str(message),
             Self::UnsupportedUri { uri } => write!(formatter, "unsupported URI: {uri}"),
@@ -32,6 +43,11 @@ impl fmt::Display for KernelError {
             }
             Self::NotFound { uri } => write!(formatter, "resource not found: {uri}"),
             Self::AlreadyExists { uri } => write!(formatter, "resource already exists: {uri}"),
+            Self::Immutable { uri } => write!(formatter, "resource is immutable: {uri}"),
+            Self::PermissionDenied { uri } => write!(formatter, "permission denied: {uri}"),
+            Self::Conflict { uri } => write!(formatter, "resource conflict: {uri}"),
+            Self::NotLive { uri } => write!(formatter, "resource is not live: {uri}"),
+            Self::NotEmpty { uri } => write!(formatter, "resource is not empty: {uri}"),
         }
     }
 }

@@ -15,6 +15,7 @@ url = { version = "2", features = ["serde"] }
 base64 = "0.23"
 tempfile = "3"
 teca = "1.0.0"
+fff-search = "0.10.4-nightly.e2cad2f"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 

@@ -1,4 +1,4 @@
-use crate::{KernelError, Request, ResourceAddress, Verb};
+use crate::{KernelError, Operation, OperationResult, Request, ResourceAddress, Verb};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -38,6 +38,19 @@ pub trait Handler: Send + Sync {
     ) -> BoxFuture<'a, Result<serde_json::Value, KernelError>>;
 }
 
+/// Typed implementation boundary for universal components. Implementations
+/// receive the contract-shaped operation and return the contract-shaped
+/// result; JSON adapters must live above this trait.
+pub trait TypedHandler: Send + Sync {
+    fn descriptor(&self) -> HandlerDescriptor;
+    fn claims_operation(&self, operation: &Operation) -> bool;
+    fn execute_typed<'a>(
+        &'a self,
+        operation: Operation,
+        host: KernelHandle,
+    ) -> BoxFuture<'a, Result<OperationResult, KernelError>>;
+}
+
 /// Metadata and execution surface for tools exposed directly to the model.
 ///
 /// This is deliberately separate from URI handlers: `tools://` is the
@@ -65,16 +78,34 @@ pub struct ToolDefinition {
 #[derive(Clone)]
 pub struct KernelHandle {
     dispatch: Arc<dyn Fn(Request) -> BoxFuture<'static, crate::ItemResult> + Send + Sync>,
+    typed_dispatch: Arc<
+        dyn Fn(Operation) -> BoxFuture<'static, Result<OperationResult, KernelError>> + Send + Sync,
+    >,
 }
 
 impl KernelHandle {
     pub(crate) fn new(
         dispatch: Arc<dyn Fn(Request) -> BoxFuture<'static, crate::ItemResult> + Send + Sync>,
+        typed_dispatch: Arc<
+            dyn Fn(Operation) -> BoxFuture<'static, Result<OperationResult, KernelError>>
+                + Send
+                + Sync,
+        >,
     ) -> Self {
-        Self { dispatch }
+        Self {
+            dispatch,
+            typed_dispatch,
+        }
     }
 
     pub fn execute(&self, request: Request) -> BoxFuture<'static, crate::ItemResult> {
         (self.dispatch)(request)
+    }
+
+    pub fn execute_operation(
+        &self,
+        operation: Operation,
+    ) -> BoxFuture<'static, Result<OperationResult, KernelError>> {
+        (self.typed_dispatch)(operation)
     }
 }

@@ -1,70 +1,83 @@
 use crate::{KernelError, ResourceUri};
 use serde::{Deserialize, Serialize};
-use std::{fmt, path::PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
-/// An operation target may be a real OS path or a virtual resource URI.
+/// Canonical internal resource identity. Bare OS paths are converted to
+/// `file://` at construction; there is no second path identity below the
+/// outer adapter boundary.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(untagged)]
-pub enum ResourceAddress {
-    Path(PathBuf),
-    Uri(ResourceUri),
-}
+#[serde(transparent)]
+pub struct ResourceAddress(ResourceUri);
 
 impl ResourceAddress {
     pub fn path(path: impl Into<PathBuf>) -> Self {
-        Self::Path(path.into())
+        let path = path.into();
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .expect("current directory is required")
+                .join(path)
+        };
+        Self(
+            ResourceUri::parse(&absolute.display().to_string())
+                .expect("OS paths are valid file URIs"),
+        )
     }
 
     pub fn uri(uri: ResourceUri) -> Self {
-        Self::Uri(uri)
-    }
-
-    pub fn as_path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Path(path) => Some(path),
-            Self::Uri(_) => None,
-        }
+        Self(uri)
     }
 
     pub fn as_uri(&self) -> Option<&ResourceUri> {
-        match self {
-            Self::Path(_) => None,
-            Self::Uri(uri) => Some(uri),
-        }
+        Some(&self.0)
+    }
+
+    pub fn uri_ref(&self) -> &ResourceUri {
+        &self.0
     }
 }
 
 impl From<ResourceUri> for ResourceAddress {
     fn from(uri: ResourceUri) -> Self {
-        Self::Uri(uri)
+        Self::uri(uri)
     }
 }
 
 impl From<PathBuf> for ResourceAddress {
     fn from(path: PathBuf) -> Self {
-        Self::Path(path)
+        Self::path(path)
     }
 }
 
-impl From<&std::path::Path> for ResourceAddress {
-    fn from(path: &std::path::Path) -> Self {
-        Self::Path(path.to_owned())
+impl From<&Path> for ResourceAddress {
+    fn from(path: &Path) -> Self {
+        Self::path(path)
     }
 }
 
 impl fmt::Display for ResourceAddress {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Path(path) => path.display().fmt(formatter),
-            Self::Uri(uri) => uri.fmt(formatter),
-        }
+        self.0.fmt(formatter)
     }
 }
 
-pub(crate) fn require_path(address: &ResourceAddress) -> Result<&PathBuf, KernelError> {
-    address
-        .as_path()
-        .ok_or_else(|| KernelError::InvalidRequest {
-            message: format!("expected an OS path, got {address}"),
+pub(crate) fn canonical_uri(address: &ResourceAddress) -> Result<ResourceUri, crate::KernelError> {
+    Ok(address.0.clone())
+}
+
+pub(crate) fn uri_path(uri: &ResourceUri) -> Result<PathBuf, KernelError> {
+    if uri.scheme() != "file" {
+        return Err(KernelError::InvalidRequest {
+            message: format!("expected file URI, got {uri}"),
+        });
+    }
+    uri.as_ref()
+        .to_file_path()
+        .map_err(|_| KernelError::InvalidUri {
+            message: uri.to_string(),
         })
 }

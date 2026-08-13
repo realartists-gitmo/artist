@@ -1,8 +1,7 @@
 //! Canonical resource-address semantics shared by handlers and runtimes.
 
-use crate::{KernelError, ResourceAddress, ResourceUri};
+use crate::{KernelError, ResourceAddress};
 use std::path::Path;
-use url::Url;
 
 const PROJECTIONS: &[&str] = &[
     "symbols",
@@ -29,23 +28,11 @@ pub fn has_projection(path: &Path) -> bool {
     })
 }
 
-/// Canonicalizes a native path into the file URI form used internally by
-/// projection handlers. Ordinary native paths remain paths.
+/// Canonicalizes every native path into the file URI form used internally.
 pub fn normalize(address: &ResourceAddress) -> Result<ResourceAddress, KernelError> {
-    let Some(path) = address.as_path() else {
-        return Ok(address.clone());
-    };
-    if !has_projection(path) {
-        return Ok(address.clone());
-    }
-    let url = Url::from_file_path(path).map_err(|_| KernelError::InvalidRequest {
-        message: format!("invalid filesystem path: {address}"),
-    })?;
-    Ok(ResourceAddress::Uri(
-        ResourceUri::parse(url.as_str()).map_err(|error| KernelError::InvalidRequest {
-            message: format!("invalid filesystem path URI: {error}"),
-        })?,
-    ))
+    Ok(ResourceAddress::uri(crate::address::canonical_uri(
+        address,
+    )?))
 }
 
 /// Whether an address is a local filesystem URI.
