@@ -43,8 +43,9 @@ invocation context propagated by the kernel out of band; none are ordinary
 tool arguments.
 
 `poll` accumulates newly observed anchored text from each target's poll cursor;
-regex matching considers only newly observed material. `Terminated` is valid
-only for resources advertising termination capability. The initial reload trigger
+regex matching considers the entire accumulated text observed since the poll
+cursor, not individual delivery chunks or lines. `Terminated` is valid only for
+resources advertising termination capability. The initial reload trigger
 is explicit; the runtime also exposes a debounced trigger that calls the same
 transactional build/validate/activate path.
 

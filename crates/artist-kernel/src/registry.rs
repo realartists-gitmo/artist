@@ -12,6 +12,42 @@ struct Inner {
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Anchor, AnchoredLine, AnchoredText, LineEnding, PollResult, RegexAtom};
+
+    #[test]
+    fn poll_regex_matches_across_anchored_lines() {
+        let uri = ResourceUri::parse("file:///tmp/poll.txt").unwrap();
+        let condition = crate::PollCondition::Atom(crate::PollAtom::Regex(RegexAtom {
+            target: 0,
+            pattern: "hello\\nworld".to_owned(),
+        }));
+        let result = PollResult {
+            text: vec![AnchoredText {
+                uri,
+                lines: vec![
+                    AnchoredLine {
+                        anchor: Anchor::from_tokens(vec!["1".to_owned()]),
+                        text: "hello".to_owned(),
+                        ending: LineEnding::Lf,
+                    },
+                    AnchoredLine {
+                        anchor: Anchor::from_tokens(vec!["2".to_owned()]),
+                        text: "world".to_owned(),
+                        ending: LineEnding::Lf,
+                    },
+                ],
+            }],
+            satisfied: Vec::new(),
+        };
+        assert!(
+            evaluate_poll_condition(Some(&condition), &[result], tokio::time::Duration::ZERO,).0
+        );
+    }
+}
+
 fn operation_uri(operation: &Operation) -> String {
     match operation {
         Operation::Read(items) => items.first().map(|item| item.uri.to_string()),
@@ -68,11 +104,9 @@ fn evaluate_poll_condition(
                 .get(regex.target as usize)
                 .is_some_and(|result| {
                     regex::Regex::new(&regex.pattern).is_ok_and(|regex| {
-                        result
-                            .text
-                            .iter()
-                            .flat_map(|text| &text.lines)
-                            .any(|line| regex.is_match(&line.text))
+                        regex.is_match(&crate::accumulated_lines_text(
+                            result.text.iter().flat_map(|text| text.lines.iter()),
+                        ))
                     })
                 }),
             crate::PollAtom::Terminated(target) => results.get(*target as usize).is_some_and(|result| result.satisfied.iter().any(|item| matches!(item, crate::PollAtom::Terminated(found) if found == target))),

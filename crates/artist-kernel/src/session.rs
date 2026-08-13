@@ -503,17 +503,11 @@ fn evaluate_condition(
                 .get(*target as usize)
                 .and_then(|value| value["events"].as_array())
                 .is_some_and(|events| !events.is_empty()),
-            PollAtom::Regex(regex) => snapshots
-                .get(regex.target as usize)
-                .and_then(|value| value["events"].as_array())
-                .is_some_and(|events| {
-                    events.iter().any(|event| {
-                        event["data"].as_str().is_some_and(|text| {
-                            regex::Regex::new(&regex.pattern)
-                                .is_ok_and(|regex| regex.is_match(text))
-                        })
-                    })
-                }),
+            PollAtom::Regex(regex) => snapshots.get(regex.target as usize).is_some_and(|value| {
+                let lines = session_event_lines(value);
+                regex::Regex::new(&regex.pattern)
+                    .is_ok_and(|regex| regex.is_match(&crate::accumulated_lines_text(lines.iter())))
+            }),
             PollAtom::Terminated(target) => snapshots
                 .get(*target as usize)
                 .and_then(|value| value["status"].as_str())
@@ -576,17 +570,7 @@ fn anchored_session_window(
     before: Option<u32>,
     after: Option<u32>,
 ) -> Result<AnchoredText, KernelError> {
-    let events = value["events"].as_array().cloned().unwrap_or_default();
-    let lines = events
-        .iter()
-        .filter_map(|event| {
-            Some(AnchoredLine {
-                anchor: Anchor::from_tokens(vec![event["seq"].as_u64()?.to_string()]),
-                text: event["data"].as_str()?.to_owned(),
-                ending: crate::LineEnding::Lf,
-            })
-        })
-        .collect::<Vec<_>>();
+    let lines = session_event_lines(value);
     let before = before.unwrap_or(u32::MAX) as usize;
     let after = after.unwrap_or(u32::MAX) as usize;
     let start = lines.len().saturating_sub(before.saturating_add(1));
@@ -595,6 +579,23 @@ fn anchored_session_window(
         uri: uri.clone(),
         lines: lines[start..end].to_vec(),
     })
+}
+
+fn session_event_lines(value: &Value) -> Vec<AnchoredLine> {
+    value["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|event| {
+            Some(AnchoredLine {
+                anchor: Anchor::from_tokens(vec![
+                    event["seq"].as_u64().unwrap_or_default().to_string(),
+                ]),
+                text: event["data"].as_str()?.to_owned(),
+                ending: crate::LineEnding::Lf,
+            })
+        })
+        .collect()
 }
 
 const DEFAULT_READ_WINDOW: usize = 200;
@@ -789,12 +790,24 @@ mod tests {
 
         let regex = crate::PollCondition::Atom(PollAtom::Regex(crate::RegexAtom {
             target: 0,
-            pattern: "^hello$".to_owned(),
+            pattern: "^hello\\n?$".to_owned(),
         }));
         let snapshots = vec![json!({"events": [{"data": "say hello there"}]})];
         assert!(!evaluate_condition(&regex, &snapshots, Duration::ZERO).0);
         let snapshots = vec![json!({"events": [{"data": "hello"}]})];
         assert!(evaluate_condition(&regex, &snapshots, Duration::ZERO).0);
+
+        let spanning = crate::PollCondition::Atom(PollAtom::Regex(crate::RegexAtom {
+            target: 0,
+            pattern: "hello\\nworld".to_owned(),
+        }));
+        let snapshots = vec![json!({
+            "events": [
+                {"seq": 1, "data": "hello"},
+                {"seq": 2, "data": "world"}
+            ]
+        })];
+        assert!(evaluate_condition(&spanning, &snapshots, Duration::ZERO).0);
     }
 
     #[tokio::test]

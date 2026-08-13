@@ -27,6 +27,23 @@ pub struct AnchoredText {
     pub lines: Vec<AnchoredLine>,
 }
 
+/// Reconstruct the textual stream represented by anchored lines, preserving
+/// each line's original terminator. Poll regexes operate on this accumulated
+/// representation rather than on delivery chunks or individual lines.
+pub fn accumulated_lines_text<'a>(lines: impl IntoIterator<Item = &'a AnchoredLine>) -> String {
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line.text);
+        match line.ending {
+            LineEnding::None => {}
+            LineEnding::Lf => text.push('\n'),
+            LineEnding::Crlf => text.push_str("\r\n"),
+            LineEnding::Cr => text.push('\r'),
+        }
+    }
+    text
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Position {
     Top,
