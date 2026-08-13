@@ -36,10 +36,10 @@ component-model streams. Their element types are respectively
 `read-result`, `anchored-text`, and `anchored-text`; adapters must not encode
 these stream elements as arbitrary JSON chunks.
 
-The execution context for `run` is explicit: the caller supplies the
-working-resource URI, attenuated capability context, cancellation/deadline,
-correlation identity, and any environment entries. The host never copies its
-ambient process environment into a component implicitly.
+The execution context for `run` is explicit in the typed operation data where
+it is part of the contract (working URI and environment). Cancellation,
+deadline, correlation, and authority are invocation context propagated by the
+kernel out of band; they are never ordinary tool arguments.
 
 `poll` uses a bounded condition-centered window. Its stream emits newly
 observed anchored text around the condition that completes the poll; regex
@@ -57,7 +57,7 @@ This slice defines and exercises:
 
 1. the canonical WIT package and worlds;
 2. component identity and ABI versioning;
-3. generic invocation and structured result/error transport;
+3. typed universal invocation and structured result/error transport;
 4. the component-to-kernel host-call boundary;
 5. lifecycle and failure semantics;
 6. the minimum conformance harness;
@@ -80,23 +80,35 @@ This slice does not:
 - register tool packages;
 - define automatic filesystem watching as the reload trigger;
 - define repository, AST, session, or runtime-specific interfaces;
-- require every provider-facing adapter to consume typed WIT records directly;
-  the generic ABI adapter remains available while those adapters are added.
+- do not make JSON the kernel or universal-component semantic representation;
+  JSON is explicitly confined to provider adapters and the quarantined legacy
+  generic world.
 
 Those systems consume this ABI in later horizontal slices.
 
 ## 4. Component model
 
-The initial component world is conceptually:
+The initial universal component worlds are conceptually:
 
     artist:component/world
       imports artist:host/host
       exports artist:component/component
 
+Universal verb components export their verb-specific typed interface. They do
+not receive a generic target-plus-JSON invocation. A package-local extension
+may instead declare its own `tool.wit`; it must export a root `invoke` function
+(or the interface name declared by its contract). The host reflects that
+function's WIT parameter/result types only at the outer provider adapter,
+while component-to-kernel calls still use the shared typed host worlds.
+
+The legacy generic component world remains available only for compatibility
+with pre-typed packages and is not a universal-verb or package-local execution
+path.
+
 The component exports:
 
 - immutable identity and ABI metadata;
-- a generic invocation entrypoint.
+- its typed verb entrypoint, or a package-local `invoke` entrypoint.
 
 The host provides:
 
@@ -118,11 +130,12 @@ The ABI must define WIT records for:
 - host-request: an operation against a resource;
 - host-response: structured output and metadata;
 - error: stable error kind, message, and structured details;
-- context: cancellation/deadline and correlation metadata.
+- invocation context: cancellation/deadline/correlation metadata propagated
+  out of band rather than embedded in ordinary tool input.
 
-Structured payloads use canonical UTF-8 JSON in the first implementation.
-This keeps the ABI interoperable with provider schemas and the existing
-kernel request/result types while leaving room for typed WIT records later.
+Universal verb payloads are WIT records and the kernel's corresponding typed
+Rust values. Canonical UTF-8 JSON exists only at provider adapters and in the
+quarantined legacy generic world.
 
 The implementation must document maximum payload size, text encoding, and
 whether unknown metadata fields are preserved.
@@ -202,7 +215,7 @@ Individual future extensions may include the ABI package and their own WIT
 interfaces. A source-first tool package has this shape:
 
     tool.md              # prose and provider-facing metadata
-    tool.wit             # optional package-local interface
+    tool.wit             # package-local interface for non-universal tools
     Cargo.toml           # optional build metadata
     src/                 # authored implementation, e.g. src/lib.rs
     target/.../tool.wasm # generated component artifact/cache
@@ -215,7 +228,7 @@ The host also discovers an unregistered package-shaped tool directory:
 
     tool.md       # YAML frontmatter plus prose
     src/          # source-first implementation directory
-    tool.wit      # optional package-local interface
+    tool.wit      # package-local interface for non-universal tools
     tool.wasm     # optional prebuilt/cache artifact
 
 Discovery parses and validates the Markdown metadata and records source and

@@ -148,15 +148,16 @@ fn line_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
     }
     let mut ranges = Vec::new();
     let mut start = 0;
-    for (offset, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' {
-            let mut end = offset;
-            if end > start && bytes[end - 1] == b'\r' {
-                end -= 1;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == b'\r' || bytes[offset] == b'\n' {
+            ranges.push((start, offset));
+            if bytes[offset] == b'\r' && bytes.get(offset + 1) == Some(&b'\n') {
+                offset += 1;
             }
-            ranges.push((start, end));
             start = offset + 1;
         }
+        offset += 1;
     }
     if start < bytes.len() {
         ranges.push((start, bytes.len()));

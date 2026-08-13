@@ -10,6 +10,7 @@ pub enum KernelError {
     NoHandler { uri: String },
     UnsupportedVerb { verb: String, uri: String },
     InvalidRequest { message: String },
+    InvalidPattern { message: String },
     InvalidAnchor { message: String },
     StaleAnchor { message: String },
     WrongKind { message: String },
@@ -30,6 +31,7 @@ impl fmt::Display for KernelError {
         match self {
             Self::InvalidUri { message }
             | Self::InvalidRequest { message }
+            | Self::InvalidPattern { message }
             | Self::InvalidAnchor { message }
             | Self::StaleAnchor { message }
             | Self::WrongKind { message }

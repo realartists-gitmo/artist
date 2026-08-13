@@ -12,7 +12,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::{Mutex, Notify, RwLock};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Status {
@@ -264,6 +264,7 @@ impl TypedHandler for SessionHandler {
         &'a self,
         operation: Operation,
         _host: KernelHandle,
+        _context: crate::InvocationContext,
     ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
         Box::pin(async move {
             match operation {
@@ -302,53 +303,63 @@ impl TypedHandler for SessionHandler {
                     Ok(OperationResult::Delete(results))
                 }
                 Operation::Poll(request) => {
-                    let target =
-                        request
-                            .targets
-                            .first()
-                            .ok_or_else(|| KernelError::InvalidRequest {
-                                message: "poll requires at least one target".to_owned(),
-                            })?;
-                    let mut args = json!({
-                        "since": 0,
-                        "timeout_ms": 0,
-                        "lines": 1,
-                    });
-                    if let Some(until) = request.until {
-                        for node in until.nodes {
-                            if let crate::PollNode::Atom(atom) = node {
-                                match atom {
-                                    PollAtom::Changed(lines) => args["lines"] = json!(lines),
-                                    PollAtom::Regex(regex) => args["match"] = json!(regex.pattern),
-                                    PollAtom::Timeout(ms) => args["timeout_ms"] = json!(ms),
-                                    PollAtom::Terminated(_) => {}
-                                }
-                            }
-                        }
+                    if request.targets.is_empty() {
+                        return Err(KernelError::InvalidRequest {
+                            message: "poll requires at least one target".to_owned(),
+                        });
                     }
-                    let value = self
-                        .poll(&ResourceAddress::uri(target.uri.clone()), &args)
-                        .await?;
-                    let text = value["events"]
-                        .as_array()
+                    let condition = request
+                        .until
+                        .unwrap_or_else(|| crate::PollCondition::Atom(PollAtom::Changed(0)));
+                    validate_poll_condition(&condition, request.targets.len())?;
+                    let started = Instant::now();
+                    let timeout_ms = poll_atoms(&condition)
                         .into_iter()
-                        .flatten()
-                        .filter_map(|event| {
-                            Some(AnchoredLine {
-                                anchor: Anchor::from_tokens(vec![
-                                    event["seq"].as_u64()?.to_string(),
-                                ]),
-                                text: event["data"].as_str()?.to_owned(),
-                                ending: crate::LineEnding::Lf,
-                            })
+                        .filter_map(|atom| match atom {
+                            PollAtom::Timeout(ms) => Some(ms),
+                            _ => None,
                         })
-                        .collect::<Vec<_>>();
+                        .min();
+                    let mut snapshots = Vec::new();
+                    let satisfied = loop {
+                        snapshots.clear();
+                        for target in &request.targets {
+                            let since = position_to_seq(target.from_position.as_ref());
+                            let value = self
+                                .poll(
+                                    &ResourceAddress::uri(target.uri.clone()),
+                                    &json!({
+                                        "since": since,
+                                        "timeout_ms": 50,
+                                        "lines": 1,
+                                    }),
+                                )
+                                .await?;
+                            snapshots.push(value);
+                        }
+                        let timed_out = timeout_ms
+                            .is_some_and(|ms| started.elapsed() >= Duration::from_millis(ms));
+                        let (ok, atoms) = evaluate_condition(&condition, &snapshots, timed_out);
+                        if ok || timed_out {
+                            break atoms;
+                        }
+                    };
+                    let text = request
+                        .targets
+                        .iter()
+                        .zip(snapshots.iter())
+                        .map(|(target, value)| {
+                            anchored_session_window(
+                                &target.uri,
+                                value,
+                                request.before,
+                                request.after,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     Ok(OperationResult::Poll(Ok(crate::PollResult {
-                        text: vec![AnchoredText {
-                            uri: target.uri.clone(),
-                            lines: text,
-                        }],
-                        satisfied: Vec::new(),
+                        text,
+                        satisfied,
                     })))
                 }
                 _ => Err(KernelError::UnsupportedVerb {
@@ -358,6 +369,156 @@ impl TypedHandler for SessionHandler {
             }
         })
     }
+}
+
+fn poll_atoms(condition: &crate::PollCondition) -> Vec<PollAtom> {
+    match condition {
+        crate::PollCondition::Atom(atom) => vec![atom.clone()],
+        crate::PollCondition::All(children) | crate::PollCondition::Any(children) => {
+            children.iter().flat_map(poll_atoms).collect()
+        }
+    }
+}
+
+fn validate_poll_condition(
+    condition: &crate::PollCondition,
+    targets: usize,
+) -> Result<(), KernelError> {
+    fn walk(condition: &crate::PollCondition, targets: usize) -> Result<(), KernelError> {
+        match condition {
+            crate::PollCondition::Atom(PollAtom::Changed(target))
+            | crate::PollCondition::Atom(PollAtom::Terminated(target)) => {
+                if (*target as usize) >= targets {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!("poll target {target} is out of range"),
+                    });
+                }
+            }
+            crate::PollCondition::Atom(PollAtom::Regex(regex)) => {
+                if (regex.target as usize) >= targets {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!("poll target {} is out of range", regex.target),
+                    });
+                }
+                regex::Regex::new(&regex.pattern).map_err(|error| KernelError::InvalidPattern {
+                    message: error.to_string(),
+                })?;
+            }
+            crate::PollCondition::Atom(PollAtom::Timeout(_)) => {}
+            crate::PollCondition::All(children) | crate::PollCondition::Any(children) => {
+                if children.is_empty() {
+                    return Err(KernelError::InvalidRequest {
+                        message: "poll boolean conditions cannot be empty".to_owned(),
+                    });
+                }
+                for child in children {
+                    walk(child, targets)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(condition, targets)
+}
+
+fn position_to_seq(position: Option<&crate::Position>) -> u64 {
+    match position {
+        None | Some(crate::Position::Top) => 0,
+        Some(crate::Position::Bottom) => u64::MAX,
+        Some(crate::Position::At(anchor)) => anchor
+            .tokens()
+            .first()
+            .and_then(|token| token.parse().ok())
+            .unwrap_or(0),
+    }
+}
+
+fn evaluate_condition(
+    condition: &crate::PollCondition,
+    snapshots: &[Value],
+    timed_out: bool,
+) -> (bool, Vec<PollAtom>) {
+    fn eval_atom(atom: &PollAtom, snapshots: &[Value], timed_out: bool) -> (bool, Vec<PollAtom>) {
+        let result = match atom {
+            PollAtom::Changed(target) => snapshots
+                .get(*target as usize)
+                .and_then(|value| value["events"].as_array())
+                .is_some_and(|events| !events.is_empty()),
+            PollAtom::Regex(regex) => snapshots
+                .get(regex.target as usize)
+                .and_then(|value| value["events"].as_array())
+                .is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["data"]
+                            .as_str()
+                            .is_some_and(|text| text.contains(&regex.pattern))
+                    })
+                }),
+            PollAtom::Terminated(target) => snapshots
+                .get(*target as usize)
+                .and_then(|value| value["status"].as_str())
+                .is_some_and(|status| status == "aborted"),
+            PollAtom::Timeout(milliseconds) => timed_out || *milliseconds == 0,
+        };
+        (
+            result,
+            result.then(|| vec![atom.clone()]).unwrap_or_default(),
+        )
+    }
+    match condition {
+        crate::PollCondition::Atom(atom) => eval_atom(atom, snapshots, timed_out),
+        crate::PollCondition::All(children) => {
+            let values = children
+                .iter()
+                .map(|child| evaluate_condition(child, snapshots, timed_out))
+                .collect::<Vec<_>>();
+            (
+                values.iter().all(|(ok, _)| *ok),
+                values.into_iter().flat_map(|(_, atoms)| atoms).collect(),
+            )
+        }
+        crate::PollCondition::Any(children) => {
+            let values = children
+                .iter()
+                .map(|child| evaluate_condition(child, snapshots, timed_out))
+                .collect::<Vec<_>>();
+            (
+                values.iter().any(|(ok, _)| *ok),
+                values
+                    .into_iter()
+                    .filter(|(ok, _)| *ok)
+                    .flat_map(|(_, atoms)| atoms)
+                    .collect(),
+            )
+        }
+    }
+}
+
+fn anchored_session_window(
+    uri: &crate::ResourceUri,
+    value: &Value,
+    before: Option<u32>,
+    after: Option<u32>,
+) -> Result<AnchoredText, KernelError> {
+    let events = value["events"].as_array().cloned().unwrap_or_default();
+    let lines = events
+        .iter()
+        .filter_map(|event| {
+            Some(AnchoredLine {
+                anchor: Anchor::from_tokens(vec![event["seq"].as_u64()?.to_string()]),
+                text: event["data"].as_str()?.to_owned(),
+                ending: crate::LineEnding::Lf,
+            })
+        })
+        .collect::<Vec<_>>();
+    let before = before.unwrap_or(u32::MAX) as usize;
+    let after = after.unwrap_or(u32::MAX) as usize;
+    let start = lines.len().saturating_sub(before.saturating_add(1));
+    let end = (start + after + 1).min(lines.len());
+    Ok(AnchoredText {
+        uri: uri.clone(),
+        lines: lines[start..end].to_vec(),
+    })
 }
 
 fn snapshot(state: &SessionState, since: u64) -> Value {

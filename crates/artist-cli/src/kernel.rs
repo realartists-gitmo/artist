@@ -35,6 +35,9 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         .map(|verb| format!("resource.{verb}"))
         .collect::<Vec<_>>();
     kernel
+        .register_typed(ToolsHandler::new(&tools_root, tool_capabilities.clone())?)
+        .await;
+    kernel
         .register_tool_handler(ToolsHandler::new(&tools_root, tool_capabilities)?)
         .await;
     Ok(kernel)
@@ -89,10 +92,15 @@ mod tests {
         let root = tempdir().unwrap();
         std::fs::write(root.path().join("note.txt"), "kernel path\n").unwrap();
         let kernel = build(root.path()).await.unwrap();
-        let result = dispatch(&kernel, Verb::Read, "note.txt", "null")
-            .await
-            .unwrap();
-        assert!(result.ok);
+        let result = dispatch(
+            &kernel,
+            Verb::Read,
+            &root.path().join("note.txt").display().to_string(),
+            "null",
+        )
+        .await
+        .unwrap();
+        assert!(result.ok, "filesystem dispatch failed: {result:?}");
         assert_eq!(result.value.unwrap()["value"]["content"], "kernel path\n");
     }
 

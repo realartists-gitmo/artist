@@ -41,7 +41,7 @@ impl Anchor {
 
 impl fmt::Display for Anchor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.tokens.join("."))
+        write!(formatter, "#{}", self.tokens.join("."))
     }
 }
 

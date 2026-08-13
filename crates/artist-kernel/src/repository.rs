@@ -7,8 +7,8 @@
 
 use crate::{
     AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler, HandlerDescriptor, KernelError,
-    KernelHandle, Operation, OperationResult, ReadResult, Request, ResourceAddress,
-    StructuralAnalyzer, StructuralLine, TypedHandler, Verb, fff, is_file_uri, normalize,
+    KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request, ResourceAddress,
+    SearchService, StructuralAnalyzer, StructuralLine, TypedHandler, Verb, is_file_uri, normalize,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,6 +21,7 @@ pub struct RepositoryHandler {
     root: PathBuf,
     project: String,
     structure: StructuralAnalyzer,
+    search: SearchService,
 }
 
 impl RepositoryHandler {
@@ -45,6 +46,7 @@ impl RepositoryHandler {
             root,
             project,
             structure: StructuralAnalyzer::default(),
+            search: SearchService::new(),
         })
     }
 
@@ -533,7 +535,9 @@ impl Handler for RepositoryHandler {
             let target = normalize(&request.target)?;
             match request.verb {
                 Verb::Read => self.read_resource(&target),
-                Verb::Find => Ok(json!({"paths": self.find_paths(&target)?})),
+                Verb::Find => Ok(
+                    json!({"paths": self.find_paths(&target, request.args.get("query").and_then(Value::as_str).unwrap_or_default())?}),
+                ),
                 Verb::Grep => self.grep(&target, &request.args),
                 verb => Err(KernelError::UnsupportedVerb {
                     verb: verb.to_string(),
@@ -579,6 +583,7 @@ impl TypedHandler for RepositoryHandler {
         &'a self,
         operation: Operation,
         _host: KernelHandle,
+        _context: crate::InvocationContext,
     ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
         Box::pin(async move {
             match operation {
@@ -611,7 +616,7 @@ impl TypedHandler for RepositoryHandler {
                     let mut paths = Vec::new();
                     for root in request.roots {
                         let target = ResourceAddress::uri(root);
-                        paths.extend(self.find_paths(&target)?);
+                        paths.extend(self.find_paths(&target, &request.query)?);
                     }
                     paths.sort();
                     paths.dedup();
@@ -632,24 +637,29 @@ impl TypedHandler for RepositoryHandler {
                     for uri in uris {
                         let target = ResourceAddress::uri(uri.clone());
                         let root = self.file_and_suffix(&target)?.0;
-                        for item in fff::grep(&root, &request.pattern, &self.structure)? {
+                        for item in self.search.grep_file(
+                            &root,
+                            &Pattern::parse(&request.pattern)?,
+                            &self.structure,
+                        )? {
+                            let file_uri = item.uri.clone();
                             let item_uri = if uri.scheme() == "repo" {
                                 crate::ResourceUri::parse(&format!(
                                     "repo://{}/{}",
                                     self.project,
                                     relative(
                                         &self.root,
-                                        &item
-                                            .uri
-                                            .as_ref()
-                                            .to_file_path()
-                                            .unwrap_or_else(|_| PathBuf::from(item.uri.path()))
+                                        &file_uri.as_ref().to_file_path().map_err(|_| {
+                                            KernelError::InvalidUri {
+                                                message: file_uri.to_string(),
+                                            }
+                                        })?
                                     )
                                 ))?
                             } else {
-                                item.uri
+                                file_uri.clone()
                             };
-                            let file = item_uri.as_ref().to_file_path().map_err(|_| {
+                            let file = file_uri.as_ref().to_file_path().map_err(|_| {
                                 KernelError::InvalidUri {
                                     message: item_uri.to_string(),
                                 }
@@ -677,12 +687,18 @@ impl TypedHandler for RepositoryHandler {
 }
 
 impl RepositoryHandler {
-    fn find_paths(&self, target: &ResourceAddress) -> Result<Vec<String>, KernelError> {
+    fn find_paths(
+        &self,
+        target: &ResourceAddress,
+        query: &str,
+    ) -> Result<Vec<String>, KernelError> {
         let url = Self::url(target)?;
         if url.scheme() == "file" {
             let (file, _) = self.file_and_suffix(target)?;
             if file.is_dir() {
-                return Ok(fff::find(&file, "")?
+                return Ok(self
+                    .search
+                    .find_files(&file, &Pattern::parse(query)?)?
                     .into_iter()
                     .map(|path| path.display().to_string())
                     .collect());
@@ -690,7 +706,9 @@ impl RepositoryHandler {
             return Ok(vec![file.display().to_string()]);
         }
         let prefix = url.path().trim_matches('/');
-        let mut output = fff::find(&self.root, "")?
+        let mut output = self
+            .search
+            .find_files(&self.root, &Pattern::parse(query)?)?
             .into_iter()
             .filter_map(|path| {
                 let relative_path = relative(&self.root, &path);
@@ -713,7 +731,9 @@ impl RepositoryHandler {
         } else {
             self.root.clone()
         };
-        let mut matches = fff::grep(&root, pattern, &self.structure)?;
+        let mut matches =
+            self.search
+                .grep_file(&root, &Pattern::parse(pattern)?, &self.structure)?;
         if !Self::is_local(target) {
             for item in &mut matches {
                 let relative_path = item.uri.path().trim_start_matches('/');
@@ -847,7 +867,7 @@ fn collect_declaration(
     let mut value = serde_json::to_value(declaration).unwrap_or_else(|_| json!({}));
     if let Value::Object(fields) = &mut value {
         let anchor = declaration_anchor(declaration.start_line, lines, anchors)
-            .map(|anchor| format!("{file_uri}#{}", anchor));
+            .map(|anchor| format!("{file_uri}{anchor}"));
         fields.insert(
             "span".to_owned(),
             json!([declaration.start_line, declaration.end_line]),

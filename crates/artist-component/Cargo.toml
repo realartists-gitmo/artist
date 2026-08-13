@@ -17,6 +17,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 thiserror = "2"
 wasmtime = { version = "47.0.3", default-features = false, features = ["std", "runtime", "component-model", "component-model-async", "async", "cranelift", "wat"] }
 wasmtime-wasi = { version = "47.0.3", default-features = false, features = ["p2"] }
+wit-parser = "0.252.0"
 
 [dev-dependencies]
 tempfile = "3"

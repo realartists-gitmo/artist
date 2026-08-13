@@ -1,4 +1,6 @@
-use crate::{KernelError, Operation, OperationResult, Request, ResourceAddress, Verb};
+use crate::{
+    InvocationContext, KernelError, Operation, OperationResult, Request, ResourceAddress, Verb,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -48,6 +50,7 @@ pub trait TypedHandler: Send + Sync {
         &'a self,
         operation: Operation,
         host: KernelHandle,
+        context: InvocationContext,
     ) -> BoxFuture<'a, Result<OperationResult, KernelError>>;
 }
 
@@ -79,7 +82,12 @@ pub struct ToolDefinition {
 pub struct KernelHandle {
     dispatch: Arc<dyn Fn(Request) -> BoxFuture<'static, crate::ItemResult> + Send + Sync>,
     typed_dispatch: Arc<
-        dyn Fn(Operation) -> BoxFuture<'static, Result<OperationResult, KernelError>> + Send + Sync,
+        dyn Fn(
+                Operation,
+                InvocationContext,
+            ) -> BoxFuture<'static, Result<OperationResult, KernelError>>
+            + Send
+            + Sync,
     >,
 }
 
@@ -87,7 +95,10 @@ impl KernelHandle {
     pub(crate) fn new(
         dispatch: Arc<dyn Fn(Request) -> BoxFuture<'static, crate::ItemResult> + Send + Sync>,
         typed_dispatch: Arc<
-            dyn Fn(Operation) -> BoxFuture<'static, Result<OperationResult, KernelError>>
+            dyn Fn(
+                    Operation,
+                    InvocationContext,
+                ) -> BoxFuture<'static, Result<OperationResult, KernelError>>
                 + Send
                 + Sync,
         >,
@@ -106,6 +117,14 @@ impl KernelHandle {
         &self,
         operation: Operation,
     ) -> BoxFuture<'static, Result<OperationResult, KernelError>> {
-        (self.typed_dispatch)(operation)
+        (self.typed_dispatch)(operation, InvocationContext::default())
+    }
+
+    pub fn execute_operation_with_context(
+        &self,
+        operation: Operation,
+        context: InvocationContext,
+    ) -> BoxFuture<'static, Result<OperationResult, KernelError>> {
+        (self.typed_dispatch)(operation, context)
     }
 }

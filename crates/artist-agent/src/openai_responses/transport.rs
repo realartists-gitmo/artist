@@ -860,7 +860,7 @@ mod transport_tests {
         ))
         .unwrap();
         assert!(
-            matches!(&completed[0], RawStreamingChoice::FinalResponse(r) if matches!(r.output[0], OutputItem::Unknown(_)) && r.usage.total_tokens == 5)
+            matches!(&completed[0], RawStreamingChoice::FinalResponse(r) if matches!(r.output[0], OutputItem::Reasoning(_)) && r.usage.total_tokens == 5)
         );
         assert!(
             matches!(&parse_event(r#"{"type":"response.output_text.delta","delta":"hi"}"#).unwrap()[0], RawStreamingChoice::Message(s) if s == "hi")

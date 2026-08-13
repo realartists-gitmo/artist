@@ -7,7 +7,6 @@
 mod address;
 mod anchors;
 mod error;
-mod fff;
 mod filesystem;
 mod handler;
 mod operation;
@@ -16,6 +15,7 @@ mod repository;
 mod request;
 mod resolver;
 mod result;
+mod search;
 mod session;
 mod structure;
 mod typed;
@@ -34,6 +34,7 @@ pub use repository::RepositoryHandler;
 pub use request::{BatchRequest, Request};
 pub use resolver::{has_projection, is_file_uri, normalize};
 pub use result::{BatchResult, ItemResult};
+pub use search::{Pattern, SearchService};
 pub use session::SessionHandler;
 pub use structure::{
     CstError, CstProvider, LineFallbackProvider, RustCstProvider, StructuralAnalyzer,

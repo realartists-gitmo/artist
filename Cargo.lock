@@ -278,6 +278,7 @@ dependencies = [
  "walkdir",
  "wasmtime",
  "wasmtime-wasi",
+ "wit-parser",
 ]
 
 [[package]]
@@ -295,6 +296,7 @@ dependencies = [
  "artist-ast",
  "base64 0.23.0",
  "fff-search",
+ "regex",
  "serde",
  "serde_json",
  "teca",
@@ -1618,9 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "fff-grep"
-version = "0.10.4-nightly.e2cad2f"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ae468f55f879963fe74a883752ed4680a9e24b10fadb817ca6732a43dcb65da"
+version = "0.10.3"
 dependencies = [
  "bstr",
  "memchr",
@@ -1642,15 +1642,11 @@ dependencies = [
 
 [[package]]
 name = "fff-query-parser"
-version = "0.10.4-nightly.e2cad2f"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "285c376de22fb9e5b7a3492e4da23e5fc312041f444f9c9bbf56e54e11bccd4c"
+version = "0.10.3"
 
 [[package]]
 name = "fff-search"
-version = "0.10.4-nightly.e2cad2f"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1ac72d475d58f98488142e4ea8afd29cff02b935d46485596544d4b81fc2ad3"
+version = "0.10.3"
 dependencies = [
  "ahash",
  "aho-corasick",

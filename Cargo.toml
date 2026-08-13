@@ -10,6 +10,7 @@ members = [
     "crates/artist-component",
 ]
 resolver = "3"
+exclude = ["vendor/fff"]
 
 [workspace.package]
 edition = "2024"

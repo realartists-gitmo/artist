@@ -218,17 +218,14 @@ pub enum PollAtom {
     Timeout(u64),
 }
 
+/// The semantic poll condition. The component ABI may lower this recursive
+/// value to an indexed arena, but the kernel must not make the lowering its
+/// meaning: handlers and native callers need to evaluate the same tree.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum PollNode {
+pub enum PollCondition {
     Atom(PollAtom),
-    All(Vec<u32>),
-    Any(Vec<u32>),
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PollCondition {
-    pub root: u32,
-    pub nodes: Vec<PollNode>,
+    All(Vec<PollCondition>),
+    Any(Vec<PollCondition>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
