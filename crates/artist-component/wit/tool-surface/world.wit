@@ -48,7 +48,6 @@ interface types {
         unsupported,
         permission-denied,
         conflict,
-        not-live,
         not-empty,
         aborted,
         internal,

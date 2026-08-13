@@ -1292,11 +1292,6 @@ fn kernel_error_to_typed(
             Some(uri),
             "resource conflict".to_owned(),
         ),
-        KernelError::NotLive { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::NotLive,
-            Some(uri),
-            "resource is not live".to_owned(),
-        ),
         KernelError::NotEmpty { uri } => (
             tool_bindings::artist::tool::types::ErrorCode::NotEmpty,
             Some(uri),
@@ -2829,6 +2824,22 @@ pub mod package {
         /// orchestration can run it on a blocking worker. It never replaces a
         /// previously valid artifact when compilation or validation fails.
         pub fn build(&self, options: &BuildOptions) -> Result<BuildResult, ComponentError> {
+            if self.build_manifest.is_none() {
+                let artifact = self.wasm.clone().ok_or_else(|| ComponentError::Build {
+                    diagnostics: "tool package has neither Cargo.toml nor tool.wasm".to_owned(),
+                })?;
+                validate_artifact(&artifact, self, options)?;
+                let mut hasher = Sha256::new();
+                hasher.update(fs::read(&artifact).map_err(|error| ComponentError::Build {
+                    diagnostics: format!("could not read {}: {error}", artifact.display()),
+                })?);
+                return Ok(BuildResult {
+                    provenance: artifact.with_extension("wasm.artist.json"),
+                    artifact,
+                    fingerprint: format!("{:x}", hasher.finalize()),
+                    cached: true,
+                });
+            }
             let manifest = self
                 .build_manifest
                 .as_ref()
@@ -4386,48 +4397,6 @@ pub mod tools {
             &self,
             current: &ToolPackage,
         ) -> Result<Vec<super::DependencySpec>, KernelError> {
-            let mut discovered = Vec::new();
-            for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
-                message: format!("read tools root {}: {error}", self.root.display()),
-            })? {
-                let entry = entry.map_err(|error| KernelError::Handler {
-                    message: format!("read tools directory entry: {error}"),
-                })?;
-                if !entry
-                    .file_type()
-                    .map_err(|error| KernelError::Handler {
-                        message: format!("inspect tools directory entry: {error}"),
-                    })?
-                    .is_dir()
-                {
-                    continue;
-                }
-                let package = ToolPackage::discover(entry.path()).map_err(component_error)?;
-                let Some(contract) = package.contract.as_ref() else {
-                    continue;
-                };
-                if package.manifest.name == current.manifest.name
-                    || contract.verb.is_some()
-                    || package.wit.is_none()
-                {
-                    continue;
-                }
-                let bytes = if let Ok(active) = self.registry.current(&package.manifest.name) {
-                    (*active.artifact_bytes()).clone()
-                } else {
-                    let build = package.build(&self.options).map_err(component_error)?;
-                    std::fs::read(&build.artifact).map_err(|error| KernelError::Handler {
-                        message: format!(
-                            "read dependency artifact {}: {error}",
-                            build.artifact.display()
-                        ),
-                    })?
-                };
-                discovered.push((contract.to_string(), bytes));
-            }
-            let artifacts = discovered
-                .into_iter()
-                .collect::<std::collections::HashMap<_, _>>();
             let mut config = wasmtime::Config::new();
             config.wasm_component_model(true);
             let engine = wasmtime::Engine::new(&config).map_err(|error| KernelError::Handler {
@@ -4435,52 +4404,119 @@ pub mod tools {
             })?;
             fn make_spec(
                 contract: &str,
-                artifacts: &std::collections::HashMap<String, Vec<u8>>,
+                packages: &[(String, ToolPackage)],
+                registry: &ComponentRegistry,
+                options: &BuildOptions,
                 engine: &wasmtime::Engine,
                 visiting: &mut std::collections::HashSet<String>,
             ) -> Result<super::DependencySpec, KernelError> {
-                let bytes = artifacts
-                    .get(contract)
+                let package = packages
+                    .iter()
+                    .find(|(id, _)| id == contract)
+                    .map(|(_, package)| package)
                     .ok_or_else(|| KernelError::NotFound {
                         uri: contract.to_owned(),
                     })?;
+                let bytes = if let Ok(active) = registry.current(&package.manifest.name) {
+                    (*active.artifact_bytes()).clone()
+                } else {
+                    let build = package.build(options).map_err(component_error)?;
+                    std::fs::read(build.artifact).map_err(|error| KernelError::Handler {
+                        message: error.to_string(),
+                    })?
+                };
                 if !visiting.insert(contract.to_owned()) {
-                    return Ok(super::DependencySpec {
-                        contract: contract.to_owned(),
-                        bytes: bytes.clone(),
-                        dependencies: Vec::new(),
+                    return Err(KernelError::InvalidState {
+                        message: format!("custom tool dependency cycle at {contract}"),
                     });
                 }
-                let component = wasmtime::component::Component::from_binary(engine, bytes)
+                let component = wasmtime::component::Component::from_binary(engine, &bytes)
                     .map_err(|error| KernelError::Handler {
                         message: format!("load dependency {contract}: {error}"),
                     })?;
                 let mut dependencies = Vec::new();
                 for (import, _) in component.component_type().imports(engine) {
-                    if let Some(child) = artifacts
-                        .keys()
-                        .find(|candidate| super::contract_matches_import(candidate, import))
-                    {
-                        if !visiting.contains(child) {
-                            dependencies.push(make_spec(child, artifacts, engine, visiting)?);
-                        }
+                    let children = packages
+                        .iter()
+                        .filter(|(candidate, _)| super::contract_matches_import(candidate, import))
+                        .collect::<Vec<_>>();
+                    if children.len() > 1 {
+                        return Err(KernelError::Conflict {
+                            uri: import.to_owned(),
+                        });
+                    }
+                    if let Some((child, _)) = children.first() {
+                        dependencies.push(make_spec(
+                            child, packages, registry, options, engine, visiting,
+                        )?);
                     }
                 }
                 visiting.remove(contract);
                 Ok(super::DependencySpec {
                     contract: contract.to_owned(),
-                    bytes: bytes.clone(),
+                    bytes,
                     dependencies,
                 })
             }
+            let mut packages = Vec::new();
+            for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
+                message: error.to_string(),
+            })? {
+                let entry = entry.map_err(|error| KernelError::Handler {
+                    message: error.to_string(),
+                })?;
+                if !entry
+                    .file_type()
+                    .map_err(|error| KernelError::Handler {
+                        message: error.to_string(),
+                    })?
+                    .is_dir()
+                {
+                    continue;
+                }
+                let Ok(package) = ToolPackage::discover(entry.path()) else {
+                    continue;
+                };
+                let Some(contract) = package.contract.as_ref() else {
+                    continue;
+                };
+                if contract.verb.is_none()
+                    && package.wit.is_some()
+                    && package.manifest.name != current.manifest.name
+                {
+                    packages.push((contract.to_string(), package));
+                }
+            }
+            let current_build = current.build(&self.options).map_err(component_error)?;
+            let current_bytes =
+                std::fs::read(current_build.artifact).map_err(|error| KernelError::Handler {
+                    message: error.to_string(),
+                })?;
+            let component = wasmtime::component::Component::from_binary(&engine, &current_bytes)
+                .map_err(|error| KernelError::Handler {
+                    message: error.to_string(),
+                })?;
             let mut output = Vec::new();
-            for contract in artifacts.keys() {
-                output.push(make_spec(
-                    contract,
-                    &artifacts,
-                    &engine,
-                    &mut std::collections::HashSet::new(),
-                )?);
+            for (import, _) in component.component_type().imports(&engine) {
+                let matches = packages
+                    .iter()
+                    .filter(|(id, _)| super::contract_matches_import(id, import))
+                    .collect::<Vec<_>>();
+                if matches.len() > 1 {
+                    return Err(KernelError::Conflict {
+                        uri: import.to_owned(),
+                    });
+                }
+                if let Some((contract, _)) = matches.first() {
+                    output.push(make_spec(
+                        contract,
+                        &packages,
+                        &self.registry,
+                        &self.options,
+                        &engine,
+                        &mut std::collections::HashSet::new(),
+                    )?);
+                }
             }
             Ok(output)
         }

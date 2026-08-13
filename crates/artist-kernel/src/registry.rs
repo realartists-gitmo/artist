@@ -57,7 +57,6 @@ fn evaluate_poll_condition(
     results: &[crate::PollResult],
     elapsed: tokio::time::Duration,
 ) -> (bool, Vec<crate::PollAtom>) {
-    let default = crate::default_poll_condition(results.len());
     fn atom(
         atom: &crate::PollAtom,
         results: &[crate::PollResult],
@@ -116,7 +115,25 @@ fn evaluate_poll_condition(
             }
         }
     }
-    walk(condition.unwrap_or(&default), results, elapsed)
+    if condition.is_none() {
+        let mut atoms = Vec::new();
+        for (index, result) in results.iter().enumerate() {
+            if result.text.iter().any(|text| !text.lines.is_empty()) {
+                atoms.push(crate::PollAtom::Changed(index as u32));
+            }
+            if result.satisfied.iter().any(
+                |atom| matches!(atom, crate::PollAtom::Terminated(found) if *found == index as u32),
+            ) {
+                atoms.push(crate::PollAtom::Terminated(index as u32));
+            }
+        }
+        return (!atoms.is_empty(), atoms);
+    }
+    walk(
+        condition.expect("condition checked above"),
+        results,
+        elapsed,
+    )
 }
 
 /// URI router and universal operation dispatcher.

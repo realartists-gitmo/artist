@@ -17,7 +17,6 @@ pub enum KernelError {
     Immutable { uri: String },
     PermissionDenied { uri: String },
     Conflict { uri: String },
-    NotLive { uri: String },
     NotEmpty { uri: String },
     Aborted { message: String },
     NotFound { uri: String },
@@ -48,7 +47,6 @@ impl fmt::Display for KernelError {
             Self::Immutable { uri } => write!(formatter, "resource is immutable: {uri}"),
             Self::PermissionDenied { uri } => write!(formatter, "permission denied: {uri}"),
             Self::Conflict { uri } => write!(formatter, "resource conflict: {uri}"),
-            Self::NotLive { uri } => write!(formatter, "resource is not live: {uri}"),
             Self::NotEmpty { uri } => write!(formatter, "resource is not empty: {uri}"),
         }
     }

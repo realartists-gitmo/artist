@@ -536,7 +536,7 @@ impl Handler for RepositoryHandler {
             match request.verb {
                 Verb::Read => self.read_resource(&target),
                 Verb::Find => Ok(
-                    json!({"paths": self.find_paths(&target, request.args.get("query").and_then(Value::as_str).unwrap_or_default())?}),
+                    json!({"paths": self.find_paths(&target, request.args.get("query").and_then(Value::as_str).unwrap_or_default())?.into_iter().map(|(path, directory)| format!("{}{}", path, if directory { "/" } else { "" })).collect::<Vec<_>>() }),
                 ),
                 Verb::Grep => self.grep(&target, &request.args),
                 verb => Err(KernelError::UnsupportedVerb {
@@ -648,19 +648,15 @@ impl TypedHandler for RepositoryHandler {
                         paths.extend(self.find_paths(&target, &request.query)?);
                     }
                     let mut seen = std::collections::HashSet::new();
-                    paths.retain(|path| seen.insert(path.clone()));
+                    paths.retain(|(path, _)| seen.insert(path.clone()));
                     Ok(OperationResult::Find(
                         paths
                             .into_iter()
-                            .map(|path| {
+                            .map(|(path, directory)| {
                                 crate::ResourceUri::parse(&format!(
                                     "{}{}",
                                     path,
-                                    if std::path::Path::new(&path).is_dir() {
-                                        "/"
-                                    } else {
-                                        ""
-                                    }
+                                    if directory { "/" } else { "" }
                                 ))
                             })
                             .collect::<Result<Vec<_>, _>>(),
@@ -767,7 +763,7 @@ impl RepositoryHandler {
         &self,
         target: &ResourceAddress,
         query: &str,
-    ) -> Result<Vec<String>, KernelError> {
+    ) -> Result<Vec<(String, bool)>, KernelError> {
         let url = Self::url(target)?;
         if url.scheme() == "file" {
             let (file, _) = self.file_and_suffix(target)?;
@@ -776,10 +772,10 @@ impl RepositoryHandler {
                     .search
                     .find_files(&file, &Pattern::parse(query)?)?
                     .into_iter()
-                    .map(|path| path.display().to_string())
+                    .map(|path| (path.display().to_string(), path.is_dir()))
                     .collect());
             }
-            return Ok(vec![file.display().to_string()]);
+            return Ok(vec![(file.display().to_string(), file.is_dir())]);
         }
         let prefix = url.path().trim_matches('/');
         let output = self
@@ -788,8 +784,12 @@ impl RepositoryHandler {
             .into_iter()
             .filter_map(|path| {
                 let relative_path = relative(&self.root, &path);
-                (prefix.is_empty() || relative_path.starts_with(prefix))
-                    .then(|| format!("repo://{}/{}", self.project, relative_path))
+                (prefix.is_empty() || relative_path.starts_with(prefix)).then(|| {
+                    (
+                        format!("repo://{}/{}", self.project, relative_path),
+                        path.is_dir(),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         Ok(output)

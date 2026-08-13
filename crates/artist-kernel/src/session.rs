@@ -387,10 +387,9 @@ impl TypedHandler for SessionHandler {
                             message: "poll requires at least one target".to_owned(),
                         });
                     }
-                    let condition = request
-                        .until
-                        .unwrap_or_else(|| crate::default_poll_condition(request.targets.len()));
-                    validate_poll_condition(&condition, request.targets.len())?;
+                    if let Some(condition) = &request.until {
+                        validate_poll_condition(condition, request.targets.len())?;
+                    }
                     let started = Instant::now();
                     let cursors = self.poll_cursors(&request.targets).await?;
                     let mut snapshots = Vec::new();
@@ -410,7 +409,10 @@ impl TypedHandler for SessionHandler {
                             snapshots.push(value);
                         }
                         let elapsed = started.elapsed();
-                        let (ok, atoms) = evaluate_condition(&condition, &snapshots, elapsed);
+                        let (ok, atoms) = match &request.until {
+                            Some(condition) => evaluate_condition(condition, &snapshots, elapsed),
+                            None => default_poll_result(&snapshots),
+                        };
                         if ok {
                             break atoms;
                         }
@@ -555,6 +557,22 @@ fn evaluate_condition(
             )
         }
     }
+}
+
+fn default_poll_result(snapshots: &[Value]) -> (bool, Vec<PollAtom>) {
+    let mut satisfied = Vec::new();
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if snapshot["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty())
+        {
+            satisfied.push(PollAtom::Changed(index as u32));
+        }
+        if snapshot["status"].as_str() == Some("aborted") {
+            satisfied.push(PollAtom::Terminated(index as u32));
+        }
+    }
+    (!satisfied.is_empty(), satisfied)
 }
 
 fn anchored_session_window(

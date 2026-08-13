@@ -30,6 +30,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     let tools_root = root.join("tools");
     std::fs::create_dir_all(&tools_root)
         .with_context(|| format!("initialize tools root at {}", tools_root.display()))?;
+    seed_universal_tools(&tools_root)?;
     let tool_capabilities = artist_kernel::Verb::ALL
         .iter()
         .map(|verb| format!("resource.{verb}"))
@@ -41,6 +42,73 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         .register_tool_handler(ToolsHandler::new(&tools_root, tool_capabilities)?)
         .await;
     Ok(kernel)
+}
+
+fn seed_universal_tools(root: &Path) -> Result<()> {
+    macro_rules! seed {
+        ($verb:literal) => {{
+            let package = root.join($verb);
+            std::fs::create_dir_all(package.join("src"))?;
+            for (relative, bytes) in [
+                (
+                    "Cargo.toml",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../artist-component/conformance/verbs/",
+                        $verb,
+                        "/Cargo.toml"
+                    ))
+                    .as_slice(),
+                ),
+                (
+                    "Cargo.lock",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../artist-component/conformance/verbs/",
+                        $verb,
+                        "/Cargo.lock"
+                    ))
+                    .as_slice(),
+                ),
+                (
+                    "tool.md",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../artist-component/conformance/verbs/",
+                        $verb,
+                        "/tool.md"
+                    ))
+                    .as_slice(),
+                ),
+                (
+                    "src/lib.rs",
+                    include_bytes!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../artist-component/conformance/verbs/",
+                        $verb,
+                        "/src/lib.rs"
+                    ))
+                    .as_slice(),
+                ),
+            ] {
+                let path = package.join(relative);
+                if !path.exists() {
+                    std::fs::write(path, bytes)?;
+                }
+            }
+        }};
+    }
+    seed!("read");
+    seed!("write");
+    seed!("edit");
+    seed!("find");
+    seed!("grep");
+    seed!("run");
+    seed!("send");
+    seed!("abort");
+    seed!("delete");
+    seed!("poll");
+    Ok(())
 }
 
 pub fn address(target: &str) -> Result<ResourceAddress> {

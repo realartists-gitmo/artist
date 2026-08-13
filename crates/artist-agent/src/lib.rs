@@ -368,9 +368,14 @@ where
             durable_history_len,
             persistence.clone(),
         );
+        let invocation_context = artist_kernel::InvocationContext {
+            cancellation_token: Some(format!("run:{run_id}")),
+            deadline_ms: None,
+            correlation_id: Some(run_id.clone()),
+        };
         let agent = builder
             .preamble(&system_prompt)
-            .dynamic_tools(named_tools(handles.kernel.clone()).await)
+            .dynamic_tools(named_tools(handles.kernel.clone(), invocation_context).await)
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
             .add_hook(steering::SteeringHook(handles.steering.clone()))

@@ -11,7 +11,10 @@ pub struct ArtistToolContext(pub artist_kernel::InvocationContext);
 /// Build the model-facing named tools from the live kernel catalog.
 /// `tools://` remains the source/configuration namespace; these dynamic tools
 /// are the only execution surface advertised to the model.
-pub async fn named_tools(kernel: Kernel) -> Vec<DynamicTool> {
+pub async fn named_tools(
+    kernel: Kernel,
+    context: artist_kernel::InvocationContext,
+) -> Vec<DynamicTool> {
     kernel
         .tool_definitions()
         .await
@@ -19,6 +22,7 @@ pub async fn named_tools(kernel: Kernel) -> Vec<DynamicTool> {
         .map(|definition| {
             let name = definition.name.clone();
             let callback_kernel = kernel.clone();
+            let callback_context = context.clone();
             DynamicTool::new(
                 definition.name,
                 definition.description,
@@ -29,7 +33,7 @@ pub async fn named_tools(kernel: Kernel) -> Vec<DynamicTool> {
                     let context = tool_context
                         .get::<ArtistToolContext>()
                         .map(|value| value.0.clone())
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| callback_context.clone());
                     Box::pin(async move {
                         kernel
                             .execute_tool_with_context(&name, arguments, context)

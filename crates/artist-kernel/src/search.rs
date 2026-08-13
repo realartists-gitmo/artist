@@ -228,24 +228,33 @@ impl SearchService {
             message: "search index unavailable".to_owned(),
         })?;
         let source_paths = if file.is_file() {
-            vec![file.to_path_buf()]
+            vec![(file.to_path_buf(), None)]
         } else {
             picker
                 .get_files()
                 .iter()
                 .filter(|item| !item.is_deleted())
-                .map(|item| item.absolute_path(picker, &index.root))
-                .filter(|path| file.is_dir() && path.starts_with(file))
+                .map(|item| (item.absolute_path(picker, &index.root), Some(())))
+                .filter(|(path, _)| file.is_dir() && path.starts_with(file))
                 .collect()
         };
         let source_before = source_paths
             .into_iter()
-            .map(|path| {
-                let source = picker
-                    .snapshot_file(&path)
-                    .ok_or_else(|| KernelError::NotFound {
-                        uri: path.display().to_string(),
-                    })?;
+            .map(|(path, indexed)| {
+                let source = match indexed {
+                    // An explicitly addressed file is authorized by the
+                    // caller and must not inherit FFF's ignore/index policy.
+                    None => std::fs::read(&path).map_err(|error| KernelError::Handler {
+                        message: format!("read {}: {error}", path.display()),
+                    })?,
+                    Some(()) => {
+                        picker
+                            .snapshot_file(&path)
+                            .ok_or_else(|| KernelError::NotFound {
+                                uri: path.display().to_string(),
+                            })?
+                    }
+                };
                 Ok((path, source))
             })
             .collect::<Result<BTreeMap<_, _>, KernelError>>()?;
