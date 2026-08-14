@@ -395,10 +395,7 @@ pub mod contracts {
 
 use artist_kernel::KernelHandle;
 use std::collections::HashSet;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Errors raised while loading or invoking a component.
@@ -432,19 +429,6 @@ pub struct ComponentMetadata {
 }
 
 pub const ABI_VERSION: &str = "1.0";
-
-#[derive(Clone, Default)]
-pub struct Cancellation(Arc<AtomicBool>);
-
-impl Cancellation {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
 
 /// Minimal host state for the first ABI slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4904,7 +4888,7 @@ pub mod package {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
-    fn tool_version(tool: &str) -> String {
+    pub(crate) fn tool_version(tool: &str) -> String {
         Command::new(tool)
             .arg("--version")
             .output()
@@ -4925,11 +4909,17 @@ pub mod generations {
     };
 
     #[derive(Clone)]
-    pub struct GenerationStore<T>(Arc<RwLock<HashMap<String, Arc<T>>>>);
+    pub struct GenerationStore<T> {
+        current: Arc<RwLock<HashMap<String, Arc<T>>>>,
+        history: Arc<RwLock<HashMap<String, Vec<Arc<T>>>>>,
+    }
 
     impl<T> Default for GenerationStore<T> {
         fn default() -> Self {
-            Self(Arc::new(RwLock::new(HashMap::new())))
+            Self {
+                current: Arc::new(RwLock::new(HashMap::new())),
+                history: Arc::new(RwLock::new(HashMap::new())),
+            }
         }
     }
 
@@ -4937,7 +4927,7 @@ pub mod generations {
         type Target = RwLock<HashMap<String, Arc<T>>>;
 
         fn deref(&self) -> &Self::Target {
-            &self.0
+            &self.current
         }
     }
 
@@ -4947,7 +4937,8 @@ pub mod generations {
         }
 
         pub fn next_generation(&self, name: &str, current: impl Fn(&T) -> u64) -> u64 {
-            self.write()
+            self.current
+                .read()
                 .unwrap()
                 .get(name)
                 .map(|active| current(active.as_ref()) + 1)
@@ -4956,16 +4947,47 @@ pub mod generations {
 
         pub fn insert(&self, name: String, generation: T) -> Arc<T> {
             let generation = Arc::new(generation);
-            self.write().unwrap().insert(name, Arc::clone(&generation));
+            if let Some(previous) = self
+                .current
+                .write()
+                .unwrap()
+                .insert(name.clone(), Arc::clone(&generation))
+            {
+                self.history
+                    .write()
+                    .unwrap()
+                    .entry(name)
+                    .or_default()
+                    .push(previous);
+            }
             generation
         }
 
         pub fn current(&self, name: &str) -> Option<Arc<T>> {
-            self.read().unwrap().get(name).cloned()
+            self.current.read().unwrap().get(name).cloned()
+        }
+
+        pub fn generation(
+            &self,
+            name: &str,
+            number: u64,
+            get_number: impl Fn(&T) -> u64,
+        ) -> Option<Arc<T>> {
+            if let Some(current) = self.current(name) {
+                if get_number(current.as_ref()) == number {
+                    return Some(current);
+                }
+            }
+            self.history.read().unwrap().get(name).and_then(|values| {
+                values
+                    .iter()
+                    .find(|value| get_number(value.as_ref()) == number)
+                    .cloned()
+            })
         }
 
         pub fn values(&self) -> Vec<Arc<T>> {
-            self.read().unwrap().values().cloned().collect()
+            self.current.read().unwrap().values().cloned().collect()
         }
     }
 
@@ -6983,7 +7005,8 @@ pub mod tools {
 pub mod resources {
     use artist_kernel::{
         BoxFuture, FileHandler, Handler, HandlerDescriptor, KernelError, KernelHandle, Operation,
-        OperationResult, Request, ResourceAddress, ResourceUri, ToolDefinition, TypedHandler, Verb,
+        OperationResult, Request, ResourceAddress, ResourceCatalogDoc, ResourceCatalogEntry,
+        ResourceCatalogProvider, ResourceUri, TypedHandler, Verb,
     };
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
@@ -7667,6 +7690,7 @@ pub mod resources {
                     message: format!("link resource poll WASI imports: {error}"),
                 }
             })?;
+            Self::link_nested_standard_imports(&mut linker)?;
             self.link_custom_imports(&mut linker)?;
             let instance =
                 super::resource_async_tool_v1_poll_bindings::ResourcePollWorld::instantiate_async(
@@ -7771,24 +7795,6 @@ pub mod resources {
         }
 
         fn validate_resource_wit(path: &Path, capabilities: &[String]) -> Result<(), KernelError> {
-            let source = fs::read_to_string(path).map_err(|error| KernelError::Handler {
-                message: format!("read resource.wit {}: {error}", path.display()),
-            })?;
-            for verb in super::contracts::Verb::ALL {
-                let interface = format!("artist:resource/{}", verb.interface());
-                let escaped_interface = format!("artist:%resource/{}", verb.interface());
-                if source.lines().any(|line| {
-                    line.contains("import")
-                        && (line.contains(&interface) || line.contains(&escaped_interface))
-                }) && !capabilities
-                    .iter()
-                    .any(|capability| capability == &format!("resource.{verb}"))
-                {
-                    return Err(KernelError::PermissionDenied {
-                        uri: format!("resource.{verb}"),
-                    });
-                }
-            }
             let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
             let mut resolve = wit_parser::Resolve::default();
             resolve
@@ -7801,11 +7807,39 @@ pub mod resources {
                 .map_err(|error| KernelError::InvalidRequest {
                     message: format!("parse resource.wit {}: {error}", path.display()),
                 })?;
-            resolve.select_world(&[package], None).map_err(|error| {
+            let world = resolve.select_world(&[package], None).map_err(|error| {
                 KernelError::InvalidRequest {
                     message: format!("resource.wit has no resolvable world: {error}"),
                 }
             })?;
+            for key in resolve.worlds[world].imports.keys() {
+                let wit_parser::WorldKey::Interface(interface_id) = key else {
+                    continue;
+                };
+                let interface = &resolve.interfaces[*interface_id];
+                let Some(package_id) = interface.package else {
+                    continue;
+                };
+                let package_name = &resolve.packages[package_id].name;
+                if package_name.namespace != "artist" || package_name.name != "resource" {
+                    continue;
+                }
+                let Some(interface_name) = interface.name.as_deref() else {
+                    continue;
+                };
+                // `artist:resource/types` is shared data, not an executable
+                // nested operation and therefore does not require authority.
+                if !super::contracts::Verb::ALL
+                    .iter()
+                    .any(|verb| verb.to_string() == interface_name)
+                {
+                    continue;
+                }
+                let capability = format!("resource.{interface_name}");
+                if !capabilities.iter().any(|value| value == &capability) {
+                    return Err(KernelError::PermissionDenied { uri: capability });
+                }
+            }
             Ok(())
         }
 
@@ -7827,16 +7861,21 @@ pub mod resources {
             })
         }
 
-        pub fn catalog_entry(&self) -> ToolDefinition {
-            let mut description = self.manifest.description.clone();
-            for doc in &self.manifest.docs {
-                description.push_str("\n");
-                description.push_str(&format!("{}: {}", doc.uri, doc.summary));
-            }
-            ToolDefinition {
+        pub fn catalog_entry(&self) -> ResourceCatalogEntry {
+            ResourceCatalogEntry {
                 name: self.manifest.name.clone(),
-                description,
-                parameters: serde_json::json!({"type":"object","additionalProperties":false}),
+                description: self.manifest.description.clone(),
+                docs: self
+                    .manifest
+                    .docs
+                    .iter()
+                    .map(|doc| ResourceCatalogDoc {
+                        uri: doc.uri.clone(),
+                        summary: doc.summary.clone(),
+                        verbs: doc.verbs.clone(),
+                        query: doc.query.iter().map(|query| query.name.clone()).collect(),
+                    })
+                    .collect(),
             }
         }
 
@@ -7934,8 +7973,8 @@ pub mod resources {
                 profile: profile.to_owned(),
                 fingerprint: fingerprint.clone(),
                 artifact_sha256: sha256_file(&artifact)?,
-                cargo_version: "unknown".to_owned(),
-                rustc_version: "unknown".to_owned(),
+                cargo_version: super::package::tool_version("cargo"),
+                rustc_version: super::package::tool_version("rustc"),
             };
             let provenance = artifact.with_extension("wasm.artist.json");
             fs::write(
@@ -7982,15 +8021,6 @@ pub mod resources {
             {
                 return Err(KernelError::InvalidRequest {
                     message: format!("invalid or duplicate resource export {verb}"),
-                });
-            }
-            if !manifest
-                .capabilities
-                .iter()
-                .any(|capability| capability == &format!("resource.{verb}"))
-            {
-                return Err(KernelError::PermissionDenied {
-                    uri: format!("resource.{verb}"),
                 });
             }
         }
@@ -8349,7 +8379,7 @@ pub mod resources {
             packages
         }
 
-        pub fn catalog(&self) -> Vec<ToolDefinition> {
+        pub fn catalog(&self) -> Vec<ResourceCatalogEntry> {
             // The model catalog is a view of published generations, not a
             // second discovery registry. Activate valid candidates first;
             // failed activation leaves an existing generation untouched and
@@ -8402,11 +8432,9 @@ pub mod resources {
                 let active = snapshotted
                     .and_then(|generation| {
                         self.active
-                            .read()
-                            .unwrap()
-                            .get(&package.manifest.name)
-                            .filter(|active| active.generation == generation)
-                            .cloned()
+                            .generation(&package.manifest.name, generation, |active| {
+                                active.generation
+                            })
                     })
                     .or_else(|| {
                         if !package_dirty {
@@ -8431,14 +8459,11 @@ pub mod resources {
                     let generation =
                         scope.snapshot_generation(&active.package.manifest.name, active.generation);
                     if generation != active.generation {
-                        if let Some(previous) = self
-                            .active
-                            .read()
-                            .unwrap()
-                            .get(&active.package.manifest.name)
-                            .filter(|candidate| candidate.generation == generation)
-                            .cloned()
-                        {
+                        if let Some(previous) = self.active.generation(
+                            &active.package.manifest.name,
+                            generation,
+                            |candidate| candidate.generation,
+                        ) {
                             candidates.push(previous);
                         }
                         continue;
@@ -8470,12 +8495,6 @@ pub mod resources {
                     .package
                     .advertised_schemes()
                     .any(|scheme| scheme == uri.scheme())
-                    && active
-                        .package
-                        .manifest
-                        .exports
-                        .iter()
-                        .any(|export| export == verb.to_string().as_str())
                     && !candidates
                         .iter()
                         .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, active))
@@ -8884,6 +8903,12 @@ pub mod resources {
         }
     }
 
+    impl ResourceCatalogProvider for ResourcesHandler {
+        fn resource_catalog(&self) -> Vec<ResourceCatalogEntry> {
+            self.catalog()
+        }
+    }
+
     impl Handler for ResourcesHandler {
         fn descriptor(&self) -> HandlerDescriptor {
             HandlerDescriptor {
@@ -8967,7 +8992,13 @@ pub mod resources {
                     .copied()
                     .find(|candidate| candidate.to_string() == verb)
                     .unwrap_or(Verb::Read);
-                let (candidate, decision) = self.select_candidate(verb, &uri, candidates).await?;
+                let claim_key =
+                    format!("resource-extensions:{}:{}", verb, operation_uri(&operation));
+                let (candidate, decision) = if let Some(decision) = scope.pinned_claim(&claim_key) {
+                    (candidates.into_iter().next(), decision)
+                } else {
+                    self.select_candidate(verb, &uri, candidates).await?
+                };
                 if let Some(candidate) = candidate {
                     let pin_key = generation_pin_key(verb, &uri);
                     scope.pin_generation(
@@ -9301,13 +9332,18 @@ pub mod watcher {
     pub fn watch_roots(
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<(PackageWatcher, Receiver<PathBuf>), notify_debouncer_mini::notify::Error> {
+        let roots = roots
+            .into_iter()
+            .map(|root| root.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        let watched_roots = roots.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let mut debouncer = new_debouncer(
             Duration::from_millis(200),
             move |result: notify_debouncer_mini::DebounceEventResult| {
                 if let Ok(events) = result {
                     for event in events {
-                        if let Some(package) = package_root(&event.path) {
+                        if let Some(package) = package_root_for_event(&event.path, &watched_roots) {
                             let _ = events_tx.send(package);
                         }
                     }
@@ -9315,9 +9351,7 @@ pub mod watcher {
             },
         )?;
         for root in roots {
-            debouncer
-                .watcher()
-                .watch(root.as_ref(), RecursiveMode::Recursive)?;
+            debouncer.watcher().watch(&root, RecursiveMode::Recursive)?;
         }
         Ok((debouncer, events_rx))
     }
@@ -9346,6 +9380,21 @@ pub mod watcher {
                 candidate.join("tool.md").is_file() || candidate.join("resource.md").is_file()
             })
             .map(Path::to_owned)
+    }
+
+    fn package_root_for_event(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+        if let Some(package) = package_root(path) {
+            return Some(package);
+        }
+        // A deletion event may point at the package manifest itself. Once the
+        // file is gone, marker-based ancestor discovery cannot identify the
+        // package, so recover the first directory below the watched root.
+        roots.iter().find_map(|root| {
+            let relative = path.strip_prefix(root).ok()?;
+            let package = relative.components().next()?.as_os_str();
+            let package = root.join(package);
+            (package != *root && package.is_dir()).then_some(package)
+        })
     }
 }
 
@@ -9813,11 +9862,15 @@ mod tests {
         active_handler.activate(authored_root.join("ast")).unwrap();
         let catalog = active_handler.catalog();
         assert_eq!(catalog.len(), 1);
-        assert!(catalog[0].description.contains("file://<path>/symbols/"));
+        assert_eq!(
+            catalog[0].description,
+            "AST projections over ordinary file resources"
+        );
         assert!(
             catalog[0]
-                .description
-                .contains("Symbol projection for a source file")
+                .docs
+                .iter()
+                .any(|doc| doc.uri == "file://<path>/symbols/")
         );
     }
 

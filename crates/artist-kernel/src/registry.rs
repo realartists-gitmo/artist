@@ -1,7 +1,8 @@
 use crate::{
     BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
     InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Request,
-    ResourceUri, ToolDefinition, ToolProvider, TypedHandler, Verb,
+    ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri, ToolDefinition, ToolProvider,
+    TypedHandler, Verb,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ struct Inner {
     handlers: RwLock<Vec<Arc<dyn Handler>>>,
     typed_handlers: RwLock<Vec<Arc<dyn TypedHandler>>>,
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
+    resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>>,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -404,8 +406,49 @@ mod tests {
                 content: "no mutation".to_owned(),
             }]))
             .await;
-        assert!(matches!(invalid, Err(KernelError::InvalidRequest { .. })));
+        assert!(matches!(
+            invalid,
+            Ok(OperationResult::Write(ref values))
+                if matches!(values.first(), Some(Err(KernelError::InvalidRequest { .. })))
+        ));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "first\nsecond\n");
+    }
+
+    #[tokio::test]
+    async fn invalid_fragment_only_rejects_its_write_item() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        std::fs::write(&first, "first\n").unwrap();
+        std::fs::write(&second, "second\n").unwrap();
+        let kernel = Kernel::new();
+        kernel
+            .register_typed(crate::FileHandler::new(root.path()).unwrap())
+            .await;
+        let first_uri = ResourceUri::parse(&first.display().to_string())
+            .unwrap()
+            .with_fragment("missing");
+        let second_uri = ResourceUri::parse(&second.display().to_string()).unwrap();
+        let result = kernel
+            .execute_operation(Operation::Write(vec![
+                crate::WriteRequest {
+                    uri: first_uri,
+                    content: "must not write\n".to_owned(),
+                },
+                crate::WriteRequest {
+                    uri: second_uri,
+                    content: "updated\n".to_owned(),
+                },
+            ]))
+            .await
+            .unwrap();
+        let OperationResult::Write(values) = result else {
+            panic!("wrong result")
+        };
+        assert!(matches!(values[0], Err(KernelError::InvalidRequest { .. })));
+        assert!(values[1].is_ok());
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first\n");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "updated\n");
     }
 }
 
@@ -565,6 +608,7 @@ impl Kernel {
                 handlers: RwLock::new(Vec::new()),
                 typed_handlers: RwLock::new(Vec::new()),
                 tool_providers: RwLock::new(Vec::new()),
+                resource_catalog_providers: RwLock::new(Vec::new()),
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -630,17 +674,25 @@ impl Kernel {
         operation: Operation,
         scope: InvocationScope,
     ) -> Result<OperationResult, KernelError> {
-        let operation = crate::lower_operation_fragments(operation)?;
         let handlers = self.inner.typed_handlers.read().await;
         let host = self.handle();
         match operation {
             Operation::Read(requests) => {
                 let mut output = Vec::with_capacity(requests.len());
                 for request in requests {
-                    let item = Operation::Read(vec![request.clone()]);
-                    let result = self
-                        .execute_typed_item(&handlers, item, host.clone(), scope.clone())
-                        .await;
+                    let result =
+                        match crate::lower_operation_fragments(Operation::Read(vec![request])) {
+                            Ok(item) => {
+                                self.execute_typed_item(
+                                    &handlers,
+                                    item,
+                                    host.clone(),
+                                    scope.clone(),
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        };
                     match result {
                         Ok(OperationResult::Read(mut values)) => output.append(&mut values),
                         Ok(_) => output.push(Err(KernelError::Handler {
@@ -665,14 +717,19 @@ impl Kernel {
                 }
                 let mut output = Vec::with_capacity(requests.len());
                 for request in requests {
-                    let result = self
-                        .execute_typed_item(
-                            &handlers,
-                            Operation::Write(vec![request]),
-                            host.clone(),
-                            scope.clone(),
-                        )
-                        .await;
+                    let result =
+                        match crate::lower_operation_fragments(Operation::Write(vec![request])) {
+                            Ok(item) => {
+                                self.execute_typed_item(
+                                    &handlers,
+                                    item,
+                                    host.clone(),
+                                    scope.clone(),
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        };
                     match result {
                         Ok(OperationResult::Write(mut values)) => output.append(&mut values),
                         Ok(_) => output.push(Err(KernelError::Handler {
@@ -686,14 +743,19 @@ impl Kernel {
             Operation::Edit(requests) => {
                 let mut output = Vec::with_capacity(requests.len());
                 for request in requests {
-                    let result = self
-                        .execute_typed_item(
-                            &handlers,
-                            Operation::Edit(vec![request]),
-                            host.clone(),
-                            scope.clone(),
-                        )
-                        .await;
+                    let result =
+                        match crate::lower_operation_fragments(Operation::Edit(vec![request])) {
+                            Ok(item) => {
+                                self.execute_typed_item(
+                                    &handlers,
+                                    item,
+                                    host.clone(),
+                                    scope.clone(),
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        };
                     match result {
                         Ok(OperationResult::Edit(mut values)) => output.append(&mut values),
                         Ok(_) => output.push(Err(KernelError::Handler {
@@ -718,9 +780,30 @@ impl Kernel {
                 self.route_uris(&handlers, uris, Operation::Delete, host, scope)
                     .await,
             )),
-            Operation::Find(request) => self.route_find(&handlers, request, host, scope).await,
-            Operation::Grep(request) => self.route_grep(&handlers, request, host, scope).await,
-            Operation::Poll(request) => self.route_poll(&handlers, request, host, scope).await,
+            Operation::Find(request) => {
+                match crate::lower_operation_fragments(Operation::Find(request))? {
+                    Operation::Find(request) => {
+                        self.route_find(&handlers, request, host, scope).await
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Operation::Grep(request) => {
+                match crate::lower_operation_fragments(Operation::Grep(request))? {
+                    Operation::Grep(request) => {
+                        self.route_grep(&handlers, request, host, scope).await
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Operation::Poll(request) => {
+                match crate::lower_operation_fragments(Operation::Poll(request))? {
+                    Operation::Poll(request) => {
+                        self.route_poll(&handlers, request, host, scope).await
+                    }
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 
@@ -745,13 +828,20 @@ impl Kernel {
     ) -> Result<OperationResult, KernelError> {
         let mut owners = Vec::new();
         for handler in handlers {
-            // Claims are deliberately evaluated for each routed operation.
-            // Generation pins are invocation-scoped, but claim decisions are
-            // not cacheable across nested or repeated operations: resource
-            // state and package generations may change between them.
-            let decision = handler
-                .claim_operation_with_scope(&operation, scope.clone())
-                .await?;
+            let key = format!(
+                "{}:{}",
+                handler.descriptor().name,
+                operation_claim_key(&operation)
+            );
+            let decision = if let Some(decision) = scope.pinned_claim(&key) {
+                decision
+            } else {
+                let decision = handler
+                    .claim_operation_with_scope(&operation, scope.clone())
+                    .await?;
+                scope.pin_claim(key, decision);
+                decision
+            };
             if decision != ClaimDecision::Pass {
                 owners.push((handler, decision));
             }
@@ -787,6 +877,12 @@ impl Kernel {
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(requests.len());
         for request in requests {
+            if request.uri.fragment().is_some() {
+                output.push(Err(KernelError::InvalidRequest {
+                    message: format!("fragment is not valid for run: {}", request.uri),
+                }));
+                continue;
+            }
             match self
                 .execute_typed_item(
                     handlers,
@@ -815,6 +911,12 @@ impl Kernel {
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(requests.len());
         for request in requests {
+            if request.uri.fragment().is_some() {
+                output.push(Err(KernelError::InvalidRequest {
+                    message: format!("fragment is not valid for send: {}", request.uri),
+                }));
+                continue;
+            }
             match self
                 .execute_typed_item(
                     handlers,
@@ -844,6 +946,12 @@ impl Kernel {
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(uris.len());
         for uri in uris {
+            if uri.fragment().is_some() {
+                output.push(Err(KernelError::InvalidRequest {
+                    message: format!("fragment is not valid for URI operation: {uri}"),
+                }));
+                continue;
+            }
             match self
                 .execute_typed_item(
                     handlers,
@@ -1066,6 +1174,26 @@ impl Kernel {
         self.inner.tool_providers.write().await.push(handler);
     }
 
+    /// Register a typed resource handler and expose its active-generation
+    /// documentation to provider adapters using the same allocation.
+    pub async fn register_typed_resource_handler<H>(&self, handler: H)
+    where
+        H: Handler + TypedHandler + ResourceCatalogProvider + 'static,
+    {
+        let handler = Arc::new(handler);
+        self.inner.handlers.write().await.push(handler.clone());
+        self.inner
+            .typed_handlers
+            .write()
+            .await
+            .push(handler.clone());
+        self.inner
+            .resource_catalog_providers
+            .write()
+            .await
+            .push(handler);
+    }
+
     pub async fn register_tool_provider<P>(&self, provider: P)
     where
         P: ToolProvider + 'static,
@@ -1084,6 +1212,16 @@ impl Kernel {
             .await
             .iter()
             .flat_map(|provider| provider.tool_definitions())
+            .collect()
+    }
+
+    pub async fn resource_catalog(&self) -> Vec<ResourceCatalogEntry> {
+        self.inner
+            .resource_catalog_providers
+            .read()
+            .await
+            .iter()
+            .flat_map(|provider| provider.resource_catalog())
             .collect()
     }
 
@@ -1221,4 +1359,8 @@ impl Kernel {
         verbs.dedup();
         verbs
     }
+}
+
+fn operation_claim_key(operation: &Operation) -> String {
+    format!("{}:{}", operation_verb(operation), operation_uri(operation))
 }

@@ -352,12 +352,44 @@ where
             .iter()
             .map(|d| format!("<diagnostic>{}</diagnostic>", d))
             .collect::<String>();
+        let resource_catalog = handles
+            .kernel
+            .resource_catalog()
+            .await
+            .into_iter()
+            .map(|entry| {
+                let docs = entry
+                    .docs
+                    .into_iter()
+                    .map(|doc| {
+                        let verbs = if doc.verbs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" [{}]", doc.verbs.join(" "))
+                        };
+                        let query = if doc.query.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" query: {}", doc.query.join(" "))
+                        };
+                        format!("\n  {}{}{}\n    {}", doc.uri, verbs, query, doc.summary)
+                    })
+                    .collect::<String>();
+                format!("\n{}\n  {}{}", entry.name, entry.description, docs)
+            })
+            .collect::<String>();
+        let resource_prompt = if resource_catalog.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nResources:{}", resource_catalog)
+        };
         let system_prompt = format!(
-            "{}\n\n{}{}{}\nCurrent working directory: {}",
+            "{}\n\n{}{}{}{}\nCurrent working directory: {}",
             main_prompt,
             prompt_diagnostics,
             "Use the registered named tools for filesystem, repository, and live-resource operations. Tool definitions may be inspected and modified through the tools:// namespace when explicitly needed.",
             "",
+            resource_prompt,
             std::path::Path::new(".").display()
         );
         let persistence = conversation::PersistenceStatus::default();

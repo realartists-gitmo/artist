@@ -20,8 +20,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     kernel
         .register_typed(
             RepositoryHandler::new(root)
-                .with_context(|| format!("initialize repository handler at {}", root.display()))?
-                .without_file_projections(),
+                .with_context(|| format!("initialize repository handler at {}", root.display()))?,
         )
         .await;
     kernel
@@ -40,7 +39,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     seed_ast_resource(&resources_root)?;
     let shared_watcher = SharedWatcher::new();
     let resources = ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?;
-    kernel.register_typed_handler(resources).await;
+    kernel.register_typed_resource_handler(resources).await;
     let tool_capabilities = artist_kernel::Verb::ALL
         .iter()
         .map(|verb| format!("resource.{verb}"))
@@ -102,6 +101,8 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             let package = root.join($verb);
             std::fs::create_dir_all(package.join("src"))?;
             std::fs::create_dir_all(root.join("wit/tool-surface-v1"))?;
+            std::fs::create_dir_all(root.join("wit/tool-surface-v1/deps/resource"))?;
+            std::fs::create_dir_all(root.join("wit/resource-surface"))?;
             let manifest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/verbs/",
@@ -116,7 +117,14 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/typed-guest/src/lib.rs"
             ))
-            .replace("../../../wit/tool-surface-v1", "../wit/tool-surface-v1");
+            .replace("../../../wit/tool-surface-v1", "../wit/tool-surface-v1")
+            .replace("../../wit/tool-surface-v1", "../wit/tool-surface-v1")
+            .replace("../../../wit/tool-surface", "../wit/tool-surface-v1")
+            .replace("../../wit/tool-surface", "../wit/tool-surface-v1");
+            let resource_wit = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../artist-component/wit/resource-surface/world.wit"
+            ));
             for (relative, bytes) in [
                 ("Cargo.toml", manifest.as_bytes()),
                 (
@@ -148,6 +156,11 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                     ))
                     .as_slice(),
                 ),
+                (
+                    "../wit/tool-surface-v1/deps/resource/world.wit",
+                    resource_wit.as_slice(),
+                ),
+                ("../wit/resource-surface/world.wit", resource_wit.as_slice()),
             ] {
                 let path = package.join(relative);
                 let needs_repair = match relative {
@@ -161,9 +174,14 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                         .then(|| std::fs::read_to_string(&path).ok())
                         .flatten()
                         .is_some_and(|contents| {
-                            contents.contains("../../../wit/tool-surface-v1")
+                            contents.contains("typed-guest")
+                                || contents.contains("../../../wit/tool-surface-v1")
                                 || contents.contains("../../wit/tool-surface-v1")
+                                || contents.contains("../../../wit/tool-surface")
+                                || contents.contains("../../wit/tool-surface")
                         }),
+                    "../wit/tool-surface-v1/deps/resource/world.wit"
+                    | "../wit/resource-surface/world.wit" => true,
                     _ => false,
                 };
                 if !path.exists() || needs_repair {
@@ -219,13 +237,23 @@ mod tests {
         let source = root.path().join("hello.txt");
         std::fs::write(&source, "hello\n").unwrap();
         let ast_source = root.path().join("main.rs");
-        std::fs::write(&ast_source, "fn main() {}\n").unwrap();
+        std::fs::write(&ast_source, "fn caller() { main(); }\nfn main() {}\n").unwrap();
         let kernel = build(root.path()).await.unwrap();
         let seeded = ToolsHandler::new(root.path().join("tools"), Vec::<String>::new())
             .unwrap()
             .registrations()
             .unwrap();
         assert!(seeded.iter().any(|tool| tool.tool_name() == "read"));
+        assert!(
+            root.path()
+                .join("tools/wit/tool-surface-v1/deps/resource/world.wit")
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join("tools/wit/resource-surface/world.wit")
+                .is_file()
+        );
         let output = kernel
             .execute_tool(
                 "read",
@@ -249,9 +277,9 @@ mod tests {
         assert!(docs.to_string().contains("artist-ast"));
         assert!(root.path().join("resources/ast/resource.wit").is_file());
 
-        // The application kernel gives file:// AST projections to the typed
-        // WASM resource, while the native repository adapter retains repo://.
-        // This must not be an ownership conflict between the two handlers.
+        // File projections must retain the complete native AST semantics.
+        // The seeded extension documents the same surface, but does not
+        // replace the native repository projection with a shallow fallback.
         let projection = format!("file://{}/symbols/", ast_source.display());
         let symbols = kernel
             .execute_tool(
@@ -262,7 +290,17 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(symbols.to_string().contains("fn main"));
+        assert!(symbols.to_string().contains("main"));
+        let callers = kernel
+            .execute_tool(
+                "read",
+                serde_json::json!({
+                    "requests": [{"uri": format!("file://{}/symbols/main/callers", ast_source.display()), "at": null, "before": null, "after": null}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(callers.to_string().contains("caller"));
     }
 
     #[test]

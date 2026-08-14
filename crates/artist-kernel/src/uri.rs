@@ -115,9 +115,15 @@ pub struct QueryItem {
 }
 
 fn decode_query_component(value: &str) -> String {
-    url::form_urlencoded::parse(value.as_bytes())
+    // Parse the component as a key with a synthetic empty value. Parsing the
+    // raw component directly would treat an embedded `=` as the separator
+    // and truncate values such as `expr=a=b`. `form_urlencoded` deliberately
+    // gives `+` its HTML-form meaning (space), while still percent-decoding
+    // the rest of the component.
+    let encoded = format!("x={value}");
+    url::form_urlencoded::parse(encoded.as_bytes())
         .next()
-        .map(|(decoded, _)| decoded.into_owned())
+        .map(|(_, decoded)| decoded.into_owned())
         .unwrap_or_default()
 }
 
@@ -241,6 +247,18 @@ mod tests {
                 key: "flag".to_owned(),
                 value: None
             }
+        );
+    }
+
+    #[test]
+    fn query_values_preserve_embedded_equals_and_plus_is_space() {
+        let uri = ResourceUri::parse("file:///tmp/main.rs?expr=a=b+c").unwrap();
+        assert_eq!(
+            uri.query_items().unwrap(),
+            vec![QueryItem {
+                key: "expr".into(),
+                value: Some("a=b c".into()),
+            }]
         );
     }
 }

@@ -3,7 +3,7 @@
 //! JSON is an adapter concern. The kernel dispatches these values directly;
 //! provider-facing JSON schemas are derived by the component layer.
 
-use crate::{Anchor, KernelError, ResourceUri};
+use crate::{Anchor, ClaimDecision, KernelError, ResourceUri};
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
@@ -157,6 +157,7 @@ pub struct InvocationScope {
     /// opaque leases; the concrete handler can recover its own generation
     /// type during nested routing even after its active registry swaps.
     generation_handles: Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>,
+    pub(crate) claim_decisions: Arc<Mutex<HashMap<String, ClaimDecision>>>,
     /// Routing frames shared by nested calls in one invocation chain. The
     /// kernel uses these to reject recursive resource re-entry before it can
     /// consume an unbounded amount of work.
@@ -190,6 +191,7 @@ impl InvocationScope {
             generation_pins: Arc::new(Mutex::new(HashMap::new())),
             generation_snapshot: Arc::new(Mutex::new(HashMap::new())),
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
+            claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -205,6 +207,7 @@ impl InvocationScope {
             generation_pins: Arc::new(Mutex::new(HashMap::new())),
             generation_snapshot: Arc::new(Mutex::new(HashMap::new())),
             generation_handles: Arc::new(Mutex::new(HashMap::new())),
+            claim_decisions: Arc::new(Mutex::new(HashMap::new())),
             routing_stack: Arc::new(Mutex::new(Vec::new())),
             deadline_started: Instant::now(),
         }
@@ -217,6 +220,7 @@ impl InvocationScope {
             generation_pins: Arc::clone(&self.generation_pins),
             generation_snapshot: Arc::clone(&self.generation_snapshot),
             generation_handles: Arc::clone(&self.generation_handles),
+            claim_decisions: Arc::clone(&self.claim_decisions),
             routing_stack: Arc::clone(&self.routing_stack),
             deadline_started: self.deadline_started,
         }
@@ -302,6 +306,17 @@ impl InvocationScope {
             .unwrap()
             .get(key)
             .and_then(|handle| Arc::clone(handle).downcast::<T>().ok())
+    }
+
+    pub fn pin_claim(&self, key: impl Into<String>, decision: ClaimDecision) {
+        self.claim_decisions
+            .lock()
+            .unwrap()
+            .insert(key.into(), decision);
+    }
+
+    pub fn pinned_claim(&self, key: &str) -> Option<ClaimDecision> {
+        self.claim_decisions.lock().unwrap().get(key).copied()
     }
 }
 

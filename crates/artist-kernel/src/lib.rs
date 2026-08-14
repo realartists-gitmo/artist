@@ -26,8 +26,8 @@ pub use anchors::{AddressedItem, Anchor, AnchorError, AnchorInput, AnchorSet};
 pub use error::KernelError;
 pub use filesystem::FileHandler;
 pub use handler::{
-    BoxFuture, ClaimDecision, Handler, HandlerDescriptor, KernelHandle, ToolDefinition,
-    ToolProvider, TypedHandler,
+    BoxFuture, ClaimDecision, Handler, HandlerDescriptor, KernelHandle, ResourceCatalogDoc,
+    ResourceCatalogEntry, ResourceCatalogProvider, ToolDefinition, ToolProvider, TypedHandler,
 };
 pub use operation::Verb;
 pub use registry::Kernel;

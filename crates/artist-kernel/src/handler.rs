@@ -126,6 +126,27 @@ pub trait ToolProvider: Send + Sync {
     }
 }
 
+/// Compact, model-facing documentation published by active resource
+/// extensions. Full prose remains addressable through `resources://`.
+pub trait ResourceCatalogProvider: Send + Sync {
+    fn resource_catalog(&self) -> Vec<ResourceCatalogEntry>;
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResourceCatalogEntry {
+    pub name: String,
+    pub description: String,
+    pub docs: Vec<ResourceCatalogDoc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ResourceCatalogDoc {
+    pub uri: String,
+    pub summary: String,
+    pub verbs: Vec<String>,
+    pub query: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ToolDefinition {
     pub name: String,

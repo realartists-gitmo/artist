@@ -27,6 +27,12 @@ fn source_uri(uri: &str) -> Option<String> {
 impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         let path = request.uri.split('?').next().unwrap_or(&request.uri);
+        // The application kernel's native repository projection owns the
+        // complete file:// AST surface. This extension remains available for
+        // explicit resource use without shadowing that implementation.
+        if path.starts_with("file://") {
+            return types::ClaimDecision::Pass;
+        }
         let recognized = path.contains("/symbols") || source_uri(path).is_some();
         if path.contains("/symbols") && request.verb == types::Verb::Read {
             return types::ClaimDecision::Handle;
