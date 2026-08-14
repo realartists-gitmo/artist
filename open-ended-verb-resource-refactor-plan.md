@@ -148,9 +148,9 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Dynamic package reconciliation removes deleted verb tool descriptors.
 - [ ] Existing pinned generation remains executable after hot swap.
 - [ ] Arbitrary executable-power proof passes.
-- [ ] Full workspace tests pass.
-- [ ] `cargo fmt --all -- --check` passes.
-- [ ] `git diff --check` passes.
+- [x] Full workspace tests pass (`cargo test --workspace`).
+- [x] `cargo fmt --all -- --check` passes.
+- [x] `git diff --check` passes.
 
 ## Forbidden-regression checklist
 
