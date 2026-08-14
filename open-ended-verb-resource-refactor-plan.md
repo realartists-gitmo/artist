@@ -180,4 +180,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added versioned `VerbId` contract/function accessors and component export identity matching.
 - [x] Added generic Wasmtime invocation path with no per-verb dispatch.
 - [x] Added recursive dynamic value lowering/lifting for records, lists, tuples, options, results, variants, enums, flags, and primitives.
+- [x] Added registry-owned `DynamicVerbExecutor` dispatch without kernel-known verb names and with hot-swap generation recheck.
 - [ ] Next slice: bind conversion to registered WIT types and replace one existing per-verb adapter.

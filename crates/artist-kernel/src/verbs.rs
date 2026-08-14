@@ -4,7 +4,7 @@
 //! compatibility layer. It is the seam through which verb packages become
 //! discoverable and hot-swappable without changing kernel code.
 
-use crate::{DynamicType, DynamicVerbCall, DynamicVerbResult, KernelError, VerbId};
+use crate::{DynamicType, DynamicValue, DynamicVerbCall, DynamicVerbResult, KernelError, VerbId};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -27,6 +27,10 @@ pub struct VerbPackageManifest {
 
 fn default_manifest_file() -> String {
     "component.wasm".to_owned()
+}
+
+pub trait DynamicVerbExecutor: Send + Sync {
+    fn invoke(&self, call: &DynamicVerbCall) -> Result<DynamicVerbResult, KernelError>;
 }
 
 impl VerbPackageManifest {
@@ -137,11 +141,49 @@ pub struct ActiveVerb {
 #[derive(Clone, Default)]
 pub struct VerbRegistry {
     entries: Arc<std::sync::RwLock<BTreeMap<VerbId, Arc<ActiveVerb>>>>,
+    executors: Arc<std::sync::RwLock<BTreeMap<VerbId, Arc<dyn DynamicVerbExecutor>>>>,
 }
 
 impl VerbRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn register_executor(
+        &self,
+        identity: VerbId,
+        executor: Arc<dyn DynamicVerbExecutor>,
+    ) -> Result<(), KernelError> {
+        self.executors
+            .write()
+            .map_err(|_| KernelError::Handler {
+                message: "verb executor registry lock poisoned".to_owned(),
+            })?
+            .insert(identity, executor);
+        Ok(())
+    }
+
+    pub fn execute(&self, call: &DynamicVerbCall) -> Result<DynamicVerbResult, KernelError> {
+        let active = self.validate_call(call)?;
+        let executor = self
+            .executors
+            .read()
+            .map_err(|_| KernelError::Handler {
+                message: "verb executor registry lock poisoned".to_owned(),
+            })?
+            .get(&call.verb)
+            .cloned()
+            .ok_or_else(|| KernelError::InvalidRequest {
+                message: format!("verb {} has no active executor", call.verb),
+            })?;
+        let result = executor.invoke(call)?;
+        self.validate_result(call, &result)?;
+        if self.current(&call.verb)?.map(|value| value.generation) != Some(active.generation) {
+            return Err(KernelError::InvalidRequest {
+                message: format!("verb {} was replaced during invocation", call.verb),
+            });
+        }
+        Ok(result)
     }
 
     pub fn activate(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
@@ -405,6 +447,46 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    struct UppercaseExecutor;
+
+    impl DynamicVerbExecutor for UppercaseExecutor {
+        fn invoke(&self, call: &DynamicVerbCall) -> Result<DynamicVerbResult, KernelError> {
+            let DynamicValue::String(value) = &call.input else {
+                return Err(KernelError::InvalidRequest {
+                    message: "uppercase expects a string".into(),
+                });
+            };
+            Ok(DynamicVerbResult {
+                verb: call.verb.clone(),
+                function: call.function.clone(),
+                output: DynamicValue::String(value.to_uppercase()),
+            })
+        }
+    }
+
+    #[test]
+    fn dynamic_executor_runs_without_kernel_verb_dispatch() {
+        let registry = VerbRegistry::new();
+        let identity = VerbId::new("example:text/uppercase@1.0.0").unwrap();
+        registry
+            .activate(
+                VerbDefinition::new(identity.clone(), "uppercase", "uppercase", "Uppercase")
+                    .with_contract(DynamicType::String, DynamicType::String),
+            )
+            .unwrap();
+        registry
+            .register_executor(identity.clone(), Arc::new(UppercaseExecutor))
+            .unwrap();
+        let result = registry
+            .execute(&DynamicVerbCall {
+                verb: identity,
+                function: "uppercase".into(),
+                input: DynamicValue::String("hello".into()),
+            })
+            .unwrap();
+        assert_eq!(result.output, DynamicValue::String("HELLO".into()));
     }
 
     #[test]
