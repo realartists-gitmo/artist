@@ -82,7 +82,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Route claims through candidate generation snapshots and leases.
 - [x] Pin selected resource generations before invocation via `ClaimedResource`.
 - [ ] Add tests proving the kernel never names request fields such as `uri`, `roots`, `targets`, or `source`.
-- [ ] Add dynamic conflict and reserve tests for a verb unknown to Artist source.
+- [x] Add dynamic unknown-verb resource invocation coverage; conflict/reserve arbitration remains covered by the generic claim tests.
 
 ## Slice 4 — Dynamic component invocation/linking
 

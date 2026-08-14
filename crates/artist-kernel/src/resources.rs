@@ -79,3 +79,54 @@ impl ResourceRegistry {
         provider.invoke(verb, uri, input).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct UnknownVerbProvider {
+        identity: VerbId,
+    }
+
+    impl DynamicResourceProvider for UnknownVerbProvider {
+        fn claim(&self, verb: &VerbId, _: &ResourceUri) -> ClaimDecision {
+            if verb == &self.identity {
+                ClaimDecision::Handle
+            } else {
+                ClaimDecision::Pass
+            }
+        }
+
+        fn invoke<'a>(
+            &'a self,
+            verb: &'a VerbId,
+            _: &'a ResourceUri,
+            input: DynamicValue,
+        ) -> ResourceFuture<'a> {
+            Box::pin(async move {
+                Ok(DynamicVerbResult {
+                    verb: verb.clone(),
+                    function: "compose".into(),
+                    output: input,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn invokes_a_resource_for_a_verb_unknown_to_artist() {
+        let identity = VerbId::new("example:composition/uppercase@1.0.0").unwrap();
+        let registry = ResourceRegistry::default();
+        registry
+            .register(Arc::new(UnknownVerbProvider {
+                identity: identity.clone(),
+            }))
+            .unwrap();
+        let uri = ResourceUri::parse("memory://composition").unwrap();
+        let result = registry
+            .invoke(&identity, &uri, DynamicValue::String("hello".into()))
+            .await
+            .unwrap();
+        assert_eq!(result.output, DynamicValue::String("hello".into()));
+    }
+}
