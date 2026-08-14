@@ -129,7 +129,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 ## Slice 8 — Effect-complete process resource
 
 - [x] Add trusted direct executable-file run primitive with exact argv and no shell.
-- [ ] Require a dynamic capability identity for process execution.
+- [x] Require a non-empty capability identity for process execution in the direct process primitive.
 - [x] Return authoritative `process://<id>` resource URIs.
 - [x] Implement process read/send/poll/abort/delete lifecycle in `ProcessManager`; integrate with generic verb/resource routing remains pending.
 - [ ] Preserve creation context for cwd/environment; later sends cannot alter it.

@@ -59,6 +59,22 @@ impl ProcessManager {
         cwd: Option<&Path>,
         environment: &[(String, String)],
     ) -> Result<String, KernelError> {
+        self.run_with_capability("compatibility.process", executable, args, cwd, environment)
+    }
+
+    pub fn run_with_capability(
+        &self,
+        capability: &str,
+        executable: impl AsRef<Path>,
+        args: &[String],
+        cwd: Option<&Path>,
+        environment: &[(String, String)],
+    ) -> Result<String, KernelError> {
+        if capability.trim().is_empty() {
+            return Err(KernelError::PermissionDenied {
+                uri: "process://capability".into(),
+            });
+        }
         let executable = executable.as_ref();
         if !executable.is_file() {
             return Err(KernelError::NotFound {
@@ -197,6 +213,15 @@ impl ProcessManager {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn process_execution_requires_a_capability_identity() {
+        let manager = ProcessManager::new();
+        assert!(matches!(
+            manager.run_with_capability("", "/bin/true", &[], None, &[]),
+            Err(KernelError::PermissionDenied { .. })
+        ));
+    }
 
     #[test]
     fn executes_direct_file_without_shell_and_supports_process_lifecycle() {
