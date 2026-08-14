@@ -1,29 +1,20 @@
 //! Host-side implementation of the Artist WebAssembly Component ABI.
 
-pub mod bindings {
+/// Version-one tool contracts. These deliberately import the shared
+/// `artist:resource` types.
+pub mod tool_v1_bindings {
     wasmtime::component::bindgen!({
-        path: "wit",
-        world: "artist-world",
-    });
-}
-
-/// Generated bindings for the typed universal tool contracts. Individual
-/// verb components will eventually select the exported interface they
-/// implement; the aggregate world exists here to validate the shared package
-/// as one coherent WIT surface.
-pub mod tool_bindings {
-    wasmtime::component::bindgen!({
-        path: "wit/tool-surface",
-        world: "tool-world",
+        path: "wit/tool-surface-v1",
+        world: "read-world",
         additional_derives: [serde::Serialize, serde::Deserialize],
     });
 }
 
-macro_rules! typed_world_bindings {
+macro_rules! tool_v1_world_bindings {
     ($module:ident, $world:literal) => {
         pub mod $module {
             wasmtime::component::bindgen!({
-                path: "wit/tool-surface",
+                path: "wit/tool-surface-v1",
                 world: $world,
                 additional_derives: [serde::Serialize, serde::Deserialize],
             });
@@ -31,21 +22,143 @@ macro_rules! typed_world_bindings {
     };
 }
 
-typed_world_bindings!(read_bindings, "read-world");
-typed_world_bindings!(write_bindings, "write-world");
-typed_world_bindings!(edit_bindings, "edit-world");
-typed_world_bindings!(find_bindings, "find-world");
-typed_world_bindings!(grep_bindings, "grep-world");
-typed_world_bindings!(run_bindings, "run-world");
-typed_world_bindings!(send_bindings, "send-world");
-typed_world_bindings!(abort_bindings, "abort-world");
-typed_world_bindings!(delete_bindings, "delete-world");
-typed_world_bindings!(poll_bindings, "poll-world");
+tool_v1_world_bindings!(tool_v1_write_bindings, "write-world");
+tool_v1_world_bindings!(tool_v1_edit_bindings, "edit-world");
+tool_v1_world_bindings!(tool_v1_find_bindings, "find-world");
+tool_v1_world_bindings!(tool_v1_grep_bindings, "grep-world");
+tool_v1_world_bindings!(tool_v1_run_bindings, "run-world");
+tool_v1_world_bindings!(tool_v1_send_bindings, "send-world");
+tool_v1_world_bindings!(tool_v1_abort_bindings, "abort-world");
+tool_v1_world_bindings!(tool_v1_delete_bindings, "delete-world");
+tool_v1_world_bindings!(tool_v1_poll_bindings, "poll-world");
 
-pub use bindings::artist::component::types::{
-    ComponentInfo, Context, Error, ErrorKind, HandleOwnership, HostRequest, HostResponse,
-    Invocation, ResourceHandle, Response, StreamChunk,
-};
+macro_rules! tool_v1_async_world_bindings {
+    ($module:ident, $world:literal) => {
+        pub mod $module {
+            wasmtime::component::bindgen!({
+                path: "wit/tool-surface-v1",
+                world: $world,
+                imports: { default: async },
+                exports: { default: async },
+                additional_derives: [serde::Serialize, serde::Deserialize],
+            });
+        }
+    };
+}
+
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_bindings, "read-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_write_bindings, "write-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_edit_bindings, "edit-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_find_bindings, "find-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_grep_bindings, "grep-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_run_bindings, "run-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_send_bindings, "send-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_abort_bindings, "abort-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_delete_bindings, "delete-world");
+tool_v1_async_world_bindings!(tool_v1_async_tool_v1_poll_bindings, "poll-world");
+
+// The generated v1 worlds are the sole universal component ABI. These local
+// aliases are only used by the typed adapter below while its per-verb match is
+// collapsed to the v1 worlds.
+
+/// Canonical shared resource contract. Resource extensions and model-facing
+/// tools are required to converge on these types at their component boundary.
+pub mod resource_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit/resource-surface",
+        world: "host-world",
+        additional_derives: [serde::Serialize, serde::Deserialize],
+    });
+}
+
+macro_rules! resource_world_bindings {
+    ($module:ident, $world:literal) => {
+        pub mod $module {
+            wasmtime::component::bindgen!({
+                path: "wit/resource-surface",
+                world: $world,
+                additional_derives: [serde::Serialize, serde::Deserialize],
+            });
+        }
+    };
+}
+
+resource_world_bindings!(resource_tool_v1_bindings, "resource-read-world");
+resource_world_bindings!(resource_tool_v1_write_bindings, "resource-write-world");
+resource_world_bindings!(resource_tool_v1_edit_bindings, "resource-edit-world");
+resource_world_bindings!(resource_tool_v1_find_bindings, "resource-find-world");
+resource_world_bindings!(resource_tool_v1_grep_bindings, "resource-grep-world");
+resource_world_bindings!(resource_tool_v1_run_bindings, "resource-run-world");
+resource_world_bindings!(resource_tool_v1_send_bindings, "resource-send-world");
+resource_world_bindings!(resource_tool_v1_abort_bindings, "resource-abort-world");
+resource_world_bindings!(resource_tool_v1_delete_bindings, "resource-delete-world");
+resource_world_bindings!(resource_tool_v1_poll_bindings, "resource-poll-world");
+resource_world_bindings!(resource_extension_bindings, "extension-world");
+
+pub mod resource_async_tool_v1_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit/resource-surface",
+        world: "resource-read-world",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+    });
+}
+pub mod resource_async_extension_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit/resource-surface",
+        world: "extension-world",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+    });
+}
+
+/// Async host bindings used by every component path that can make nested
+/// resource calls. Keeping this separate from the synchronous native adapter
+/// prevents component-to-kernel calls from blocking an executor.
+pub mod resource_async_host_bindings {
+    wasmtime::component::bindgen!({
+        path: "wit/resource-surface",
+        world: "host-world",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+    });
+}
+
+macro_rules! resource_async_world_bindings {
+    ($module:ident, $world:literal) => {
+        pub mod $module {
+            wasmtime::component::bindgen!({
+                path: "wit/resource-surface",
+                world: $world,
+                imports: { default: async },
+                exports: { default: async },
+                additional_derives: [serde::Serialize, serde::Deserialize],
+            });
+        }
+    };
+}
+
+resource_async_world_bindings!(
+    resource_async_tool_v1_write_bindings,
+    "resource-write-world"
+);
+resource_async_world_bindings!(resource_async_tool_v1_edit_bindings, "resource-edit-world");
+resource_async_world_bindings!(resource_async_tool_v1_find_bindings, "resource-find-world");
+resource_async_world_bindings!(resource_async_tool_v1_grep_bindings, "resource-grep-world");
+resource_async_world_bindings!(resource_async_tool_v1_run_bindings, "resource-run-world");
+resource_async_world_bindings!(resource_async_tool_v1_send_bindings, "resource-send-world");
+resource_async_world_bindings!(
+    resource_async_tool_v1_abort_bindings,
+    "resource-abort-world"
+);
+resource_async_world_bindings!(
+    resource_async_tool_v1_delete_bindings,
+    "resource-delete-world"
+);
+resource_async_world_bindings!(resource_async_tool_v1_poll_bindings, "resource-poll-world");
 
 /// Stable identities for the universal typed tool contracts.
 pub mod contracts {
@@ -280,13 +393,13 @@ pub mod contracts {
     }
 }
 
-use artist_kernel::{KernelHandle, Request as KernelRequest, Verb as KernelVerb};
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use artist_kernel::KernelHandle;
+use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 /// Errors raised while loading or invoking a component.
 #[derive(Debug, thiserror::Error)]
@@ -297,8 +410,6 @@ pub enum ComponentError {
     Build { diagnostics: String },
     #[error("component invocation failed: {0}")]
     Invoke(#[source] anyhow::Error),
-    #[error("component returned an ABI error: {0:?}")]
-    Abi(Error),
     #[error("component returned malformed {field} JSON")]
     MalformedResponse { field: &'static str },
     #[error("component invocation cancelled")]
@@ -311,35 +422,16 @@ pub enum ComponentError {
     NotActive(String),
 }
 
-pub const ABI_VERSION: &str = "0.1";
-
-pub fn validate_component_info(info: &ComponentInfo) -> Result<(), ComponentError> {
-    if info.abi_version != ABI_VERSION {
-        return Err(ComponentError::Abi(Error {
-            kind: ErrorKind::Incompatible,
-            message: format!(
-                "component ABI {} is incompatible with {}",
-                info.abi_version, ABI_VERSION
-            ),
-            details: None,
-        }));
-    }
-    Ok(())
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComponentMetadata {
+    pub name: String,
+    pub version: String,
+    pub abi_version: String,
+    pub interfaces: Vec<String>,
+    pub required_capabilities: Vec<String>,
 }
 
-pub fn validate_capabilities(
-    info: &ComponentInfo,
-    granted: &HashSet<String>,
-) -> Result<(), ComponentError> {
-    if let Some(missing) = info
-        .required_capabilities
-        .iter()
-        .find(|capability| !granted.contains(*capability))
-    {
-        return Err(ComponentError::CapabilityDenied(missing.clone()));
-    }
-    Ok(())
-}
+pub const ABI_VERSION: &str = "1.0";
 
 #[derive(Clone, Default)]
 pub struct Cancellation(Arc<AtomicBool>);
@@ -355,13 +447,21 @@ impl Cancellation {
 }
 
 /// Minimal host state for the first ABI slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ComponentPhase {
+    Claim,
+    Invoke,
+}
+
 pub struct HostState {
     wasi: wasmtime_wasi::WasiCtx,
     table: wasmtime::component::ResourceTable,
     capabilities: HashSet<String>,
-    handles: Arc<Mutex<HashMap<String, String>>>,
     kernel: Option<KernelHandle>,
     context: artist_kernel::InvocationContext,
+    scope: artist_kernel::InvocationScope,
+    phase: ComponentPhase,
+    limits: wasmtime::StoreLimits,
 }
 
 impl Default for HostState {
@@ -379,9 +479,17 @@ impl HostState {
             wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             table: wasmtime::component::ResourceTable::new(),
             capabilities: capabilities.into_iter().collect(),
-            handles: Arc::new(Mutex::new(HashMap::new())),
             kernel: None,
             context: artist_kernel::InvocationContext::default(),
+            scope: artist_kernel::InvocationScope::new(artist_kernel::InvocationContext::default()),
+            phase: ComponentPhase::Invoke,
+            limits: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(package::WasmExecutionLimits::default().max_memory_bytes)
+                .table_elements(package::WasmExecutionLimits::default().max_table_elements)
+                .instances(package::WasmExecutionLimits::default().max_instances)
+                .memories(package::WasmExecutionLimits::default().max_memories)
+                .tables(package::WasmExecutionLimits::default().max_tables)
+                .build(),
         }
     }
 
@@ -402,10 +510,61 @@ impl HostState {
     where
         I: IntoIterator<Item = String>,
     {
+        Self::with_kernel_scope(
+            capabilities,
+            kernel,
+            artist_kernel::InvocationScope::new(context),
+        )
+    }
+
+    fn with_kernel_scope<I>(
+        capabilities: I,
+        kernel: KernelHandle,
+        scope: artist_kernel::InvocationScope,
+    ) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
         let mut state = Self::with_kernel(capabilities, kernel);
-        state.context = context;
+        state.context = scope.context.clone();
+        state.scope = scope;
         state
     }
+
+    fn with_scope<I>(capabilities: I, scope: artist_kernel::InvocationScope) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut state = Self::with_capabilities(capabilities);
+        state.context = scope.context.clone();
+        state.scope = scope;
+        state.phase = ComponentPhase::Claim;
+        state
+    }
+}
+
+fn new_store(engine: &wasmtime::Engine, state: HostState) -> wasmtime::Store<HostState> {
+    let cancellation = state.scope.cancellation.clone();
+    let deadline = state.scope.remaining_deadline();
+    let started = Instant::now();
+    let mut store = wasmtime::Store::new(engine, state);
+    store.limiter(|state| &mut state.limits);
+    // A single runtime-owned ticker advances every component engine. The
+    // callback keeps ordinary calls alive, but turns cancellation/deadline
+    // expiry into a Wasmtime interruption even when the guest is CPU-bound.
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |_store| {
+        if cancellation.is_cancelled()
+            || deadline.is_some_and(|deadline| started.elapsed() >= deadline)
+        {
+            return Ok(wasmtime::UpdateDeadline::Interrupt);
+        }
+        Ok(wasmtime::UpdateDeadline::Continue(1))
+    });
+    // Fuel is a hard ceiling for pathological guests. Claim calls can use a
+    // smaller budget later; ordinary invocations get the shared default.
+    let _ = store.set_fuel(10_000_000);
+    store
 }
 
 impl wasmtime_wasi::WasiView for HostState {
@@ -417,158 +576,14 @@ impl wasmtime_wasi::WasiView for HostState {
     }
 }
 
-impl bindings::artist::component::host::Host for HostState {
-    fn invoke(&mut self, request: HostRequest) -> Result<HostResponse, Error> {
-        // This is the quarantined legacy component ABI. Universal verbs are
-        // required to use the typed `artist:tool` worlds below; this bridge is
-        // retained only for pre-existing extension components while arbitrary
-        // package-local WIT contracts are being established.
-        if let Some(capability) = request.capability.as_deref()
-            && !self.capabilities.contains(capability)
-        {
-            return Err(Error {
-                kind: ErrorKind::HostFailure,
-                message: format!("capability denied: {capability}"),
-                details: None,
-            });
-        }
-        if let Some(handle) = request.handle {
-            let handles = self.handles.lock().unwrap();
-            if !handles.contains_key(&handle.id) {
-                return Err(Error {
-                    kind: ErrorKind::HostFailure,
-                    message: "invalid resource handle".to_owned(),
-                    details: None,
-                });
-            }
-        }
-        if let (Some(kernel), Some(verb_name)) =
-            (self.kernel.clone(), request.operation.strip_prefix("tool."))
-        {
-            let verb = match verb_name {
-                "read" => KernelVerb::Read,
-                "write" => KernelVerb::Write,
-                "edit" => KernelVerb::Edit,
-                "poll" => KernelVerb::Poll,
-                "send" => KernelVerb::Send,
-                "run" => KernelVerb::Run,
-                "abort" => KernelVerb::Abort,
-                "delete" => KernelVerb::Delete,
-                "find" => KernelVerb::Find,
-                "grep" => KernelVerb::Grep,
-                _ => {
-                    return Err(Error {
-                        kind: ErrorKind::InvalidRequest,
-                        message: format!("unknown tool verb: {verb_name}"),
-                        details: None,
-                    });
-                }
-            };
-            let target = request.target.clone();
-            let input = request.input.clone();
-            let result = std::thread::spawn(move || {
-                let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-                let target = if target.contains("://") {
-                    artist_kernel::ResourceUri::parse(&target)
-                        .map(artist_kernel::ResourceAddress::uri)
-                        .map_err(|error| error.to_string())?
-                } else {
-                    artist_kernel::ResourceAddress::path(target)
-                };
-                let args = serde_json::from_str(&input).map_err(|error| error.to_string())?;
-                Ok::<_, String>(
-                    runtime.block_on(kernel.execute(KernelRequest::new(verb, target, args))),
-                )
-            })
-            .join()
-            .map_err(|_| Error {
-                kind: ErrorKind::HostFailure,
-                message: "tool host bridge panicked".to_owned(),
-                details: None,
-            })?
-            .map_err(|message| Error {
-                kind: ErrorKind::HostFailure,
-                message,
-                details: None,
-            })?;
-            if result.ok {
-                return Ok(HostResponse {
-                    output: serde_json::to_string(
-                        result.value.as_ref().unwrap_or(&serde_json::Value::Null),
-                    )
-                    .unwrap(),
-                    metadata: "{\"bridge\":\"kernel\"}".to_owned(),
-                });
-            }
-            return Err(Error {
-                kind: ErrorKind::HostFailure,
-                message: result.error.map_or_else(
-                    || "tool operation failed".to_owned(),
-                    |error| error.to_string(),
-                ),
-                details: None,
-            });
-        }
-        Ok(HostResponse {
-            output: request.input,
-            metadata: format!("{{\"operation\":\"{}\"}}", request.operation),
-        })
-    }
-
-    fn acquire(&mut self, target: String) -> Result<ResourceHandle, Error> {
-        let id = format!("resource-{}", self.handles.lock().unwrap().len() + 1);
-        self.handles.lock().unwrap().insert(id.clone(), target);
-        Ok(ResourceHandle {
-            id,
-            ownership: HandleOwnership::Owned,
-        })
-    }
-
-    fn release(&mut self, handle: ResourceHandle) -> Result<(), Error> {
-        if handle.ownership != HandleOwnership::Owned {
-            return Err(Error {
-                kind: ErrorKind::InvalidRequest,
-                message: "only owned handles may be released".to_owned(),
-                details: None,
-            });
-        }
-        self.handles
-            .lock()
-            .unwrap()
-            .remove(&handle.id)
-            .map(|_| ())
-            .ok_or_else(|| Error {
-                kind: ErrorKind::InvalidRequest,
-                message: "resource handle already released".to_owned(),
-                details: None,
-            })
-    }
-
-    fn borrow_handle(&mut self, handle: ResourceHandle) -> Result<ResourceHandle, Error> {
-        if !self.handles.lock().unwrap().contains_key(&handle.id) {
-            return Err(Error {
-                kind: ErrorKind::InvalidRequest,
-                message: "invalid resource handle".to_owned(),
-                details: None,
-            });
-        }
-        Ok(ResourceHandle {
-            id: handle.id,
-            ownership: HandleOwnership::Borrowed,
-        })
-    }
-}
-
-impl bindings::artist::component::types::Host for HostState {}
-
-impl read_bindings::artist::tool::host_read::Host for HostState {
+impl resource_bindings::artist::resource::read::Host for HostState {
     fn read(
         &mut self,
-        requests: Vec<read_bindings::artist::tool::types::ReadRequest>,
+        requests: Vec<resource_bindings::artist::resource::types::ReadRequest>,
     ) -> Vec<
         Result<
-            read_bindings::artist::tool::types::ReadResult,
-            read_bindings::artist::tool::types::Error,
+            resource_bindings::artist::resource::types::ReadResult,
+            resource_bindings::artist::resource::types::Error,
         >,
     > {
         requests
@@ -576,20 +591,20 @@ impl read_bindings::artist::tool::host_read::Host for HostState {
             .map(|request| {
                 let target = request.uri.clone();
                 let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<read_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
                 })?;
                 let at = request.at.map(|position| match position {
-                    read_bindings::artist::tool::types::Position::Top => {
+                    resource_bindings::artist::resource::types::Position::Top => {
                         artist_kernel::Position::Top
                     }
-                    read_bindings::artist::tool::types::Position::Bottom => {
+                    resource_bindings::artist::resource::types::Position::Bottom => {
                         artist_kernel::Position::Bottom
                     }
-                    read_bindings::artist::tool::types::Position::At(anchor) => {
+                    resource_bindings::artist::resource::types::Position::At(anchor) => {
                         artist_kernel::Position::At(anchor_from_string(&anchor))
                     }
                 });
@@ -608,15 +623,14 @@ impl read_bindings::artist::tool::host_read::Host for HostState {
             .collect()
     }
 }
-impl read_bindings::artist::tool::types::Host for HostState {}
-impl write_bindings::artist::tool::host_write::Host for HostState {
+impl resource_bindings::artist::resource::write::Host for HostState {
     fn write(
         &mut self,
-        requests: Vec<write_bindings::artist::tool::types::WriteRequest>,
+        requests: Vec<resource_bindings::artist::resource::types::WriteRequest>,
     ) -> Vec<
         Result<
-            write_bindings::artist::tool::types::WriteResult,
-            write_bindings::artist::tool::types::Error,
+            resource_bindings::artist::resource::types::WriteResult,
+            resource_bindings::artist::resource::types::Error,
         >,
     > {
         requests
@@ -624,8 +638,8 @@ impl write_bindings::artist::tool::host_write::Host for HostState {
             .map(|request| {
                 let target = request.uri.clone();
                 let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<write_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -643,15 +657,14 @@ impl write_bindings::artist::tool::host_write::Host for HostState {
             .collect()
     }
 }
-impl write_bindings::artist::tool::types::Host for HostState {}
-impl edit_bindings::artist::tool::host_edit::Host for HostState {
+impl resource_bindings::artist::resource::edit::Host for HostState {
     fn edit(
         &mut self,
-        requests: Vec<edit_bindings::artist::tool::types::EditRequest>,
+        requests: Vec<resource_bindings::artist::resource::types::EditRequest>,
     ) -> Vec<
         Result<
-            edit_bindings::artist::tool::types::EditResult,
-            edit_bindings::artist::tool::types::Error,
+            resource_bindings::artist::resource::types::EditResult,
+            resource_bindings::artist::resource::types::Error,
         >,
     > {
         requests
@@ -659,8 +672,8 @@ impl edit_bindings::artist::tool::host_edit::Host for HostState {
             .map(|request| {
                 let target = request.uri.clone();
                 let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<edit_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -669,7 +682,7 @@ impl edit_bindings::artist::tool::host_edit::Host for HostState {
                     .operations
                     .into_iter()
                     .map(|operation| match operation {
-                        edit_bindings::artist::tool::types::EditOperation::Replace(replace) => {
+                        resource_bindings::artist::resource::types::EditOperation::Replace(replace) => {
                             Ok(artist_kernel::EditOperation::Replace(
                                 artist_kernel::ReplaceOperation {
                                     start: anchor_from_string(&replace.start),
@@ -678,21 +691,21 @@ impl edit_bindings::artist::tool::host_edit::Host for HostState {
                                 },
                             ))
                         }
-                        edit_bindings::artist::tool::types::EditOperation::Insert(insert) => Ok(
+                        resource_bindings::artist::resource::types::EditOperation::Insert(insert) => Ok(
                             artist_kernel::EditOperation::Insert(artist_kernel::InsertOperation {
                                 at: match insert.at {
-                                    edit_bindings::artist::tool::types::InsertionPoint::Top => {
+                                    resource_bindings::artist::resource::types::InsertionPoint::Top => {
                                         artist_kernel::InsertionPoint::Top
                                     }
-                                    edit_bindings::artist::tool::types::InsertionPoint::Bottom => {
+                                    resource_bindings::artist::resource::types::InsertionPoint::Bottom => {
                                         artist_kernel::InsertionPoint::Bottom
                                     }
-                                    edit_bindings::artist::tool::types::InsertionPoint::Before(
+                                    resource_bindings::artist::resource::types::InsertionPoint::Before(
                                         anchor,
                                     ) => artist_kernel::InsertionPoint::Before(anchor_from_string(
                                         &anchor,
                                     )),
-                                    edit_bindings::artist::tool::types::InsertionPoint::After(
+                                    resource_bindings::artist::resource::types::InsertionPoint::After(
                                         anchor,
                                     ) => artist_kernel::InsertionPoint::After(anchor_from_string(
                                         &anchor,
@@ -702,7 +715,7 @@ impl edit_bindings::artist::tool::host_edit::Host for HostState {
                             }),
                         ),
                     })
-                    .collect::<Result<Vec<_>, edit_bindings::artist::tool::types::Error>>()?;
+                    .collect::<Result<Vec<_>, resource_bindings::artist::resource::types::Error>>()?;
                 typed_host_invoke_operation(
                     self,
                     "edit",
@@ -716,19 +729,18 @@ impl edit_bindings::artist::tool::host_edit::Host for HostState {
             .collect()
     }
 }
-impl edit_bindings::artist::tool::types::Host for HostState {}
-impl run_bindings::artist::tool::host_run::Host for HostState {
+impl resource_bindings::artist::resource::run::Host for HostState {
     fn run(
         &mut self,
-        requests: Vec<run_bindings::artist::tool::types::RunRequest>,
-    ) -> Vec<Result<String, run_bindings::artist::tool::types::Error>> {
+        requests: Vec<resource_bindings::artist::resource::types::RunRequest>,
+    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
         requests
             .into_iter()
             .map(|request| {
                 let target = request.uri.clone();
                 let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<run_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -746,20 +758,19 @@ impl run_bindings::artist::tool::host_run::Host for HostState {
             .collect()
     }
 }
-impl run_bindings::artist::tool::types::Host for HostState {}
 
-impl send_bindings::artist::tool::host_send::Host for HostState {
+impl resource_bindings::artist::resource::send::Host for HostState {
     fn send(
         &mut self,
-        requests: Vec<send_bindings::artist::tool::types::SendRequest>,
-    ) -> Vec<Result<String, send_bindings::artist::tool::types::Error>> {
+        requests: Vec<resource_bindings::artist::resource::types::SendRequest>,
+    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
         requests
             .into_iter()
             .map(|request| {
                 let target = request.uri.clone();
                 let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
-                    typed_error_for::<send_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -777,20 +788,19 @@ impl send_bindings::artist::tool::host_send::Host for HostState {
             .collect()
     }
 }
-impl send_bindings::artist::tool::types::Host for HostState {}
 
-impl find_bindings::artist::tool::host_find::Host for HostState {
+impl resource_bindings::artist::resource::find::Host for HostState {
     fn find(
         &mut self,
-        request: find_bindings::artist::tool::types::FindRequest,
-    ) -> Result<Vec<String>, find_bindings::artist::tool::types::Error> {
+        request: resource_bindings::artist::resource::types::FindRequest,
+    ) -> Result<Vec<String>, resource_bindings::artist::resource::types::Error> {
         let roots = request
             .roots
             .iter()
             .map(|root| {
                 artist_kernel::ResourceUri::parse(root).map_err(|error| {
-                    typed_error_for::<find_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(root.clone()),
                     )
@@ -808,30 +818,29 @@ impl find_bindings::artist::tool::host_find::Host for HostState {
         )
     }
 }
-impl find_bindings::artist::tool::types::Host for HostState {}
-impl grep_bindings::artist::tool::host_grep::Host for HostState {
+impl resource_bindings::artist::resource::grep::Host for HostState {
     fn grep(
         &mut self,
-        request: grep_bindings::artist::tool::types::GrepRequest,
+        request: resource_bindings::artist::resource::types::GrepRequest,
     ) -> Result<
-        Vec<grep_bindings::artist::tool::types::AnchoredText>,
-        grep_bindings::artist::tool::types::Error,
+        Vec<resource_bindings::artist::resource::types::AnchoredText>,
+        resource_bindings::artist::resource::types::Error,
     > {
         let source = match request.source {
-            grep_bindings::artist::tool::types::GrepSource::Resources(uris) => {
-                let uris = uris.iter().map(|uri| artist_kernel::ResourceUri::parse(uri).map_err(|error| typed_error_for::<grep_bindings::artist::tool::types::Error>(tool_bindings::artist::tool::types::ErrorCode::InvalidUri, error.to_string(), Some(uri.clone())))).collect::<Result<Vec<_>, _>>()?;
+            resource_bindings::artist::resource::types::GrepSource::Resources(uris) => {
+                let uris = uris.iter().map(|uri| artist_kernel::ResourceUri::parse(uri).map_err(|error| typed_error_for::<resource_bindings::artist::resource::types::Error>(tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri, error.to_string(), Some(uri.clone())))).collect::<Result<Vec<_>, _>>()?;
                 artist_kernel::GrepSource::Resources(uris)
             }
-            grep_bindings::artist::tool::types::GrepSource::Text(texts) => artist_kernel::GrepSource::Text(texts.into_iter().map(|text| -> Result<artist_kernel::AnchoredText, grep_bindings::artist::tool::types::Error> { Ok(artist_kernel::AnchoredText {
-                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| typed_error_for::<grep_bindings::artist::tool::types::Error>(tool_bindings::artist::tool::types::ErrorCode::InvalidUri, error.to_string(), Some(text.uri.clone())))?,
+            resource_bindings::artist::resource::types::GrepSource::Text(texts) => artist_kernel::GrepSource::Text(texts.into_iter().map(|text| -> Result<artist_kernel::AnchoredText, resource_bindings::artist::resource::types::Error> { Ok(artist_kernel::AnchoredText {
+                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| typed_error_for::<resource_bindings::artist::resource::types::Error>(tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri, error.to_string(), Some(text.uri.clone())))?,
                 lines: text.lines.into_iter().map(|line| artist_kernel::AnchoredLine {
                     anchor: anchor_from_string(&line.anchor),
                     text: line.text,
                     ending: match line.ending {
-                        grep_bindings::artist::tool::types::LineEnding::None => artist_kernel::LineEnding::None,
-                        grep_bindings::artist::tool::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
-                        grep_bindings::artist::tool::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
-                        grep_bindings::artist::tool::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                        resource_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
+                        resource_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                        resource_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                        resource_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
                     },
                 }).collect(),
             }) }).collect::<Result<Vec<_>, _>>()?),
@@ -853,40 +862,39 @@ impl grep_bindings::artist::tool::host_grep::Host for HostState {
         )
     }
 }
-impl grep_bindings::artist::tool::types::Host for HostState {}
-impl poll_bindings::artist::tool::host_poll::Host for HostState {
+impl resource_bindings::artist::resource::poll::Host for HostState {
     fn poll(
         &mut self,
-        request: poll_bindings::artist::tool::types::PollRequest,
+        request: resource_bindings::artist::resource::types::PollRequest,
     ) -> Result<
-        poll_bindings::artist::tool::types::PollResult,
-        poll_bindings::artist::tool::types::Error,
+        resource_bindings::artist::resource::types::PollResult,
+        resource_bindings::artist::resource::types::Error,
     > {
         let targets = request
             .targets
             .iter()
             .map(|target| {
                 let uri = artist_kernel::ResourceUri::parse(&target.uri).map_err(|error| {
-                    typed_error_for::<poll_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.uri.clone()),
                     )
                 })?;
                 let from_position = target.from_position.clone().map(|position| match position {
-                    poll_bindings::artist::tool::types::Position::Top => {
+                    resource_bindings::artist::resource::types::Position::Top => {
                         artist_kernel::Position::Top
                     }
-                    poll_bindings::artist::tool::types::Position::Bottom => {
+                    resource_bindings::artist::resource::types::Position::Bottom => {
                         artist_kernel::Position::Bottom
                     }
-                    poll_bindings::artist::tool::types::Position::At(anchor) => {
+                    resource_bindings::artist::resource::types::Position::At(anchor) => {
                         artist_kernel::Position::At(anchor_from_string(&anchor))
                     }
                 });
                 Ok(artist_kernel::PollTarget { uri, from_position })
             })
-            .collect::<Result<Vec<_>, poll_bindings::artist::tool::types::Error>>()?;
+            .collect::<Result<Vec<_>, resource_bindings::artist::resource::types::Error>>()?;
         let until = request.until.map(lower_poll_wire).transpose()?;
         let target = targets.first().map(|target| target.uri.to_string());
         typed_host_invoke_operation(
@@ -897,43 +905,43 @@ impl poll_bindings::artist::tool::host_poll::Host for HostState {
         )
     }
 }
-impl poll_bindings::artist::tool::types::Host for HostState {}
 
 fn lower_poll_wire(
-    wire: poll_bindings::artist::tool::types::PollConditionWire,
-) -> Result<artist_kernel::PollCondition, poll_bindings::artist::tool::types::Error> {
+    wire: resource_bindings::artist::resource::types::PollConditionWire,
+) -> Result<artist_kernel::PollCondition, resource_bindings::artist::resource::types::Error> {
     fn lower(
         index: usize,
-        nodes: &[poll_bindings::artist::tool::types::PollNode],
-    ) -> Result<artist_kernel::PollCondition, poll_bindings::artist::tool::types::Error> {
+        nodes: &[resource_bindings::artist::resource::types::PollNode],
+    ) -> Result<artist_kernel::PollCondition, resource_bindings::artist::resource::types::Error>
+    {
         let node = nodes.get(index).ok_or_else(|| {
-            typed_error_for::<poll_bindings::artist::tool::types::Error>(
-                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+            typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
                 format!("poll node {index} is out of range"),
                 None,
             )
         })?;
         Ok(match node {
-            poll_bindings::artist::tool::types::PollNode::Atom(atom) => {
+            resource_bindings::artist::resource::types::PollNode::Atom(atom) => {
                 artist_kernel::PollCondition::Atom(match atom {
-                    poll_bindings::artist::tool::types::PollAtom::Changed(lines) => {
+                    resource_bindings::artist::resource::types::PollAtom::Changed(lines) => {
                         artist_kernel::PollAtom::Changed(*lines)
                     }
-                    poll_bindings::artist::tool::types::PollAtom::Regex(regex) => {
+                    resource_bindings::artist::resource::types::PollAtom::Regex(regex) => {
                         artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
                             target: regex.target,
                             pattern: regex.pattern.clone(),
                         })
                     }
-                    poll_bindings::artist::tool::types::PollAtom::Terminated(target) => {
+                    resource_bindings::artist::resource::types::PollAtom::Terminated(target) => {
                         artist_kernel::PollAtom::Terminated(*target)
                     }
-                    poll_bindings::artist::tool::types::PollAtom::Timeout(milliseconds) => {
+                    resource_bindings::artist::resource::types::PollAtom::Timeout(milliseconds) => {
                         artist_kernel::PollAtom::Timeout(*milliseconds)
                     }
                 })
             }
-            poll_bindings::artist::tool::types::PollNode::All(children) => {
+            resource_bindings::artist::resource::types::PollNode::All(children) => {
                 artist_kernel::PollCondition::All(
                     children
                         .iter()
@@ -941,7 +949,7 @@ fn lower_poll_wire(
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             }
-            poll_bindings::artist::tool::types::PollNode::Any(children) => {
+            resource_bindings::artist::resource::types::PollNode::Any(children) => {
                 artist_kernel::PollCondition::Any(
                     children
                         .iter()
@@ -954,17 +962,17 @@ fn lower_poll_wire(
     lower(wire.root as usize, &wire.nodes)
 }
 
-impl abort_bindings::artist::tool::host_abort::Host for HostState {
+impl resource_bindings::artist::resource::abort::Host for HostState {
     fn abort(
         &mut self,
         uris: Vec<String>,
-    ) -> Vec<Result<String, abort_bindings::artist::tool::types::Error>> {
+    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
         uris.into_iter()
             .map(|uri| {
                 let target = uri.clone();
                 let parsed = artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                    typed_error_for::<abort_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -979,19 +987,18 @@ impl abort_bindings::artist::tool::host_abort::Host for HostState {
             .collect()
     }
 }
-impl abort_bindings::artist::tool::types::Host for HostState {}
 
-impl delete_bindings::artist::tool::host_delete::Host for HostState {
+impl resource_bindings::artist::resource::delete::Host for HostState {
     fn delete(
         &mut self,
         uris: Vec<String>,
-    ) -> Vec<Result<String, delete_bindings::artist::tool::types::Error>> {
+    ) -> Vec<Result<String, resource_bindings::artist::resource::types::Error>> {
         uris.into_iter()
             .map(|uri| {
                 let target = uri.clone();
                 let parsed = artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
-                    typed_error_for::<delete_bindings::artist::tool::types::Error>(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+                    typed_error_for::<resource_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
                         error.to_string(),
                         Some(target.clone()),
                     )
@@ -1006,7 +1013,512 @@ impl delete_bindings::artist::tool::host_delete::Host for HostState {
             .collect()
     }
 }
-impl delete_bindings::artist::tool::types::Host for HostState {}
+
+impl resource_bindings::artist::resource::types::Host for HostState {}
+
+impl resource_async_host_bindings::artist::resource::read::Host for HostState {
+    async fn read(
+        &mut self,
+        requests: Vec<resource_async_host_bindings::artist::resource::types::ReadRequest>,
+    ) -> Vec<
+        Result<
+            resource_async_host_bindings::artist::resource::types::ReadResult,
+            resource_async_host_bindings::artist::resource::types::Error,
+        >,
+    > {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let target = request.uri.clone();
+            let result = (|| {
+                let uri = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
+                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                        error.to_string(),
+                        Some(target.clone()),
+                    )
+                })?;
+                let at = request.at.map(|position| match position {
+                    resource_async_host_bindings::artist::resource::types::Position::Top => {
+                        artist_kernel::Position::Top
+                    }
+                    resource_async_host_bindings::artist::resource::types::Position::Bottom => {
+                        artist_kernel::Position::Bottom
+                    }
+                    resource_async_host_bindings::artist::resource::types::Position::At(anchor) => {
+                        artist_kernel::Position::At(anchor_from_string(&anchor))
+                    }
+                });
+                Ok((uri, at, request.before, request.after))
+            })();
+            let result = match result {
+                Ok((uri, at, before, after)) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "read",
+                        Some(target),
+                        artist_kernel::Operation::Read(vec![artist_kernel::ReadRequest {
+                            uri,
+                            at,
+                            before,
+                            after,
+                        }]),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::write::Host for HostState {
+    async fn write(
+        &mut self,
+        requests: Vec<resource_async_host_bindings::artist::resource::types::WriteRequest>,
+    ) -> Vec<
+        Result<
+            resource_async_host_bindings::artist::resource::types::WriteResult,
+            resource_async_host_bindings::artist::resource::types::Error,
+        >,
+    > {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let target = request.uri.clone();
+            let result = match artist_kernel::ResourceUri::parse(&target) {
+                Ok(uri) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "write",
+                        Some(target),
+                        artist_kernel::Operation::Write(vec![artist_kernel::WriteRequest {
+                            uri,
+                            content: request.content,
+                        }]),
+                    )
+                    .await
+                }
+                Err(error) => Err(typed_error_for::<
+                    resource_async_host_bindings::artist::resource::types::Error,
+                >(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target),
+                )),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::run::Host for HostState {
+    async fn run(
+        &mut self,
+        requests: Vec<resource_async_host_bindings::artist::resource::types::RunRequest>,
+    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let target = request.uri.clone();
+            let result = match artist_kernel::ResourceUri::parse(&target) {
+                Ok(uri) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "run",
+                        Some(target),
+                        artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
+                            uri,
+                            args: request.args,
+                        }]),
+                    )
+                    .await
+                }
+                Err(error) => Err(typed_error_for::<
+                    resource_async_host_bindings::artist::resource::types::Error,
+                >(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target),
+                )),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::edit::Host for HostState {
+    async fn edit(
+        &mut self,
+        requests: Vec<resource_async_host_bindings::artist::resource::types::EditRequest>,
+    ) -> Vec<
+        Result<
+            resource_async_host_bindings::artist::resource::types::EditResult,
+            resource_async_host_bindings::artist::resource::types::Error,
+        >,
+    > {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let target = request.uri.clone();
+            let parsed = artist_kernel::ResourceUri::parse(&target).map_err(|error| {
+                typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target.clone()),
+                )
+            });
+            let result = match parsed {
+                Ok(uri) => {
+                    let operations = request
+                        .operations
+                        .into_iter()
+                        .map(|operation| match operation {
+                            resource_async_host_bindings::artist::resource::types::EditOperation::Replace(replace) => {
+                                artist_kernel::EditOperation::Replace(artist_kernel::ReplaceOperation {
+                                    start: anchor_from_string(&replace.start),
+                                    end: replace.end.as_deref().map(anchor_from_string),
+                                    content: replace.content,
+                                })
+                            }
+                            resource_async_host_bindings::artist::resource::types::EditOperation::Insert(insert) => {
+                                artist_kernel::EditOperation::Insert(artist_kernel::InsertOperation {
+                                    at: match insert.at {
+                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Top => artist_kernel::InsertionPoint::Top,
+                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Bottom => artist_kernel::InsertionPoint::Bottom,
+                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::Before(anchor) => artist_kernel::InsertionPoint::Before(anchor_from_string(&anchor)),
+                                        resource_async_host_bindings::artist::resource::types::InsertionPoint::After(anchor) => artist_kernel::InsertionPoint::After(anchor_from_string(&anchor)),
+                                    },
+                                    content: insert.content,
+                                })
+                            }
+                        })
+                        .collect();
+                    typed_host_invoke_operation_async(
+                        self,
+                        "edit",
+                        Some(target),
+                        artist_kernel::Operation::Edit(vec![artist_kernel::EditRequest {
+                            uri,
+                            operations,
+                        }]),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::send::Host for HostState {
+    async fn send(
+        &mut self,
+        requests: Vec<resource_async_host_bindings::artist::resource::types::SendRequest>,
+    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let target = request.uri.clone();
+            let result = match artist_kernel::ResourceUri::parse(&target) {
+                Ok(uri) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "send",
+                        Some(target),
+                        artist_kernel::Operation::Send(vec![artist_kernel::SendRequest {
+                            uri,
+                            content: request.content,
+                        }]),
+                    )
+                    .await
+                }
+                Err(error) => Err(typed_error_for::<
+                    resource_async_host_bindings::artist::resource::types::Error,
+                >(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target),
+                )),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::find::Host for HostState {
+    async fn find(
+        &mut self,
+        request: resource_async_host_bindings::artist::resource::types::FindRequest,
+    ) -> Result<Vec<String>, resource_async_host_bindings::artist::resource::types::Error> {
+        let target = request.roots.first().cloned();
+        let roots = request
+            .roots
+            .iter()
+            .map(|root| {
+                artist_kernel::ResourceUri::parse(root).map_err(|error| {
+                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                        error.to_string(),
+                        Some(root.clone()),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        typed_host_invoke_operation_async(
+            self,
+            "find",
+            target,
+            artist_kernel::Operation::Find(artist_kernel::FindRequest {
+                roots,
+                query: request.query,
+            }),
+        )
+        .await
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::grep::Host for HostState {
+    async fn grep(
+        &mut self,
+        request: resource_async_host_bindings::artist::resource::types::GrepRequest,
+    ) -> Result<
+        Vec<resource_async_host_bindings::artist::resource::types::AnchoredText>,
+        resource_async_host_bindings::artist::resource::types::Error,
+    > {
+        let source = match request.source {
+            resource_async_host_bindings::artist::resource::types::GrepSource::Resources(uris) => {
+                let parsed = uris
+                    .iter()
+                    .map(|uri| {
+                        artist_kernel::ResourceUri::parse(uri).map_err(|error| {
+                            typed_error_for::<
+                                resource_async_host_bindings::artist::resource::types::Error,
+                            >(
+                                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                                error.to_string(),
+                                Some(uri.clone()),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                artist_kernel::GrepSource::Resources(parsed)
+            }
+            resource_async_host_bindings::artist::resource::types::GrepSource::Text(texts) => {
+                let parsed = texts
+                    .into_iter()
+                    .map(|text| {
+                        let uri = artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
+                            typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                                error.to_string(),
+                                Some(text.uri.clone()),
+                            )
+                        })?;
+                        let lines = text
+                            .lines
+                            .into_iter()
+                            .map(|line| artist_kernel::AnchoredLine {
+                                anchor: anchor_from_string(&line.anchor),
+                                text: line.text,
+                                ending: match line.ending {
+                                    resource_async_host_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
+                                    resource_async_host_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                                    resource_async_host_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                                    resource_async_host_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                                },
+                            })
+                            .collect();
+                        Ok(artist_kernel::AnchoredText { uri, lines })
+                    })
+                    .collect::<Result<Vec<_>, resource_async_host_bindings::artist::resource::types::Error>>()?;
+                artist_kernel::GrepSource::Text(parsed)
+            }
+        };
+        let target = match &source {
+            artist_kernel::GrepSource::Resources(uris) => uris.first().map(ToString::to_string),
+            artist_kernel::GrepSource::Text(texts) => {
+                texts.first().map(|text| text.uri.to_string())
+            }
+        };
+        typed_host_invoke_operation_async(
+            self,
+            "grep",
+            target,
+            artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
+                pattern: request.pattern,
+                source,
+            }),
+        )
+        .await
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::abort::Host for HostState {
+    async fn abort(
+        &mut self,
+        uris: Vec<String>,
+    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
+        let mut results = Vec::with_capacity(uris.len());
+        for target in uris {
+            let result = match artist_kernel::ResourceUri::parse(&target) {
+                Ok(uri) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "abort",
+                        Some(target),
+                        artist_kernel::Operation::Abort(vec![uri]),
+                    )
+                    .await
+                }
+                Err(error) => Err(typed_error_for::<
+                    resource_async_host_bindings::artist::resource::types::Error,
+                >(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target),
+                )),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
+
+fn lower_poll_wire_async(
+    wire: resource_async_host_bindings::artist::resource::types::PollConditionWire,
+) -> Result<
+    artist_kernel::PollCondition,
+    resource_async_host_bindings::artist::resource::types::Error,
+> {
+    fn lower(
+        index: usize,
+        nodes: &[resource_async_host_bindings::artist::resource::types::PollNode],
+    ) -> Result<
+        artist_kernel::PollCondition,
+        resource_async_host_bindings::artist::resource::types::Error,
+    > {
+        let node = nodes.get(index).ok_or_else(|| {
+            typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
+                format!("poll node {index} is out of range"),
+                None,
+            )
+        })?;
+        Ok(match node {
+            resource_async_host_bindings::artist::resource::types::PollNode::Atom(atom) => {
+                artist_kernel::PollCondition::Atom(match atom {
+                    resource_async_host_bindings::artist::resource::types::PollAtom::Changed(
+                        lines,
+                    ) => artist_kernel::PollAtom::Changed(*lines),
+                    resource_async_host_bindings::artist::resource::types::PollAtom::Regex(
+                        regex,
+                    ) => artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
+                        target: regex.target,
+                        pattern: regex.pattern.clone(),
+                    }),
+                    resource_async_host_bindings::artist::resource::types::PollAtom::Terminated(
+                        target,
+                    ) => artist_kernel::PollAtom::Terminated(*target),
+                    resource_async_host_bindings::artist::resource::types::PollAtom::Timeout(
+                        milliseconds,
+                    ) => artist_kernel::PollAtom::Timeout(*milliseconds),
+                })
+            }
+            resource_async_host_bindings::artist::resource::types::PollNode::All(children) => {
+                artist_kernel::PollCondition::All(
+                    children
+                        .iter()
+                        .map(|child| lower(*child as usize, nodes))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+            resource_async_host_bindings::artist::resource::types::PollNode::Any(children) => {
+                artist_kernel::PollCondition::Any(
+                    children
+                        .iter()
+                        .map(|child| lower(*child as usize, nodes))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            }
+        })
+    }
+    lower(wire.root as usize, &wire.nodes)
+}
+
+impl resource_async_host_bindings::artist::resource::poll::Host for HostState {
+    async fn poll(
+        &mut self,
+        request: resource_async_host_bindings::artist::resource::types::PollRequest,
+    ) -> Result<
+        resource_async_host_bindings::artist::resource::types::PollResult,
+        resource_async_host_bindings::artist::resource::types::Error,
+    > {
+        let target = request.targets.first().map(|target| target.uri.clone());
+        let targets = request
+            .targets
+            .into_iter()
+            .map(|target| {
+                let uri = artist_kernel::ResourceUri::parse(&target.uri).map_err(|error| {
+                    typed_error_for::<resource_async_host_bindings::artist::resource::types::Error>(
+                        tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                        error.to_string(),
+                        Some(target.uri.clone()),
+                    )
+                })?;
+                let from_position = target.from_position.map(|position| match position {
+                    resource_async_host_bindings::artist::resource::types::Position::Top => artist_kernel::Position::Top,
+                    resource_async_host_bindings::artist::resource::types::Position::Bottom => artist_kernel::Position::Bottom,
+                    resource_async_host_bindings::artist::resource::types::Position::At(anchor) => artist_kernel::Position::At(anchor_from_string(&anchor)),
+                });
+                Ok(artist_kernel::PollTarget { uri, from_position })
+            })
+            .collect::<Result<Vec<_>, resource_async_host_bindings::artist::resource::types::Error>>()?;
+        let until = request.until.map(lower_poll_wire_async).transpose()?;
+        typed_host_invoke_operation_async(
+            self,
+            "poll",
+            target,
+            artist_kernel::Operation::Poll(artist_kernel::PollRequest { targets, until }),
+        )
+        .await
+    }
+}
+
+impl resource_async_host_bindings::artist::resource::types::Host for HostState {}
+
+impl resource_async_host_bindings::artist::resource::delete::Host for HostState {
+    async fn delete(
+        &mut self,
+        uris: Vec<String>,
+    ) -> Vec<Result<String, resource_async_host_bindings::artist::resource::types::Error>> {
+        let mut results = Vec::with_capacity(uris.len());
+        for target in uris {
+            let result = match artist_kernel::ResourceUri::parse(&target) {
+                Ok(uri) => {
+                    typed_host_invoke_operation_async(
+                        self,
+                        "delete",
+                        Some(target),
+                        artist_kernel::Operation::Delete(vec![uri]),
+                    )
+                    .await
+                }
+                Err(error) => Err(typed_error_for::<
+                    resource_async_host_bindings::artist::resource::types::Error,
+                >(
+                    tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
+                    error.to_string(),
+                    Some(target),
+                )),
+            };
+            results.push(result);
+        }
+        results
+    }
+}
 
 fn anchor_from_string(value: &str) -> artist_kernel::Anchor {
     artist_kernel::Anchor::from_tokens(
@@ -1018,8 +1530,743 @@ fn anchor_from_string(value: &str) -> artist_kernel::Anchor {
     )
 }
 
+fn resource_error_to_kernel(
+    error: resource_async_tool_v1_bindings::artist::resource::types::Error,
+) -> artist_kernel::KernelError {
+    use artist_kernel::KernelError;
+    let code = format!("{:?}", error.code);
+    let uri = error.uri.unwrap_or_default();
+    match code.as_str() {
+        "InvalidUri" => KernelError::InvalidUri {
+            message: error.message,
+        },
+        "InvalidInput" => KernelError::InvalidRequest {
+            message: error.message,
+        },
+        "InvalidPattern" => KernelError::InvalidPattern {
+            message: error.message,
+        },
+        "NotFound" => KernelError::NotFound { uri },
+        "WrongKind" => KernelError::WrongKind {
+            message: error.message,
+        },
+        "InvalidAnchor" => KernelError::InvalidAnchor {
+            message: error.message,
+        },
+        "StaleAnchor" => KernelError::StaleAnchor {
+            message: error.message,
+        },
+        "Immutable" => KernelError::Immutable { uri },
+        "Unsupported" => KernelError::UnsupportedVerb {
+            verb: "read".to_owned(),
+            uri,
+        },
+        "PermissionDenied" => KernelError::PermissionDenied { uri },
+        "Conflict" => KernelError::Conflict { uri },
+        "NotEmpty" => KernelError::NotEmpty { uri },
+        "Aborted" => KernelError::Aborted {
+            message: error.message,
+        },
+        _ => KernelError::Handler {
+            message: error.message,
+        },
+    }
+}
+
+fn resource_read_result_to_kernel(
+    result: resource_async_tool_v1_bindings::artist::resource::types::ReadResult,
+) -> Result<artist_kernel::ReadResult, artist_kernel::KernelError> {
+    use resource_async_tool_v1_bindings::artist::resource::types::{LineEnding, ReadResult};
+    match result {
+        ReadResult::Text(text) => Ok(artist_kernel::ReadResult::Text(
+            artist_kernel::AnchoredText {
+                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
+                    artist_kernel::KernelError::InvalidUri {
+                        message: error.to_string(),
+                    }
+                })?,
+                lines: text
+                    .lines
+                    .into_iter()
+                    .map(|line| artist_kernel::AnchoredLine {
+                        anchor: anchor_from_string(&line.anchor),
+                        text: line.text,
+                        ending: match line.ending {
+                            LineEnding::None => artist_kernel::LineEnding::None,
+                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                        },
+                    })
+                    .collect(),
+            },
+        )),
+        ReadResult::Directory(directory) => Ok(artist_kernel::ReadResult::Directory {
+            uri: artist_kernel::ResourceUri::parse(&directory.uri).map_err(|error| {
+                artist_kernel::KernelError::InvalidUri {
+                    message: error.to_string(),
+                }
+            })?,
+            entries: directory
+                .entries
+                .into_iter()
+                .map(|uri| {
+                    artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
+                        artist_kernel::KernelError::InvalidUri {
+                            message: error.to_string(),
+                        }
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+        }),
+    }
+}
+
+fn resource_write_result_to_kernel(
+    result: resource_async_tool_v1_write_bindings::artist::resource::types::WriteResult,
+) -> Result<artist_kernel::WriteResult, artist_kernel::KernelError> {
+    Ok(artist_kernel::WriteResult {
+        text: artist_kernel::AnchoredText {
+            uri: artist_kernel::ResourceUri::parse(&result.text.uri).map_err(|error| {
+                artist_kernel::KernelError::InvalidUri { message: error.to_string() }
+            })?,
+            lines: result
+                .text
+                .lines
+                .into_iter()
+                .map(|line| artist_kernel::AnchoredLine {
+                    anchor: anchor_from_string(&line.anchor),
+                    text: line.text,
+                    ending: match line.ending {
+                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
+                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                        resource_async_tool_v1_write_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                    },
+                })
+                .collect(),
+        },
+    })
+}
+
+fn resource_write_error_to_kernel(
+    error: resource_async_tool_v1_write_bindings::artist::resource::types::Error,
+) -> artist_kernel::KernelError {
+    let code = format!("{:?}", error.code);
+    let uri = error.uri.unwrap_or_default();
+    match code.as_str() {
+        "InvalidUri" => artist_kernel::KernelError::InvalidUri {
+            message: error.message,
+        },
+        "InvalidInput" => artist_kernel::KernelError::InvalidRequest {
+            message: error.message,
+        },
+        "NotFound" => artist_kernel::KernelError::NotFound { uri },
+        "PermissionDenied" => artist_kernel::KernelError::PermissionDenied { uri },
+        "Conflict" => artist_kernel::KernelError::Conflict { uri },
+        "WrongKind" => artist_kernel::KernelError::WrongKind {
+            message: error.message,
+        },
+        _ => artist_kernel::KernelError::Handler {
+            message: error.message,
+        },
+    }
+}
+
+fn resource_error_to_kernel_for(
+    error: resource_async_tool_v1_edit_bindings::artist::resource::types::Error,
+    verb: &str,
+) -> artist_kernel::KernelError {
+    let code = format!("{:?}", error.code);
+    let uri = error.uri.unwrap_or_default();
+    match code.as_str() {
+        "InvalidUri" => artist_kernel::KernelError::InvalidUri {
+            message: error.message,
+        },
+        "InvalidInput" => artist_kernel::KernelError::InvalidRequest {
+            message: error.message,
+        },
+        "InvalidPattern" => artist_kernel::KernelError::InvalidPattern {
+            message: error.message,
+        },
+        "NotFound" => artist_kernel::KernelError::NotFound { uri },
+        "WrongKind" => artist_kernel::KernelError::WrongKind {
+            message: error.message,
+        },
+        "InvalidAnchor" => artist_kernel::KernelError::InvalidAnchor {
+            message: error.message,
+        },
+        "StaleAnchor" => artist_kernel::KernelError::StaleAnchor {
+            message: error.message,
+        },
+        "Immutable" => artist_kernel::KernelError::Immutable { uri },
+        "Unsupported" => artist_kernel::KernelError::UnsupportedVerb {
+            verb: verb.to_owned(),
+            uri,
+        },
+        "PermissionDenied" => artist_kernel::KernelError::PermissionDenied { uri },
+        "Conflict" => artist_kernel::KernelError::Conflict { uri },
+        "NotEmpty" => artist_kernel::KernelError::NotEmpty { uri },
+        "Aborted" => artist_kernel::KernelError::Aborted {
+            message: error.message,
+        },
+        _ => artist_kernel::KernelError::Handler {
+            message: error.message,
+        },
+    }
+}
+
+fn resource_error_parts_to_kernel(
+    code: String,
+    uri: Option<String>,
+    message: String,
+    verb: &str,
+) -> artist_kernel::KernelError {
+    let uri = uri.unwrap_or_default();
+    match code.as_str() {
+        "InvalidUri" => artist_kernel::KernelError::InvalidUri { message },
+        "InvalidInput" => artist_kernel::KernelError::InvalidRequest { message },
+        "InvalidPattern" => artist_kernel::KernelError::InvalidPattern { message },
+        "NotFound" => artist_kernel::KernelError::NotFound { uri },
+        "WrongKind" => artist_kernel::KernelError::WrongKind { message },
+        "InvalidAnchor" => artist_kernel::KernelError::InvalidAnchor { message },
+        "StaleAnchor" => artist_kernel::KernelError::StaleAnchor { message },
+        "Immutable" => artist_kernel::KernelError::Immutable { uri },
+        "Unsupported" => artist_kernel::KernelError::UnsupportedVerb {
+            verb: verb.to_owned(),
+            uri,
+        },
+        "PermissionDenied" => artist_kernel::KernelError::PermissionDenied { uri },
+        "Conflict" => artist_kernel::KernelError::Conflict { uri },
+        "NotEmpty" => artist_kernel::KernelError::NotEmpty { uri },
+        "Aborted" => artist_kernel::KernelError::Aborted { message },
+        _ => artist_kernel::KernelError::Handler { message },
+    }
+}
+
+fn resource_edit_requests_from_kernel(
+    requests: Vec<artist_kernel::EditRequest>,
+) -> Result<
+    Vec<resource_async_tool_v1_edit_bindings::artist::resource::types::EditRequest>,
+    artist_kernel::KernelError,
+> {
+    use resource_async_tool_v1_edit_bindings::artist::resource::types::{
+        EditOperation, EditRequest, InsertOperation, InsertionPoint, ReplaceOperation,
+    };
+    requests
+        .into_iter()
+        .map(|request| {
+            Ok(EditRequest {
+                uri: request.uri.to_string(),
+                operations: request
+                    .operations
+                    .into_iter()
+                    .map(|operation| match operation {
+                        artist_kernel::EditOperation::Replace(operation) => {
+                            EditOperation::Replace(ReplaceOperation {
+                                start: operation.start.to_string(),
+                                end: operation.end.map(|anchor| anchor.to_string()),
+                                content: operation.content,
+                            })
+                        }
+                        artist_kernel::EditOperation::Insert(operation) => {
+                            EditOperation::Insert(InsertOperation {
+                                at: match operation.at {
+                                    artist_kernel::InsertionPoint::Top => InsertionPoint::Top,
+                                    artist_kernel::InsertionPoint::Bottom => InsertionPoint::Bottom,
+                                    artist_kernel::InsertionPoint::Before(anchor) => {
+                                        InsertionPoint::Before(anchor.to_string())
+                                    }
+                                    artist_kernel::InsertionPoint::After(anchor) => {
+                                        InsertionPoint::After(anchor.to_string())
+                                    }
+                                },
+                                content: operation.content,
+                            })
+                        }
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn resource_edit_result_to_kernel(
+    result: resource_async_tool_v1_edit_bindings::artist::resource::types::EditResult,
+) -> Result<artist_kernel::EditResult, artist_kernel::KernelError> {
+    use resource_async_tool_v1_edit_bindings::artist::resource::types::LineEnding;
+    type KernelError = artist_kernel::KernelError;
+    let text = result.text;
+    let anchored_text =
+        |text: resource_async_tool_v1_edit_bindings::artist::resource::types::AnchoredText| {
+            Ok::<_, KernelError>(artist_kernel::AnchoredText {
+                uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
+                    KernelError::InvalidUri {
+                        message: error.to_string(),
+                    }
+                })?,
+                lines: text
+                    .lines
+                    .into_iter()
+                    .map(|line| artist_kernel::AnchoredLine {
+                        anchor: anchor_from_string(&line.anchor),
+                        text: line.text,
+                        ending: match line.ending {
+                            LineEnding::None => artist_kernel::LineEnding::None,
+                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                        },
+                    })
+                    .collect(),
+            })
+        };
+    let text = anchored_text(text)?;
+    let hunks = result
+        .diff
+        .hunks
+        .into_iter()
+        .map(|hunk| {
+            Ok::<_, KernelError>(artist_kernel::DiffHunk {
+                old: hunk
+                    .old
+                    .into_iter()
+                    .map(|line| artist_kernel::AnchoredLine {
+                        anchor: anchor_from_string(&line.anchor),
+                        text: line.text,
+                        ending: match line.ending {
+                            LineEnding::None => artist_kernel::LineEnding::None,
+                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                        },
+                    })
+                    .collect(),
+                new: hunk
+                    .new
+                    .into_iter()
+                    .map(|line| artist_kernel::AnchoredLine {
+                        anchor: anchor_from_string(&line.anchor),
+                        text: line.text,
+                        ending: match line.ending {
+                            LineEnding::None => artist_kernel::LineEnding::None,
+                            LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                            LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                            LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                        },
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Result<Vec<_>, KernelError>>()?;
+    Ok(artist_kernel::EditResult {
+        text,
+        diff: artist_kernel::AnchoredDiff {
+            uri: artist_kernel::ResourceUri::parse(&result.diff.uri).map_err(|error| {
+                KernelError::InvalidUri {
+                    message: error.to_string(),
+                }
+            })?,
+            hunks,
+        },
+    })
+}
+
+fn resource_run_requests_from_kernel(
+    requests: Vec<artist_kernel::RunRequest>,
+) -> Vec<resource_async_tool_v1_run_bindings::artist::resource::types::RunRequest> {
+    requests
+        .into_iter()
+        .map(
+            |request| resource_async_tool_v1_run_bindings::artist::resource::types::RunRequest {
+                uri: request.uri.to_string(),
+                args: request.args,
+            },
+        )
+        .collect()
+}
+
+fn resource_send_requests_from_kernel(
+    requests: Vec<artist_kernel::SendRequest>,
+) -> Vec<resource_async_tool_v1_send_bindings::artist::resource::types::SendRequest> {
+    requests
+        .into_iter()
+        .map(
+            |request| resource_async_tool_v1_send_bindings::artist::resource::types::SendRequest {
+                uri: request.uri.to_string(),
+                content: request.content,
+            },
+        )
+        .collect()
+}
+
+fn resource_uri_results_to_kernel(
+    results: Vec<
+        Result<String, resource_async_tool_v1_run_bindings::artist::resource::types::Error>,
+    >,
+    verb: &str,
+) -> Result<
+    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
+    artist_kernel::KernelError,
+> {
+    results
+        .into_iter()
+        .map(|result| match result {
+            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
+                .map(Ok)
+                .map_err(|error| artist_kernel::KernelError::InvalidUri {
+                    message: error.to_string(),
+                }),
+            Err(error) => Ok(Err(resource_error_parts_to_kernel(
+                format!("{:?}", error.code),
+                error.uri,
+                error.message,
+                verb,
+            ))),
+        })
+        .collect()
+}
+
+fn resource_send_results_to_kernel(
+    results: Vec<
+        Result<String, resource_async_tool_v1_send_bindings::artist::resource::types::Error>,
+    >,
+) -> Result<
+    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
+    artist_kernel::KernelError,
+> {
+    results
+        .into_iter()
+        .map(|result| match result {
+            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
+                .map(Ok)
+                .map_err(|error| artist_kernel::KernelError::InvalidUri {
+                    message: error.to_string(),
+                }),
+            Err(error) => Ok(Err(resource_error_parts_to_kernel(
+                format!("{:?}", error.code),
+                error.uri,
+                error.message,
+                "send",
+            ))),
+        })
+        .collect()
+}
+
+fn resource_abort_results_to_kernel(
+    results: Vec<
+        Result<String, resource_async_tool_v1_abort_bindings::artist::resource::types::Error>,
+    >,
+) -> Result<
+    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
+    artist_kernel::KernelError,
+> {
+    results
+        .into_iter()
+        .map(|result| match result {
+            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
+                .map(Ok)
+                .map_err(|error| artist_kernel::KernelError::InvalidUri {
+                    message: error.to_string(),
+                }),
+            Err(error) => Ok(Err(resource_error_parts_to_kernel(
+                format!("{:?}", error.code),
+                error.uri,
+                error.message,
+                "abort",
+            ))),
+        })
+        .collect()
+}
+
+fn resource_delete_results_to_kernel(
+    results: Vec<
+        Result<String, resource_async_tool_v1_delete_bindings::artist::resource::types::Error>,
+    >,
+) -> Result<
+    Vec<Result<artist_kernel::ResourceUri, artist_kernel::KernelError>>,
+    artist_kernel::KernelError,
+> {
+    results
+        .into_iter()
+        .map(|result| match result {
+            Ok(uri) => artist_kernel::ResourceUri::parse(&uri)
+                .map(Ok)
+                .map_err(|error| artist_kernel::KernelError::InvalidUri {
+                    message: error.to_string(),
+                }),
+            Err(error) => Ok(Err(resource_error_parts_to_kernel(
+                format!("{:?}", error.code),
+                error.uri,
+                error.message,
+                "delete",
+            ))),
+        })
+        .collect()
+}
+
+fn resource_find_request_from_kernel(
+    request: artist_kernel::FindRequest,
+) -> resource_async_tool_v1_find_bindings::artist::resource::types::FindRequest {
+    resource_async_tool_v1_find_bindings::artist::resource::types::FindRequest {
+        roots: request
+            .roots
+            .into_iter()
+            .map(|uri| uri.to_string())
+            .collect(),
+        query: request.query,
+    }
+}
+
+fn resource_find_result_to_kernel(
+    result: Result<
+        Vec<String>,
+        resource_async_tool_v1_find_bindings::artist::resource::types::Error,
+    >,
+) -> Result<Vec<artist_kernel::ResourceUri>, artist_kernel::KernelError> {
+    match result {
+        Ok(uris) => uris
+            .into_iter()
+            .map(|uri| {
+                artist_kernel::ResourceUri::parse(&uri).map_err(|error| {
+                    artist_kernel::KernelError::InvalidUri {
+                        message: error.to_string(),
+                    }
+                })
+            })
+            .collect(),
+        Err(error) => Err(resource_error_parts_to_kernel(
+            format!("{:?}", error.code),
+            error.uri,
+            error.message,
+            "find",
+        )),
+    }
+}
+
+fn resource_grep_request_from_kernel(
+    request: artist_kernel::GrepRequest,
+) -> resource_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest {
+    use resource_async_tool_v1_grep_bindings::artist::resource::types::{
+        AnchoredLine, AnchoredText, GrepSource,
+    };
+    let source = match request.source {
+        artist_kernel::GrepSource::Resources(uris) => {
+            GrepSource::Resources(uris.into_iter().map(|uri| uri.to_string()).collect())
+        }
+        artist_kernel::GrepSource::Text(texts) => GrepSource::Text(
+            texts
+                .into_iter()
+                .map(|text| AnchoredText {
+                    uri: text.uri.to_string(),
+                    lines: text
+                        .lines
+                        .into_iter()
+                        .map(|line| AnchoredLine {
+                            anchor: line.anchor.to_string(),
+                            text: line.text,
+                            ending: match line.ending {
+                                artist_kernel::LineEnding::None => {
+                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::None
+                                }
+                                artist_kernel::LineEnding::Lf => {
+                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Lf
+                                }
+                                artist_kernel::LineEnding::Crlf => {
+                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Crlf
+                                }
+                                artist_kernel::LineEnding::Cr => {
+                                    resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Cr
+                                }
+                            },
+                        })
+                        .collect(),
+                })
+                .collect(),
+        ),
+    };
+    resource_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest {
+        pattern: request.pattern,
+        source,
+    }
+}
+
+fn resource_grep_results_to_kernel(
+    result: Result<
+        Vec<resource_async_tool_v1_grep_bindings::artist::resource::types::AnchoredText>,
+        resource_async_tool_v1_grep_bindings::artist::resource::types::Error,
+    >,
+) -> Result<Vec<artist_kernel::AnchoredText>, artist_kernel::KernelError> {
+    match result {
+        Ok(texts) => texts
+            .into_iter()
+            .map(|text| {
+                Ok(artist_kernel::AnchoredText {
+                    uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
+                        artist_kernel::KernelError::InvalidUri {
+                            message: error.to_string(),
+                        }
+                    })?,
+                    lines: text
+                        .lines
+                        .into_iter()
+                        .map(|line| artist_kernel::AnchoredLine {
+                            anchor: anchor_from_string(&line.anchor),
+                            text: line.text,
+                            ending: match line.ending {
+                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::None => artist_kernel::LineEnding::None,
+                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                                resource_async_tool_v1_grep_bindings::artist::resource::types::LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                            },
+                        })
+                        .collect(),
+                })
+            })
+            .collect(),
+        Err(error) => Err(resource_error_parts_to_kernel(
+            format!("{:?}", error.code),
+            error.uri,
+            error.message,
+            "grep",
+        )),
+    }
+}
+
+fn resource_poll_request_from_kernel(
+    request: artist_kernel::PollRequest,
+) -> resource_async_tool_v1_poll_bindings::artist::resource::types::PollRequest {
+    use resource_async_tool_v1_poll_bindings::artist::resource::types::{PollTarget, Position};
+    let targets = request
+        .targets
+        .into_iter()
+        .map(|target| PollTarget {
+            uri: target.uri.to_string(),
+            from_position: target.from_position.map(|position| match position {
+                artist_kernel::Position::Top => Position::Top,
+                artist_kernel::Position::Bottom => Position::Bottom,
+                artist_kernel::Position::At(anchor) => Position::At(anchor.to_string()),
+            }),
+        })
+        .collect();
+    let until = request.until.map(|condition| {
+        let mut nodes = Vec::new();
+        fn lower(
+            condition: artist_kernel::PollCondition,
+            nodes: &mut Vec<
+                resource_async_tool_v1_poll_bindings::artist::resource::types::PollNode,
+            >,
+        ) -> u32 {
+            use resource_async_tool_v1_poll_bindings::artist::resource::types::{
+                PollAtom, PollNode, RegexAtom,
+            };
+            let node = match condition {
+                artist_kernel::PollCondition::Atom(atom) => PollNode::Atom(match atom {
+                    artist_kernel::PollAtom::Changed(target) => PollAtom::Changed(target),
+                    artist_kernel::PollAtom::Regex(regex) => PollAtom::Regex(RegexAtom {
+                        target: regex.target,
+                        pattern: regex.pattern,
+                    }),
+                    artist_kernel::PollAtom::Terminated(target) => PollAtom::Terminated(target),
+                    artist_kernel::PollAtom::Timeout(milliseconds) => {
+                        PollAtom::Timeout(milliseconds)
+                    }
+                }),
+                artist_kernel::PollCondition::All(children) => PollNode::All(
+                    children
+                        .into_iter()
+                        .map(|child| lower(child, nodes))
+                        .collect(),
+                ),
+                artist_kernel::PollCondition::Any(children) => PollNode::Any(
+                    children
+                        .into_iter()
+                        .map(|child| lower(child, nodes))
+                        .collect(),
+                ),
+            };
+            let index = nodes.len() as u32;
+            nodes.push(node);
+            index
+        }
+        let root = lower(condition, &mut nodes);
+        resource_async_tool_v1_poll_bindings::artist::resource::types::PollConditionWire {
+            root,
+            nodes,
+        }
+    });
+    resource_async_tool_v1_poll_bindings::artist::resource::types::PollRequest { targets, until }
+}
+
+fn resource_poll_result_to_kernel(
+    result: Result<
+        resource_async_tool_v1_poll_bindings::artist::resource::types::PollResult,
+        resource_async_tool_v1_poll_bindings::artist::resource::types::Error,
+    >,
+) -> Result<artist_kernel::PollResult, artist_kernel::KernelError> {
+    use resource_async_tool_v1_poll_bindings::artist::resource::types::LineEnding;
+    match result {
+        Ok(result) => Ok(artist_kernel::PollResult {
+            text: result
+                .text
+                .into_iter()
+                .map(|text| {
+                    Ok(artist_kernel::AnchoredText {
+                        uri: artist_kernel::ResourceUri::parse(&text.uri).map_err(|error| {
+                            artist_kernel::KernelError::InvalidUri {
+                                message: error.to_string(),
+                            }
+                        })?,
+                        lines: text
+                            .lines
+                            .into_iter()
+                            .map(|line| artist_kernel::AnchoredLine {
+                                anchor: anchor_from_string(&line.anchor),
+                                text: line.text,
+                                ending: match line.ending {
+                                    LineEnding::None => artist_kernel::LineEnding::None,
+                                    LineEnding::Lf => artist_kernel::LineEnding::Lf,
+                                    LineEnding::Crlf => artist_kernel::LineEnding::Crlf,
+                                    LineEnding::Cr => artist_kernel::LineEnding::Cr,
+                                },
+                            })
+                            .collect(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            satisfied: result
+                .satisfied
+                .into_iter()
+                .map(|atom| match atom {
+                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Changed(
+                        target,
+                    ) => artist_kernel::PollAtom::Changed(target),
+                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Regex(
+                        regex,
+                    ) => artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
+                        target: regex.target,
+                        pattern: regex.pattern,
+                    }),
+                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Terminated(
+                        target,
+                    ) => artist_kernel::PollAtom::Terminated(target),
+                    resource_async_tool_v1_poll_bindings::artist::resource::types::PollAtom::Timeout(
+                        milliseconds,
+                    ) => artist_kernel::PollAtom::Timeout(milliseconds),
+                })
+                .collect(),
+        }),
+        Err(error) => Err(resource_error_parts_to_kernel(
+            format!("{:?}", error.code),
+            error.uri,
+            error.message,
+            "poll",
+        )),
+    }
+}
+
 fn typed_error_for<E>(
-    code: tool_bindings::artist::tool::types::ErrorCode,
+    code: tool_v1_bindings::artist::resource::types::ErrorCode,
     message: String,
     uri: Option<String>,
 ) -> E
@@ -1041,6 +2288,39 @@ where
         .expect("WIT error types share the canonical error representation")
 }
 
+fn async_typed_error(
+    code: tool_v1_bindings::artist::resource::types::ErrorCode,
+    message: String,
+    uri: Option<String>,
+) -> resource_async_host_bindings::artist::resource::types::Error {
+    use resource_async_host_bindings::artist::resource::types::ErrorCode as AsyncCode;
+    let code = match format!("{code:?}").as_str() {
+        "InvalidUri" => AsyncCode::InvalidUri,
+        "InvalidInput" => AsyncCode::InvalidInput,
+        "InvalidPattern" => AsyncCode::InvalidPattern,
+        "InvalidAnchor" => AsyncCode::InvalidAnchor,
+        "StaleAnchor" => AsyncCode::StaleAnchor,
+        "WrongKind" => AsyncCode::WrongKind,
+        "NotFound" => AsyncCode::NotFound,
+        "Conflict" => AsyncCode::Conflict,
+        "Immutable" => AsyncCode::Immutable,
+        "PermissionDenied" => AsyncCode::PermissionDenied,
+        "NotEmpty" => AsyncCode::NotEmpty,
+        "Aborted" => AsyncCode::Aborted,
+        "Internal" => AsyncCode::Internal,
+        _ => AsyncCode::Unsupported,
+    };
+    resource_async_host_bindings::artist::resource::types::Error { code, uri, message }
+}
+
+fn async_error_from_kernel(
+    error: artist_kernel::KernelError,
+    target: Option<String>,
+) -> resource_async_host_bindings::artist::resource::types::Error {
+    let error = kernel_error_to_typed(error, target);
+    async_typed_error(error.code, error.message, error.uri)
+}
+
 /// Execute a contract-shaped kernel operation. JSON is used only to adapt the
 /// already-computed typed result to the generated WIT record; it is not used
 /// to construct, route, or execute the kernel operation.
@@ -1057,41 +2337,26 @@ where
     let capability = format!("resource.{verb}");
     if !state.capabilities.contains(&capability) {
         return Err(typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::PermissionDenied,
+            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
             format!("capability denied: {capability}"),
             target,
         ));
     }
     let Some(kernel) = state.kernel.clone() else {
         return Err(typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
             "typed tool host has no kernel".to_owned(),
             target,
         ));
     };
-    let context = state.context.clone();
-    let result = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
-            artist_kernel::KernelError::Handler {
-                message: error.to_string(),
-            }
-        })?;
-        runtime.block_on(kernel.execute_operation_with_context(operation, context))
-    })
-    .join()
-    .map_err(|_| {
-        typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            "typed kernel bridge panicked".to_owned(),
-            target.clone(),
-        )
-    })?
-    .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
+    let scope = state.scope.clone();
+    let result = futures::executor::block_on(kernel.execute_operation_with_scope(operation, scope))
+        .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
     let value = operation_primary_value(result)
         .map_err(|error| typed_error_from_kernel(error, target.clone()))?;
     let mut value = serde_json::to_value(value).map_err(|error| {
         typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
             error.to_string(),
             None,
         )
@@ -1099,11 +2364,263 @@ where
     normalize_typed_value(&mut value);
     serde_json::from_value(value).map_err(|_| {
         typed_error_for(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
             "typed host response conversion failed".to_owned(),
             None,
         )
     })
+}
+
+/// Async counterpart for the canonical component host bridge. Component
+/// invocations must never block an executor while routing a nested operation
+/// through the kernel.
+async fn typed_host_invoke_operation_async<Response>(
+    state: &mut HostState,
+    verb: &str,
+    target: Option<String>,
+    operation: artist_kernel::Operation,
+) -> Result<Response, resource_async_host_bindings::artist::resource::types::Error>
+where
+    Response: AsyncOperationResponse,
+{
+    let capability = format!("resource.{verb}");
+    if !state.capabilities.contains(&capability) {
+        return Err(async_typed_error(
+            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
+            format!("capability denied: {capability}"),
+            target,
+        ));
+    }
+    let Some(kernel) = state.kernel.clone() else {
+        return Err(async_typed_error(
+            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
+            "typed tool host has no kernel".to_owned(),
+            target,
+        ));
+    };
+    let result = kernel
+        .execute_operation_with_scope(operation, state.scope.clone())
+        .await
+        .map_err(|error| async_error_from_kernel(error, target.clone()))?;
+    Response::from_operation(verb, result).map_err(|error| async_error_from_kernel(error, target))
+}
+
+trait AsyncOperationResponse: Sized {
+    fn from_operation(
+        verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError>;
+}
+
+fn async_anchored_text(
+    text: artist_kernel::AnchoredText,
+) -> resource_async_host_bindings::artist::resource::types::AnchoredText {
+    use resource_async_host_bindings::artist::resource::types::{AnchoredLine, LineEnding};
+    resource_async_host_bindings::artist::resource::types::AnchoredText {
+        uri: text.uri.to_string(),
+        lines: text
+            .lines
+            .into_iter()
+            .map(|line| AnchoredLine {
+                anchor: line.anchor.to_string(),
+                text: line.text,
+                ending: match line.ending {
+                    artist_kernel::LineEnding::None => LineEnding::None,
+                    artist_kernel::LineEnding::Lf => LineEnding::Lf,
+                    artist_kernel::LineEnding::Crlf => LineEnding::Crlf,
+                    artist_kernel::LineEnding::Cr => LineEnding::Cr,
+                },
+            })
+            .collect(),
+    }
+}
+
+impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::ReadResult {
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Read(mut values) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "read response kind mismatch".into(),
+            });
+        };
+        match values.remove(0)? {
+            artist_kernel::ReadResult::Text(text) => Ok(Self::Text(async_anchored_text(text))),
+            artist_kernel::ReadResult::Directory { uri, entries } => Ok(Self::Directory(
+                resource_async_host_bindings::artist::resource::types::DirectoryResult {
+                    uri: uri.to_string(),
+                    entries: entries.into_iter().map(|entry| entry.to_string()).collect(),
+                },
+            )),
+        }
+    }
+}
+
+impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::WriteResult {
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Write(mut values) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "write response kind mismatch".into(),
+            });
+        };
+        Ok(Self {
+            text: async_anchored_text(values.remove(0)?.text),
+        })
+    }
+}
+
+impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::EditResult {
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Edit(mut values) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "edit response kind mismatch".into(),
+            });
+        };
+        let value = values.remove(0)?;
+        let diff_uri = value.diff.uri.clone();
+        let hunks = value
+            .diff
+            .hunks
+            .into_iter()
+            .map(
+                |hunk| resource_async_host_bindings::artist::resource::types::DiffHunk {
+                    old: hunk.old.into_iter().map(async_anchored_line).collect(),
+                    new: hunk.new.into_iter().map(async_anchored_line).collect(),
+                },
+            )
+            .collect();
+        Ok(Self {
+            text: async_anchored_text(value.text),
+            diff: resource_async_host_bindings::artist::resource::types::AnchoredDiff {
+                uri: diff_uri.to_string(),
+                hunks,
+            },
+        })
+    }
+}
+
+impl AsyncOperationResponse for Vec<String> {
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Find(result) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "find response kind mismatch".into(),
+            });
+        };
+        Ok(result?.into_iter().map(|uri| uri.to_string()).collect())
+    }
+}
+
+impl AsyncOperationResponse
+    for Vec<resource_async_host_bindings::artist::resource::types::AnchoredText>
+{
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Grep(result) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "grep response kind mismatch".into(),
+            });
+        };
+        Ok(result?.into_iter().map(async_anchored_text).collect())
+    }
+}
+
+impl AsyncOperationResponse for resource_async_host_bindings::artist::resource::types::PollResult {
+    fn from_operation(
+        _verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let artist_kernel::OperationResult::Poll(result) = result else {
+            return Err(artist_kernel::KernelError::Handler {
+                message: "poll response kind mismatch".into(),
+            });
+        };
+        let result = result?;
+        Ok(Self {
+            text: result.text.into_iter().map(async_anchored_text).collect(),
+            satisfied: result
+                .satisfied
+                .into_iter()
+                .map(|atom| match atom {
+                    artist_kernel::PollAtom::Changed(target) => {
+                        resource_async_host_bindings::artist::resource::types::PollAtom::Changed(
+                            target,
+                        )
+                    }
+                    artist_kernel::PollAtom::Regex(regex) => {
+                        resource_async_host_bindings::artist::resource::types::PollAtom::Regex(
+                            resource_async_host_bindings::artist::resource::types::RegexAtom {
+                                target: regex.target,
+                                pattern: regex.pattern,
+                            },
+                        )
+                    }
+                    artist_kernel::PollAtom::Terminated(target) => {
+                        resource_async_host_bindings::artist::resource::types::PollAtom::Terminated(
+                            target,
+                        )
+                    }
+                    artist_kernel::PollAtom::Timeout(milliseconds) => {
+                        resource_async_host_bindings::artist::resource::types::PollAtom::Timeout(
+                            milliseconds,
+                        )
+                    }
+                })
+                .collect(),
+        })
+    }
+}
+
+impl AsyncOperationResponse for String {
+    fn from_operation(
+        verb: &str,
+        result: artist_kernel::OperationResult,
+    ) -> Result<Self, artist_kernel::KernelError> {
+        let (mut values, expected) = match result {
+            artist_kernel::OperationResult::Run(values) => (values, "run"),
+            artist_kernel::OperationResult::Send(values) => (values, "send"),
+            artist_kernel::OperationResult::Abort(values) => (values, "abort"),
+            artist_kernel::OperationResult::Delete(values) => (values, "delete"),
+            _ => {
+                return Err(artist_kernel::KernelError::Handler {
+                    message: format!("{verb} response kind mismatch"),
+                });
+            }
+        };
+        if verb != expected {
+            return Err(artist_kernel::KernelError::Handler {
+                message: format!("{verb} response kind mismatch"),
+            });
+        }
+        Ok(values.remove(0)?.to_string())
+    }
+}
+
+fn async_anchored_line(
+    line: artist_kernel::AnchoredLine,
+) -> resource_async_host_bindings::artist::resource::types::AnchoredLine {
+    use resource_async_host_bindings::artist::resource::types::LineEnding;
+    resource_async_host_bindings::artist::resource::types::AnchoredLine {
+        anchor: line.anchor.to_string(),
+        text: line.text,
+        ending: match line.ending {
+            artist_kernel::LineEnding::None => LineEnding::None,
+            artist_kernel::LineEnding::Lf => LineEnding::Lf,
+            artist_kernel::LineEnding::Crlf => LineEnding::Crlf,
+            artist_kernel::LineEnding::Cr => LineEnding::Cr,
+        },
+    }
 }
 
 fn operation_primary_value(
@@ -1181,484 +2698,108 @@ fn normalize_typed_value(value: &mut serde_json::Value) {
 }
 
 fn typed_error(
-    code: tool_bindings::artist::tool::types::ErrorCode,
+    code: tool_v1_bindings::artist::resource::types::ErrorCode,
     message: String,
     uri: Option<String>,
-) -> tool_bindings::artist::tool::types::Error {
-    tool_bindings::artist::tool::types::Error { code, uri, message }
+) -> tool_v1_bindings::artist::resource::types::Error {
+    tool_v1_bindings::artist::resource::types::Error { code, uri, message }
 }
 
-// Retained only as source archaeology while downstream legacy components are
-// removed. Universal typed worlds never call this JSON bridge.
+// Kept behind the provider adapter boundary for older external callers; the
+// universal component worlds never construct kernel operations from this path.
 fn kernel_error_to_typed(
     error: artist_kernel::KernelError,
     target: Option<String>,
-) -> tool_bindings::artist::tool::types::Error {
+) -> tool_v1_bindings::artist::resource::types::Error {
     use artist_kernel::KernelError;
     let (code, uri, message) = match error {
         KernelError::InvalidUri { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
+            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidUri,
             target,
             message,
         ),
         KernelError::UnsupportedUri { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Unsupported,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
             Some(uri),
             "URI scheme is not supported".to_owned(),
         ),
         KernelError::NoHandler { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Unsupported,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
             Some(uri),
             "no handler is registered for this URI".to_owned(),
         ),
         KernelError::UnsupportedVerb { verb, uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Unsupported,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Unsupported,
             Some(uri),
             format!("verb {verb} is not supported for this resource"),
         ),
         KernelError::InvalidRequest { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
+            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidInput,
             target,
             message,
         ),
         KernelError::InvalidPattern { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::InvalidPattern,
+            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidPattern,
             target,
             message,
         ),
         KernelError::InvalidAnchor { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::InvalidAnchor,
+            tool_v1_bindings::artist::resource::types::ErrorCode::InvalidAnchor,
             target,
             message,
         ),
         KernelError::StaleAnchor { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::StaleAnchor,
+            tool_v1_bindings::artist::resource::types::ErrorCode::StaleAnchor,
             target,
             message,
         ),
         KernelError::WrongKind { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::WrongKind,
+            tool_v1_bindings::artist::resource::types::ErrorCode::WrongKind,
             target,
             message,
         ),
         KernelError::NotFound { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::NotFound,
+            tool_v1_bindings::artist::resource::types::ErrorCode::NotFound,
             Some(uri),
             "resource was not found".to_owned(),
         ),
         KernelError::AlreadyExists { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Conflict,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Conflict,
             Some(uri),
             "resource conflict".to_owned(),
         ),
         KernelError::Immutable { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Immutable,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Immutable,
             Some(uri),
             "resource is immutable".to_owned(),
         ),
         KernelError::PermissionDenied { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::PermissionDenied,
+            tool_v1_bindings::artist::resource::types::ErrorCode::PermissionDenied,
             Some(uri),
             "permission denied".to_owned(),
         ),
         KernelError::Conflict { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::Conflict,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Conflict,
             Some(uri),
             "resource conflict".to_owned(),
         ),
         KernelError::NotEmpty { uri } => (
-            tool_bindings::artist::tool::types::ErrorCode::NotEmpty,
+            tool_v1_bindings::artist::resource::types::ErrorCode::NotEmpty,
             Some(uri),
             "resource is not empty".to_owned(),
         ),
         KernelError::Aborted { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::Aborted,
-            target,
-            message,
-        ),
-        KernelError::InvalidState { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Aborted,
             target,
             message,
         ),
         KernelError::Handler { message } => (
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
+            tool_v1_bindings::artist::resource::types::ErrorCode::Internal,
             target,
             message,
         ),
     };
     typed_error(code, message, uri)
-}
-
-#[cfg(any())]
-fn execute_typed_kernel_value(
-    kernel: KernelHandle,
-    verb_name: &str,
-    target: String,
-    args: serde_json::Value,
-    context: artist_kernel::InvocationContext,
-) -> Result<serde_json::Value, tool_bindings::artist::tool::types::Error> {
-    let uri = (!target.is_empty())
-        .then(|| artist_kernel::ResourceUri::parse(&target))
-        .transpose()
-        .map_err(|error| {
-            typed_error(
-                tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
-                error.to_string(),
-                (!target.is_empty()).then_some(target.clone()),
-            )
-        })?;
-    let operation = match verb_name {
-        "read" => artist_kernel::Operation::Read(vec![artist_kernel::ReadRequest {
-            uri: uri.clone().ok_or_else(|| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    "read requires a URI".to_owned(),
-                    Some(target.clone()),
-                )
-            })?,
-            at: None,
-            before: None,
-            after: None,
-        }]),
-        "write" => artist_kernel::Operation::Write(vec![artist_kernel::WriteRequest {
-            uri: uri.clone().ok_or_else(|| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    "write requires a URI".to_owned(),
-                    Some(target.clone()),
-                )
-            })?,
-            content: args
-                .get("value")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        }]),
-        "find" => artist_kernel::Operation::Find(artist_kernel::FindRequest {
-            roots: args
-                .get("roots")
-                .and_then(serde_json::Value::as_array)
-                .map(|roots| {
-                    roots
-                        .iter()
-                        .filter_map(|root| root.as_str())
-                        .map(artist_kernel::ResourceUri::parse)
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .transpose()
-                .map_err(|error| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidUri,
-                        error.to_string(),
-                        None,
-                    )
-                })?
-                .unwrap_or_else(|| uri.clone().into_iter().collect()),
-            query: args
-                .get("query")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        }),
-        "grep" => artist_kernel::Operation::Grep(artist_kernel::GrepRequest {
-            pattern: args
-                .get("pattern")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            source: args
-                .get("source")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                        error.to_string(),
-                        None,
-                    )
-                })?
-                .unwrap_or_else(|| {
-                    artist_kernel::GrepSource::Resources(uri.clone().into_iter().collect())
-                }),
-        }),
-        "abort" => artist_kernel::Operation::Abort(vec![uri.clone().ok_or_else(|| {
-            typed_error(
-                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                "abort requires a URI".to_owned(),
-                Some(target.clone()),
-            )
-        })?]),
-        "delete" => artist_kernel::Operation::Delete(vec![uri.clone().ok_or_else(|| {
-            typed_error(
-                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                "delete requires a URI".to_owned(),
-                Some(target.clone()),
-            )
-        })?]),
-        "send" => artist_kernel::Operation::Send(vec![artist_kernel::SendRequest {
-            uri: uri.clone().ok_or_else(|| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    "send requires a URI".to_owned(),
-                    Some(target.clone()),
-                )
-            })?,
-            content: args
-                .get("content")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-        }]),
-        "run" => artist_kernel::Operation::Run(vec![artist_kernel::RunRequest {
-            uri: uri.clone().ok_or_else(|| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    "run requires a URI".to_owned(),
-                    Some(target.clone()),
-                )
-            })?,
-            args: args
-                .get("args")
-                .and_then(serde_json::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }]),
-        "edit" => {
-            let mut operations = if args.is_array() {
-                args
-            } else {
-                args.get("operations")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!([]))
-            };
-            let operations = serde_json::from_value(operations).map_err(|error| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    format!("invalid edit operations: {error}"),
-                    Some(target.clone()),
-                )
-            })?;
-            artist_kernel::Operation::Edit(vec![artist_kernel::EditRequest {
-                uri: uri.ok_or_else(|| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                        "edit requires a URI".to_owned(),
-                        Some(target.clone()),
-                    )
-                })?,
-                operations,
-            }])
-        }
-        "poll" => {
-            let targets = serde_json::from_value(
-                args.get("targets")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!([])),
-            )
-            .map_err(|error| {
-                typed_error(
-                    tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                    format!("invalid poll targets: {error}"),
-                    Some(target.clone()),
-                )
-            })?;
-            let until = if let Some(condition) = args.get("until") {
-                Some(lower_poll_condition(condition).map_err(|message| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                        message,
-                        Some(target.clone()),
-                    )
-                })?)
-            } else {
-                None
-            };
-            let mut request = artist_kernel::PollRequest { targets, until };
-            if request.targets.is_empty() {
-                request.targets.push(artist_kernel::PollTarget {
-                    uri: uri.ok_or_else(|| {
-                        typed_error(
-                            tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                            "poll requires a URI".to_owned(),
-                            Some(target.clone()),
-                        )
-                    })?,
-                    from_position: None,
-                });
-            }
-            artist_kernel::Operation::Poll(request)
-        }
-        _ => {
-            return Err(typed_error(
-                tool_bindings::artist::tool::types::ErrorCode::InvalidInput,
-                format!("typed operation {verb_name} is not yet representable"),
-                Some(target),
-            ));
-        }
-    };
-    let result = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
-        runtime
-            .block_on(kernel.execute_operation_with_context(operation, context))
-            .map_err(|error| error.to_string())
-    })
-    .join()
-    .map_err(|_| {
-        typed_error(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            "typed kernel bridge panicked".to_owned(),
-            Some(target.clone()),
-        )
-    })?
-    .map_err(|message| {
-        typed_error(
-            tool_bindings::artist::tool::types::ErrorCode::Internal,
-            message,
-            Some(target.clone()),
-        )
-    })?;
-    let value = match result {
-        artist_kernel::OperationResult::Read(mut values) => values
-            .remove(0)
-            .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))
-            .and_then(|value| {
-                serde_json::to_value(value).map_err(|error| {
-                    typed_error(
-                        tool_bindings::artist::tool::types::ErrorCode::Internal,
-                        error.to_string(),
-                        Some(target.clone()),
-                    )
-                })
-            })?,
-        artist_kernel::OperationResult::Find(value) => serde_json::to_value(
-            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-        artist_kernel::OperationResult::Grep(value) => serde_json::to_value(
-            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-        artist_kernel::OperationResult::Write(mut values) => serde_json::to_value(
-            values
-                .remove(0)
-                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-        artist_kernel::OperationResult::Edit(mut values) => serde_json::to_value(
-            values
-                .remove(0)
-                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-        artist_kernel::OperationResult::Poll(value) => serde_json::to_value(
-            value.map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-        artist_kernel::OperationResult::Send(mut values)
-        | artist_kernel::OperationResult::Run(mut values)
-        | artist_kernel::OperationResult::Abort(mut values)
-        | artist_kernel::OperationResult::Delete(mut values) => serde_json::to_value(
-            values
-                .remove(0)
-                .map_err(|error| kernel_error_to_typed(error, Some(target.clone())))?,
-        )
-        .unwrap(),
-    };
-    Ok(value)
-}
-
-/// Lower the component-facing indexed poll condition into the recursive
-/// kernel semantic value. The indexed form exists only because WIT records
-/// cannot recursively refer to themselves in all host binding modes.
-#[cfg(any())]
-fn lower_poll_condition(value: &serde_json::Value) -> Result<artist_kernel::PollCondition, String> {
-    let nodes = value
-        .get("nodes")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "poll condition requires nodes".to_owned())?;
-    let root = value
-        .get("root")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| "poll condition requires root".to_owned())? as usize;
-    fn lower(
-        index: usize,
-        nodes: &[serde_json::Value],
-    ) -> Result<artist_kernel::PollCondition, String> {
-        let node = nodes
-            .get(index)
-            .ok_or_else(|| format!("poll condition node {index} is out of range"))?;
-        if let Some(atom) = node.get("atom") {
-            let value = if let Some(object) = atom.as_object() {
-                if let Some(lines) = object.get("changed").and_then(serde_json::Value::as_u64) {
-                    artist_kernel::PollAtom::Changed(lines as u32)
-                } else if let Some(regex) = object.get("regex") {
-                    artist_kernel::PollAtom::Regex(artist_kernel::RegexAtom {
-                        target: regex
-                            .get("target")
-                            .and_then(serde_json::Value::as_u64)
-                            .ok_or_else(|| "regex atom requires target".to_owned())?
-                            as u32,
-                        pattern: regex
-                            .get("pattern")
-                            .and_then(serde_json::Value::as_str)
-                            .ok_or_else(|| "regex atom requires pattern".to_owned())?
-                            .to_owned(),
-                    })
-                } else if let Some(target) =
-                    object.get("terminated").and_then(serde_json::Value::as_u64)
-                {
-                    artist_kernel::PollAtom::Terminated(target as u32)
-                } else if let Some(milliseconds) =
-                    object.get("timeout").and_then(serde_json::Value::as_u64)
-                {
-                    artist_kernel::PollAtom::Timeout(milliseconds)
-                } else {
-                    return Err("unknown poll atom".to_owned());
-                }
-            } else if let Some(lines) = atom.as_u64() {
-                artist_kernel::PollAtom::Changed(lines as u32)
-            } else {
-                return Err("invalid poll atom".to_owned());
-            };
-            return Ok(artist_kernel::PollCondition::Atom(value));
-        }
-        for (key, constructor) in [("all", true), ("any", false)] {
-            if let Some(children) = node.get(key).and_then(serde_json::Value::as_array) {
-                let children = children
-                    .iter()
-                    .map(|child| {
-                        child
-                            .as_u64()
-                            .ok_or_else(|| "poll boolean child must be an index".to_owned())
-                            .and_then(|index| lower(index as usize, nodes))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                return Ok(if constructor {
-                    artist_kernel::PollCondition::All(children)
-                } else {
-                    artist_kernel::PollCondition::Any(children)
-                });
-            }
-        }
-        Err(format!("unknown poll node {index}"))
-    }
-    lower(root, nodes)
-}
-
-/// A loaded, validated component instance.
-pub struct ComponentHost {
-    engine: wasmtime::Engine,
-    component: wasmtime::component::Component,
-    capabilities: HashSet<String>,
-    bytes: Arc<Vec<u8>>,
 }
 
 /// Host for components that implement the typed `artist:tool` worlds.
@@ -1667,6 +2808,7 @@ pub struct TypedComponentHost {
     component: wasmtime::component::Component,
     capabilities: HashSet<String>,
     dependencies: Vec<Arc<DynamicDependency>>,
+    canonical_resource_imports: bool,
 }
 
 #[derive(Clone)]
@@ -1690,29 +2832,16 @@ fn validate_typed_contract_names(
     exports: &[String],
     tool_imports: &[String],
 ) -> Result<(), String> {
-    let expected_export = format!("artist:tool/{}@0.1.0", verb.interface());
-    if exports != &[expected_export.clone()] {
-        return Err(format!(
-            "typed contract {} requires exactly export {}, found {:?}",
-            contracts::ContractId::universal(verb),
-            expected_export,
-            exports
-        ));
+    let v1_export = format!("artist:tool/{}@1.0.0", verb.interface());
+    if exports == &[v1_export.clone()] && tool_imports.iter().any(|name| name.contains("resource/"))
+    {
+        return Ok(());
     }
-    let expected_import = format!("artist:tool/host-{}@0.1.0", verb.interface());
-    let expected_imports = vec![
-        "artist:tool/types@0.1.0".to_owned(),
-        expected_import.clone(),
-    ];
-    if tool_imports != expected_imports {
-        return Err(format!(
-            "typed contract {} requires type definitions and exactly import {}, found {:?}",
-            contracts::ContractId::universal(verb),
-            expected_import,
-            tool_imports
-        ));
-    }
-    Ok(())
+    Err(format!(
+        "typed contract {} requires export {} and direct artist:resource imports (exports={exports:?}, imports={tool_imports:?})",
+        contracts::ContractId::universal(verb),
+        v1_export
+    ))
 }
 
 impl TypedComponentHost {
@@ -1750,12 +2879,13 @@ impl TypedComponentHost {
     where
         I: IntoIterator<Item = String>,
     {
-        let mut config = wasmtime::Config::new();
-        config.wasm_component_model(true);
-        let engine = wasmtime::Engine::new(&config)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
+        let engine = package::component_engine()?;
         let component = wasmtime::component::Component::from_binary(&engine, bytes)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(format!("{e:#}"))))?;
+        let canonical_resource_imports = component
+            .component_type()
+            .imports(&engine)
+            .any(|(name, _)| name.contains("resource/"));
         let capabilities = capabilities.into_iter().collect::<HashSet<_>>();
         fn load_dependencies(
             engine: &wasmtime::Engine,
@@ -1786,6 +2916,7 @@ impl TypedComponentHost {
             component,
             capabilities,
             dependencies,
+            canonical_resource_imports,
         })
     }
 
@@ -1804,7 +2935,7 @@ impl TypedComponentHost {
             .collect::<Vec<_>>();
         let tool_imports = imports
             .iter()
-            .filter(|name| name.starts_with("artist:tool/"))
+            .filter(|name| name.contains("artist:tool/") || name.contains("resource/"))
             .cloned()
             .collect::<Vec<_>>();
         validate_typed_contract_names(verb, &exports, &tool_imports)
@@ -1818,45 +2949,67 @@ impl TypedComponentHost {
         let mut linker = wasmtime::component::Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
             .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        macro_rules! add {
-            ($world:ty) => {
-                <$world>::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-                    &mut linker,
-                    |state: &mut HostState| state,
-                )
-                .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
+        macro_rules! add_resource_import {
+            ($instance:literal, $interface:ident) => {{
+                let mut instance = linker
+                    .instance($instance)
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+                resource_bindings::artist::resource::$interface::add_to_linker_instance::<
+                    _,
+                    wasmtime::component::HasSelf<_>,
+                >(&mut instance, |state: &mut HostState| state)
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+            }};
+        }
+        macro_rules! add_resource {
+            ($interface:ident) => {
+                resource_bindings::artist::resource::$interface::add_to_linker::<
+                    _,
+                    wasmtime::component::HasSelf<_>,
+                >(&mut linker, |state: &mut HostState| state)
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
             };
         }
         match verb {
             contracts::Verb::Read => {
-                add!(read_bindings::ReadWorld);
+                add_resource!(read);
+                add_resource_import!("resource-read", read);
             }
             contracts::Verb::Write => {
-                add!(write_bindings::WriteWorld);
+                add_resource!(write);
+                add_resource_import!("resource-write", write);
             }
             contracts::Verb::Edit => {
-                add!(edit_bindings::EditWorld);
+                add_resource!(edit);
+                add_resource_import!("resource-edit", edit);
             }
             contracts::Verb::Find => {
-                add!(find_bindings::FindWorld);
+                add_resource!(find);
+                add_resource_import!("resource-find", find);
             }
             contracts::Verb::Grep => {
-                add!(grep_bindings::GrepWorld);
+                add_resource!(grep);
+                add_resource_import!("resource-grep", grep);
             }
             contracts::Verb::Run => {
-                add!(run_bindings::RunWorld);
+                add_resource!(run);
+                add_resource_import!("resource-run", run);
             }
             contracts::Verb::Send => {
-                add!(send_bindings::SendWorld);
+                add_resource!(send);
+                add_resource_import!("resource-send", send);
             }
             contracts::Verb::Abort => {
-                add!(abort_bindings::AbortWorld);
+                add_resource!(abort);
+                add_resource_import!("resource-abort", abort);
             }
             contracts::Verb::Delete => {
-                add!(delete_bindings::DeleteWorld);
+                add_resource!(delete);
+                add_resource_import!("resource-delete", delete);
             }
             contracts::Verb::Poll => {
-                add!(poll_bindings::PollWorld);
+                add_resource!(poll);
+                add_resource_import!("resource-poll", poll);
             }
         }
         Ok(linker)
@@ -1869,6 +3022,79 @@ impl TypedComponentHost {
             &self.capabilities,
             &self.dependencies,
         )
+    }
+
+    fn async_linker_for(
+        &self,
+        verb: contracts::Verb,
+    ) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
+        let mut linker = wasmtime::component::Linker::new(&self.engine);
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        macro_rules! add_resource_import {
+            ($instance:literal, $interface:ident) => {{
+                let mut instance = linker
+                    .instance($instance)
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+                resource_async_host_bindings::artist::resource::$interface::add_to_linker_instance::<
+                    _,
+                    wasmtime::component::HasSelf<_>,
+                >(&mut instance, |state: &mut HostState| state)
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+            }};
+        }
+        macro_rules! add_resource {
+            ($interface:ident) => {
+                resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
+                    _,
+                    wasmtime::component::HasSelf<_>,
+                >(&mut linker, |state: &mut HostState| state)
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+            };
+        }
+        match verb {
+            contracts::Verb::Read => {
+                add_resource!(read);
+                add_resource_import!("resource-read", read);
+            }
+            contracts::Verb::Write => {
+                add_resource!(write);
+                add_resource_import!("resource-write", write);
+            }
+            contracts::Verb::Edit => {
+                add_resource!(edit);
+                add_resource_import!("resource-edit", edit);
+            }
+            contracts::Verb::Find => {
+                add_resource!(find);
+                add_resource_import!("resource-find", find);
+            }
+            contracts::Verb::Grep => {
+                add_resource!(grep);
+                add_resource_import!("resource-grep", grep);
+            }
+            contracts::Verb::Run => {
+                add_resource!(run);
+                add_resource_import!("resource-run", run);
+            }
+            contracts::Verb::Send => {
+                add_resource!(send);
+                add_resource_import!("resource-send", send);
+            }
+            contracts::Verb::Abort => {
+                add_resource!(abort);
+                add_resource_import!("resource-abort", abort);
+            }
+            contracts::Verb::Delete => {
+                add_resource!(delete);
+                add_resource_import!("resource-delete", delete);
+            }
+            contracts::Verb::Poll => {
+                add_resource!(poll);
+                add_resource_import!("resource-poll", poll);
+            }
+        }
+        Ok(linker)
     }
 
     /// Invoke an arbitrary package-local WIT contract through the Component
@@ -1896,7 +3122,7 @@ impl TypedComponentHost {
         kernel: artist_kernel::KernelHandle,
         context: artist_kernel::InvocationContext,
     ) -> Result<serde_json::Value, ComponentError> {
-        let mut store = wasmtime::Store::new(
+        let mut store = new_store(
             &self.engine,
             HostState::with_kernel_context(self.capabilities.iter().cloned(), kernel, context),
         );
@@ -1947,8 +3173,73 @@ impl TypedComponentHost {
         })
     }
 
+    pub async fn invoke_dynamic_json_async_with_scope(
+        &self,
+        input: &serde_json::Value,
+        export_name: &str,
+        kernel: artist_kernel::KernelHandle,
+        scope: artist_kernel::InvocationScope,
+    ) -> Result<serde_json::Value, ComponentError> {
+        let mut store = new_store(
+            &self.engine,
+            HostState::with_kernel_scope(self.capabilities.iter().cloned(), kernel, scope),
+        );
+        let linker = dynamic_linker_for_async(
+            &self.engine,
+            &self.component,
+            &self.capabilities,
+            &self.dependencies,
+        )?;
+        let instance = linker
+            .instantiate_async(&mut store, &self.component)
+            .await
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let func = instance
+            .get_func(&mut store, "invoke")
+            .or_else(|| instance.get_func(&mut store, export_name))
+            .ok_or_else(|| {
+                ComponentError::Invoke(anyhow::anyhow!(format!(
+                    "dynamic tool exports neither invoke nor {export_name}"
+                )))
+            })?;
+        let function_type = func.ty(&store);
+        let params = function_type.params().collect::<Vec<_>>();
+        let arguments = params
+            .iter()
+            .map(|(name, ty)| {
+                let value = input
+                    .get(*name)
+                    .or_else(|| (params.len() == 1).then_some(input))
+                    .ok_or_else(|| {
+                        ComponentError::Invoke(anyhow::anyhow!(format!(
+                            "dynamic tool input is missing parameter {name}"
+                        )))
+                    })?;
+                json_to_component_val(value, ty)
+                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut results = func
+            .ty(&store)
+            .results()
+            .map(|_| wasmtime::component::Val::Bool(false))
+            .collect::<Vec<_>>();
+        func.call_async(&mut store, &arguments, &mut results)
+            .await
+            .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+        let values = results
+            .iter()
+            .map(component_val_to_json)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match values.as_slice() {
+            [] => serde_json::Value::Null,
+            [value] => value.clone(),
+            values => serde_json::Value::Array(values.to_vec()),
+        })
+    }
+
     pub fn validate_dynamic_export(&self, export_name: &str) -> Result<(), ComponentError> {
-        let mut store = wasmtime::Store::new(
+        let mut store = new_store(
             &self.engine,
             HostState::with_capabilities(self.capabilities.iter().cloned()),
         );
@@ -1991,13 +3282,13 @@ impl TypedComponentHost {
 
     pub fn invoke_read(
         &self,
-        requests: Vec<tool_bindings::artist::tool::types::ReadRequest>,
+        requests: Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
         kernel: KernelHandle,
     ) -> Result<
         Vec<
             Result<
-                tool_bindings::artist::tool::types::ReadResult,
-                tool_bindings::artist::tool::types::Error,
+                tool_v1_bindings::artist::resource::types::ReadResult,
+                tool_v1_bindings::artist::resource::types::Error,
             >,
         >,
         ComponentError,
@@ -2033,7 +3324,7 @@ impl TypedComponentHost {
         kernel: KernelHandle,
         context: artist_kernel::InvocationContext,
     ) -> Result<String, ComponentError> {
-        let mut store = wasmtime::Store::new(
+        let mut store = new_store(
             &self.engine,
             HostState::with_kernel_context(self.capabilities.iter().cloned(), kernel, context),
         );
@@ -2055,105 +3346,339 @@ impl TypedComponentHost {
         }
         match verb {
             contracts::Verb::Read => {
-                invoke!(
-                    read_bindings,
-                    ReadWorld,
-                    Vec<read_bindings::artist::tool::types::ReadRequest>,
-                    artist_tool_read,
-                    call_read,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_bindings,
+                        ReadWorld,
+                        Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
+                        artist_tool_read,
+                        call_read,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_bindings,
+                        ReadWorld,
+                        Vec<tool_v1_bindings::artist::resource::types::ReadRequest>,
+                        artist_tool_read,
+                        call_read,
+                        input
+                    )
+                }
             }
             contracts::Verb::Write => {
-                invoke!(
-                    write_bindings,
-                    WriteWorld,
-                    Vec<write_bindings::artist::tool::types::WriteRequest>,
-                    artist_tool_write,
-                    call_write,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_write_bindings,
+                        WriteWorld,
+                        Vec<tool_v1_write_bindings::artist::resource::types::WriteRequest>,
+                        artist_tool_write,
+                        call_write,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_write_bindings,
+                        WriteWorld,
+                        Vec<tool_v1_write_bindings::artist::resource::types::WriteRequest>,
+                        artist_tool_write,
+                        call_write,
+                        input
+                    )
+                }
             }
             contracts::Verb::Edit => {
-                invoke!(
-                    edit_bindings,
-                    EditWorld,
-                    Vec<edit_bindings::artist::tool::types::EditRequest>,
-                    artist_tool_edit,
-                    call_edit,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_edit_bindings,
+                        EditWorld,
+                        Vec<tool_v1_edit_bindings::artist::resource::types::EditRequest>,
+                        artist_tool_edit,
+                        call_edit,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_edit_bindings,
+                        EditWorld,
+                        Vec<tool_v1_edit_bindings::artist::resource::types::EditRequest>,
+                        artist_tool_edit,
+                        call_edit,
+                        input
+                    )
+                }
             }
             contracts::Verb::Find => {
-                invoke!(
-                    find_bindings,
-                    FindWorld,
-                    find_bindings::artist::tool::types::FindRequest,
-                    artist_tool_find,
-                    call_find,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_find_bindings,
+                        FindWorld,
+                        tool_v1_find_bindings::artist::resource::types::FindRequest,
+                        artist_tool_find,
+                        call_find,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_find_bindings,
+                        FindWorld,
+                        tool_v1_find_bindings::artist::resource::types::FindRequest,
+                        artist_tool_find,
+                        call_find,
+                        input
+                    )
+                }
             }
             contracts::Verb::Grep => {
-                invoke!(
-                    grep_bindings,
-                    GrepWorld,
-                    grep_bindings::artist::tool::types::GrepRequest,
-                    artist_tool_grep,
-                    call_grep,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_grep_bindings,
+                        GrepWorld,
+                        tool_v1_grep_bindings::artist::resource::types::GrepRequest,
+                        artist_tool_grep,
+                        call_grep,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_grep_bindings,
+                        GrepWorld,
+                        tool_v1_grep_bindings::artist::resource::types::GrepRequest,
+                        artist_tool_grep,
+                        call_grep,
+                        input
+                    )
+                }
             }
             contracts::Verb::Run => {
-                invoke!(
-                    run_bindings,
-                    RunWorld,
-                    Vec<run_bindings::artist::tool::types::RunRequest>,
-                    artist_tool_run,
-                    call_run,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_run_bindings,
+                        RunWorld,
+                        Vec<tool_v1_run_bindings::artist::resource::types::RunRequest>,
+                        artist_tool_run,
+                        call_run,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_run_bindings,
+                        RunWorld,
+                        Vec<tool_v1_run_bindings::artist::resource::types::RunRequest>,
+                        artist_tool_run,
+                        call_run,
+                        input
+                    )
+                }
             }
             contracts::Verb::Send => {
-                invoke!(
-                    send_bindings,
-                    SendWorld,
-                    Vec<send_bindings::artist::tool::types::SendRequest>,
-                    artist_tool_send,
-                    call_send,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_send_bindings,
+                        SendWorld,
+                        Vec<tool_v1_send_bindings::artist::resource::types::SendRequest>,
+                        artist_tool_send,
+                        call_send,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_send_bindings,
+                        SendWorld,
+                        Vec<tool_v1_send_bindings::artist::resource::types::SendRequest>,
+                        artist_tool_send,
+                        call_send,
+                        input
+                    )
+                }
             }
             contracts::Verb::Abort => {
-                invoke!(
-                    abort_bindings,
-                    AbortWorld,
-                    Vec<String>,
-                    artist_tool_abort,
-                    call_abort,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_abort_bindings,
+                        AbortWorld,
+                        Vec<String>,
+                        artist_tool_abort,
+                        call_abort,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_abort_bindings,
+                        AbortWorld,
+                        Vec<String>,
+                        artist_tool_abort,
+                        call_abort,
+                        input
+                    )
+                }
             }
             contracts::Verb::Delete => {
-                invoke!(
-                    delete_bindings,
-                    DeleteWorld,
-                    Vec<String>,
-                    artist_tool_delete,
-                    call_delete,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_delete_bindings,
+                        DeleteWorld,
+                        Vec<String>,
+                        artist_tool_delete,
+                        call_delete,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_delete_bindings,
+                        DeleteWorld,
+                        Vec<String>,
+                        artist_tool_delete,
+                        call_delete,
+                        input
+                    )
+                }
             }
             contracts::Verb::Poll => {
-                invoke!(
-                    poll_bindings,
-                    PollWorld,
-                    poll_bindings::artist::tool::types::PollRequest,
-                    artist_tool_poll,
-                    call_poll,
-                    input
-                )
+                if self.canonical_resource_imports {
+                    invoke!(
+                        tool_v1_poll_bindings,
+                        PollWorld,
+                        tool_v1_poll_bindings::artist::resource::types::PollRequest,
+                        artist_tool_poll,
+                        call_poll,
+                        input
+                    )
+                } else {
+                    invoke!(
+                        tool_v1_poll_bindings,
+                        PollWorld,
+                        tool_v1_poll_bindings::artist::resource::types::PollRequest,
+                        artist_tool_poll,
+                        call_poll,
+                        input
+                    )
+                }
             }
+        }
+    }
+
+    /// Async counterpart used by the canonical v1 universal tool path. The
+    /// JSON here is only the provider adapter representation; the component
+    /// call itself is generated WIT and uses the shared resource types.
+    pub async fn invoke_json_async_with_context(
+        &self,
+        verb: contracts::Verb,
+        input: &str,
+        kernel: KernelHandle,
+        context: artist_kernel::InvocationContext,
+    ) -> Result<String, ComponentError> {
+        self.invoke_json_async_with_scope(
+            verb,
+            input,
+            kernel,
+            artist_kernel::InvocationScope::new(context),
+        )
+        .await
+    }
+
+    pub async fn invoke_json_async_with_scope(
+        &self,
+        verb: contracts::Verb,
+        input: &str,
+        kernel: KernelHandle,
+        scope: artist_kernel::InvocationScope,
+    ) -> Result<String, ComponentError> {
+        let mut store = new_store(
+            &self.engine,
+            HostState::with_kernel_scope(self.capabilities.iter().cloned(), kernel, scope),
+        );
+        let linker = self.async_linker_for(verb)?;
+        macro_rules! invoke {
+            ($module:ident, $world:ident, $ty:ty, $instance:ident, $method:ident) => {{
+                let instance =
+                    $module::$world::instantiate_async(&mut store, &self.component, &linker)
+                        .await
+                        .map_err(|error| {
+                            ComponentError::Invoke(anyhow::anyhow!(error.to_string()))
+                        })?;
+                let request: $ty = serde_json::from_str(input)
+                    .map_err(|_| ComponentError::MalformedResponse { field: "input" })?;
+                let result = instance
+                    .$instance()
+                    .$method(&mut store, &request)
+                    .await
+                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))?;
+                serde_json::to_string(&result)
+                    .map_err(|error| ComponentError::Invoke(anyhow::anyhow!(error.to_string())))
+            }};
+        }
+        match verb {
+            contracts::Verb::Read => invoke!(
+                tool_v1_async_tool_v1_bindings,
+                ReadWorld,
+                Vec<tool_v1_async_tool_v1_bindings::artist::resource::types::ReadRequest>,
+                artist_tool_read,
+                call_read
+            ),
+            contracts::Verb::Write => invoke!(
+                tool_v1_async_tool_v1_write_bindings,
+                WriteWorld,
+                Vec<tool_v1_async_tool_v1_write_bindings::artist::resource::types::WriteRequest>,
+                artist_tool_write,
+                call_write
+            ),
+            contracts::Verb::Edit => invoke!(
+                tool_v1_async_tool_v1_edit_bindings,
+                EditWorld,
+                Vec<tool_v1_async_tool_v1_edit_bindings::artist::resource::types::EditRequest>,
+                artist_tool_edit,
+                call_edit
+            ),
+            contracts::Verb::Find => invoke!(
+                tool_v1_async_tool_v1_find_bindings,
+                FindWorld,
+                tool_v1_async_tool_v1_find_bindings::artist::resource::types::FindRequest,
+                artist_tool_find,
+                call_find
+            ),
+            contracts::Verb::Grep => invoke!(
+                tool_v1_async_tool_v1_grep_bindings,
+                GrepWorld,
+                tool_v1_async_tool_v1_grep_bindings::artist::resource::types::GrepRequest,
+                artist_tool_grep,
+                call_grep
+            ),
+            contracts::Verb::Run => invoke!(
+                tool_v1_async_tool_v1_run_bindings,
+                RunWorld,
+                Vec<tool_v1_async_tool_v1_run_bindings::artist::resource::types::RunRequest>,
+                artist_tool_run,
+                call_run
+            ),
+            contracts::Verb::Send => invoke!(
+                tool_v1_async_tool_v1_send_bindings,
+                SendWorld,
+                Vec<tool_v1_async_tool_v1_send_bindings::artist::resource::types::SendRequest>,
+                artist_tool_send,
+                call_send
+            ),
+            contracts::Verb::Abort => invoke!(
+                tool_v1_async_tool_v1_abort_bindings,
+                AbortWorld,
+                Vec<String>,
+                artist_tool_abort,
+                call_abort
+            ),
+            contracts::Verb::Delete => invoke!(
+                tool_v1_async_tool_v1_delete_bindings,
+                DeleteWorld,
+                Vec<String>,
+                artist_tool_delete,
+                call_delete
+            ),
+            contracts::Verb::Poll => invoke!(
+                tool_v1_async_tool_v1_poll_bindings,
+                PollWorld,
+                tool_v1_async_tool_v1_poll_bindings::artist::resource::types::PollRequest,
+                artist_tool_poll,
+                call_poll
+            ),
         }
     }
 }
@@ -2167,26 +3692,25 @@ fn dynamic_linker_for(
     let mut linker = wasmtime::component::Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-    macro_rules! add {
-        ($world:ty) => {
-            <$world>::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-                &mut linker,
-                |state: &mut HostState| state,
-            )
+    macro_rules! add_resource {
+        ($interface:ident) => {
+            resource_bindings::artist::resource::$interface::add_to_linker::<
+                _,
+                wasmtime::component::HasSelf<_>,
+            >(&mut linker, |state: &mut HostState| state)
             .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
         };
     }
-    add!(read_bindings::ReadWorld);
-    add!(write_bindings::WriteWorld);
-    add!(edit_bindings::EditWorld);
-    add!(find_bindings::FindWorld);
-    add!(grep_bindings::GrepWorld);
-    add!(run_bindings::RunWorld);
-    add!(send_bindings::SendWorld);
-    add!(abort_bindings::AbortWorld);
-    add!(delete_bindings::DeleteWorld);
-    add!(poll_bindings::PollWorld);
-
+    add_resource!(read);
+    add_resource!(write);
+    add_resource!(edit);
+    add_resource!(find);
+    add_resource!(grep);
+    add_resource!(run);
+    add_resource!(send);
+    add_resource!(abort);
+    add_resource!(delete);
+    add_resource!(poll);
     for (import_name, _) in component.component_type().imports(engine) {
         if import_name.starts_with("wasi:") || import_name.starts_with("artist:tool/") {
             continue;
@@ -2210,6 +3734,168 @@ fn dynamic_linker_for(
         define_dependency_exports(&mut instance, Arc::clone(dependency))?;
     }
     Ok(linker)
+}
+
+/// Async counterpart of the package-local linker. Dependency exports are
+/// ordinary typed component functions, but their implementation may itself
+/// import another component. Keep that recursion inside Wasmtime's async
+/// linker so custom A -> B -> C calls never block a runtime worker.
+fn dynamic_linker_for_async(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+    _capabilities: &HashSet<String>,
+    dependencies: &[Arc<DynamicDependency>],
+) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
+    let mut linker = wasmtime::component::Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)
+        .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+    macro_rules! add_resource {
+        ($interface:ident) => {
+            resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
+                HostState,
+                wasmtime::component::HasSelf<HostState>,
+            >(&mut linker, |state: &mut HostState| state)
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        };
+    }
+    add_resource!(read);
+    add_resource!(write);
+    add_resource!(edit);
+    add_resource!(find);
+    add_resource!(grep);
+    add_resource!(run);
+    add_resource!(send);
+    add_resource!(abort);
+    add_resource!(delete);
+    add_resource!(poll);
+    for (import_name, _) in component.component_type().imports(engine) {
+        if import_name.starts_with("wasi:") || import_name.starts_with("artist:tool/") {
+            continue;
+        }
+        let dependency = dependencies.iter().find(|dependency| {
+            contract_matches_import(&dependency.contract, import_name)
+                || dependency
+                    .component
+                    .component_type()
+                    .exports(&dependency.engine)
+                    .any(|(_, export)| export.is_implements(import_name))
+        });
+        let Some(dependency) = dependency else {
+            return Err(ComponentError::Load(anyhow::anyhow!(format!(
+                "no active custom tool satisfies component import {import_name}"
+            ))));
+        };
+        let mut instance = linker
+            .instance(import_name)
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        define_dependency_exports_async(&mut instance, Arc::clone(dependency))?;
+    }
+    Ok(linker)
+}
+
+fn define_dependency_exports_async(
+    instance: &mut wasmtime::component::LinkerInstance<'_, HostState>,
+    dependency: Arc<DynamicDependency>,
+) -> Result<(), ComponentError> {
+    for (name, export) in dependency
+        .component
+        .component_type()
+        .exports(&dependency.engine)
+    {
+        match &export.ty {
+            wasmtime::component::types::ComponentItem::ComponentFunc(_) => {
+                let dependency = Arc::clone(&dependency);
+                let export_name = name.to_owned();
+                instance
+                    .func_new_async(name, move |mut store, _ty, params, results| {
+                        let dependency = Arc::clone(&dependency);
+                        let export_name = export_name.clone();
+                        Box::new(async move {
+                            let linker = dynamic_linker_for_async(
+                                &dependency.engine,
+                                &dependency.component,
+                                &dependency.capabilities,
+                                &dependency.dependencies,
+                            )
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                            let imported = linker
+                                .instantiate_async(&mut store, &dependency.component)
+                                .await
+                                .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                            let function =
+                                imported.get_func(&mut store, &export_name).ok_or_else(|| {
+                                    wasmtime::Error::msg(format!(
+                                        "dependency export disappeared: {export_name}"
+                                    ))
+                                })?;
+                            function
+                                .call_async(&mut store, params, results)
+                                .await
+                                .map_err(|error| wasmtime::Error::msg(error.to_string()))
+                        })
+                    })
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+            }
+            wasmtime::component::types::ComponentItem::ComponentInstance(component_instance) => {
+                let mut nested = instance
+                    .instance(name)
+                    .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+                define_dependency_instance_exports_async(
+                    &mut nested,
+                    Arc::clone(&dependency),
+                    component_instance,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn define_dependency_instance_exports_async(
+    instance: &mut wasmtime::component::LinkerInstance<'_, HostState>,
+    dependency: Arc<DynamicDependency>,
+    component_instance: &wasmtime::component::types::ComponentInstance,
+) -> Result<(), ComponentError> {
+    for (name, export) in component_instance.exports(&dependency.engine) {
+        if matches!(
+            export.ty,
+            wasmtime::component::types::ComponentItem::ComponentFunc(_)
+        ) {
+            let dependency = Arc::clone(&dependency);
+            let export_name = name.to_owned();
+            instance
+                .func_new_async(name, move |mut store, _ty, params, results| {
+                    let dependency = Arc::clone(&dependency);
+                    let export_name = export_name.clone();
+                    Box::new(async move {
+                        let linker = dynamic_linker_for_async(
+                            &dependency.engine,
+                            &dependency.component,
+                            &dependency.capabilities,
+                            &dependency.dependencies,
+                        )
+                        .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let imported = linker
+                            .instantiate_async(&mut store, &dependency.component)
+                            .await
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))?;
+                        let function =
+                            imported.get_func(&mut store, &export_name).ok_or_else(|| {
+                                wasmtime::Error::msg(format!(
+                                    "dependency export disappeared: {export_name}"
+                                ))
+                            })?;
+                        function
+                            .call_async(&mut store, params, results)
+                            .await
+                            .map_err(|error| wasmtime::Error::msg(error.to_string()))
+                    })
+                })
+                .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        }
+    }
+    Ok(())
 }
 
 fn contract_matches_import(contract: &str, import_name: &str) -> bool {
@@ -2417,6 +4103,7 @@ fn json_to_component_val(
                     .map(|field| {
                         object
                             .get(field.name)
+                            .or_else(|| object.get(&field.name.replace('-', "_")))
                             .ok_or_else(|| format!("missing record field {}", field.name))
                             .and_then(|value| {
                                 json_to_component_val(value, &field.ty)
@@ -2579,14 +4266,180 @@ fn component_val_to_json(
 }
 
 pub mod package {
-    use super::{ABI_VERSION, ComponentError, ComponentHost, TypedComponentHost};
-    use serde::{Deserialize, Serialize};
+    use super::{ABI_VERSION, ComponentError, TypedComponentHost};
+    use gray_matter::{Matter, engine::YAML};
+    use serde::{Deserialize, Serialize, de::DeserializeOwned};
     use sha2::{Digest, Sha256};
     use std::{
         fs,
         path::{Path, PathBuf},
         process::Command,
+        sync::{Mutex, OnceLock},
+        time::Duration,
     };
+
+    /// Per-invocation Wasmtime resource ceilings. These are deliberately runtime
+    /// policy rather than part of any package or WIT contract.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct WasmExecutionLimits {
+        pub max_memory_bytes: usize,
+        pub max_table_elements: usize,
+        pub max_instances: usize,
+        pub max_memories: usize,
+        pub max_tables: usize,
+    }
+
+    impl Default for WasmExecutionLimits {
+        fn default() -> Self {
+            Self {
+                max_memory_bytes: 512 * 1024 * 1024,
+                max_table_elements: 100_000,
+                max_instances: 128,
+                max_memories: 32,
+                max_tables: 32,
+            }
+        }
+    }
+
+    #[allow(deprecated)]
+    pub(crate) fn component_engine() -> Result<wasmtime::Engine, ComponentError> {
+        let mut config = wasmtime::Config::new();
+        config.wasm_component_model(true);
+        config.wasm_component_model_implements(true);
+        config.async_support(true);
+        config.wasm_component_model_async(true);
+        config.epoch_interruption(true);
+        config.consume_fuel(true);
+        let engine = wasmtime::Engine::new(&config)
+            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
+        register_epoch_engine(&engine);
+        Ok(engine)
+    }
+
+    static EPOCH_ENGINES: OnceLock<Mutex<Vec<wasmtime::Engine>>> = OnceLock::new();
+    static EPOCH_TICKER: OnceLock<()> = OnceLock::new();
+    static CARGO_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn cargo_build_lock() -> std::sync::MutexGuard<'static, ()> {
+        CARGO_BUILD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap()
+    }
+
+    /// Build one authored package target and recover the emitted component.
+    /// Tool and resource packages deliberately share this Cargo boundary; the
+    /// package-specific layers own only manifest validation, fingerprints,
+    /// caching, and component-link validation.
+    pub(crate) fn build_wasm_artifact(
+        root: &Path,
+        manifest: &Path,
+        target_name: &str,
+        options: &BuildOptions,
+    ) -> Result<PathBuf, String> {
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .manifest_path(manifest)
+            .no_deps()
+            .other_options(vec!["--offline".to_owned()])
+            .exec()
+            .map_err(|error| format!("cargo metadata failed: {error}"))?;
+        let target_directory = metadata.target_directory.clone().into_std_path_buf();
+
+        let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+        if !rustflags.contains("target-cpu") {
+            if !rustflags.is_empty() {
+                rustflags.push(' ');
+            }
+            rustflags.push_str("-C target-cpu=native");
+        }
+        let mut build = escargot::CargoBuild::new()
+            .manifest_path(manifest)
+            .target_dir(root.join("target"))
+            .target(&options.target)
+            .arg("--message-format")
+            .arg("json")
+            .arg("--offline")
+            .env("RUSTFLAGS", rustflags);
+        build = match options.profile {
+            BuildProfile::Debug => build,
+            BuildProfile::Release => build.release(),
+            BuildProfile::Product => build.arg("--profile").arg("product"),
+        };
+        let _build_guard = cargo_build_lock();
+        let mut command = build.into_command();
+        command.current_dir(root);
+        if let Ok(path) = std::env::var("PATH") {
+            command.env("PATH", format!("/usr/bin:/bin:{path}"));
+        }
+        let messages = escargot::CommandMessages::with_command(command)
+            .map_err(|error| format!("cargo build failed: {error}"))?;
+        let filename = format!("{}.wasm", target_name.replace('-', "_"));
+        let artifact = messages
+            .filter_map(|message| message.ok())
+            .find_map(|message| {
+                let escargot::format::Message::CompilerArtifact(artifact) =
+                    message.decode().ok()?
+                else {
+                    return None;
+                };
+                (artifact.target.name == target_name).then(|| {
+                    artifact
+                        .filenames
+                        .into_iter()
+                        .map(|path| path.into_owned())
+                        .find(|path| path.extension().is_some_and(|extension| extension == "wasm"))
+                })?
+            })
+            .or_else(|| {
+                let expected = target_directory
+                    .join(&options.target)
+                    .join(options.profile.directory())
+                    .join(&filename);
+                expected.is_file().then_some(expected).or_else(|| {
+                    [target_directory.clone(), root.join("target")]
+                        .into_iter()
+                        .find_map(|search_root| {
+                            WalkDir::new(search_root)
+                                .into_iter()
+                                .filter_map(Result::ok)
+                                .map(|entry| entry.into_path())
+                                .find(|path| path.is_file() && path.file_name().is_some_and(|name| name == filename.as_str()))
+                        })
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "cargo succeeded but emitted no WASM component artifact (target={target_name}, expected={filename})"
+                )
+            })?;
+        if !artifact.is_file() {
+            return Err(format!(
+                "cargo produced a non-file artifact {}",
+                artifact.display()
+            ));
+        }
+        Ok(artifact)
+    }
+
+    fn register_epoch_engine(engine: &wasmtime::Engine) {
+        let engines = EPOCH_ENGINES.get_or_init(|| Mutex::new(Vec::new()));
+        engines.lock().unwrap().push(engine.clone());
+        EPOCH_TICKER.get_or_init(|| {
+            std::thread::Builder::new()
+                .name("artist-wasm-epoch".to_owned())
+                .spawn(|| {
+                    loop {
+                        std::thread::sleep(Duration::from_millis(10));
+                        if let Some(engines) = EPOCH_ENGINES.get() {
+                            for engine in engines.lock().unwrap().iter() {
+                                engine.increment_epoch();
+                            }
+                        }
+                    }
+                })
+                .expect("artist WASM epoch ticker must start");
+        });
+    }
     use walkdir::WalkDir;
 
     #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -2673,35 +4526,21 @@ pub mod package {
         pub rustc_version: String,
     }
 
-    #[derive(Debug, Deserialize)]
-    struct CargoMetadata {
-        packages: Vec<CargoPackage>,
+    pub struct ParsedManifest<T> {
+        pub frontmatter: T,
+        pub prose: String,
     }
 
-    #[derive(Debug, Deserialize)]
-    struct CargoPackage {
-        name: String,
-        version: String,
-        manifest_path: PathBuf,
-        targets: Vec<CargoTarget>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct CargoTarget {
-        name: String,
-        kind: Vec<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct CargoBuildMessage {
-        reason: String,
-        target: Option<CargoMessageTarget>,
-        filenames: Option<Vec<PathBuf>>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct CargoMessageTarget {
-        name: String,
+    pub fn parse_frontmatter<T: DeserializeOwned>(
+        markdown: &str,
+    ) -> Result<ParsedManifest<T>, String> {
+        let parsed = Matter::<YAML>::new()
+            .parse_with_struct::<T>(markdown)
+            .ok_or_else(|| "Markdown must contain valid YAML frontmatter".to_owned())?;
+        Ok(ParsedManifest {
+            frontmatter: parsed.data,
+            prose: parsed.content.trim().to_owned(),
+        })
     }
 
     impl ToolPackage {
@@ -2709,9 +4548,12 @@ pub mod package {
             let root = root.as_ref().to_owned();
             let markdown = fs::read_to_string(root.join("tool.md"))
                 .map_err(|e| ComponentError::Load(anyhow::anyhow!(e)))?;
-            let (frontmatter, prose) = split_frontmatter(&markdown)?;
-            let manifest: ToolFrontmatter = serde_yaml::from_str(frontmatter)
-                .map_err(|e| ComponentError::Load(anyhow::anyhow!(e)))?;
+            let parsed = parse_frontmatter::<ToolFrontmatter>(&markdown).map_err(|error| {
+                ComponentError::Load(anyhow::anyhow!(format!(
+                    "tool.md must contain valid YAML frontmatter: {error}"
+                )))
+            })?;
+            let manifest = parsed.frontmatter;
             let contract = manifest
                 .contract
                 .as_deref()
@@ -2734,6 +4576,11 @@ pub mod package {
             }
             let cargo_manifest = root.join("Cargo.toml");
             let wit_path = root.join("tool.wit");
+            if contract.is_none() && !wit_path.is_file() {
+                return Err(ComponentError::Load(anyhow::anyhow!(
+                    "tool package must declare a typed contract or tool.wit"
+                )));
+            }
             if let Some(path) = wit_path.as_path().is_file().then_some(wit_path.as_path()) {
                 wit_parser::UnresolvedPackageGroup::parse_dir(path.parent().unwrap()).map_err(
                     |error| {
@@ -2747,7 +4594,7 @@ pub mod package {
             Ok(Self {
                 root,
                 manifest,
-                prose: prose.trim().to_owned(),
+                prose: parsed.prose,
                 wasm,
                 source: source_path,
                 build_manifest: cargo_manifest.is_file().then_some(cargo_manifest),
@@ -2784,11 +4631,20 @@ pub mod package {
                 .ok_or_else(|| ComponentError::Build {
                     diagnostics: "source package has no Cargo.toml".to_owned(),
                 })?;
-            let metadata = cargo_metadata(manifest)?;
+            let mut metadata_command = cargo_metadata::MetadataCommand::new();
+            metadata_command
+                .manifest_path(manifest)
+                .no_deps()
+                .other_options(vec!["--offline".to_owned()]);
+            let metadata = metadata_command
+                .exec()
+                .map_err(|error| ComponentError::Build {
+                    diagnostics: format!("cargo metadata failed: {error}"),
+                })?;
             let package = metadata
                 .packages
                 .iter()
-                .find(|package| package.manifest_path == *manifest)
+                .find(|package| package.manifest_path.as_str() == manifest.to_string_lossy())
                 .or_else(|| metadata.packages.first())
                 .ok_or_else(|| ComponentError::Build {
                     diagnostics: "Cargo metadata contained no package".to_owned(),
@@ -2796,18 +4652,25 @@ pub mod package {
             let target = package
                 .targets
                 .iter()
-                .find(|target| target.kind.iter().any(|kind| kind == "cdylib"))
-                .or_else(|| {
-                    package
-                        .targets
+                .find(|target| {
+                    target
+                        .kind
                         .iter()
-                        .find(|target| target.kind.iter().any(|kind| kind == "bin"))
+                        .any(|kind| matches!(kind, cargo_metadata::TargetKind::CDyLib))
+                })
+                .or_else(|| {
+                    package.targets.iter().find(|target| {
+                        target
+                            .kind
+                            .iter()
+                            .any(|kind| matches!(kind, cargo_metadata::TargetKind::Bin))
+                    })
                 })
                 .ok_or_else(|| ComponentError::Build {
                     diagnostics: "package must declare a cdylib or bin target".to_owned(),
                 })?;
 
-            let fingerprint = fingerprint(self, options, &package.version)?;
+            let fingerprint = fingerprint(self, options, &package.version.to_string())?;
             if !options.force {
                 if let Some((artifact, provenance)) = find_cached_artifact(
                     &self.root,
@@ -2816,74 +4679,25 @@ pub mod package {
                     options.profile,
                     &fingerprint,
                 )? {
-                    validate_artifact(&artifact, self, options)?;
-                    return Ok(BuildResult {
-                        artifact,
-                        provenance,
-                        fingerprint,
-                        cached: true,
-                    });
+                    if validate_artifact(&artifact, self, options).is_ok() {
+                        return Ok(BuildResult {
+                            artifact,
+                            provenance,
+                            fingerprint,
+                            cached: true,
+                        });
+                    }
                 }
             }
 
-            let mut command = Command::new("cargo");
-            command
-                .arg("build")
-                .arg("--manifest-path")
-                .arg(manifest)
-                .arg("--target")
-                .arg(&options.target)
-                .arg("--message-format")
-                .arg("json-render-diagnostics")
-                .arg("--offline");
-            let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-            if !rustflags.contains("target-cpu") {
-                if !rustflags.is_empty() {
-                    rustflags.push(' ');
-                }
-                rustflags.push_str("-C target-cpu=native");
-            }
-            command.env("RUSTFLAGS", rustflags);
-            match options.profile {
-                BuildProfile::Debug => {}
-                BuildProfile::Release => {
-                    command.arg("--release");
-                }
-                BuildProfile::Product => {
-                    command.args(["--profile", "product"]);
-                }
-            }
-            let output = command.output().map_err(|error| ComponentError::Build {
-                diagnostics: format!("could not execute cargo: {error}"),
-            })?;
-            if !output.status.success() {
-                return Err(ComponentError::Build {
-                    diagnostics: command_diagnostics(&output.stdout, &output.stderr),
-                });
-            }
-            let artifact = cargo_artifact(
-                &output.stdout,
-                &target.name,
-                &options.target,
-                options.profile,
-            )
-            .ok_or_else(|| ComponentError::Build {
-                diagnostics: "cargo succeeded but emitted no WASM component artifact".to_owned(),
-            })?;
-            if !artifact.is_file() {
-                return Err(ComponentError::Build {
-                    diagnostics: format!(
-                        "cargo succeeded but did not produce expected component {}",
-                        artifact.display()
-                    ),
-                });
-            }
+            let artifact = build_wasm_artifact(&self.root, manifest, &target.name, options)
+                .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
             let provenance = artifact.with_extension("wasm.artist.json");
 
             validate_artifact(&artifact, self, options)?;
             let provenance_value = BuildProvenance {
                 package_name: package.name.clone(),
-                package_version: package.version.clone(),
+                package_version: package.version.to_string(),
                 contract: self.contract.as_ref().map(ToString::to_string),
                 abi_version: ABI_VERSION.to_owned(),
                 target: options.target.clone(),
@@ -2907,31 +4721,6 @@ pub mod package {
                 cached: false,
             })
         }
-    }
-
-    fn cargo_metadata(manifest: &Path) -> Result<CargoMetadata, ComponentError> {
-        let output = Command::new("cargo")
-            .args([
-                "metadata",
-                "--no-deps",
-                "--format-version",
-                "1",
-                "--offline",
-            ])
-            .arg("--manifest-path")
-            .arg(manifest)
-            .output()
-            .map_err(|error| ComponentError::Build {
-                diagnostics: format!("could not execute cargo metadata: {error}"),
-            })?;
-        if !output.status.success() {
-            return Err(ComponentError::Build {
-                diagnostics: command_diagnostics(&output.stdout, &output.stderr),
-            });
-        }
-        serde_json::from_slice(&output.stdout).map_err(|error| ComponentError::Build {
-            diagnostics: format!("invalid cargo metadata: {error}"),
-        })
     }
 
     fn fingerprint(
@@ -2962,7 +4751,7 @@ pub mod package {
         }
         hash_path(
             &mut hasher,
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/tool-surface/world.wit"),
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/tool-surface-v1"),
         )?;
         hash_path(
             &mut hasher,
@@ -3056,10 +4845,11 @@ pub mod package {
                     .unwrap_or("invoke"),
             )?;
         } else {
-            ComponentHost::new_with_capabilities(&bytes, options.granted_capabilities.clone())
-                .map_err(|error| ComponentError::Build {
-                    diagnostics: format!("component validation failed: {error}"),
-                })?;
+            return Err(ComponentError::Build {
+                diagnostics:
+                    "component package must declare a typed universal contract or package-local WIT"
+                        .to_owned(),
+            });
         }
         if package.manifest.name.is_empty() {
             return Err(ComponentError::Build {
@@ -3107,35 +4897,6 @@ pub mod package {
         Ok(None)
     }
 
-    fn cargo_artifact(
-        stdout: &[u8],
-        target_name: &str,
-        target: &str,
-        profile: BuildProfile,
-    ) -> Option<PathBuf> {
-        stdout
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice::<CargoBuildMessage>(line).ok())
-            .filter(|message| message.reason == "compiler-artifact")
-            .filter(|message| {
-                message
-                    .target
-                    .as_ref()
-                    .is_some_and(|value| value.name == target_name)
-            })
-            .flat_map(|message| message.filenames.unwrap_or_default())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "wasm")
-                    && path
-                        .components()
-                        .any(|component| component.as_os_str() == target)
-                    && path
-                        .components()
-                        .any(|component| component.as_os_str() == profile.directory())
-            })
-    }
-
     fn sha256_file(path: &Path) -> Result<String, ComponentError> {
         let bytes = fs::read(path).map_err(|error| ComponentError::Build {
             diagnostics: error.to_string(),
@@ -3151,195 +4912,92 @@ pub mod package {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
             .unwrap_or_else(|| "unknown".to_owned())
     }
-
-    fn command_diagnostics(stdout: &[u8], stderr: &[u8]) -> String {
-        let stderr = String::from_utf8_lossy(stderr).trim().to_owned();
-        if !stderr.is_empty() {
-            stderr
-        } else {
-            String::from_utf8_lossy(stdout).trim().to_owned()
-        }
-    }
-
-    fn split_frontmatter(markdown: &str) -> Result<(&str, &str), ComponentError> {
-        let mut lines = markdown.lines();
-        if lines.next() != Some("---") {
-            return Err(ComponentError::Load(anyhow::anyhow!(
-                "tool.md must begin with YAML frontmatter"
-            )));
-        }
-        let Some(end) = markdown[4..].find("\n---") else {
-            return Err(ComponentError::Load(anyhow::anyhow!(
-                "tool.md frontmatter is not closed"
-            )));
-        };
-        let end = end + 4;
-        Ok((&markdown[4..end], &markdown[end + 4..]))
-    }
 }
 
-impl ComponentHost {
-    fn linker(&self) -> Result<wasmtime::component::Linker<HostState>, ComponentError> {
-        let mut linker = wasmtime::component::Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        bindings::ArtistWorld::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-            &mut linker,
-            |state: &mut HostState| state,
-        )
-        .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        Ok(linker)
-    }
+/// Shared active-generation storage used by both tool and resource package
+/// adapters. Activation validates candidates before inserting immutable
+/// `Arc` generations, so readers never observe a partially swapped package.
+pub mod generations {
+    use std::{
+        collections::HashMap,
+        ops::Deref,
+        sync::{Arc, RwLock},
+    };
 
-    pub fn new(bytes: &[u8]) -> Result<Self, ComponentError> {
-        Self::new_with_capabilities(bytes, std::iter::empty::<String>())
-    }
+    #[derive(Clone)]
+    pub struct GenerationStore<T>(Arc<RwLock<HashMap<String, Arc<T>>>>);
 
-    pub fn new_with_capabilities<I>(bytes: &[u8], capabilities: I) -> Result<Self, ComponentError>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let mut config = wasmtime::Config::new();
-        config.wasm_component_model(true);
-        let engine = wasmtime::Engine::new(&config)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        let component = wasmtime::component::Component::from_binary(&engine, bytes)
-            .map_err(|e| ComponentError::Load(anyhow::anyhow!(e.to_string())))?;
-        let host = Self {
-            engine,
-            component,
-            capabilities: capabilities.into_iter().collect(),
-            bytes: Arc::new(bytes.to_vec()),
-        };
-        host.validate()?;
-        Ok(host)
-    }
-
-    pub fn validate(&self) -> Result<ComponentInfo, ComponentError> {
-        let info = self.info()?;
-        validate_component_info(&info)?;
-        validate_capabilities(&info, &self.capabilities)?;
-        Ok(info)
-    }
-
-    pub fn info(&self) -> Result<ComponentInfo, ComponentError> {
-        let mut store = wasmtime::Store::new(
-            &self.engine,
-            HostState::with_capabilities(self.capabilities.iter().cloned()),
-        );
-        let linker = self.linker()?;
-        let instance = bindings::ArtistWorld::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-        instance
-            .artist_component_component()
-            .call_info(&mut store)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))
-    }
-
-    pub fn invoke(&self, request: Invocation) -> Result<Response, ComponentError> {
-        serde_json::from_str::<serde_json::Value>(&request.input)
-            .map_err(|_| ComponentError::MalformedResponse { field: "input" })?;
-        let mut store = wasmtime::Store::new(
-            &self.engine,
-            HostState::with_capabilities(self.capabilities.iter().cloned()),
-        );
-        let linker = self.linker()?;
-        let instance = bindings::ArtistWorld::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-        let response = instance
-            .artist_component_component()
-            .call_invoke(&mut store, &request)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?
-            .map_err(ComponentError::Abi)?;
-        serde_json::from_str::<serde_json::Value>(&response.output)
-            .map_err(|_| ComponentError::MalformedResponse { field: "output" })?;
-        serde_json::from_str::<serde_json::Value>(&response.metadata)
-            .map_err(|_| ComponentError::MalformedResponse { field: "metadata" })?;
-        Ok(response)
-    }
-
-    /// Invoke a component with the kernel capability bridge installed. The
-    /// component remains the execution boundary; resource effects occur only
-    /// through the explicitly supplied kernel handle.
-    pub fn invoke_with_kernel(
-        &self,
-        request: Invocation,
-        kernel: KernelHandle,
-    ) -> Result<Response, ComponentError> {
-        serde_json::from_str::<serde_json::Value>(&request.input)
-            .map_err(|_| ComponentError::MalformedResponse { field: "input" })?;
-        let mut store = wasmtime::Store::new(
-            &self.engine,
-            HostState::with_kernel(self.capabilities.iter().cloned(), kernel),
-        );
-        let linker = self.linker()?;
-        let instance = bindings::ArtistWorld::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-        let response = instance
-            .artist_component_component()
-            .call_invoke(&mut store, &request)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?
-            .map_err(ComponentError::Abi)?;
-        serde_json::from_str::<serde_json::Value>(&response.output)
-            .map_err(|_| ComponentError::MalformedResponse { field: "output" })?;
-        serde_json::from_str::<serde_json::Value>(&response.metadata)
-            .map_err(|_| ComponentError::MalformedResponse { field: "metadata" })?;
-        Ok(response)
-    }
-
-    pub fn invoke_stream(&self, request: Invocation) -> Result<Vec<StreamChunk>, ComponentError> {
-        let mut store = wasmtime::Store::new(
-            &self.engine,
-            HostState::with_capabilities(self.capabilities.iter().cloned()),
-        );
-        let linker = self.linker()?;
-        let instance = bindings::ArtistWorld::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?;
-        instance
-            .artist_component_component()
-            .call_invoke_stream(&mut store, &request)
-            .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?
-            .map_err(ComponentError::Abi)
-    }
-
-    pub async fn invoke_async(&self, request: Invocation) -> Result<Response, ComponentError> {
-        let bytes = self.bytes.clone();
-        let capabilities = self.capabilities.clone();
-        tokio::task::spawn_blocking(move || {
-            Self::new_with_capabilities(&bytes, capabilities)?.invoke(request)
-        })
-        .await
-        .map_err(|e| ComponentError::Invoke(anyhow::anyhow!(e.to_string())))?
-    }
-
-    pub fn invoke_with_cancellation(
-        &self,
-        request: Invocation,
-        cancellation: &Cancellation,
-    ) -> Result<Response, ComponentError> {
-        if cancellation.is_cancelled() {
-            return Err(ComponentError::Cancelled);
+    impl<T> Default for GenerationStore<T> {
+        fn default() -> Self {
+            Self(Arc::new(RwLock::new(HashMap::new())))
         }
-        let result = self.invoke(request);
-        if cancellation.is_cancelled() {
-            return Err(ComponentError::Cancelled);
+    }
+
+    impl<T> Deref for GenerationStore<T> {
+        type Target = RwLock<HashMap<String, Arc<T>>>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
         }
-        result
+    }
+
+    impl<T> GenerationStore<T> {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn next_generation(&self, name: &str, current: impl Fn(&T) -> u64) -> u64 {
+            self.write()
+                .unwrap()
+                .get(name)
+                .map(|active| current(active.as_ref()) + 1)
+                .unwrap_or(1)
+        }
+
+        pub fn insert(&self, name: String, generation: T) -> Arc<T> {
+            let generation = Arc::new(generation);
+            self.write().unwrap().insert(name, Arc::clone(&generation));
+            generation
+        }
+
+        pub fn current(&self, name: &str) -> Option<Arc<T>> {
+            self.read().unwrap().get(name).cloned()
+        }
+
+        pub fn values(&self) -> Vec<Arc<T>> {
+            self.read().unwrap().values().cloned().collect()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::GenerationStore;
+
+        #[test]
+        fn replacement_keeps_old_generation_usable_by_existing_leases() {
+            let store = GenerationStore::new();
+            let old = store.insert("demo".to_owned(), 1_u64);
+            assert_eq!(store.next_generation("demo", |generation| *generation), 2);
+            let new = store.insert("demo".to_owned(), 2_u64);
+
+            assert_eq!(*old, 1);
+            assert_eq!(*new, 2);
+            assert_eq!(*store.current("demo").unwrap(), 2);
+        }
     }
 }
 
 /// Versioned component activation and hot-reload coordination.
 pub mod runtime {
     use super::{
-        ComponentError, ComponentHost, ComponentInfo, Invocation, Response, StreamChunk,
-        TypedComponentHost,
+        ComponentError, ComponentMetadata, TypedComponentHost,
         package::{BuildOptions, ToolPackage},
     };
     use std::{
         collections::HashMap,
         fs,
         path::PathBuf,
-        sync::{Arc, Mutex, RwLock},
+        sync::{Arc, Mutex},
         thread,
         time::Duration,
     };
@@ -3352,8 +5010,7 @@ pub mod runtime {
         fingerprint: String,
         provenance: PathBuf,
         artifact: Arc<Vec<u8>>,
-        info: ComponentInfo,
-        host: Option<Arc<ComponentHost>>,
+        info: ComponentMetadata,
         typed_host: Option<Arc<TypedComponentHost>>,
         dynamic_host: Option<Arc<TypedComponentHost>>,
     }
@@ -3379,34 +5036,8 @@ pub mod runtime {
             Arc::clone(&self.artifact)
         }
 
-        pub fn info(&self) -> &ComponentInfo {
+        pub fn info(&self) -> &ComponentMetadata {
             &self.info
-        }
-
-        pub fn invoke(&self, request: Invocation) -> Result<Response, ComponentError> {
-            self.host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "typed component requires a verb contract"
-                    ))
-                })?
-                .invoke(request)
-        }
-
-        pub fn invoke_with_kernel(
-            &self,
-            request: Invocation,
-            kernel: artist_kernel::KernelHandle,
-        ) -> Result<Response, ComponentError> {
-            self.host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "typed component requires a verb contract"
-                    ))
-                })?
-                .invoke_with_kernel(request, kernel)
         }
 
         pub fn invoke_tool_json(
@@ -3430,25 +5061,46 @@ pub mod runtime {
             kernel: artist_kernel::KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> Result<String, ComponentError> {
-            if let Some(host) = &self.typed_host {
-                host.invoke_json_with_context(verb, input, kernel, context)
-            } else {
-                let response = self.invoke_with_kernel(
-                    Invocation {
-                        id: format!("tool:{verb}"),
-                        operation: format!("tool.{verb}"),
-                        target: String::new(),
-                        input: input.to_owned(),
-                        context: super::Context {
-                            cancellation_token: context.cancellation_token.unwrap_or_default(),
-                            deadline_ms: context.deadline_ms,
-                            correlation_id: context.correlation_id.unwrap_or_default(),
-                        },
-                    },
-                    kernel,
-                )?;
-                Ok(response.output)
-            }
+            self.typed_host
+                .as_ref()
+                .ok_or_else(|| {
+                    ComponentError::Invoke(anyhow::anyhow!(
+                        "named invocation requires a typed v1 component"
+                    ))
+                })?
+                .invoke_json_with_context(verb, input, kernel, context)
+        }
+
+        pub async fn invoke_tool_json_async_with_context(
+            &self,
+            verb: super::contracts::Verb,
+            input: &str,
+            kernel: artist_kernel::KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<String, ComponentError> {
+            let host = self.typed_host.as_ref().ok_or_else(|| {
+                ComponentError::Invoke(anyhow::anyhow!(
+                    "async named invocation requires a typed v1 component"
+                ))
+            })?;
+            host.invoke_json_async_with_context(verb, input, kernel, context)
+                .await
+        }
+
+        pub async fn invoke_tool_json_async_with_scope(
+            &self,
+            verb: super::contracts::Verb,
+            input: &str,
+            kernel: artist_kernel::KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<String, ComponentError> {
+            let host = self.typed_host.as_ref().ok_or_else(|| {
+                ComponentError::Invoke(anyhow::anyhow!(
+                    "async named invocation requires a typed v1 component"
+                ))
+            })?;
+            host.invoke_json_async_with_scope(verb, input, kernel, scope)
+                .await
         }
 
         pub fn invoke_dynamic_json(
@@ -3482,29 +5134,21 @@ pub mod runtime {
                 .invoke_dynamic_json_with_context(input, export_name, kernel, context)
         }
 
-        pub fn invoke_stream(
+        pub async fn invoke_dynamic_json_async_with_scope(
             &self,
-            request: Invocation,
-        ) -> Result<Vec<StreamChunk>, ComponentError> {
-            self.host
+            input: &serde_json::Value,
+            export_name: &str,
+            kernel: artist_kernel::KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<serde_json::Value, ComponentError> {
+            self.dynamic_host
                 .as_ref()
                 .ok_or_else(|| {
                     ComponentError::Invoke(anyhow::anyhow!(
-                        "typed component has no generic stream entrypoint"
+                        "component has no package-local WIT host"
                     ))
                 })?
-                .invoke_stream(request)
-        }
-
-        pub async fn invoke_async(&self, request: Invocation) -> Result<Response, ComponentError> {
-            self.host
-                .as_ref()
-                .ok_or_else(|| {
-                    ComponentError::Invoke(anyhow::anyhow!(
-                        "typed component requires typed dispatch"
-                    ))
-                })?
-                .invoke_async(request)
+                .invoke_dynamic_json_async_with_scope(input, export_name, kernel, scope)
                 .await
         }
     }
@@ -3518,17 +5162,10 @@ pub mod runtime {
                 provenance: self.provenance.clone(),
                 artifact: Arc::clone(&self.artifact),
                 info: self.info.clone(),
-                host: self.host.as_ref().map(Arc::clone),
                 typed_host: self.typed_host.as_ref().map(Arc::clone),
                 dynamic_host: self.dynamic_host.as_ref().map(Arc::clone),
             }
         }
-    }
-
-    #[derive(Clone, Debug)]
-    pub struct InvocationResult {
-        pub generation: u64,
-        pub response: Response,
     }
 
     /// Registry of the currently active component version for each package.
@@ -3536,7 +5173,7 @@ pub mod runtime {
     /// reload cannot disturb the active version.
     #[derive(Clone, Default)]
     pub struct ComponentRegistry {
-        active: Arc<RwLock<HashMap<String, Arc<ActiveVersion>>>>,
+        active: super::generations::GenerationStore<ActiveVersion>,
         debounce: Arc<Mutex<HashMap<String, Arc<Mutex<u64>>>>>,
     }
 
@@ -3583,7 +5220,7 @@ pub mod runtime {
                     build.artifact.display()
                 ))
             })?;
-            let (host, typed_host, dynamic_host, info) = if package
+            let (typed_host, dynamic_host, info) = if package
                 .contract
                 .as_ref()
                 .and_then(|contract| contract.verb)
@@ -3593,7 +5230,7 @@ pub mod runtime {
                     &bytes,
                     options.granted_capabilities.clone(),
                 )?);
-                let info = ComponentInfo {
+                let info = ComponentMetadata {
                     name: package.manifest.name.clone(),
                     version: package.manifest.version.clone(),
                     abi_version: super::ABI_VERSION.to_owned(),
@@ -3606,7 +5243,7 @@ pub mod runtime {
                     ],
                     required_capabilities: package.manifest.capabilities.clone(),
                 };
-                (None, Some(typed_host), None, info)
+                (Some(typed_host), None, info)
             } else if package.wit.is_some() {
                 let dynamic_host = Arc::new(TypedComponentHost::new_with_dependency_specs(
                     &bytes,
@@ -3620,7 +5257,7 @@ pub mod runtime {
                         .map(|contract| contract.interface.as_str())
                         .unwrap_or("invoke"),
                 )?;
-                let info = ComponentInfo {
+                let info = ComponentMetadata {
                     name: package.manifest.name.clone(),
                     version: package.manifest.version.clone(),
                     abi_version: super::ABI_VERSION.to_owned(),
@@ -3633,33 +5270,30 @@ pub mod runtime {
                     ],
                     required_capabilities: package.manifest.capabilities.clone(),
                 };
-                (None, None, Some(dynamic_host), info)
+                (None, Some(dynamic_host), info)
             } else {
-                let host = Arc::new(ComponentHost::new_with_capabilities(
-                    &bytes,
-                    options.granted_capabilities.clone(),
-                )?);
-                let info = host.info()?;
-                (Some(host), None, None, info)
+                return Err(ComponentError::Load(anyhow::anyhow!(
+                    "component package must declare a typed universal contract or package-local WIT"
+                )));
             };
             let package_name = package.manifest.name.clone();
 
-            let mut active = self.active.write().unwrap();
-            let generation = active
-                .get(&package_name)
-                .map_or(1, |current| current.generation + 1);
-            let version = Arc::new(ActiveVersion {
-                package: package_name.clone(),
-                generation,
-                fingerprint: build.fingerprint,
-                provenance: build.provenance,
-                artifact: Arc::new(bytes),
-                info,
-                host,
-                typed_host,
-                dynamic_host,
-            });
-            active.insert(package_name, Arc::clone(&version));
+            let generation = self
+                .active
+                .next_generation(&package_name, |current| current.generation);
+            let version = self.active.insert(
+                package_name.clone(),
+                ActiveVersion {
+                    package: package_name.clone(),
+                    generation,
+                    fingerprint: build.fingerprint,
+                    provenance: build.provenance,
+                    artifact: Arc::new(bytes),
+                    info,
+                    typed_host,
+                    dynamic_host,
+                },
+            );
             Ok((*version).clone())
         }
 
@@ -3672,18 +5306,10 @@ pub mod runtime {
                 .ok_or_else(|| ComponentError::NotActive(package.to_owned()))
         }
 
-        pub fn invoke(
-            &self,
-            package: &str,
-            request: Invocation,
-        ) -> Result<InvocationResult, ComponentError> {
-            let version = self.current(package)?;
-            let generation = version.generation;
-            let response = version.invoke(request)?;
-            Ok(InvocationResult {
-                generation,
-                response,
-            })
+        pub fn current_generation(&self, package: &str) -> Option<u64> {
+            self.active
+                .current(package)
+                .map(|version| version.generation)
         }
 
         /// Schedule an explicit reload after a quiet period. Repeated source
@@ -3870,12 +5496,98 @@ pub mod tool_adapter {
             args: Value,
             kernel: KernelHandle,
         ) -> Result<Value, KernelError> {
-            let this = self.clone();
-            tokio::task::spawn_blocking(move || this.invoke(args, kernel))
+            self.invoke_async_with_context(
+                args,
+                kernel,
+                artist_kernel::InvocationContext::default(),
+            )
+            .await
+        }
+
+        pub async fn invoke_async_with_context(
+            &self,
+            args: Value,
+            kernel: KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> Result<Value, KernelError> {
+            let input_value = match self.verb {
+                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send => {
+                    let mut requests = args.get("requests").cloned().unwrap_or_else(|| {
+                        if args.is_array() {
+                            args.clone()
+                        } else {
+                            serde_json::json!([args])
+                        }
+                    });
+                    normalize_model_requests(self.verb, &mut requests)?;
+                    requests
+                }
+                Verb::Abort | Verb::Delete => args.get("uris").cloned().unwrap_or_else(|| {
+                    if args.is_array() {
+                        args.clone()
+                    } else if let Some(uri) = args.get("uri").or_else(|| args.get("target")) {
+                        serde_json::json!([uri])
+                    } else {
+                        args.clone()
+                    }
+                }),
+                Verb::Find | Verb::Grep | Verb::Poll => args,
+            };
+            let input =
+                serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
+                    message: format!("could not encode component input: {error}"),
+                })?;
+            let output = self
+                .component
+                .invoke_tool_json_async_with_context(self.verb, &input, kernel, context)
                 .await
-                .map_err(|error| KernelError::Handler {
-                    message: format!("component tool task failed: {error}"),
-                })?
+                .map_err(component_error)?;
+            serde_json::from_str(&output).map_err(|error| KernelError::Handler {
+                message: format!("component returned invalid output JSON: {error}"),
+            })
+        }
+
+        pub async fn invoke_async_with_scope(
+            &self,
+            args: Value,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Value, KernelError> {
+            let input_value = match self.verb {
+                Verb::Read | Verb::Write | Verb::Edit | Verb::Run | Verb::Send => {
+                    let mut requests = args.get("requests").cloned().unwrap_or_else(|| {
+                        if args.is_array() {
+                            args.clone()
+                        } else {
+                            serde_json::json!([args])
+                        }
+                    });
+                    normalize_model_requests(self.verb, &mut requests)?;
+                    requests
+                }
+                Verb::Abort | Verb::Delete => args.get("uris").cloned().unwrap_or_else(|| {
+                    if args.is_array() {
+                        args.clone()
+                    } else if let Some(uri) = args.get("uri").or_else(|| args.get("target")) {
+                        serde_json::json!([uri])
+                    } else {
+                        args.clone()
+                    }
+                }),
+                Verb::Find | Verb::Grep | Verb::Poll => args,
+            };
+            let input =
+                serde_json::to_string(&input_value).map_err(|error| KernelError::Handler {
+                    message: format!("could not encode component input: {error}"),
+                })?;
+            let output = self
+                .component
+                .invoke_tool_json_async_with_scope(self.verb, &input, kernel, scope)
+                .await
+                .map_err(component_error)?;
+            serde_json::from_str(&output).map_err(|error| KernelError::Handler {
+                message: format!("component returned invalid output JSON: {error}"),
+            })
         }
     }
 
@@ -3976,6 +5688,20 @@ pub mod tools {
         known_packages: Arc<Mutex<HashMap<String, (PathBuf, ToolRegistration)>>>,
     }
 
+    impl Clone for ToolsHandler {
+        fn clone(&self) -> Self {
+            Self {
+                files: FileHandler::new(&self.root)
+                    .expect("a cloned tools handler must retain its filesystem root"),
+                root: self.root.clone(),
+                registry: self.registry.clone(),
+                options: self.options.clone(),
+                dirty: Arc::clone(&self.dirty),
+                known_packages: Arc::clone(&self.known_packages),
+            }
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq)]
     pub struct ToolRegistration {
         pub package: String,
@@ -4020,6 +5746,14 @@ pub mod tools {
             root: impl AsRef<Path>,
             granted_capabilities: impl IntoIterator<Item = String>,
         ) -> Result<Self, KernelError> {
+            Self::new_with_watcher(root, granted_capabilities, None)
+        }
+
+        pub fn new_with_watcher(
+            root: impl AsRef<Path>,
+            granted_capabilities: impl IntoIterator<Item = String>,
+            watcher: Option<&super::watcher::SharedWatcher>,
+        ) -> Result<Self, KernelError> {
             let root =
                 std::fs::canonicalize(root.as_ref()).map_err(|error| KernelError::Handler {
                     message: format!(
@@ -4035,7 +5769,10 @@ pub mod tools {
                     granted_capabilities: granted_capabilities.into_iter().collect(),
                     ..BuildOptions::default()
                 },
-                dirty: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                dirty: watcher.map_or_else(
+                    || Arc::new(Mutex::new(std::collections::HashSet::new())),
+                    super::watcher::SharedWatcher::dirty_set,
+                ),
                 known_packages: Arc::new(Mutex::new(HashMap::new())),
             })
         }
@@ -4049,6 +5786,9 @@ pub mod tools {
         /// adapters can use this as the dynamic model-tool registry.
         pub fn registrations(&self) -> Result<Vec<ToolRegistration>, KernelError> {
             let mut registrations = Vec::new();
+            let mut live_package_paths = std::collections::HashSet::new();
+            let mut valid_package_paths = std::collections::HashSet::new();
+            let mut observed_package_names = std::collections::HashSet::new();
             for entry in std::fs::read_dir(&self.root).map_err(|error| KernelError::Handler {
                 message: format!("read tools root {}: {error}", self.root.display()),
             })? {
@@ -4067,6 +5807,7 @@ pub mod tools {
                 if !entry.path().join("tool.md").is_file() {
                     continue;
                 }
+                live_package_paths.insert(entry.path());
                 let package = match ToolPackage::discover(entry.path()) {
                     Ok(package) => package,
                     Err(_) => continue,
@@ -4083,11 +5824,21 @@ pub mod tools {
                     output_schema: package.manifest.output_schema,
                     capabilities: package.manifest.capabilities,
                 };
+                valid_package_paths.insert(entry.path());
+                observed_package_names.insert(registration.package.clone());
                 self.known_packages.lock().unwrap().insert(
                     registration.package.clone(),
                     (entry.path(), registration.clone()),
                 );
             }
+            self.known_packages
+                .lock()
+                .unwrap()
+                .retain(|name, (path, _)| {
+                    live_package_paths.contains(path)
+                        && (!valid_package_paths.contains(path)
+                            || observed_package_names.contains(name))
+                });
             registrations.extend(
                 self.known_packages
                     .lock()
@@ -4149,7 +5900,14 @@ pub mod tools {
 
         fn map_typed_uri(&self, uri: &ResourceUri) -> Result<ResourceUri, KernelError> {
             let relative = self.relative_uri_path(uri)?;
-            ResourceUri::parse(&self.root.join(relative).display().to_string())
+            let mut mapped = ResourceUri::parse(&self.root.join(relative).display().to_string())?;
+            if let Some(query) = uri.query() {
+                mapped = mapped.with_query(query);
+            }
+            if let Some(fragment) = uri.fragment() {
+                mapped = mapped.with_fragment(fragment);
+            }
+            Ok(mapped)
         }
 
         fn unmap_typed_uri(&self, uri: ResourceUri) -> Result<ResourceUri, KernelError> {
@@ -4167,7 +5925,14 @@ pub mod tools {
             let relative = relative
                 .to_string_lossy()
                 .replace(std::path::MAIN_SEPARATOR, "/");
-            ResourceUri::parse(&format!("tools:///{relative}"))
+            let mut mapped = ResourceUri::parse(&format!("tools:///{relative}"))?;
+            if let Some(query) = uri.query() {
+                mapped = mapped.with_query(query);
+            }
+            if let Some(fragment) = uri.fragment() {
+                mapped = mapped.with_fragment(fragment);
+            }
+            Ok(mapped)
         }
 
         fn map_typed_operation(&self, operation: Operation) -> Result<Operation, KernelError> {
@@ -4376,11 +6141,10 @@ pub mod tools {
             &self,
             current: &ToolPackage,
         ) -> Result<Vec<super::DependencySpec>, KernelError> {
-            let mut config = wasmtime::Config::new();
-            config.wasm_component_model(true);
-            let engine = wasmtime::Engine::new(&config).map_err(|error| KernelError::Handler {
-                message: error.to_string(),
-            })?;
+            let engine =
+                super::package::component_engine().map_err(|error| KernelError::Handler {
+                    message: error.to_string(),
+                })?;
             fn make_spec(
                 contract: &str,
                 packages: &[(String, ToolPackage)],
@@ -4399,13 +6163,14 @@ pub mod tools {
                 let bytes = if let Ok(active) = registry.current(&package.manifest.name) {
                     (*active.artifact_bytes()).clone()
                 } else {
-                    let build = package.build(options).map_err(component_error)?;
-                    std::fs::read(build.artifact).map_err(|error| KernelError::Handler {
-                        message: error.to_string(),
-                    })?
+                    // Dependency imports bind to a registered active
+                    // generation, never to an unregistered artifact that was
+                    // merely built while resolving another package.
+                    let active = registry.reload(package, options).map_err(component_error)?;
+                    (*active.artifact_bytes()).clone()
                 };
                 if !visiting.insert(contract.to_owned()) {
-                    return Err(KernelError::InvalidState {
+                    return Err(KernelError::InvalidRequest {
                         message: format!("custom tool dependency cycle at {contract}"),
                     });
                 }
@@ -4541,6 +6306,21 @@ pub mod tools {
             }
         }
 
+        fn mark_typed_operation_dirty(&self, operation: &Operation) {
+            let mark = |uri: &ResourceUri| {
+                if let Ok(relative) = self.relative_uri_path(uri) {
+                    self.mark_dirty(&relative);
+                }
+            };
+            match operation {
+                Operation::Write(requests) => {
+                    requests.iter().for_each(|request| mark(&request.uri))
+                }
+                Operation::Edit(requests) => requests.iter().for_each(|request| mark(&request.uri)),
+                _ => {}
+            }
+        }
+
         fn prepare_write(&self, relative: &Path) -> Result<(), KernelError> {
             for component in relative.components() {
                 if !matches!(component, std::path::Component::Normal(_)) {
@@ -4612,26 +6392,28 @@ pub mod tools {
             }
         }
 
-        fn execute_named_inner(
-            &self,
-            name: &str,
-            args: Value,
-            host: KernelHandle,
-        ) -> Result<Value, KernelError> {
-            self.execute_named_inner_with_context(
-                name,
-                args,
-                host,
-                artist_kernel::InvocationContext::default(),
-            )
-        }
-
-        fn execute_named_inner_with_context(
+        async fn execute_named_inner_async(
             &self,
             name: &str,
             args: Value,
             host: KernelHandle,
             context: artist_kernel::InvocationContext,
+        ) -> Result<Value, KernelError> {
+            self.execute_named_inner_async_scope(
+                name,
+                args,
+                host,
+                artist_kernel::InvocationScope::new(context),
+            )
+            .await
+        }
+
+        async fn execute_named_inner_async_scope(
+            &self,
+            name: &str,
+            args: Value,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
         ) -> Result<Value, KernelError> {
             let registration = self
                 .registrations()?
@@ -4643,16 +6425,22 @@ pub mod tools {
             let package_root = self.package_path_for_name(&registration.package)?;
             let active = self.activate(&package_root)?;
             if let Some(verb) = registration.contract.verb {
-                return ComponentTool::new(active, verb).invoke_with_context(args, host, context);
+                return ComponentTool::new(active, verb)
+                    .invoke_async_with_scope(args, host, scope.clone())
+                    .await;
             }
 
+            // Custom package-local contracts remain on the quarantined
+            // reflective adapter until their direct generated WIT invocation
+            // is migrated. Universal named tools never take this branch.
             active
-                .invoke_dynamic_json_with_context(
+                .invoke_dynamic_json_async_with_scope(
                     &args,
                     &registration.contract.interface,
                     host,
-                    context,
+                    scope,
                 )
+                .await
                 .map_err(component_error)
         }
     }
@@ -4737,6 +6525,7 @@ pub mod tools {
             _context: artist_kernel::InvocationContext,
         ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
             Box::pin(async move {
+                self.mark_typed_operation_dirty(&operation);
                 let mapped = self.map_typed_operation(operation)?;
                 let result = self.files.execute_typed(mapped, host, _context).await?;
                 self.unmap_result(result)
@@ -4763,7 +6552,15 @@ pub mod tools {
             args: Value,
             host: KernelHandle,
         ) -> BoxFuture<'a, Result<Value, KernelError>> {
-            Box::pin(async move { self.execute_named_inner(name, args, host) })
+            Box::pin(async move {
+                self.execute_named_inner_async(
+                    name,
+                    args,
+                    host,
+                    artist_kernel::InvocationContext::default(),
+                )
+                .await
+            })
         }
 
         fn execute_tool_with_context<'a>(
@@ -4773,9 +6570,23 @@ pub mod tools {
             host: KernelHandle,
             context: artist_kernel::InvocationContext,
         ) -> BoxFuture<'a, Result<Value, KernelError>> {
-            Box::pin(
-                async move { self.execute_named_inner_with_context(name, args, host, context) },
-            )
+            Box::pin(async move {
+                self.execute_named_inner_async(name, args, host, context)
+                    .await
+            })
+        }
+
+        fn execute_tool_with_scope<'a>(
+            &'a self,
+            name: &'a str,
+            args: Value,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Result<Value, KernelError>> {
+            Box::pin(async move {
+                self.execute_named_inner_async_scope(name, args, host, scope)
+                    .await
+            })
         }
     }
 
@@ -4788,7 +6599,7 @@ pub mod tools {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use artist_kernel::{Kernel, Verb as KernelVerb};
+        use artist_kernel::{Kernel, Verb as KernelVerb, WriteRequest};
         use tempfile::tempdir;
 
         #[derive(Clone, Default)]
@@ -5033,6 +6844,98 @@ pub mod tools {
         }
 
         #[tokio::test]
+        async fn malformed_edit_keeps_active_named_generation_executable() {
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs/read");
+            let authored = ToolPackage::discover(&source).unwrap();
+            let mut build_options = BuildOptions::default();
+            build_options.granted_capabilities = vec!["resource.read".to_owned()];
+            let artifact = authored.build(&build_options).unwrap().artifact;
+
+            let tools_root = tempdir().unwrap();
+            let package_root = tools_root.path().join("read");
+            std::fs::create_dir_all(&package_root).unwrap();
+            std::fs::copy(&artifact, package_root.join("tool.wasm")).unwrap();
+            std::fs::copy(source.join("tool.md"), package_root.join("tool.md")).unwrap();
+
+            let files_root = tempdir().unwrap();
+            let target = files_root.path().join("target.txt");
+            std::fs::write(&target, "generation one\n").unwrap();
+            let kernel = Kernel::new();
+            kernel
+                .register_typed(artist_kernel::FileHandler::new(files_root.path()).unwrap())
+                .await;
+            let tools = ToolsHandler::new(tools_root.path(), ["resource.read".to_owned()]).unwrap();
+            let observed_tools = tools.clone();
+            kernel.register_typed_tool_handler(tools).await;
+
+            let input = serde_json::json!({"target": target.to_string_lossy()});
+            let first = kernel.execute_tool("read", input.clone()).await.unwrap();
+            assert!(first.to_string().contains("generation one"));
+            let first_generation = observed_tools
+                .registry
+                .current_generation("artist-tool-read")
+                .expect("first generation active");
+
+            let edit = kernel
+                .execute_operation(Operation::Write(vec![WriteRequest {
+                    uri: ResourceUri::parse("tools://read/tool.md").unwrap(),
+                    content: "not valid frontmatter".to_owned(),
+                }]))
+                .await
+                .unwrap();
+            assert!(matches!(
+                edit,
+                OperationResult::Write(values)
+                    if matches!(values.as_slice(), [Ok(WriteResult { .. })])
+            ));
+            assert_eq!(
+                std::fs::read_to_string(package_root.join("tool.md")).unwrap(),
+                "not valid frontmatter"
+            );
+            let second = kernel.execute_tool("read", input).await.unwrap();
+            assert!(second.to_string().contains("generation one"));
+
+            // A later valid self-edit must use the same handler allocation and
+            // activate a new generation on the named-tool path.  Checking the
+            // catalog as well as executing the tool catches the split-brain
+            // failure where typed writes dirty one ToolsHandler while named
+            // execution consults another.
+            let repaired = "---\nname: artist-tool-read\ndescription: generation two\nversion: 0.1.1\ncontract: artist:tool:read@1\ncapabilities:\n  - resource.read\n---\n";
+            let repair = kernel
+                .execute_operation(Operation::Write(vec![WriteRequest {
+                    uri: ResourceUri::parse("tools://read/tool.md").unwrap(),
+                    content: repaired.to_owned(),
+                }]))
+                .await
+                .unwrap();
+            assert!(matches!(
+                repair,
+                OperationResult::Write(values)
+                    if matches!(values.as_slice(), [Ok(WriteResult { .. })])
+            ));
+            let definitions = kernel.tool_definitions().await;
+            assert!(
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == "read"
+                        && definition.description == "generation two")
+            );
+            let third = kernel
+                .execute_tool(
+                    "read",
+                    serde_json::json!({"target": target.to_string_lossy()}),
+                )
+                .await
+                .unwrap();
+            assert!(third.to_string().contains("generation one"));
+            let second_generation = observed_tools
+                .registry
+                .current_generation("artist-tool-read")
+                .expect("repaired generation active");
+            assert!(second_generation > first_generation);
+        }
+
+        #[tokio::test]
         async fn named_wasm_run_and_send_reach_a_scheme_claiming_namespace() {
             let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/verbs");
             let namespace = NamedFakeNamespace::default();
@@ -5073,252 +6976,2384 @@ pub mod tools {
     }
 }
 
+/// Bootstrap support for the self-describing `resources://` package namespace.
+/// Package discovery/cataloging is deliberately independent of claim routing;
+/// this keeps documentation and package-file inspection available before any
+/// resource component is activated.
+pub mod resources {
+    use artist_kernel::{
+        BoxFuture, FileHandler, Handler, HandlerDescriptor, KernelError, KernelHandle, Operation,
+        OperationResult, Request, ResourceAddress, ResourceUri, ToolDefinition, TypedHandler, Verb,
+    };
+    use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
+    use std::sync::Arc;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+    use walkdir::WalkDir;
+
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+    pub struct ResourceRoute {
+        pub schemes: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+    pub struct QueryDoc {
+        pub name: String,
+        pub summary: String,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+    pub struct ResourceDoc {
+        pub uri: String,
+        pub summary: String,
+        #[serde(default)]
+        pub verbs: Vec<String>,
+        #[serde(default)]
+        pub query: Vec<QueryDoc>,
+    }
+
+    #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+    pub struct ResourceFrontmatter {
+        pub name: String,
+        pub description: String,
+        pub version: String,
+        pub contract: String,
+        #[serde(default)]
+        pub routes: Vec<ResourceRoute>,
+        #[serde(default)]
+        pub exports: Vec<String>,
+        #[serde(default)]
+        pub capabilities: Vec<String>,
+        #[serde(default)]
+        pub docs: Vec<ResourceDoc>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ResourcePackage {
+        pub root: PathBuf,
+        pub manifest: ResourceFrontmatter,
+        pub prose: String,
+        pub wasm: Option<PathBuf>,
+        pub source: Option<PathBuf>,
+        pub build_manifest: Option<PathBuf>,
+        pub wit: Option<PathBuf>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ResourceBuildResult {
+        pub artifact: PathBuf,
+        pub provenance: PathBuf,
+        pub fingerprint: String,
+        pub cached: bool,
+    }
+
+    struct ResourceComponentHost {
+        engine: wasmtime::Engine,
+        component: wasmtime::component::Component,
+        capabilities: Vec<String>,
+        dependencies: Vec<Arc<super::DynamicDependency>>,
+    }
+
+    fn wasm_invocation_failure(
+        scope: &artist_kernel::InvocationScope,
+        operation: impl std::fmt::Display,
+        error: impl std::fmt::Display,
+    ) -> KernelError {
+        if scope.cancellation.is_cancelled() {
+            return KernelError::Aborted {
+                message: operation.to_string(),
+            };
+        }
+        KernelError::Handler {
+            message: format!("{operation}: {error}"),
+        }
+    }
+
+    macro_rules! async_resource_uri_list_call {
+        (
+            $method:ident,
+            $module:ident,
+            $world:ident,
+            $interface:ident,
+            $call:ident
+        ) => {
+            async fn $method(
+                &self,
+                uris: Vec<String>,
+                kernel: KernelHandle,
+                scope: artist_kernel::InvocationScope,
+            ) -> Result<
+                Vec<Result<String, super::$module::artist::resource::types::Error>>,
+                KernelError,
+            > {
+                let failure_scope = scope.clone();
+                let mut store = super::new_store(
+                    &self.engine,
+                    super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+                );
+                let mut linker = wasmtime::component::Linker::new(&self.engine);
+                wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                    KernelError::Handler {
+                        message: format!(
+                            "link resource {} WASI imports: {error}",
+                            stringify!($method)
+                        ),
+                    }
+                })?;
+                let instance =
+                    super::$module::$world::instantiate_async(&mut store, &self.component, &linker)
+                        .await
+                        .map_err(|error| {
+                            wasm_invocation_failure(
+                                &failure_scope,
+                                format!("resource {} instantiation failed", stringify!($method)),
+                                error,
+                            )
+                        })?;
+                instance
+                    .$interface()
+                    .$call(&mut store, &uris)
+                    .await
+                    .map_err(|error| {
+                        wasm_invocation_failure(
+                            &failure_scope,
+                            format!("resource {} failed", stringify!($method)),
+                            error,
+                        )
+                    })
+            }
+        };
+    }
+
+    impl ResourceComponentHost {
+        fn new(
+            bytes: &[u8],
+            capabilities: Vec<String>,
+            dependencies: Vec<super::DependencySpec>,
+        ) -> Result<Self, KernelError> {
+            let typed = super::TypedComponentHost::new_with_dependency_specs(
+                bytes,
+                capabilities.clone(),
+                dependencies,
+            )
+            .map_err(|error| KernelError::Handler {
+                message: format!("load resource component: {error}"),
+            })?;
+            Ok(Self {
+                engine: typed.engine,
+                component: typed.component,
+                capabilities,
+                dependencies: typed.dependencies,
+            })
+        }
+
+        fn link_custom_imports(
+            &self,
+            linker: &mut wasmtime::component::Linker<super::HostState>,
+        ) -> Result<(), KernelError> {
+            for (import_name, _) in self.component.component_type().imports(&self.engine) {
+                if import_name.starts_with("wasi:")
+                    || import_name.contains("artist:%resource/")
+                    || import_name.contains("artist:resource/")
+                {
+                    continue;
+                }
+                let dependency = self.dependencies.iter().find(|dependency| {
+                    super::contract_matches_import(&dependency.contract, import_name)
+                        || dependency
+                            .component
+                            .component_type()
+                            .exports(&dependency.engine)
+                            .any(|(_, export)| export.is_implements(import_name))
+                });
+                let Some(dependency) = dependency else {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!(
+                            "no active custom resource dependency satisfies {import_name}"
+                        ),
+                    });
+                };
+                let mut instance =
+                    linker
+                        .instance(import_name)
+                        .map_err(|error| KernelError::Handler {
+                            message: format!(
+                                "create resource dependency instance {import_name}: {error}"
+                            ),
+                        })?;
+                super::define_dependency_exports_async(&mut instance, Arc::clone(dependency))
+                    .map_err(|error| KernelError::Handler {
+                        message: format!("link resource dependency {import_name}: {error}"),
+                    })?;
+            }
+            Ok(())
+        }
+
+        fn link_nested_standard_imports(
+            linker: &mut wasmtime::component::Linker<super::HostState>,
+        ) -> Result<(), KernelError> {
+            macro_rules! link {
+                ($interface:ident) => {
+                    super::resource_async_host_bindings::artist::resource::$interface::add_to_linker::<
+                        super::HostState,
+                        wasmtime::component::HasSelf<super::HostState>,
+                    >(linker, |state: &mut super::HostState| state)
+                    .map_err(|error| KernelError::Handler {
+                        message: format!(
+                            "link nested resource {}: {error}",
+                            stringify!($interface)
+                        ),
+                    })?;
+                };
+            }
+            link!(read);
+            link!(write);
+            link!(edit);
+            link!(find);
+            link!(grep);
+            link!(run);
+            link!(send);
+            link!(abort);
+            link!(delete);
+            link!(poll);
+            Ok(())
+        }
+
+        async fn claim(
+            &self,
+            verb: Verb,
+            uri: &ResourceUri,
+        ) -> Result<artist_kernel::ClaimDecision, KernelError> {
+            let claim_context = artist_kernel::InvocationContext {
+                deadline_ms: Some(50),
+                ..Default::default()
+            };
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_scope(
+                    std::iter::empty::<String>(),
+                    artist_kernel::InvocationScope::new(claim_context),
+                ),
+            );
+            store
+                .set_fuel(1_000_000)
+                .map_err(|error| KernelError::Handler {
+                    message: format!("configure resource claim fuel: {error}"),
+                })?;
+            // Claim is deliberately a capability-free phase. The linker only
+            // supplies empty plumbing for imports retained by the concrete
+            // component; the claim state has no kernel or useful authority.
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            // WASI is linked with an empty capability context for Rust
+            // component plumbing (the claim store still has no filesystem,
+            // process, network, or kernel authority). No useful WASI handle
+            // is available during claim.
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link claim WASI imports: {error}"),
+                }
+            })?;
+            // Concrete resource worlds may import standard interfaces even
+            // though claim itself is forbidden from using them. The host
+            // implementation sees a claim-phase state with no kernel, so any
+            // attempted nested call is denied rather than executed.
+            Self::link_nested_standard_imports(&mut linker)?;
+            let instance =
+                super::resource_async_extension_bindings::ExtensionWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| KernelError::Handler {
+                    message: format!("resource claim instantiation failed: {error}"),
+                })?;
+            let decision = instance
+                    .artist_resource_extension()
+                    .call_claim(
+                        &mut store,
+                        &super::resource_async_extension_bindings::artist::resource::types::ClaimRequest {
+                            verb: match verb {
+                                Verb::Read => super::resource_async_extension_bindings::artist::resource::types::Verb::Read,
+                                Verb::Write => super::resource_async_extension_bindings::artist::resource::types::Verb::Write,
+                                Verb::Edit => super::resource_async_extension_bindings::artist::resource::types::Verb::Edit,
+                                Verb::Poll => super::resource_async_extension_bindings::artist::resource::types::Verb::Poll,
+                                Verb::Send => super::resource_async_extension_bindings::artist::resource::types::Verb::Send,
+                                Verb::Run => super::resource_async_extension_bindings::artist::resource::types::Verb::Run,
+                                Verb::Abort => super::resource_async_extension_bindings::artist::resource::types::Verb::Abort,
+                                Verb::Delete => super::resource_async_extension_bindings::artist::resource::types::Verb::Delete,
+                                Verb::Find => super::resource_async_extension_bindings::artist::resource::types::Verb::Find,
+                                Verb::Grep => super::resource_async_extension_bindings::artist::resource::types::Verb::Grep,
+                            },
+                            uri: uri.to_string(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| KernelError::Handler {
+                        message: format!("resource claim failed: {error}"),
+                    })?;
+            Ok(match decision {
+                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Pass => artist_kernel::ClaimDecision::Pass,
+                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Handle => artist_kernel::ClaimDecision::Handle,
+                    super::resource_async_extension_bindings::artist::resource::types::ClaimDecision::Reserve => artist_kernel::ClaimDecision::Reserve,
+            })
+        }
+
+        async fn invoke_read_typed(
+            &self,
+            requests: Vec<artist_kernel::ReadRequest>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Result<artist_kernel::ReadResult, KernelError>>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_requests = requests
+                .iter()
+                .map(|request| {
+                    super::resource_async_tool_v1_bindings::artist::resource::types::ReadRequest {
+                        uri: request.uri.to_string(),
+                        at: request.at.as_ref().map(|position| match position {
+                            artist_kernel::Position::Top => super::resource_async_tool_v1_bindings::artist::resource::types::Position::Top,
+                            artist_kernel::Position::Bottom => super::resource_async_tool_v1_bindings::artist::resource::types::Position::Bottom,
+                            artist_kernel::Position::At(anchor) => super::resource_async_tool_v1_bindings::artist::resource::types::Position::At(anchor.to_string()),
+                        }),
+                        before: request.before,
+                        after: request.after,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource read WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_bindings::ResourceReadWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource read instantiation failed",
+                        error,
+                    )
+                })?;
+            instance
+                .artist_resource_read()
+                .call_read(&mut store, &wire_requests)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource read failed", error)
+                })?
+                .into_iter()
+                .map(|result| {
+                    result
+                        .map(super::resource_read_result_to_kernel)
+                        .map_err(super::resource_error_to_kernel)
+                })
+                .collect()
+        }
+
+        async fn invoke_write_typed(
+            &self,
+            requests: Vec<artist_kernel::WriteRequest>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Result<artist_kernel::WriteResult, KernelError>>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_requests = requests
+                .iter()
+                .map(|request| {
+                    super::resource_async_tool_v1_write_bindings::artist::resource::types::WriteRequest {
+                        uri: request.uri.to_string(),
+                        content: request.content.clone(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource write WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_write_bindings::ResourceWriteWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource write instantiation failed",
+                        error,
+                    )
+                })?;
+            instance
+                .artist_resource_write()
+                .call_write(&mut store, &wire_requests)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource write failed", error)
+                })?
+                .into_iter()
+                .map(|result| {
+                    result
+                        .map(|value| super::resource_write_result_to_kernel(value))
+                        .map_err(super::resource_write_error_to_kernel)
+                })
+                .collect()
+        }
+
+        async fn invoke_edit_typed(
+            &self,
+            requests: Vec<artist_kernel::EditRequest>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Result<artist_kernel::EditResult, KernelError>>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_requests = super::resource_edit_requests_from_kernel(requests)?;
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource edit WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_edit_bindings::ResourceEditWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource edit instantiation failed",
+                        error,
+                    )
+                })?;
+            instance
+                .artist_resource_edit()
+                .call_edit(&mut store, &wire_requests)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource edit failed", error)
+                })?
+                .into_iter()
+                .map(|result| match result {
+                    Ok(value) => Ok(Ok(super::resource_edit_result_to_kernel(value)?)),
+                    Err(error) => Ok(Err(super::resource_error_to_kernel_for(error, "edit"))),
+                })
+                .collect()
+        }
+
+        async fn invoke_run_typed(
+            &self,
+            requests: Vec<artist_kernel::RunRequest>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Result<artist_kernel::ResourceUri, KernelError>>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_requests = super::resource_run_requests_from_kernel(requests);
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource run WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_run_bindings::ResourceRunWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource run instantiation failed",
+                        error,
+                    )
+                })?;
+            let result = instance
+                .artist_resource_run()
+                .call_run(&mut store, &wire_requests)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource run failed", error)
+                })?;
+            super::resource_uri_results_to_kernel(result, "run")
+        }
+
+        async fn invoke_send_typed(
+            &self,
+            requests: Vec<artist_kernel::SendRequest>,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<Result<artist_kernel::ResourceUri, KernelError>>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_requests = super::resource_send_requests_from_kernel(requests);
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource send WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_send_bindings::ResourceSendWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource send instantiation failed",
+                        error,
+                    )
+                })?;
+            let result = instance
+                .artist_resource_send()
+                .call_send(&mut store, &wire_requests)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource send failed", error)
+                })?;
+            super::resource_send_results_to_kernel(result)
+        }
+
+        async fn invoke_find_typed(
+            &self,
+            request: artist_kernel::FindRequest,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<artist_kernel::ResourceUri>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_request = super::resource_find_request_from_kernel(request);
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource find WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_find_bindings::ResourceFindWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource find instantiation failed",
+                        error,
+                    )
+                })?;
+            let result = instance
+                .artist_resource_find()
+                .call_find(&mut store, &wire_request)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource find failed", error)
+                })?;
+            super::resource_find_result_to_kernel(result)
+        }
+
+        async fn invoke_grep_typed(
+            &self,
+            request: artist_kernel::GrepRequest,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<Vec<artist_kernel::AnchoredText>, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_request = super::resource_grep_request_from_kernel(request);
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource grep WASI imports: {error}"),
+                }
+            })?;
+            Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_grep_bindings::ResourceGrepWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource grep instantiation failed",
+                        error,
+                    )
+                })?;
+            let result = instance
+                .artist_resource_grep()
+                .call_grep(&mut store, &wire_request)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource grep failed", error)
+                })?;
+            super::resource_grep_results_to_kernel(result)
+        }
+
+        async fn invoke_poll_typed(
+            &self,
+            request: artist_kernel::PollRequest,
+            kernel: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<artist_kernel::PollResult, KernelError> {
+            let failure_scope = scope.clone();
+            let wire_request = super::resource_poll_request_from_kernel(request);
+            let mut store = super::new_store(
+                &self.engine,
+                super::HostState::with_kernel_scope(self.capabilities.clone(), kernel, scope),
+            );
+            let mut linker = wasmtime::component::Linker::new(&self.engine);
+            wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("link resource poll WASI imports: {error}"),
+                }
+            })?;
+            self.link_custom_imports(&mut linker)?;
+            let instance =
+                super::resource_async_tool_v1_poll_bindings::ResourcePollWorld::instantiate_async(
+                    &mut store,
+                    &self.component,
+                    &linker,
+                )
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(
+                        &failure_scope,
+                        "resource poll instantiation failed",
+                        error,
+                    )
+                })?;
+            let result = instance
+                .artist_resource_poll()
+                .call_poll(&mut store, &wire_request)
+                .await
+                .map_err(|error| {
+                    wasm_invocation_failure(&failure_scope, "resource poll failed", error)
+                })?;
+            super::resource_poll_result_to_kernel(result)
+        }
+
+        async_resource_uri_list_call!(
+            invoke_abort_typed,
+            resource_async_tool_v1_abort_bindings,
+            ResourceAbortWorld,
+            artist_resource_abort,
+            call_abort
+        );
+        async_resource_uri_list_call!(
+            invoke_delete_typed,
+            resource_async_tool_v1_delete_bindings,
+            ResourceDeleteWorld,
+            artist_resource_delete,
+            call_delete
+        );
+    }
+
+    struct ActiveResource {
+        package: ResourcePackage,
+        generation: u64,
+        artifact: Arc<Vec<u8>>,
+        host: Arc<ResourceComponentHost>,
+    }
+
+    impl ResourcePackage {
+        pub fn discover(root: impl AsRef<Path>) -> Result<Self, KernelError> {
+            let root = root.as_ref().to_owned();
+            let markdown = fs::read_to_string(root.join("resource.md")).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("read resource.md: {error}"),
+                }
+            })?;
+            let parsed = super::package::parse_frontmatter::<ResourceFrontmatter>(&markdown)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!(
+                        "invalid resource.md frontmatter in {}: {error}",
+                        root.display()
+                    ),
+                })?;
+            let wasm_path = root.join("resource.wasm");
+            let source = if root.join("src").is_dir() {
+                Some(root.join("src"))
+            } else if root.join("source").is_dir() {
+                Some(root.join("source"))
+            } else {
+                None
+            };
+            if !wasm_path.is_file() && source.is_none() {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "resource package {} has no resource.wasm or source",
+                        root.display()
+                    ),
+                });
+            }
+            if let Some(wit) = root
+                .join("resource.wit")
+                .is_file()
+                .then(|| root.join("resource.wit"))
+            {
+                Self::validate_resource_wit(&wit, &parsed.frontmatter.capabilities)?;
+            }
+            Ok(Self {
+                root: root.clone(),
+                manifest: parsed.frontmatter,
+                prose: parsed.prose,
+                wasm: wasm_path.is_file().then_some(wasm_path),
+                source,
+                build_manifest: root
+                    .join("Cargo.toml")
+                    .is_file()
+                    .then_some(root.join("Cargo.toml")),
+                wit: root
+                    .join("resource.wit")
+                    .is_file()
+                    .then_some(root.join("resource.wit")),
+            })
+        }
+
+        fn validate_resource_wit(path: &Path, capabilities: &[String]) -> Result<(), KernelError> {
+            let source = fs::read_to_string(path).map_err(|error| KernelError::Handler {
+                message: format!("read resource.wit {}: {error}", path.display()),
+            })?;
+            for verb in super::contracts::Verb::ALL {
+                let interface = format!("artist:resource/{}", verb.interface());
+                let escaped_interface = format!("artist:%resource/{}", verb.interface());
+                if source.lines().any(|line| {
+                    line.contains("import")
+                        && (line.contains(&interface) || line.contains(&escaped_interface))
+                }) && !capabilities
+                    .iter()
+                    .any(|capability| capability == &format!("resource.{verb}"))
+                {
+                    return Err(KernelError::PermissionDenied {
+                        uri: format!("resource.{verb}"),
+                    });
+                }
+            }
+            let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
+            let mut resolve = wit_parser::Resolve::default();
+            resolve
+                .push_dir(canonical)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!("parse canonical resource WIT: {error}"),
+                })?;
+            let package = resolve
+                .push_file(path)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!("parse resource.wit {}: {error}", path.display()),
+                })?;
+            resolve.select_world(&[package], None).map_err(|error| {
+                KernelError::InvalidRequest {
+                    message: format!("resource.wit has no resolvable world: {error}"),
+                }
+            })?;
+            Ok(())
+        }
+
+        pub fn advertised_schemes(&self) -> impl Iterator<Item = &str> {
+            self.manifest
+                .routes
+                .iter()
+                .flat_map(|route| route.schemes.iter().map(String::as_str))
+        }
+
+        fn wit_identity(&self) -> Option<String> {
+            let path = self.wit.as_ref()?;
+            let source = fs::read_to_string(path).ok()?;
+            source.lines().find_map(|line| {
+                let value = line.trim().strip_prefix("package ")?.trim_end_matches(';');
+                let (identity, version) = value.rsplit_once('@')?;
+                let major = version.split('.').next()?;
+                Some(format!("{identity}@{major}"))
+            })
+        }
+
+        pub fn catalog_entry(&self) -> ToolDefinition {
+            let mut description = self.manifest.description.clone();
+            for doc in &self.manifest.docs {
+                description.push_str("\n");
+                description.push_str(&format!("{}: {}", doc.uri, doc.summary));
+            }
+            ToolDefinition {
+                name: self.manifest.name.clone(),
+                description,
+                parameters: serde_json::json!({"type":"object","additionalProperties":false}),
+            }
+        }
+
+        /// Build or load the resource component without publishing it. The
+        /// caller owns generation swap/claim registration; a failed candidate
+        /// therefore cannot disturb an already-active package.
+        pub fn build(
+            &self,
+            options: &super::package::BuildOptions,
+        ) -> Result<ResourceBuildResult, KernelError> {
+            validate_manifest(&self.manifest)?;
+            let fingerprint = fingerprint(self, options)?;
+            if let Some(artifact) = &self.wasm {
+                validate_artifact(artifact, self, options)?;
+                return Ok(ResourceBuildResult {
+                    provenance: artifact.with_extension("wasm.artist.json"),
+                    artifact: artifact.clone(),
+                    fingerprint,
+                    cached: true,
+                });
+            }
+            let manifest =
+                self.build_manifest
+                    .as_ref()
+                    .ok_or_else(|| KernelError::InvalidRequest {
+                        message: "resource source package has no Cargo.toml".to_owned(),
+                    })?;
+            let mut metadata_command = cargo_metadata::MetadataCommand::new();
+            metadata_command
+                .manifest_path(manifest)
+                .no_deps()
+                .other_options(vec!["--offline".to_owned()]);
+            let metadata = metadata_command
+                .exec()
+                .map_err(|error| KernelError::Handler {
+                    message: format!("cargo metadata failed: {error}"),
+                })?;
+            let cargo_target_directory = metadata.target_directory.clone().into_std_path_buf();
+            let package = metadata
+                .packages
+                .iter()
+                .find(|package| package.manifest_path.as_str() == manifest.to_string_lossy())
+                .or_else(|| metadata.packages.first())
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: "resource Cargo metadata contained no package".to_owned(),
+                })?;
+            let target = package
+                .targets
+                .iter()
+                .find(|target| {
+                    target
+                        .kind
+                        .iter()
+                        .any(|kind| matches!(kind, cargo_metadata::TargetKind::CDyLib))
+                })
+                .or_else(|| {
+                    package.targets.iter().find(|target| {
+                        target
+                            .kind
+                            .iter()
+                            .any(|kind| matches!(kind, cargo_metadata::TargetKind::Bin))
+                    })
+                })
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: "resource package must declare a cdylib or bin target".to_owned(),
+                })?;
+            let profile = profile_directory(options.profile);
+            let artifact_path = cargo_target_directory
+                .join(&options.target)
+                .join(profile)
+                .join(format!("{}.wasm", target.name.replace('-', "_")));
+            let provenance = artifact_path.with_extension("wasm.artist.json");
+            if !options.force
+                && artifact_path.is_file()
+                && provenance_matches(&provenance, &fingerprint, &artifact_path)
+            {
+                validate_artifact(&artifact_path, self, options)?;
+                return Ok(ResourceBuildResult {
+                    artifact: artifact_path,
+                    provenance,
+                    fingerprint,
+                    cached: true,
+                });
+            }
+            let artifact =
+                super::package::build_wasm_artifact(&self.root, manifest, &target.name, options)
+                    .map_err(|message| KernelError::Handler { message })?;
+            validate_artifact(&artifact, self, options)?;
+            let provenance_value = super::package::BuildProvenance {
+                package_name: package.name.clone(),
+                package_version: package.version.to_string(),
+                contract: Some(self.manifest.contract.clone()),
+                abi_version: super::ABI_VERSION.to_owned(),
+                target: options.target.clone(),
+                profile: profile.to_owned(),
+                fingerprint: fingerprint.clone(),
+                artifact_sha256: sha256_file(&artifact)?,
+                cargo_version: "unknown".to_owned(),
+                rustc_version: "unknown".to_owned(),
+            };
+            let provenance = artifact.with_extension("wasm.artist.json");
+            fs::write(
+                &provenance,
+                serde_json::to_vec_pretty(&provenance_value).unwrap(),
+            )
+            .map_err(|error| KernelError::Handler {
+                message: format!("write resource provenance: {error}"),
+            })?;
+            Ok(ResourceBuildResult {
+                artifact,
+                provenance,
+                fingerprint,
+                cached: false,
+            })
+        }
+    }
+
+    fn profile_directory(profile: super::package::BuildProfile) -> &'static str {
+        match profile {
+            super::package::BuildProfile::Debug => "debug",
+            super::package::BuildProfile::Release => "release",
+            super::package::BuildProfile::Product => "product",
+        }
+    }
+
+    fn validate_manifest(manifest: &ResourceFrontmatter) -> Result<(), KernelError> {
+        if manifest.contract != "artist:resource:extension@1" {
+            return Err(KernelError::InvalidRequest {
+                message: format!("unsupported resource contract {}", manifest.contract),
+            });
+        }
+        if manifest.routes.is_empty() {
+            return Err(KernelError::InvalidRequest {
+                message: "resource package must declare at least one route".to_owned(),
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        for verb in &manifest.exports {
+            if !super::contracts::Verb::ALL
+                .iter()
+                .any(|candidate| candidate.interface() == verb)
+                || !seen.insert(verb)
+            {
+                return Err(KernelError::InvalidRequest {
+                    message: format!("invalid or duplicate resource export {verb}"),
+                });
+            }
+            if !manifest
+                .capabilities
+                .iter()
+                .any(|capability| capability == &format!("resource.{verb}"))
+            {
+                return Err(KernelError::PermissionDenied {
+                    uri: format!("resource.{verb}"),
+                });
+            }
+        }
+        for route in &manifest.routes {
+            for scheme in &route.schemes {
+                if scheme.is_empty()
+                    || !scheme.chars().enumerate().all(|(index, ch)| {
+                        ch.is_ascii_alphanumeric() && (index > 0 || ch.is_ascii_alphabetic())
+                            || index > 0 && matches!(ch, '+' | '-' | '.')
+                    })
+                {
+                    return Err(KernelError::InvalidUri {
+                        message: format!("invalid resource route scheme {scheme}"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn fingerprint(
+        package: &ResourcePackage,
+        options: &super::package::BuildOptions,
+    ) -> Result<String, KernelError> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"artist-resource-component-v1\0");
+        hasher.update(super::ABI_VERSION.as_bytes());
+        hasher.update(options.target.as_bytes());
+        hasher.update(profile_directory(options.profile).as_bytes());
+        hasher.update(package.manifest.name.as_bytes());
+        hasher.update(package.manifest.version.as_bytes());
+        hasher.update(package.manifest.contract.as_bytes());
+        for capability in &package.manifest.capabilities {
+            hasher.update(capability.as_bytes());
+        }
+        for path in [
+            &package.root.join("resource.md"),
+            &package.root.join("resource.wit"),
+            &package.root.join("Cargo.toml"),
+            &package.root.join("Cargo.lock"),
+        ] {
+            hash_path(&mut hasher, path)?;
+        }
+        if let Some(source) = &package.source {
+            hash_path(&mut hasher, source)?;
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn hash_path(hasher: &mut Sha256, path: &Path) -> Result<(), KernelError> {
+        if path.is_file() {
+            hasher.update(path.to_string_lossy().as_bytes());
+            hasher.update(fs::read(path).map_err(|error| KernelError::Handler {
+                message: format!("read {}: {error}", path.display()),
+            })?);
+        } else if path.is_dir() {
+            let mut files = WalkDir::new(path)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.path().to_owned())
+                .collect::<Vec<_>>();
+            files.sort();
+            for file in files {
+                hash_path(hasher, &file)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn sha256_file(path: &Path) -> Result<String, KernelError> {
+        let bytes = fs::read(path).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", path.display()),
+        })?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    fn provenance_matches(path: &Path, fingerprint: &str, artifact: &Path) -> bool {
+        let Ok(bytes) = fs::read(path) else {
+            return false;
+        };
+        let Ok(provenance) = serde_json::from_slice::<super::package::BuildProvenance>(&bytes)
+        else {
+            return false;
+        };
+        provenance.fingerprint == fingerprint
+            && sha256_file(artifact).is_ok_and(|hash| hash == provenance.artifact_sha256)
+    }
+
+    fn validate_artifact(
+        artifact: &Path,
+        package: &ResourcePackage,
+        options: &super::package::BuildOptions,
+    ) -> Result<(), KernelError> {
+        let bytes = fs::read(artifact).map_err(|error| KernelError::Handler {
+            message: format!("read {}: {error}", artifact.display()),
+        })?;
+        let engine = super::package::component_engine().map_err(|error| KernelError::Handler {
+            message: error.to_string(),
+        })?;
+        let component =
+            wasmtime::component::Component::from_binary(&engine, &bytes).map_err(|error| {
+                KernelError::Handler {
+                    message: format!("resource component validation failed: {error}"),
+                }
+            })?;
+        let exports = component
+            .component_type()
+            .exports(&engine)
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>();
+        if !exports
+            .iter()
+            .any(|name| name.contains("artist:resource/extension"))
+        {
+            return Err(KernelError::InvalidRequest {
+                message: "resource component must export artist:resource/extension@1.0.0"
+                    .to_owned(),
+            });
+        }
+        for verb in super::contracts::Verb::ALL {
+            let actual = exports
+                .iter()
+                .any(|name| name.contains(&format!("artist:resource/{verb}")));
+            let declared = package
+                .manifest
+                .exports
+                .iter()
+                .any(|export| export == verb.to_string().as_str());
+            if actual != declared {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "resource component export mismatch for {verb}: declared={declared}, actual={actual}"
+                    ),
+                });
+            }
+        }
+        let _ = options;
+        Ok(())
+    }
+
+    pub struct ResourcesHandler {
+        root: PathBuf,
+        files: FileHandler,
+        active: super::generations::GenerationStore<ActiveResource>,
+        dirty: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+    }
+
+    impl ResourcesHandler {
+        pub fn new(root: impl AsRef<Path>) -> Result<Self, KernelError> {
+            Self::new_with_watcher(root, None)
+        }
+
+        pub fn new_with_watcher(
+            root: impl AsRef<Path>,
+            watcher: Option<&super::watcher::SharedWatcher>,
+        ) -> Result<Self, KernelError> {
+            let root = fs::canonicalize(root.as_ref()).map_err(|error| KernelError::Handler {
+                message: format!("canonicalize resources root: {error}"),
+            })?;
+            Ok(Self {
+                files: FileHandler::new(&root)?,
+                root,
+                active: super::generations::GenerationStore::new(),
+                dirty: watcher.map_or_else(
+                    || Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+                    super::watcher::SharedWatcher::dirty_set,
+                ),
+            })
+        }
+
+        pub fn activate(&self, package_root: impl AsRef<Path>) -> Result<u64, KernelError> {
+            let package_root = package_root.as_ref();
+            let package = match ResourcePackage::discover(package_root) {
+                Ok(package) => package,
+                Err(error) => {
+                    // Discovery is part of candidate activation. A malformed
+                    // edit to an already-active package must leave the
+                    // complete prior generation usable, just like a failed
+                    // component build does.
+                    if let Some(active) = self
+                        .active
+                        .read()
+                        .unwrap()
+                        .values()
+                        .find(|active| active.package.root == package_root)
+                    {
+                        return Ok(active.generation);
+                    }
+                    return Err(error);
+                }
+            };
+            let options = super::package::BuildOptions {
+                granted_capabilities: package.manifest.capabilities.clone(),
+                ..Default::default()
+            };
+            let build = match package.build(&options) {
+                Ok(build) => build,
+                Err(error) => {
+                    if let Some(active) = self.active.read().unwrap().get(&package.manifest.name) {
+                        return Ok(active.generation);
+                    }
+                    return Err(error);
+                }
+            };
+            let bytes = fs::read(&build.artifact).map_err(|error| KernelError::Handler {
+                message: format!("read resource artifact: {error}"),
+            })?;
+            let dependencies = self.resource_dependencies(
+                &package,
+                &bytes,
+                &mut std::collections::HashSet::new(),
+            )?;
+            let host = Arc::new(ResourceComponentHost::new(
+                &bytes,
+                package.manifest.capabilities.clone(),
+                dependencies,
+            )?);
+            let package_root = package.root.clone();
+            let generation = self
+                .active
+                .next_generation(&package.manifest.name, |current| current.generation);
+            self.active.insert(
+                package.manifest.name.clone(),
+                ActiveResource {
+                    package,
+                    generation,
+                    artifact: Arc::new(bytes),
+                    host,
+                },
+            );
+            self.dirty.lock().unwrap().remove(&package_root);
+            Ok(generation)
+        }
+
+        fn resource_dependencies(
+            &self,
+            current: &ResourcePackage,
+            bytes: &[u8],
+            visiting: &mut std::collections::HashSet<String>,
+        ) -> Result<Vec<super::DependencySpec>, KernelError> {
+            let current_identity = current.wit_identity();
+            if let Some(identity) = &current_identity {
+                if !visiting.insert(identity.clone()) {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!("resource dependency cycle at {identity}"),
+                    });
+                }
+            }
+            let engine =
+                super::package::component_engine().map_err(|error| KernelError::Handler {
+                    message: format!("load resource component engine: {error}"),
+                })?;
+            let component =
+                wasmtime::component::Component::from_binary(&engine, bytes).map_err(|error| {
+                    KernelError::InvalidRequest {
+                        message: format!("inspect resource dependencies: {error}"),
+                    }
+                })?;
+            let candidates = self
+                .discover()
+                .into_iter()
+                .filter(|package| package.manifest.name != current.manifest.name)
+                .filter_map(|package| package.wit_identity().map(|identity| (identity, package)))
+                .collect::<Vec<_>>();
+            let mut dependencies = Vec::new();
+            for (import, _) in component.component_type().imports(&engine) {
+                if import.starts_with("wasi:")
+                    || import.contains("artist:%resource/")
+                    || import.contains("artist:resource/")
+                {
+                    continue;
+                }
+                let matches = candidates
+                    .iter()
+                    .filter(|(identity, _)| super::contract_matches_import(identity, import))
+                    .collect::<Vec<_>>();
+                if matches.len() > 1 {
+                    return Err(KernelError::Conflict {
+                        uri: import.to_owned(),
+                    });
+                }
+                let Some((identity, package)) = matches.first() else {
+                    return Err(KernelError::NotFound {
+                        uri: import.to_owned(),
+                    });
+                };
+                let active = if self.dirty.lock().unwrap().contains(&package.root) {
+                    // A dependency edit follows the same candidate path as a
+                    // top-level edit. A failed rebuild leaves the prior
+                    // generation available, while a successful one becomes
+                    // the generation pinned into this activation.
+                    let _ = self.activate(&package.root);
+                    self.active
+                        .read()
+                        .unwrap()
+                        .get(&package.manifest.name)
+                        .cloned()
+                } else {
+                    self.active
+                        .read()
+                        .unwrap()
+                        .get(&package.manifest.name)
+                        .cloned()
+                };
+                let (dependency_bytes, dependency_package) = if let Some(active) = active {
+                    (active.artifact.clone(), active.package.clone())
+                } else {
+                    self.activate(&package.root)?;
+                    let active = self
+                        .active
+                        .read()
+                        .unwrap()
+                        .get(&package.manifest.name)
+                        .cloned()
+                        .ok_or_else(|| KernelError::NotFound {
+                            uri: package.manifest.name.clone(),
+                        })?;
+                    (active.artifact.clone(), active.package.clone())
+                };
+                let children = self.resource_dependencies(
+                    &dependency_package,
+                    dependency_bytes.as_slice(),
+                    visiting,
+                )?;
+                dependencies.push(super::DependencySpec {
+                    contract: identity.clone(),
+                    bytes: dependency_bytes.as_ref().clone(),
+                    dependencies: children,
+                });
+            }
+            if let Some(identity) = current_identity {
+                visiting.remove(&identity);
+            }
+            Ok(dependencies)
+        }
+
+        pub fn active_generation(&self, name: &str) -> Option<u64> {
+            self.active
+                .read()
+                .unwrap()
+                .get(name)
+                .map(|active| active.generation)
+        }
+
+        pub fn discover(&self) -> Vec<ResourcePackage> {
+            let Ok(entries) = fs::read_dir(&self.root) else {
+                return Vec::new();
+            };
+            let mut packages = entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+                .filter_map(|entry| ResourcePackage::discover(entry.path()).ok())
+                .collect::<Vec<_>>();
+            packages.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
+            packages
+        }
+
+        pub fn catalog(&self) -> Vec<ToolDefinition> {
+            // The model catalog is a view of published generations, not a
+            // second discovery registry. Activate valid candidates first;
+            // failed activation leaves an existing generation untouched and
+            // never publishes a never-active or malformed package.
+            for package in self.discover() {
+                let _ = self.activate(&package.root);
+            }
+            let mut packages = self
+                .active
+                .read()
+                .unwrap()
+                .values()
+                .filter(|active| {
+                    active.package.root.is_dir()
+                        && active.package.root.join("resource.md").is_file()
+                })
+                .map(|active| active.package.clone())
+                .collect::<Vec<_>>();
+            packages.sort_by(|left, right| left.manifest.name.cmp(&right.manifest.name));
+            packages
+                .into_iter()
+                .map(|package| package.catalog_entry())
+                .collect()
+        }
+
+        fn active_candidates(
+            &self,
+            uri: &ResourceUri,
+            verb: Verb,
+            scope: &artist_kernel::InvocationScope,
+        ) -> Vec<Arc<ActiveResource>> {
+            // A claim phase may already have selected an active generation.
+            // Reuse that leased object even if the live registry has swapped
+            // to a newer generation before a nested call arrives.
+            if let Some(pinned) =
+                scope.generation_handle::<ActiveResource>(&generation_pin_key(verb, uri))
+            {
+                return vec![pinned];
+            }
+            let mut candidates = Vec::new();
+            for package in self.discover() {
+                if !package
+                    .advertised_schemes()
+                    .any(|scheme| scheme == uri.scheme())
+                {
+                    continue;
+                }
+                let snapshotted = scope.snapshotted_generation(&package.manifest.name);
+                let package_dirty = self.dirty.lock().unwrap().contains(&package.root);
+                let active = snapshotted
+                    .and_then(|generation| {
+                        self.active
+                            .read()
+                            .unwrap()
+                            .get(&package.manifest.name)
+                            .filter(|active| active.generation == generation)
+                            .cloned()
+                    })
+                    .or_else(|| {
+                        if !package_dirty {
+                            self.active
+                                .read()
+                                .unwrap()
+                                .get(&package.manifest.name)
+                                .cloned()
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        self.activate(&package.root).ok();
+                        self.active
+                            .read()
+                            .unwrap()
+                            .get(&package.manifest.name)
+                            .cloned()
+                    });
+                if let Some(active) = active {
+                    let generation =
+                        scope.snapshot_generation(&active.package.manifest.name, active.generation);
+                    if generation != active.generation {
+                        if let Some(previous) = self
+                            .active
+                            .read()
+                            .unwrap()
+                            .get(&active.package.manifest.name)
+                            .filter(|candidate| candidate.generation == generation)
+                            .cloned()
+                        {
+                            candidates.push(previous);
+                        }
+                        continue;
+                    }
+                    candidates.push(active);
+                }
+            }
+            // Discovery is intentionally fallible and may omit a package while
+            // it is being edited. Keep the last active generation eligible in
+            // that interval; activation will retry the candidate and preserve
+            // this generation if the edit is malformed.
+            for active in self.active.read().unwrap().values() {
+                // A removed package is a real deactivation. Keep an active
+                // generation through malformed edits at its existing root,
+                // but never let a deleted package become a permanent routing
+                // ghost.
+                if !active.package.root.is_dir()
+                    || !active.package.root.join("resource.md").is_file()
+                {
+                    continue;
+                }
+                if let Some(generation) =
+                    scope.snapshotted_generation(&active.package.manifest.name)
+                    && generation != active.generation
+                {
+                    continue;
+                }
+                if active
+                    .package
+                    .advertised_schemes()
+                    .any(|scheme| scheme == uri.scheme())
+                    && active
+                        .package
+                        .manifest
+                        .exports
+                        .iter()
+                        .any(|export| export == verb.to_string().as_str())
+                    && !candidates
+                        .iter()
+                        .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, active))
+                {
+                    candidates.push(Arc::clone(active));
+                }
+            }
+            // HashMap iteration is not a routing policy. Keep claim order
+            // deterministic so diagnostics and conflict arbitration are
+            // stable across processes.
+            candidates.sort_by(|left, right| {
+                left.package
+                    .manifest
+                    .name
+                    .cmp(&right.package.manifest.name)
+                    .then(left.generation.cmp(&right.generation))
+            });
+            candidates
+        }
+
+        fn operation_candidates(
+            &self,
+            operation: &Operation,
+            scope: &artist_kernel::InvocationScope,
+        ) -> Vec<Arc<ActiveResource>> {
+            let (verb, uris): (Verb, Vec<&ResourceUri>) = match operation {
+                Operation::Read(items) => {
+                    (Verb::Read, items.iter().map(|item| &item.uri).collect())
+                }
+                Operation::Write(items) => {
+                    (Verb::Write, items.iter().map(|item| &item.uri).collect())
+                }
+                Operation::Edit(items) => {
+                    (Verb::Edit, items.iter().map(|item| &item.uri).collect())
+                }
+                Operation::Find(request) => (Verb::Find, request.roots.iter().collect()),
+                Operation::Grep(request) => match &request.source {
+                    artist_kernel::GrepSource::Resources(uris) => {
+                        (Verb::Grep, uris.iter().collect())
+                    }
+                    artist_kernel::GrepSource::Text(text) => {
+                        (Verb::Grep, text.iter().map(|text| &text.uri).collect())
+                    }
+                },
+                Operation::Run(items) => (Verb::Run, items.iter().map(|item| &item.uri).collect()),
+                Operation::Send(items) => {
+                    (Verb::Send, items.iter().map(|item| &item.uri).collect())
+                }
+                Operation::Abort(uris) => (Verb::Abort, uris.iter().collect()),
+                Operation::Delete(uris) => (Verb::Delete, uris.iter().collect()),
+                Operation::Poll(request) => (
+                    Verb::Poll,
+                    request.targets.iter().map(|target| &target.uri).collect(),
+                ),
+            };
+            let mut candidates = Vec::new();
+            for uri in uris {
+                for candidate in self.active_candidates(uri, verb, scope) {
+                    if !candidates
+                        .iter()
+                        .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, &candidate))
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+            candidates
+        }
+
+        fn bootstrap_operation(operation: &Operation) -> bool {
+            let all_resources = |uris: &[ResourceUri]| {
+                !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "resources")
+            };
+            match operation {
+                Operation::Read(items) => all_resources(
+                    &items
+                        .iter()
+                        .map(|item| item.uri.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                Operation::Write(items) => all_resources(
+                    &items
+                        .iter()
+                        .map(|item| item.uri.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                Operation::Edit(items) => all_resources(
+                    &items
+                        .iter()
+                        .map(|item| item.uri.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                Operation::Find(request) => all_resources(&request.roots),
+                Operation::Grep(request) => matches!(
+                    &request.source,
+                    artist_kernel::GrepSource::Resources(uris) if all_resources(uris)
+                ),
+                Operation::Abort(uris) | Operation::Delete(uris) => all_resources(uris),
+                _ => false,
+            }
+        }
+
+        fn mark_bootstrap_dirty(&self, operation: &Operation) {
+            let mut packages = std::collections::HashSet::new();
+            let mut collect = |uri: &ResourceUri| {
+                if uri.scheme() == "resources" {
+                    if let Some(package) = uri.as_ref().host_str() {
+                        packages.insert(package.to_owned());
+                    }
+                }
+            };
+            match operation {
+                Operation::Write(items) => items.iter().for_each(|item| collect(&item.uri)),
+                Operation::Edit(items) => items.iter().for_each(|item| collect(&item.uri)),
+                Operation::Delete(uris) => uris.iter().for_each(&mut collect),
+                _ => return,
+            }
+            if !packages.is_empty() {
+                let mut dirty = self.dirty.lock().unwrap();
+                for package in packages {
+                    dirty.insert(self.root.join(package));
+                }
+            }
+        }
+
+        fn map_bootstrap_operation(&self, operation: Operation) -> Result<Operation, KernelError> {
+            let map = |uri: ResourceUri| self.map_uri(&ResourceAddress::uri(uri));
+            Ok(match operation {
+                Operation::Read(items) => Operation::Read(
+                    items
+                        .into_iter()
+                        .map(|mut item| {
+                            item.uri = map(item.uri)?;
+                            Ok(item)
+                        })
+                        .collect::<Result<_, KernelError>>()?,
+                ),
+                Operation::Write(items) => Operation::Write(
+                    items
+                        .into_iter()
+                        .map(|mut item| {
+                            item.uri = map(item.uri)?;
+                            Ok(item)
+                        })
+                        .collect::<Result<_, KernelError>>()?,
+                ),
+                Operation::Edit(items) => Operation::Edit(
+                    items
+                        .into_iter()
+                        .map(|mut item| {
+                            item.uri = map(item.uri)?;
+                            Ok(item)
+                        })
+                        .collect::<Result<_, KernelError>>()?,
+                ),
+                Operation::Find(mut request) => {
+                    request.roots = request
+                        .roots
+                        .into_iter()
+                        .map(map)
+                        .collect::<Result<_, KernelError>>()?;
+                    Operation::Find(request)
+                }
+                Operation::Grep(mut request) => {
+                    if let artist_kernel::GrepSource::Resources(uris) = request.source {
+                        request.source = artist_kernel::GrepSource::Resources(
+                            uris.into_iter()
+                                .map(map)
+                                .collect::<Result<_, KernelError>>()?,
+                        );
+                    }
+                    Operation::Grep(request)
+                }
+                Operation::Abort(uris) => Operation::Abort(
+                    uris.into_iter()
+                        .map(map)
+                        .collect::<Result<_, KernelError>>()?,
+                ),
+                Operation::Delete(uris) => Operation::Delete(
+                    uris.into_iter()
+                        .map(map)
+                        .collect::<Result<_, KernelError>>()?,
+                ),
+                other => {
+                    return Err(KernelError::UnsupportedVerb {
+                        verb: operation_verb(&other).to_owned(),
+                        uri: operation_uri(&other),
+                    });
+                }
+            })
+        }
+
+        fn unmap_bootstrap_uri(&self, uri: ResourceUri) -> Result<ResourceUri, KernelError> {
+            let path = uri
+                .as_ref()
+                .to_file_path()
+                .map_err(|_| KernelError::InvalidUri {
+                    message: uri.to_string(),
+                })?;
+            let relative = path
+                .strip_prefix(&self.root)
+                .map_err(|_| KernelError::InvalidUri {
+                    message: uri.to_string(),
+                })?;
+            let mut components = relative.components();
+            let package = components
+                .next()
+                .and_then(|component| match component {
+                    std::path::Component::Normal(value) => value.to_str(),
+                    _ => None,
+                })
+                .ok_or_else(|| KernelError::InvalidUri {
+                    message: uri.to_string(),
+                })?;
+            let rest = components
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let mut output = ResourceUri::parse(&if rest.is_empty() {
+                format!("resources://{package}/")
+            } else {
+                format!("resources://{package}/{rest}")
+            })?;
+            if let Some(query) = uri.query() {
+                output = output.with_query(query);
+            }
+            if let Some(fragment) = uri.fragment() {
+                output = output.with_fragment(fragment);
+            }
+            Ok(output)
+        }
+
+        fn unmap_bootstrap_result(
+            &self,
+            result: OperationResult,
+        ) -> Result<OperationResult, KernelError> {
+            let uri = |uri: ResourceUri| self.unmap_bootstrap_uri(uri);
+            Ok(match result {
+                OperationResult::Read(values) => OperationResult::Read(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            value.and_then(|value| match value {
+                                artist_kernel::ReadResult::Text(mut text) => {
+                                    text.uri = uri(text.uri)?;
+                                    Ok(artist_kernel::ReadResult::Text(text))
+                                }
+                                artist_kernel::ReadResult::Directory { uri: root, entries } => {
+                                    Ok(artist_kernel::ReadResult::Directory {
+                                        uri: uri(root)?,
+                                        entries: entries
+                                            .into_iter()
+                                            .map(uri)
+                                            .collect::<Result<_, _>>()?,
+                                    })
+                                }
+                            })
+                        })
+                        .collect(),
+                ),
+                OperationResult::Write(values) => OperationResult::Write(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            value.and_then(|mut result| {
+                                result.text.uri = uri(result.text.uri)?;
+                                Ok(result)
+                            })
+                        })
+                        .collect(),
+                ),
+                OperationResult::Edit(values) => OperationResult::Edit(
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            value.and_then(|mut result| {
+                                result.text.uri = uri(result.text.uri)?;
+                                result.diff.uri = uri(result.diff.uri)?;
+                                Ok(result)
+                            })
+                        })
+                        .collect(),
+                ),
+                OperationResult::Find(value) => OperationResult::Find(
+                    value.map(|uris| uris.into_iter().map(uri).collect::<Result<_, _>>())?,
+                ),
+                OperationResult::Grep(value) => OperationResult::Grep(value.map(|texts| {
+                    texts
+                        .into_iter()
+                        .map(|mut text| {
+                            text.uri = uri(text.uri)?;
+                            Ok(text)
+                        })
+                        .collect::<Result<_, KernelError>>()
+                })?),
+                OperationResult::Abort(values) => OperationResult::Abort(
+                    values
+                        .into_iter()
+                        .map(|value| value.and_then(uri))
+                        .collect(),
+                ),
+                OperationResult::Delete(values) => OperationResult::Delete(
+                    values
+                        .into_iter()
+                        .map(|value| value.and_then(uri))
+                        .collect(),
+                ),
+                other => other,
+            })
+        }
+
+        fn map_uri(&self, target: &ResourceAddress) -> Result<ResourceUri, KernelError> {
+            let uri = target.as_uri().ok_or_else(|| KernelError::InvalidUri {
+                message: "resources handler requires URI".to_owned(),
+            })?;
+            if uri.scheme() != "resources" {
+                return Err(KernelError::UnsupportedUri {
+                    uri: uri.to_string(),
+                });
+            }
+            let package = uri.as_ref().host_str().unwrap_or_default();
+            if package.is_empty() {
+                return Err(KernelError::InvalidUri {
+                    message: "resources URI must name a package".to_owned(),
+                });
+            }
+            let relative = uri.path().trim_start_matches('/');
+            if std::path::Path::new(relative)
+                .components()
+                .any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::ParentDir | std::path::Component::RootDir
+                    )
+                })
+            {
+                return Err(KernelError::InvalidRequest {
+                    message: "resources URI escapes the resources root".to_owned(),
+                });
+            }
+            let path = self.root.join(package).join(relative);
+            let mut mapped = ResourceUri::parse(&path.display().to_string())?;
+            if let Some(query) = uri.query() {
+                mapped = mapped.with_query(query);
+            }
+            if let Some(fragment) = uri.fragment() {
+                mapped = mapped.with_fragment(fragment);
+            }
+            Ok(mapped)
+        }
+
+        async fn select_candidate(
+            &self,
+            verb: Verb,
+            uri: &ResourceUri,
+            candidates: Vec<Arc<ActiveResource>>,
+        ) -> Result<(Option<Arc<ActiveResource>>, artist_kernel::ClaimDecision), KernelError>
+        {
+            let mut owners = Vec::new();
+            for candidate in candidates {
+                let decision = candidate.host.claim(verb, uri).await.map_err(|error| {
+                    KernelError::Handler {
+                        message: format!(
+                            "resource claim failed for {} ({}) in {}: {error}",
+                            verb, uri, candidate.package.manifest.name
+                        ),
+                    }
+                })?;
+                if matches!(decision, artist_kernel::ClaimDecision::Handle)
+                    && !candidate
+                        .package
+                        .manifest
+                        .exports
+                        .iter()
+                        .any(|export| export == verb.to_string().as_str())
+                {
+                    return Err(KernelError::Handler {
+                        message: format!(
+                            "resource package {} claimed undeclared verb {verb}",
+                            candidate.package.manifest.name
+                        ),
+                    });
+                }
+                if decision != artist_kernel::ClaimDecision::Pass {
+                    owners.push((candidate, decision));
+                }
+            }
+            if owners.len() > 1 {
+                return Err(KernelError::Conflict {
+                    uri: format!(
+                        "{uri} (competing resource packages: {})",
+                        owners
+                            .iter()
+                            .map(|(candidate, decision)| {
+                                format!("{}:{decision:?}", candidate.package.manifest.name)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+            Ok(owners
+                .pop()
+                .map(|(candidate, decision)| (Some(candidate), decision))
+                .unwrap_or((None, artist_kernel::ClaimDecision::Pass)))
+        }
+    }
+
+    impl Handler for ResourcesHandler {
+        fn descriptor(&self) -> HandlerDescriptor {
+            HandlerDescriptor {
+                name: "resources-bootstrap".to_owned(),
+                schemes: vec!["resources".to_owned()],
+                verbs: Verb::ALL.to_vec(),
+            }
+        }
+
+        fn execute<'a>(
+            &'a self,
+            mut request: Request,
+            host: KernelHandle,
+        ) -> BoxFuture<'a, Result<serde_json::Value, KernelError>> {
+            let mapped = self.map_uri(&request.target);
+            Box::pin(async move {
+                request.target = ResourceAddress::uri(mapped?);
+                // The bootstrap mount exposes package files through the same
+                // ordinary file semantics as tools:// package inspection.
+                self.files.execute(request, host).await
+            })
+        }
+    }
+
+    impl TypedHandler for ResourcesHandler {
+        fn descriptor(&self) -> HandlerDescriptor {
+            HandlerDescriptor {
+                name: "resource-extensions".to_owned(),
+                schemes: Vec::new(),
+                verbs: Verb::ALL.to_vec(),
+            }
+        }
+
+        fn claims_operation(&self, operation: &Operation) -> bool {
+            Self::bootstrap_operation(operation)
+                || !self
+                    .operation_candidates(
+                        operation,
+                        &artist_kernel::InvocationScope::new(
+                            artist_kernel::InvocationContext::default(),
+                        ),
+                    )
+                    .is_empty()
+        }
+
+        fn claim_operation<'a>(
+            &'a self,
+            operation: &'a Operation,
+        ) -> BoxFuture<'a, Result<artist_kernel::ClaimDecision, KernelError>> {
+            self.claim_operation_with_scope(
+                operation,
+                artist_kernel::InvocationScope::new(artist_kernel::InvocationContext::default()),
+            )
+        }
+
+        fn claim_operation_with_scope<'a>(
+            &'a self,
+            operation: &'a Operation,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Result<artist_kernel::ClaimDecision, KernelError>> {
+            Box::pin(async move {
+                if Self::bootstrap_operation(operation) {
+                    return Ok(artist_kernel::ClaimDecision::Handle);
+                }
+                let candidates = self.operation_candidates(operation, &scope);
+                if candidates.is_empty() {
+                    return Ok(artist_kernel::ClaimDecision::Pass);
+                }
+                let uri = operation_uri(operation);
+                let verb = operation_verb(operation);
+                let uri = match ResourceUri::parse(&uri) {
+                    Ok(uri) => uri,
+                    Err(error) => {
+                        return Err(KernelError::Handler {
+                            message: format!("resource claim failed: {error}"),
+                        });
+                    }
+                };
+                let verb = Verb::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.to_string() == verb)
+                    .unwrap_or(Verb::Read);
+                let (candidate, decision) = self.select_candidate(verb, &uri, candidates).await?;
+                if let Some(candidate) = candidate {
+                    let pin_key = generation_pin_key(verb, &uri);
+                    scope.pin_generation(
+                        pin_key.clone(),
+                        candidate.package.manifest.name.clone(),
+                        candidate.generation,
+                    );
+                    scope.pin_generation_handle(pin_key, Arc::clone(&candidate));
+                }
+                Ok(decision)
+            })
+        }
+
+        fn execute_typed<'a>(
+            &'a self,
+            operation: Operation,
+            host: KernelHandle,
+            context: artist_kernel::InvocationContext,
+        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+            self.execute_typed_with_scope(
+                operation,
+                host,
+                artist_kernel::InvocationScope::new(context),
+            )
+        }
+
+        fn execute_typed_with_scope<'a>(
+            &'a self,
+            operation: Operation,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
+            Box::pin(async move {
+                if Self::bootstrap_operation(&operation) {
+                    self.mark_bootstrap_dirty(&operation);
+                    let mapped = self.map_bootstrap_operation(operation)?;
+                    let result = self
+                        .files
+                        .execute_typed(mapped, host, scope.context.clone())
+                        .await?;
+                    return self.unmap_bootstrap_result(result);
+                }
+                let mut candidates = self.operation_candidates(&operation, &scope);
+                if candidates.is_empty() {
+                    return Err(KernelError::NoHandler {
+                        uri: operation_uri(&operation),
+                    });
+                }
+                let uri = ResourceUri::parse(&operation_uri(&operation)).map_err(|error| {
+                    KernelError::InvalidUri {
+                        message: error.to_string(),
+                    }
+                })?;
+                let verb = Verb::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.to_string() == operation_verb(&operation))
+                    .unwrap_or(Verb::Read);
+                if let Some((package, generation)) =
+                    scope.pinned_generation(&generation_pin_key(verb, &uri))
+                {
+                    candidates.retain(|candidate| {
+                        candidate.package.manifest.name == package
+                            && candidate.generation == generation
+                    });
+                }
+                let (candidate, decision) = self.select_candidate(verb, &uri, candidates).await?;
+                if decision == artist_kernel::ClaimDecision::Reserve {
+                    return Err(KernelError::UnsupportedVerb {
+                        verb: verb.to_string(),
+                        uri: uri.to_string(),
+                    });
+                }
+                let Some(candidate) = candidate else {
+                    return Err(KernelError::NoHandler {
+                        uri: operation_uri(&operation),
+                    });
+                };
+                let frame_key = format!(
+                    "{}@{}:{}:{}",
+                    candidate.package.manifest.name,
+                    candidate.generation,
+                    verb,
+                    uri.without_fragment()
+                );
+                let _routing_frame =
+                    scope
+                        .enter_routing_frame(frame_key)
+                        .map_err(|cycle| KernelError::Handler {
+                            message: format!("resource routing cycle: {cycle}"),
+                        })?;
+                let verb = operation_verb(&operation);
+                if let Operation::Write(requests) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_write_typed(requests.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Write(output));
+                }
+                if let Operation::Read(requests) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_read_typed(requests.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Read(output));
+                }
+                if let Operation::Edit(requests) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_edit_typed(requests.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Edit(output));
+                }
+                if let Operation::Run(requests) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_run_typed(requests.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Run(output));
+                }
+                if let Operation::Send(requests) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_send_typed(requests.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Send(output));
+                }
+                if let Operation::Find(request) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_find_typed(request.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Find(Ok(output)));
+                }
+                if let Operation::Grep(request) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_grep_typed(request.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Grep(Ok(output)));
+                }
+                if let Operation::Poll(request) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_poll_typed(request.clone(), host.clone(), scope.clone())
+                        .await?;
+                    return Ok(OperationResult::Poll(Ok(output)));
+                }
+                if let Operation::Abort(uris) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_abort_typed(
+                            uris.iter().map(ToString::to_string).collect(),
+                            host.clone(),
+                            scope.clone(),
+                        )
+                        .await?;
+                    return Ok(OperationResult::Abort(
+                        super::resource_abort_results_to_kernel(output)?,
+                    ));
+                }
+                if let Operation::Delete(uris) = &operation {
+                    let output = candidate
+                        .host
+                        .invoke_delete_typed(
+                            uris.iter().map(ToString::to_string).collect(),
+                            host.clone(),
+                            scope.clone(),
+                        )
+                        .await?;
+                    return Ok(OperationResult::Delete(
+                        super::resource_delete_results_to_kernel(output)?,
+                    ));
+                }
+                Err(KernelError::Handler {
+                    message: format!(
+                        "resource verb {verb} was not dispatched through its typed WIT interface"
+                    ),
+                })
+            })
+        }
+    }
+
+    fn operation_uri(operation: &Operation) -> String {
+        match operation {
+            Operation::Read(items) => items
+                .first()
+                .map(|item| item.uri.to_string())
+                .unwrap_or_default(),
+            Operation::Write(items) => items
+                .first()
+                .map(|item| item.uri.to_string())
+                .unwrap_or_default(),
+            Operation::Edit(items) => items
+                .first()
+                .map(|item| item.uri.to_string())
+                .unwrap_or_default(),
+            Operation::Find(request) => request
+                .roots
+                .first()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            Operation::Grep(request) => match &request.source {
+                artist_kernel::GrepSource::Resources(uris) => {
+                    uris.first().map(ToString::to_string).unwrap_or_default()
+                }
+                artist_kernel::GrepSource::Text(text) => text
+                    .first()
+                    .map(|text| text.uri.to_string())
+                    .unwrap_or_default(),
+            },
+            Operation::Run(items) => items
+                .first()
+                .map(|item| item.uri.to_string())
+                .unwrap_or_default(),
+            Operation::Send(items) => items
+                .first()
+                .map(|item| item.uri.to_string())
+                .unwrap_or_default(),
+            Operation::Abort(uris) | Operation::Delete(uris) => {
+                uris.first().map(ToString::to_string).unwrap_or_default()
+            }
+            Operation::Poll(request) => request
+                .targets
+                .first()
+                .map(|target| target.uri.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn operation_verb(operation: &Operation) -> &'static str {
+        match operation {
+            Operation::Read(_) => "read",
+            Operation::Write(_) => "write",
+            Operation::Edit(_) => "edit",
+            Operation::Find(_) => "find",
+            Operation::Grep(_) => "grep",
+            Operation::Run(_) => "run",
+            Operation::Send(_) => "send",
+            Operation::Abort(_) => "abort",
+            Operation::Delete(_) => "delete",
+            Operation::Poll(_) => "poll",
+        }
+    }
+
+    fn generation_pin_key(verb: Verb, uri: &ResourceUri) -> String {
+        format!("{}:{}", verb, uri.without_fragment())
+    }
+}
+
+/// Shared debounced watcher for editable tool/resource package trees. The
+/// caller owns activation policy; this service only identifies the affected
+/// package, so one broken edit cannot poison unrelated packages.
+pub mod watcher {
+    use artist_kernel::KernelError;
+    use notify_debouncer_mini::{
+        Debouncer, new_debouncer,
+        notify::{RecommendedWatcher, RecursiveMode},
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    pub type PackageWatcher = Debouncer<RecommendedWatcher>;
+
+    pub struct WatcherHandle {
+        stop: Option<Sender<()>>,
+        join: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for WatcherHandle {
+        fn drop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+
+    /// Shared dirty-package state for the project-level tools and resources
+    /// roots. A single debouncer feeds both namespaces so an external edit
+    /// cannot leave their activation paths observing different file-change
+    /// timelines.
+    #[derive(Clone, Default)]
+    pub struct SharedWatcher {
+        dirty: Arc<Mutex<std::collections::HashSet<PathBuf>>>,
+    }
+
+    impl SharedWatcher {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub(crate) fn dirty_set(&self) -> Arc<Mutex<std::collections::HashSet<PathBuf>>> {
+            Arc::clone(&self.dirty)
+        }
+
+        pub fn start(
+            &self,
+            roots: impl IntoIterator<Item = impl AsRef<Path>>,
+        ) -> Result<WatcherHandle, KernelError> {
+            let (debouncer, events) = watch_roots(roots).map_err(|error| KernelError::Handler {
+                message: format!("start shared package watcher: {error}"),
+            })?;
+            let dirty = Arc::clone(&self.dirty);
+            let (stop_tx, stop_rx) = mpsc::channel();
+            let join = std::thread::spawn(move || {
+                let _debouncer = debouncer;
+                loop {
+                    match stop_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => {}
+                    }
+                    while let Ok(package) = events.try_recv() {
+                        dirty.lock().unwrap().insert(package);
+                    }
+                }
+            });
+            Ok(WatcherHandle {
+                stop: Some(stop_tx),
+                join: Some(join),
+            })
+        }
+    }
+
+    pub fn watch_roots(
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<(PackageWatcher, Receiver<PathBuf>), notify_debouncer_mini::notify::Error> {
+        let (events_tx, events_rx) = mpsc::channel();
+        let mut debouncer = new_debouncer(
+            Duration::from_millis(200),
+            move |result: notify_debouncer_mini::DebounceEventResult| {
+                if let Ok(events) = result {
+                    for event in events {
+                        if let Some(package) = package_root(&event.path) {
+                            let _ = events_tx.send(package);
+                        }
+                    }
+                }
+            },
+        )?;
+        for root in roots {
+            debouncer
+                .watcher()
+                .watch(root.as_ref(), RecursiveMode::Recursive)?;
+        }
+        Ok((debouncer, events_rx))
+    }
+
+    fn package_root(path: &Path) -> Option<PathBuf> {
+        if path
+            .components()
+            .any(|component| matches!(component.as_os_str().to_str(), Some("target" | ".git")))
+        {
+            return None;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.starts_with('.')
+                    || name.ends_with('~')
+                    || name.ends_with(".wasm.artist.json")
+                    || name.contains(".artist-tmp-")
+            })
+        {
+            return None;
+        }
+        path.ancestors()
+            .find(|candidate| {
+                candidate.join("tool.md").is_file() || candidate.join("resource.md").is_file()
+            })
+            .map(Path::to_owned)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::ToolsHandler;
-    use std::{path::PathBuf, process::Command};
-
-    fn fixture() -> Vec<u8> {
-        let manifest =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/echo/Cargo.toml");
-        let status = Command::new("cargo")
-            .args([
-                "build",
-                "--manifest-path",
-                manifest.to_str().unwrap(),
-                "--target",
-                "wasm32-wasip2",
-                "--offline",
-            ])
-            .status()
-            .expect("build conformance component");
-        assert!(status.success());
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("target/wasm32-wasip2/debug/artist_component_echo.wasm");
-        std::fs::read(root).expect("read conformance component")
-    }
-
-    #[test]
-    fn loads_describes_and_invokes_conformance_component() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let info = host.validate().unwrap();
-        assert_eq!(info.name, "conformance-echo");
-        let response = host
-            .invoke(Invocation {
-                id: "1".to_owned(),
-                operation: "echo".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{\"ok\":true}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-1".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-1".to_owned(),
-                },
-            })
-            .unwrap();
-        assert_eq!(response.output, "{\"ok\":true}");
-    }
-
-    #[test]
-    fn preserves_declared_component_errors() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let error = host
-            .invoke(Invocation {
-                id: "2".to_owned(),
-                operation: "error".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-2".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-2".to_owned(),
-                },
-            })
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ComponentError::Abi(Error {
-                kind: ErrorKind::InvalidRequest,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn rejects_incompatible_abi_and_cancelled_invocations() {
-        let info = ComponentInfo {
-            name: "bad".to_owned(),
-            version: "0.1.0".to_owned(),
-            abi_version: "9.0".to_owned(),
-            interfaces: Vec::new(),
-            required_capabilities: Vec::new(),
-        };
-        assert!(matches!(
-            validate_component_info(&info),
-            Err(ComponentError::Abi(Error {
-                kind: ErrorKind::Incompatible,
-                ..
-            }))
-        ));
-
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let cancellation = Cancellation::default();
-        cancellation.cancel();
-        let error = host.invoke_with_cancellation(
-            Invocation {
-                id: "3".to_owned(),
-                operation: "echo".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-3".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-3".to_owned(),
-                },
-            },
-            &cancellation,
-        );
-        assert!(matches!(error, Err(ComponentError::Cancelled)));
-    }
-
-    #[test]
-    fn rejects_malformed_structured_response() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let error = host
-            .invoke(Invocation {
-                id: "4".to_owned(),
-                operation: "malformed".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-4".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-4".to_owned(),
-                },
-            })
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ComponentError::MalformedResponse { field: "output" }
-        ));
-    }
-
-    #[test]
-    fn exercises_the_component_to_kernel_host_boundary() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let error = host
-            .invoke(Invocation {
-                id: "5".to_owned(),
-                operation: "host".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-5".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-5".to_owned(),
-                },
-            })
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ComponentError::Abi(Error {
-                kind: ErrorKind::HostFailure,
-                ..
-            })
-        ));
-
-        let host =
-            ComponentHost::new_with_capabilities(&fixture(), ["resource.read".to_owned()]).unwrap();
-        let response = host
-            .invoke(Invocation {
-                id: "6".to_owned(),
-                operation: "host".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-6".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-6".to_owned(),
-                },
-            })
-            .unwrap();
-        assert_eq!(response.output, "{}");
-    }
-
-    #[test]
-    fn handles_are_host_issued_and_released_explicitly() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let response = host
-            .invoke(Invocation {
-                id: "7".to_owned(),
-                operation: "handle".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{\"handle\":true}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-7".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-7".to_owned(),
-                },
-            })
-            .unwrap();
-        assert_eq!(response.output, "{\"handle\":true}");
-    }
-
-    #[test]
-    fn executes_real_kernel_operations_through_a_component() {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let kernel = artist_kernel::Kernel::new();
-        runtime.block_on(kernel.register(artist_kernel::FileHandler::new(root.path()).unwrap()));
-        runtime
-            .block_on(kernel.register_typed(artist_kernel::FileHandler::new(root.path()).unwrap()));
-        let host = ComponentHost::new_with_capabilities(
-            &fixture(),
-            ["resource.write".to_owned(), "resource.read".to_owned()],
-        )
-        .unwrap();
-        let target = root
-            .path()
-            .join("component-bridge.txt")
-            .display()
-            .to_string();
-        let write = host
-            .invoke_with_kernel(
-                Invocation {
-                    id: "bridge-write".to_owned(),
-                    operation: "tool.write".to_owned(),
-                    target: target.to_owned(),
-                    input: "{\"value\":\"hello\"}".to_owned(),
-                    context: Context {
-                        cancellation_token: String::new(),
-                        deadline_ms: None,
-                        correlation_id: "bridge".to_owned(),
-                    },
-                },
-                kernel.handle(),
-            )
-            .unwrap();
-        assert!(write.output.contains("written"));
-        let read = host
-            .invoke_with_kernel(
-                Invocation {
-                    id: "bridge-read".to_owned(),
-                    operation: "tool.read".to_owned(),
-                    target: target.to_owned(),
-                    input: "{}".to_owned(),
-                    context: Context {
-                        cancellation_token: String::new(),
-                        deadline_ms: None,
-                        correlation_id: "bridge".to_owned(),
-                    },
-                },
-                kernel.handle(),
-            )
-            .unwrap();
-        assert!(read.output.contains("hello"));
-    }
+    use std::path::PathBuf;
 
     #[test]
     fn typed_component_invokes_a_real_filesystem_resource() {
@@ -5342,7 +9377,7 @@ mod tests {
             .block_on(kernel.register_typed(artist_kernel::FileHandler::new(root.path()).unwrap()));
         let result = host
             .invoke_read(
-                vec![tool_bindings::artist::tool::types::ReadRequest {
+                vec![tool_v1_bindings::artist::resource::types::ReadRequest {
                     uri: typed_uri.clone(),
                     at: None,
                     before: None,
@@ -5606,7 +9641,7 @@ mod tests {
         ];
         let imports = vec![
             "artist:tool/types@0.1.0".to_owned(),
-            "artist:tool/host-read@0.1.0".to_owned(),
+            "artist:tool/old-helper@0.1.0".to_owned(),
             "artist:tool/extra@0.1.0".to_owned(),
         ];
         assert!(validate_typed_contract_names(read, &exports, &imports).is_err());
@@ -5616,7 +9651,7 @@ mod tests {
                 &["artist:tool/read@0.1.0".to_owned()],
                 &imports[..2]
             )
-            .is_ok()
+            .is_err()
         );
     }
 
@@ -5640,64 +9675,11 @@ mod tests {
     }
 
     #[test]
-    fn streams_chunks_and_async_invokes() {
-        let host = ComponentHost::new(&fixture()).unwrap();
-        let chunks = host
-            .invoke_stream(Invocation {
-                id: "8".to_owned(),
-                operation: "stream".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{\"stream\":true}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-8".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-8".to_owned(),
-                },
-            })
-            .unwrap();
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks[1].final_);
-
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let response = runtime
-            .block_on(host.invoke_async(Invocation {
-                id: "9".to_owned(),
-                operation: "echo".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-9".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-9".to_owned(),
-                },
-            }))
-            .unwrap();
-        assert_eq!(response.output, "{}");
-
-        let authorized_host =
-            ComponentHost::new_with_capabilities(&fixture(), ["resource.read".to_owned()]).unwrap();
-        let response = runtime
-            .block_on(authorized_host.invoke_async(Invocation {
-                id: "10".to_owned(),
-                operation: "host".to_owned(),
-                target: "repo://project/example".to_owned(),
-                input: "{}".to_owned(),
-                context: Context {
-                    cancellation_token: "cancel-10".to_owned(),
-                    deadline_ms: None,
-                    correlation_id: "test-10".to_owned(),
-                },
-            }))
-            .unwrap();
-        assert_eq!(response.output, "{}");
-    }
-
-    #[test]
     fn discovers_tool_markdown_packages() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("tool.md"),
-            "---\nname: echo\ndescription: Echo input\nversion: 0.1.0\ncapabilities:\n  - resource.read\n---\n\nEcho prose.\n",
+            "---\nname: echo\ndescription: Echo input\nversion: 0.1.0\ncontract: \"artist:tool:read@1\"\ncapabilities:\n  - resource.read\n---\n\nEcho prose.\n",
         )
         .unwrap();
         std::fs::create_dir(dir.path().join("src")).unwrap();
@@ -5714,7 +9696,10 @@ mod tests {
         assert!(package.source.is_some());
         assert!(package.build_manifest.is_some());
         assert!(package.wit.is_none());
-        assert!(package.contract.is_none());
+        assert_eq!(
+            package.contract.as_ref().map(ToString::to_string),
+            Some("artist:tool:read@1".to_owned())
+        );
     }
 
     #[test]
@@ -5772,39 +9757,275 @@ mod tests {
     }
 
     #[test]
-    fn builds_validates_and_reuses_a_source_package() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/echo");
-        let package = package::ToolPackage::discover(&root).unwrap();
-        let options = package::BuildOptions {
-            force: true,
-            ..Default::default()
-        };
-        let first = package.build(&options).unwrap();
-        assert!(!first.cached);
-        assert!(first.artifact.is_file());
-        assert!(first.provenance.is_file());
+    fn removed_or_renamed_tool_packages_do_not_leave_ghost_registrations() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("package");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("tool.md"),
+            "---\nname: cached-tool\ndescription: Cached tool\nversion: 0.1.0\ncontract: artist:tool:read@1\n---\n",
+        )
+        .unwrap();
+        std::fs::write(package.join("tool.wasm"), b"not activated in this test").unwrap();
 
-        let cached = package
-            .build(&package::BuildOptions {
-                force: false,
-                ..options
-            })
-            .unwrap();
-        assert!(cached.cached);
-        assert_eq!(cached.fingerprint, first.fingerprint);
+        let handler = ToolsHandler::new(root.path(), []).unwrap();
+        assert_eq!(handler.registrations().unwrap().len(), 1);
 
-        let provenance: package::BuildProvenance =
-            serde_json::from_slice(&std::fs::read(first.provenance).unwrap()).unwrap();
-        assert_eq!(provenance.abi_version, ABI_VERSION);
-        assert_eq!(provenance.target, "wasm32-wasip2");
+        // A package rename is a manifest identity change, not merely moving
+        // its directory. The old registration must disappear on the next
+        // catalog observation.
+        std::fs::write(
+            package.join("tool.md"),
+            "---\nname: renamed-tool\ndescription: Renamed tool\nversion: 0.1.0\ncontract: artist:tool:read@1\n---\n",
+        )
+        .unwrap();
+        let registrations = handler.registrations().unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].package, "renamed-tool");
+
+        std::fs::remove_dir_all(&package).unwrap();
+        assert!(handler.registrations().unwrap().is_empty());
     }
 
     #[test]
-    fn rejects_malformed_component_bytes() {
-        assert!(matches!(
-            ComponentHost::new(b"not a component"),
-            Err(ComponentError::Load(_))
-        ));
+    fn discovers_resource_packages_and_builds_compact_catalog_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("ast");
+        std::fs::create_dir_all(package.join("src")).unwrap();
+        std::fs::write(
+            package.join("resource.md"),
+            "---\nname: artist-ast\ndescription: AST projections\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes:\n  - schemes: [file]\nexports: [read]\ncapabilities: [resource.read]\ndocs:\n  - uri: file://<path>/symbols/\n    summary: Lists symbols\n    verbs: [read]\n    query:\n      - name: kind\n        summary: Symbol kind\n---\n\nFull AST documentation.\n",
+        )
+        .unwrap();
+        let handler = resources::ResourcesHandler::new(root.path()).unwrap();
+        let packages = handler.discover();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].manifest.routes[0].schemes, vec!["file"]);
+        assert!(packages[0].prose.contains("Full AST documentation"));
+        let catalog = handler.catalog();
+        assert!(
+            catalog.is_empty(),
+            "inactive packages must not seed the catalog"
+        );
+
+        let authored_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources");
+        let active_handler = resources::ResourcesHandler::new(&authored_root).unwrap();
+        active_handler.activate(authored_root.join("ast")).unwrap();
+        let catalog = active_handler.catalog();
+        assert_eq!(catalog.len(), 1);
+        assert!(catalog[0].description.contains("file://<path>/symbols/"));
+        assert!(
+            catalog[0]
+                .description
+                .contains("Symbol projection for a source file")
+        );
+    }
+
+    #[test]
+    fn builds_the_ast_resource_component_with_a_nested_read_import() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources/ast");
+        let package = resources::ResourcePackage::discover(&root).unwrap();
+        assert_eq!(package.manifest.name, "artist-ast");
+        assert!(package.wit.is_some());
+        let build = package
+            .build(&package::BuildOptions {
+                force: true,
+                granted_capabilities: package.manifest.capabilities.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(build.artifact.is_file());
+        let engine = package::component_engine().unwrap();
+        let component = wasmtime::component::Component::from_binary(
+            &engine,
+            &std::fs::read(build.artifact).unwrap(),
+        )
+        .unwrap();
+        let imports = component
+            .component_type()
+            .imports(&engine)
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>();
+        assert!(imports.iter().any(|name| name.contains("resource/read")));
+    }
+
+    #[tokio::test]
+    async fn ast_resource_reads_a_file_through_the_typed_nested_resource_path() {
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("main.rs");
+        std::fs::write(&source, "fn main() {}\nstruct Marker;\n").unwrap();
+        let authored_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources/ast");
+        let authored = resources::ResourcePackage::discover(&authored_root).unwrap();
+        let built = authored
+            .build(&package::BuildOptions {
+                force: true,
+                granted_capabilities: authored.manifest.capabilities.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let resource_root = tempfile::tempdir().unwrap();
+        let installed = resource_root.path().join("ast");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::copy(
+            authored_root.join("resource.md"),
+            installed.join("resource.md"),
+        )
+        .unwrap();
+        std::fs::copy(built.artifact, installed.join("resource.wasm")).unwrap();
+
+        let kernel = artist_kernel::Kernel::new();
+        kernel
+            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
+            .await;
+        kernel
+            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
+            .await;
+
+        let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
+        let projection = artist_kernel::ResourceUri::parse(&format!("{file}/symbols/")).unwrap();
+        let result = kernel
+            .execute_operation(artist_kernel::Operation::Read(vec![
+                artist_kernel::ReadRequest {
+                    uri: projection,
+                    at: None,
+                    before: None,
+                    after: None,
+                },
+            ]))
+            .await
+            .unwrap();
+        let artist_kernel::OperationResult::Read(values) = result else {
+            panic!("AST resource returned the wrong result variant");
+        };
+        let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
+            panic!("AST resource did not return anchored text: {values:?}");
+        };
+        assert_eq!(text.lines.len(), 2);
+        assert!(text.lines.iter().any(|line| line.text.contains("fn main")));
+
+        // The bootstrap mount is also a typed file namespace: package
+        // metadata remains inspectable through the same typed resource path.
+        let package_file =
+            artist_kernel::ResourceUri::parse("resources://ast/resource.md").unwrap();
+        let package_result = kernel
+            .execute_operation(artist_kernel::Operation::Read(vec![
+                artist_kernel::ReadRequest {
+                    uri: package_file.clone(),
+                    at: None,
+                    before: None,
+                    after: None,
+                },
+            ]))
+            .await
+            .unwrap();
+        let artist_kernel::OperationResult::Read(package_values) = package_result else {
+            panic!("resource package read returned the wrong result variant");
+        };
+        let Ok(artist_kernel::ReadResult::Text(package_text)) = &package_values[0] else {
+            panic!("resource package read did not return text: {package_values:?}");
+        };
+        assert_eq!(package_text.uri, package_file);
+        assert!(
+            package_text
+                .lines
+                .iter()
+                .any(|line| line.text.contains("artist-ast"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ast_resource_exposes_deeper_children_and_preserves_query_identity() {
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("main.rs");
+        std::fs::write(&source, "fn main() {}\nfn helper() {}\n").unwrap();
+        let authored_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources/ast");
+        let authored = resources::ResourcePackage::discover(&authored_root).unwrap();
+        let built = authored
+            .build(&package::BuildOptions {
+                force: true,
+                granted_capabilities: authored.manifest.capabilities.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        let resource_root = tempfile::tempdir().unwrap();
+        let installed = resource_root.path().join("ast");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::copy(
+            authored_root.join("resource.md"),
+            installed.join("resource.md"),
+        )
+        .unwrap();
+        std::fs::copy(built.artifact, installed.join("resource.wasm")).unwrap();
+
+        let kernel = artist_kernel::Kernel::new();
+        kernel
+            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
+            .await;
+        kernel
+            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
+            .await;
+
+        let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
+        let projection =
+            artist_kernel::ResourceUri::parse(&format!("{file}/symbols/main/callers?limit=1"))
+                .unwrap();
+        let result = kernel
+            .execute_operation(artist_kernel::Operation::Read(vec![
+                artist_kernel::ReadRequest {
+                    uri: projection,
+                    at: None,
+                    before: None,
+                    after: None,
+                },
+            ]))
+            .await
+            .unwrap();
+        let artist_kernel::OperationResult::Read(values) = result else {
+            panic!("AST child returned the wrong result variant");
+        };
+        let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
+            panic!("AST child did not return anchored text: {values:?}");
+        };
+        assert_eq!(text.uri.query(), Some("limit=1"));
+        assert!(text.lines.iter().any(|line| line.text.contains("fn main")));
+    }
+
+    #[tokio::test]
+    async fn ast_resource_reserves_projection_mutations() {
+        let resource_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources");
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("main.rs");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let kernel = artist_kernel::Kernel::new();
+        kernel
+            .register_typed(artist_kernel::FileHandler::new(project.path()).unwrap())
+            .await;
+        kernel
+            .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
+            .await;
+        let projection = artist_kernel::ResourceUri::parse(&format!(
+            "{}/symbols/",
+            artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap()
+        ))
+        .unwrap();
+        let result = kernel
+            .execute_operation(artist_kernel::Operation::Edit(vec![
+                artist_kernel::EditRequest {
+                    uri: projection,
+                    operations: Vec::new(),
+                },
+            ]))
+            .await;
+        assert!(
+            matches!(
+                result,
+            Ok(artist_kernel::OperationResult::Edit(ref values))
+                    if matches!(values.as_slice(), [Err(artist_kernel::KernelError::UnsupportedVerb { .. })])
+            ),
+            "unexpected projection mutation result: {result:?}"
+        );
     }
 
     #[test]
@@ -5890,79 +10111,5 @@ mod tests {
             context.environment,
             vec![("MODE".to_owned(), "test".to_owned())]
         );
-    }
-
-    #[test]
-    fn registry_swaps_versions_and_pins_existing_invocations() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/echo");
-        let package = package::ToolPackage::discover(&root).unwrap();
-        let registry = runtime::ComponentRegistry::new();
-        let first = registry
-            .reload(
-                &package,
-                &package::BuildOptions {
-                    force: true,
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let pinned = first.clone();
-        let second = registry
-            .reload(&package, &package::BuildOptions::default())
-            .unwrap();
-
-        assert_eq!(first.generation(), 1);
-        assert_eq!(pinned.generation(), 1);
-        assert_eq!(second.generation(), 2);
-        assert_eq!(
-            registry.current("conformance-echo").unwrap().generation(),
-            2
-        );
-
-        let request = |id: &str| Invocation {
-            id: id.to_owned(),
-            operation: "echo".to_owned(),
-            target: "repo://project/example".to_owned(),
-            input: "{}".to_owned(),
-            context: Context {
-                cancellation_token: format!("cancel-{id}"),
-                deadline_ms: None,
-                correlation_id: format!("correlation-{id}"),
-            },
-        };
-        assert_eq!(pinned.invoke(request("old")).unwrap().output, "{}");
-        let result = registry.invoke("conformance-echo", request("new")).unwrap();
-        assert_eq!(result.generation, 2);
-        assert_eq!(result.response.output, "{}");
-    }
-
-    #[test]
-    fn failed_reload_preserves_the_active_version() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/echo");
-        let package = package::ToolPackage::discover(&root).unwrap();
-        let registry = runtime::ComponentRegistry::new();
-        let active = registry
-            .reload(&package, &package::BuildOptions::default())
-            .unwrap();
-
-        let broken = tempfile::tempdir().unwrap();
-        std::fs::write(
-            broken.path().join("tool.md"),
-            "---\nname: conformance-echo\ndescription: broken\nversion: 0.1.0\n---\n",
-        )
-        .unwrap();
-        std::fs::create_dir(broken.path().join("src")).unwrap();
-        std::fs::write(broken.path().join("src/lib.rs"), "this is not Rust\n").unwrap();
-        std::fs::write(broken.path().join("Cargo.toml"), "not valid cargo\n").unwrap();
-        let broken = package::ToolPackage::discover(broken.path()).unwrap();
-
-        assert!(
-            registry
-                .reload(&broken, &package::BuildOptions::default())
-                .is_err()
-        );
-        let still_active = registry.current("conformance-echo").unwrap();
-        assert_eq!(still_active.generation(), active.generation());
-        assert_eq!(still_active.fingerprint(), active.fingerprint());
     }
 }

@@ -6,9 +6,10 @@
 //! source edits remain native-path `edit` requests, anchored by the kernel.
 
 use crate::{
-    AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler, HandlerDescriptor, KernelError,
-    KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request, ResourceAddress,
-    SearchService, StructuralAnalyzer, StructuralLine, TypedHandler, Verb, is_file_uri, normalize,
+    AnchorSet, AnchoredLine, AnchoredText, BoxFuture, ClaimDecision, Handler, HandlerDescriptor,
+    KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request,
+    ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler, Verb,
+    has_projection, is_file_uri, normalize,
 };
 use serde_json::{Value, json};
 use std::{
@@ -22,6 +23,7 @@ pub struct RepositoryHandler {
     project: String,
     structure: StructuralAnalyzer,
     search: SearchService,
+    file_projections: bool,
 }
 
 impl RepositoryHandler {
@@ -47,7 +49,16 @@ impl RepositoryHandler {
             project,
             structure: StructuralAnalyzer::default(),
             search: SearchService::new(),
+            file_projections: true,
         })
+    }
+
+    /// Keep `file://` AST compatibility available for standalone native
+    /// kernels, while allowing the WASM AST resource to own those projections
+    /// in the application kernel. `repo://` remains handled in both modes.
+    pub fn without_file_projections(mut self) -> Self {
+        self.file_projections = false;
+        self
     }
 
     pub fn project(&self) -> &str {
@@ -560,24 +571,73 @@ impl TypedHandler for RepositoryHandler {
     fn claims_operation(&self, operation: &Operation) -> bool {
         match operation {
             Operation::Read(requests) => requests.iter().all(|request| {
-                matches!(request.uri.scheme(), "repo" | "file")
-                    && (request.uri.scheme() == "repo"
-                        || self
-                            .file_and_suffix(&ResourceAddress::uri(request.uri.clone()))
-                            .is_ok())
+                request.uri.scheme() == "repo"
+                    || (self.file_projections
+                        && request.uri.scheme() == "file"
+                        && has_projection(Path::new(request.uri.path())))
             }),
-            Operation::Find(request) => request
-                .roots
-                .iter()
-                .all(|uri| matches!(uri.scheme(), "repo" | "file")),
+            Operation::Find(request) => request.roots.iter().all(|uri| {
+                uri.scheme() == "repo"
+                    || (self.file_projections
+                        && uri.scheme() == "file"
+                        && has_projection(Path::new(uri.path())))
+            }),
             Operation::Grep(request) => matches!(
                 &request.source,
                 crate::GrepSource::Resources(uris)
                     if !uris.is_empty()
-                        && uris.iter().all(|uri| matches!(uri.scheme(), "repo" | "file"))
+                        && uris.iter().all(|uri| uri.scheme() == "repo" || (self.file_projections && uri.scheme() == "file" && has_projection(Path::new(uri.path()))))
             ),
             _ => false,
         }
+    }
+
+    fn claim_operation<'a>(
+        &'a self,
+        operation: &'a Operation,
+    ) -> BoxFuture<'a, Result<ClaimDecision, KernelError>> {
+        let reserve = match operation {
+            Operation::Write(requests) => requests.iter().any(|request| {
+                self.file_projections
+                    && request.uri.scheme() == "file"
+                    && has_projection(Path::new(request.uri.path()))
+            }),
+            Operation::Edit(requests) => requests.iter().any(|request| {
+                self.file_projections
+                    && request.uri.scheme() == "file"
+                    && has_projection(Path::new(request.uri.path()))
+            }),
+            Operation::Run(requests) => requests.iter().any(|request| {
+                self.file_projections
+                    && request.uri.scheme() == "file"
+                    && has_projection(Path::new(request.uri.path()))
+            }),
+            Operation::Send(requests) => requests.iter().any(|request| {
+                self.file_projections
+                    && request.uri.scheme() == "file"
+                    && has_projection(Path::new(request.uri.path()))
+            }),
+            Operation::Poll(request) => request.targets.iter().any(|target| {
+                self.file_projections
+                    && target.uri.scheme() == "file"
+                    && has_projection(Path::new(target.uri.path()))
+            }),
+            Operation::Abort(uris) | Operation::Delete(uris) => uris.iter().any(|uri| {
+                self.file_projections
+                    && uri.scheme() == "file"
+                    && has_projection(Path::new(uri.path()))
+            }),
+            Operation::Find(_) | Operation::Read(_) | Operation::Grep(_) => false,
+        };
+        Box::pin(async move {
+            if reserve {
+                Ok(ClaimDecision::Reserve)
+            } else if self.claims_operation(operation) {
+                Ok(ClaimDecision::Handle)
+            } else {
+                Ok(ClaimDecision::Pass)
+            }
+        })
     }
 
     fn execute_typed<'a>(
@@ -1033,6 +1093,9 @@ mod tests {
         let handler = RepositoryHandler::new(root.path()).unwrap();
         let uri = crate::ResourceUri::parse(&file.display().to_string()).unwrap();
         let kernel = Kernel::new();
+        kernel
+            .register_typed(crate::FileHandler::new(root.path()).unwrap())
+            .await;
         kernel.register_typed(handler).await;
         let result = kernel
             .execute_operation(crate::Operation::Read(vec![crate::ReadRequest {
@@ -1064,6 +1127,9 @@ mod tests {
         let file_uri = ResourceUri::parse(&file.display().to_string()).unwrap();
         let repo_uri = ResourceUri::parse(&format!("repo://{project}/main.rs/symbols")).unwrap();
         let kernel = Kernel::new();
+        kernel
+            .register_typed(crate::FileHandler::new(root.path()).unwrap())
+            .await;
         kernel.register_typed(handler).await;
 
         let read = kernel

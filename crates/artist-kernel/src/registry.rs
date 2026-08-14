@@ -1,15 +1,18 @@
 use crate::{
-    BatchRequest, BatchResult, Handler, HandlerDescriptor, InvocationContext, ItemResult,
-    KernelError, KernelHandle, Operation, OperationResult, Request, ResourceUri, ToolDefinition,
-    ToolProvider, TypedHandler, Verb,
+    BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
+    InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Request,
+    ResourceUri, ToolDefinition, ToolProvider, TypedHandler, Verb,
 };
+use std::any::Any;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 
 struct Inner {
     handlers: RwLock<Vec<Arc<dyn Handler>>>,
     typed_handlers: RwLock<Vec<Arc<dyn TypedHandler>>>,
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
+    background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
 #[cfg(test)]
@@ -312,7 +315,7 @@ mod tests {
         assert!(matches!(
             unknown,
             Ok(OperationResult::Send(ref values))
-                if matches!(values[0], Err(KernelError::NoHandler { .. }))
+                if matches!(values[0], Err(KernelError::UnsupportedVerb { .. }))
         ));
     }
 
@@ -333,16 +336,76 @@ mod tests {
                     content: "first\n".to_owned(),
                 },
                 crate::WriteRequest {
-                    uri,
+                    uri: uri.clone(),
                     content: "second\n".to_owned(),
+                },
+                crate::WriteRequest {
+                    uri,
+                    content: "third\n".to_owned(),
                 },
             ]))
             .await
             .unwrap();
         assert!(
-            matches!(result, OperationResult::Write(ref values) if values.len() == 1 && matches!(values[0], Err(KernelError::Conflict { .. })))
+            matches!(result, OperationResult::Write(ref values) if values.len() == 3 && values.iter().all(|value| matches!(value, Err(KernelError::InvalidRequest { .. }))))
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "original\n");
+    }
+
+    #[tokio::test]
+    async fn uri_fragments_lower_only_to_existing_positions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("fragment.txt");
+        std::fs::write(&path, "first\nsecond\n").unwrap();
+        let kernel = Kernel::new();
+        kernel
+            .register_typed(crate::FileHandler::new(root.path()).unwrap())
+            .await;
+        let base_uri = ResourceUri::parse(&path.display().to_string()).unwrap();
+        let baseline = kernel
+            .execute_operation(Operation::Read(vec![crate::ReadRequest {
+                uri: base_uri.clone(),
+                at: None,
+                before: None,
+                after: None,
+            }]))
+            .await
+            .unwrap();
+        let OperationResult::Read(baseline_values) = baseline else {
+            panic!("wrong baseline result")
+        };
+        let Ok(crate::ReadResult::Text(baseline_text)) = &baseline_values[0] else {
+            panic!("wrong baseline value")
+        };
+        let anchor = baseline_text.lines[0].anchor.to_string();
+        let uri = base_uri.with_fragment(anchor.trim_start_matches('#'));
+        let result = kernel
+            .execute_operation(Operation::Read(vec![crate::ReadRequest {
+                uri,
+                at: None,
+                before: None,
+                after: Some(0),
+            }]))
+            .await
+            .unwrap();
+        let OperationResult::Read(values) = result else {
+            panic!("wrong result")
+        };
+        let Ok(crate::ReadResult::Text(text)) = &values[0] else {
+            panic!("wrong value: {:?}", values[0])
+        };
+        assert_eq!(text.uri.fragment(), None);
+        assert_eq!(text.lines.len(), 1);
+        assert_eq!(text.lines[0].text, "first");
+
+        let invalid = kernel
+            .execute_operation(Operation::Write(vec![crate::WriteRequest {
+                uri: base_uri.with_fragment(anchor.trim_start_matches('#')),
+                content: "no mutation".to_owned(),
+            }]))
+            .await;
+        assert!(matches!(invalid, Err(KernelError::InvalidRequest { .. })));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "first\nsecond\n");
     }
 }
 
@@ -364,6 +427,21 @@ fn operation_uri(operation: &Operation) -> String {
         Operation::Poll(item) => item.targets.first().map(|item| item.uri.to_string()),
     }
     .unwrap_or_else(|| "<operation>".to_owned())
+}
+
+fn operation_verb(operation: &Operation) -> &'static str {
+    match operation {
+        Operation::Read(_) => "read",
+        Operation::Write(_) => "write",
+        Operation::Edit(_) => "edit",
+        Operation::Find(_) => "find",
+        Operation::Grep(_) => "grep",
+        Operation::Run(_) => "run",
+        Operation::Send(_) => "send",
+        Operation::Abort(_) => "abort",
+        Operation::Delete(_) => "delete",
+        Operation::Poll(_) => "poll",
+    }
 }
 
 fn poll_timeout(condition: &Option<crate::PollCondition>) -> Option<u64> {
@@ -487,8 +565,24 @@ impl Kernel {
                 handlers: RwLock::new(Vec::new()),
                 typed_handlers: RwLock::new(Vec::new()),
                 tool_providers: RwLock::new(Vec::new()),
+                background: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// Retain a runtime-owned background service until the last kernel clone
+    /// is dropped. Services can implement `Drop` to stop and join their
+    /// worker cleanly; this is intentionally generic so the kernel does not
+    /// depend on a particular watcher implementation.
+    pub fn retain_background<T>(&self, service: T)
+    where
+        T: Send + 'static,
+    {
+        self.inner
+            .background
+            .lock()
+            .unwrap()
+            .push(Box::new(service));
     }
 
     pub async fn register_typed<H>(&self, handler: H)
@@ -502,9 +596,18 @@ impl Kernel {
             .push(Arc::new(handler));
     }
 
+    pub async fn register_typed_handler<H>(&self, handler: H)
+    where
+        H: Handler + TypedHandler + 'static,
+    {
+        let handler = Arc::new(handler);
+        self.inner.handlers.write().await.push(handler.clone());
+        self.inner.typed_handlers.write().await.push(handler);
+    }
+
     /// Dispatches the typed contract surface. This is the component-native
-    /// entry point; `execute(Request)` remains only as an adapter for legacy
-    /// callers while they migrate.
+    /// entry point; `execute(Request)` remains only as a native adapter for
+    /// provider and CLI integrations.
     pub async fn execute_operation(
         &self,
         operation: Operation,
@@ -518,6 +621,16 @@ impl Kernel {
         operation: Operation,
         context: InvocationContext,
     ) -> Result<OperationResult, KernelError> {
+        self.execute_operation_with_scope_internal(operation, InvocationScope::new(context))
+            .await
+    }
+
+    async fn execute_operation_with_scope_internal(
+        &self,
+        operation: Operation,
+        scope: InvocationScope,
+    ) -> Result<OperationResult, KernelError> {
+        let operation = crate::lower_operation_fragments(operation)?;
         let handlers = self.inner.typed_handlers.read().await;
         let host = self.handle();
         match operation {
@@ -526,7 +639,7 @@ impl Kernel {
                 for request in requests {
                     let item = Operation::Read(vec![request.clone()]);
                     let result = self
-                        .execute_typed_item(&handlers, item, host.clone(), context.clone())
+                        .execute_typed_item(&handlers, item, host.clone(), scope.clone())
                         .await;
                     match result {
                         Ok(OperationResult::Read(mut values)) => output.append(&mut values),
@@ -543,9 +656,12 @@ impl Kernel {
                 if let Some(duplicate) = requests.iter().find_map(|request| {
                     (!seen.insert(request.uri.clone())).then_some(request.uri.clone())
                 }) {
-                    return Ok(OperationResult::Write(vec![Err(KernelError::Conflict {
-                        uri: duplicate.to_string(),
-                    })]));
+                    let error = || KernelError::InvalidRequest {
+                        message: format!("duplicate write URI: {duplicate}"),
+                    };
+                    return Ok(OperationResult::Write(
+                        (0..requests.len()).map(|_| Err(error())).collect(),
+                    ));
                 }
                 let mut output = Vec::with_capacity(requests.len());
                 for request in requests {
@@ -554,7 +670,7 @@ impl Kernel {
                             &handlers,
                             Operation::Write(vec![request]),
                             host.clone(),
-                            context.clone(),
+                            scope.clone(),
                         )
                         .await;
                     match result {
@@ -575,7 +691,7 @@ impl Kernel {
                             &handlers,
                             Operation::Edit(vec![request]),
                             host.clone(),
-                            context.clone(),
+                            scope.clone(),
                         )
                         .await;
                     match result {
@@ -589,23 +705,35 @@ impl Kernel {
                 Ok(OperationResult::Edit(output))
             }
             Operation::Run(requests) => Ok(OperationResult::Run(
-                self.route_run(&handlers, requests, host, context).await,
+                self.route_run(&handlers, requests, host, scope).await,
             )),
             Operation::Send(requests) => Ok(OperationResult::Send(
-                self.route_send(&handlers, requests, host, context).await,
+                self.route_send(&handlers, requests, host, scope).await,
             )),
             Operation::Abort(uris) => Ok(OperationResult::Abort(
-                self.route_uris(&handlers, uris, Operation::Abort, host, context)
+                self.route_uris(&handlers, uris, Operation::Abort, host, scope)
                     .await,
             )),
             Operation::Delete(uris) => Ok(OperationResult::Delete(
-                self.route_uris(&handlers, uris, Operation::Delete, host, context)
+                self.route_uris(&handlers, uris, Operation::Delete, host, scope)
                     .await,
             )),
-            Operation::Find(request) => self.route_find(&handlers, request, host, context).await,
-            Operation::Grep(request) => self.route_grep(&handlers, request, host, context).await,
-            Operation::Poll(request) => self.route_poll(&handlers, request, host, context).await,
+            Operation::Find(request) => self.route_find(&handlers, request, host, scope).await,
+            Operation::Grep(request) => self.route_grep(&handlers, request, host, scope).await,
+            Operation::Poll(request) => self.route_poll(&handlers, request, host, scope).await,
         }
+    }
+
+    pub async fn execute_operation_with_scope(
+        &self,
+        operation: Operation,
+        scope: InvocationScope,
+    ) -> Result<OperationResult, KernelError> {
+        // Keep the context-compatible routing implementation available while
+        // handlers migrate to the scope-aware hook. The scope-aware handle is
+        // still preserved across nested calls by the handler hook.
+        self.execute_operation_with_scope_internal(operation, scope)
+            .await
     }
 
     async fn execute_typed_item(
@@ -613,17 +741,41 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         operation: Operation,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Result<OperationResult, KernelError> {
-        let Some(handler) = handlers
-            .iter()
-            .find(|handler| handler.claims_operation(&operation))
-        else {
-            return Err(KernelError::NoHandler {
+        let mut owners = Vec::new();
+        for handler in handlers {
+            // Claims are deliberately evaluated for each routed operation.
+            // Generation pins are invocation-scoped, but claim decisions are
+            // not cacheable across nested or repeated operations: resource
+            // state and package generations may change between them.
+            let decision = handler
+                .claim_operation_with_scope(&operation, scope.clone())
+                .await?;
+            if decision != ClaimDecision::Pass {
+                owners.push((handler, decision));
+            }
+        }
+        if owners.len() > 1 {
+            return Err(KernelError::Conflict {
+                uri: operation_uri(&operation),
+            });
+        }
+        let Some((handler, decision)) = owners.first() else {
+            return Err(KernelError::UnsupportedVerb {
+                verb: operation_verb(&operation).to_owned(),
                 uri: operation_uri(&operation),
             });
         };
-        handler.execute_typed(operation, host, context).await
+        if *decision == ClaimDecision::Reserve {
+            return Err(KernelError::UnsupportedVerb {
+                verb: operation_verb(&operation).to_owned(),
+                uri: operation_uri(&operation),
+            });
+        }
+        handler
+            .execute_typed_with_scope(operation, host, scope)
+            .await
     }
 
     async fn route_run(
@@ -631,7 +783,7 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         requests: Vec<crate::RunRequest>,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(requests.len());
         for request in requests {
@@ -640,7 +792,7 @@ impl Kernel {
                     handlers,
                     Operation::Run(vec![request]),
                     host.clone(),
-                    context.clone(),
+                    scope.clone(),
                 )
                 .await
             {
@@ -659,7 +811,7 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         requests: Vec<crate::SendRequest>,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(requests.len());
         for request in requests {
@@ -668,7 +820,7 @@ impl Kernel {
                     handlers,
                     Operation::Send(vec![request]),
                     host.clone(),
-                    context.clone(),
+                    scope.clone(),
                 )
                 .await
             {
@@ -688,7 +840,7 @@ impl Kernel {
         uris: Vec<ResourceUri>,
         verb: impl Fn(Vec<ResourceUri>) -> Operation,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Vec<Result<ResourceUri, KernelError>> {
         let mut output = Vec::with_capacity(uris.len());
         for uri in uris {
@@ -697,7 +849,7 @@ impl Kernel {
                     handlers,
                     verb(vec![uri.clone()]),
                     host.clone(),
-                    context.clone(),
+                    scope.clone(),
                 )
                 .await
             {
@@ -717,7 +869,7 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         request: crate::FindRequest,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Result<OperationResult, KernelError> {
         let mut paths = Vec::new();
         for root in request.roots {
@@ -729,7 +881,7 @@ impl Kernel {
                         query: request.query.clone(),
                     }),
                     host.clone(),
-                    context.clone(),
+                    scope.clone(),
                 )
                 .await?
             {
@@ -751,7 +903,7 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         request: crate::GrepRequest,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Result<OperationResult, KernelError> {
         match request.source {
             crate::GrepSource::Resources(uris) => {
@@ -765,7 +917,7 @@ impl Kernel {
                                 source: crate::GrepSource::Resources(vec![uri]),
                             }),
                             host.clone(),
-                            context.clone(),
+                            scope.clone(),
                         )
                         .await?
                     {
@@ -787,7 +939,7 @@ impl Kernel {
                         source,
                     }),
                     host,
-                    context,
+                    scope,
                 )
                 .await
             }
@@ -799,33 +951,43 @@ impl Kernel {
         handlers: &[Arc<dyn TypedHandler>],
         request: crate::PollRequest,
         host: KernelHandle,
-        context: InvocationContext,
+        scope: InvocationScope,
     ) -> Result<OperationResult, KernelError> {
         if request.targets.is_empty() {
             return Err(KernelError::InvalidRequest {
                 message: "poll requires at least one target".to_owned(),
             });
         }
-        let owners = request
-            .targets
-            .iter()
-            .map(|target| {
-                let operation = Operation::Poll(crate::PollRequest {
-                    targets: vec![target.clone()],
-                    until: None,
-                });
-                handlers
-                    .iter()
-                    .position(|handler| handler.claims_operation(&operation))
-                    .ok_or_else(|| KernelError::NoHandler {
+        for target in &request.targets {
+            let operation = Operation::Poll(crate::PollRequest {
+                targets: vec![target.clone()],
+                until: None,
+            });
+            let mut owner = None;
+            for (index, handler) in handlers.iter().enumerate() {
+                let decision = handler
+                    .claim_operation_with_scope(&operation, scope.clone())
+                    .await?;
+                if decision == ClaimDecision::Pass {
+                    continue;
+                }
+                if owner.replace((index, decision)).is_some() {
+                    return Err(KernelError::Conflict {
                         uri: target.uri.to_string(),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if owners.windows(2).all(|pair| pair[0] == pair[1]) {
-            return self
-                .execute_typed_item(handlers, Operation::Poll(request), host, context)
-                .await;
+                    });
+                }
+            }
+            let Some((_index, decision)) = owner else {
+                return Err(KernelError::NoHandler {
+                    uri: target.uri.to_string(),
+                });
+            };
+            if decision == ClaimDecision::Reserve {
+                return Err(KernelError::UnsupportedVerb {
+                    verb: "poll".to_owned(),
+                    uri: target.uri.to_string(),
+                });
+            }
         }
         let started = tokio::time::Instant::now();
         let timeout_ms = poll_timeout(&request.until);
@@ -843,7 +1005,7 @@ impl Kernel {
                         slice_ms,
                     ))),
                 });
-                self.execute_typed_item(handlers, operation, host.clone(), context.clone())
+                self.execute_typed_item(handlers, operation, host.clone(), scope.clone())
             });
             let mut results = Vec::with_capacity(request.targets.len());
             for result in futures::future::join_all(futures).await {
@@ -883,6 +1045,24 @@ impl Kernel {
     {
         let handler = Arc::new(handler);
         self.inner.handlers.write().await.push(handler.clone());
+        self.inner.tool_providers.write().await.push(handler);
+    }
+
+    /// Register one allocation across all three compatible surfaces. This is
+    /// important for self-modifying handlers: typed filesystem edits, native
+    /// URI access, and named-tool execution must share the same registry,
+    /// dirty set, and active-generation pins.
+    pub async fn register_typed_tool_handler<H>(&self, handler: H)
+    where
+        H: Handler + TypedHandler + ToolProvider + 'static,
+    {
+        let handler = Arc::new(handler);
+        self.inner.handlers.write().await.push(handler.clone());
+        self.inner
+            .typed_handlers
+            .write()
+            .await
+            .push(handler.clone());
         self.inner.tool_providers.write().await.push(handler);
     }
 
@@ -937,6 +1117,27 @@ impl Kernel {
         })
     }
 
+    pub async fn execute_tool_with_scope(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        scope: InvocationScope,
+    ) -> Result<serde_json::Value, KernelError> {
+        let providers = self.inner.tool_providers.read().await;
+        let host = self.handle();
+        for provider in providers.iter() {
+            let definitions = provider.tool_definitions();
+            if definitions.iter().any(|definition| definition.name == name) {
+                return provider
+                    .execute_tool_with_scope(name, args, host, scope)
+                    .await;
+            }
+        }
+        Err(KernelError::Handler {
+            message: format!("no named tool registered: {name}"),
+        })
+    }
+
     pub async fn descriptors(&self) -> Vec<HandlerDescriptor> {
         self.inner
             .handlers
@@ -955,11 +1156,14 @@ impl Kernel {
                 let kernel = kernel.clone();
                 Box::pin(async move { kernel.execute(request).await })
             }),
-            Arc::new(move |operation, context| {
+            Arc::new(move |operation, scope| {
                 let kernel = typed_kernel.clone();
+                // Every host-mediated nested call gets a descendant token:
+                // parent cancellation still propagates inward, while a
+                // child invocation cannot cancel its caller.
                 Box::pin(async move {
                     kernel
-                        .execute_operation_with_context(operation, context)
+                        .execute_operation_with_scope(operation, scope.child())
                         .await
                 })
             }),

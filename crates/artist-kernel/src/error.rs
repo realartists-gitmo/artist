@@ -21,7 +21,6 @@ pub enum KernelError {
     Aborted { message: String },
     NotFound { uri: String },
     AlreadyExists { uri: String },
-    InvalidState { message: String },
     Handler { message: String },
 }
 
@@ -35,7 +34,6 @@ impl fmt::Display for KernelError {
             | Self::StaleAnchor { message }
             | Self::WrongKind { message }
             | Self::Aborted { message }
-            | Self::InvalidState { message }
             | Self::Handler { message } => formatter.write_str(message),
             Self::UnsupportedUri { uri } => write!(formatter, "unsupported URI: {uri}"),
             Self::NoHandler { uri } => write!(formatter, "no handler for URI: {uri}"),

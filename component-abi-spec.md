@@ -5,7 +5,7 @@ Status: implemented horizontal-slice specification
 This document specifies the component boundary used by tools, handlers, verbs,
 and runtimes. The conformance tree contains one reloadable Rust/WASM package
 for each universal verb; those packages delegate resource effects through the
-explicit kernel capability bridge.
+typed `artist:resource@1.0.0` interfaces.
 
 ## 1. Purpose
 
@@ -22,14 +22,14 @@ The component boundary must be:
 - compatible with resource handles, typed streaming, capabilities, and
   replaceable universal verbs.
 
-The typed universal tool contracts are defined in the companion WIT package
-at `crates/artist-component/wit/tool-surface/world.wit`. It defines the shared
-URI, anchor, line, diff, error, polling, and request/result types plus the ten
-verb interfaces: `read`, `write`, `edit`, `poll`, `send`, `run`, `abort`,
-`delete`, `find`, and `grep`. Each verb package declares one contract identity
-and one required resource capability. Its component entrypoint invokes only
-that verb through the host kernel bridge; higher-level components compose verbs
-through the contract registry.
+The typed universal tool contracts are defined in the companion WIT packages
+at `crates/artist-component/wit/resource-surface/` and
+`crates/artist-component/wit/tool-surface-v1/`. The resource package owns the
+shared URI, anchor, line, diff, error, polling, and request/result types plus
+the ten verb interfaces. The tool package reuses those types and imports the
+corresponding resource interface directly. Each verb package declares one
+contract identity and one required resource capability; its component
+entrypoint is a thin typed adapter, not a JSON host bridge.
 
 The `read-stream`, `grep-stream`, and `poll-stream` operations use typed
 component-model streams. Their element types are respectively
@@ -100,8 +100,7 @@ This slice does not:
 - define automatic filesystem watching as the reload trigger;
 - define repository, AST, session, or runtime-specific interfaces;
 - do not make JSON the kernel or universal-component semantic representation;
-  JSON is explicitly confined to provider adapters and the quarantined legacy
-  generic world.
+  JSON is confined to provider/model adapters.
 
 Those systems consume this ABI in later horizontal slices.
 
@@ -122,13 +121,8 @@ prompt markers, sentinels, and readiness atoms are intentionally unspecified.
 
 ## 4. Component model
 
-The initial universal component worlds are conceptually:
-
-    artist:component/world
-      imports artist:host/host
-      exports artist:component/component
-
-Universal verb components export their verb-specific typed interface. They do
+Universal verb components export their verb-specific typed `artist:tool` v1
+interface and import the shared typed `artist:resource` interfaces. They do
 not receive a generic target-plus-JSON invocation. A package-local extension
 may instead declare its own `tool.wit`; it must export a root `invoke` function
 (or the interface name declared by its contract). The host reflects that
@@ -138,10 +132,6 @@ Package-local WIT imports are resolved against active package contracts during
 activation. The registry links imported typed exports to the active dependency
 generation; an unsatisfied or incompatible custom import rejects activation
 before the new version becomes visible.
-
-The legacy generic component world remains available only for compatibility
-with pre-typed packages and is not a universal-verb or package-local execution
-path.
 
 The component exports:
 
@@ -161,19 +151,13 @@ resource lifetimes. Components do not receive ambient access to the host.
 
 The ABI must define WIT records for:
 
-- component-info: name, version, ABI version, and declared interfaces;
-- invocation: invocation ID, operation name, target resource address, and
-  structured input;
-- response: structured output and optional metadata;
-- host-request: an operation against a resource;
-- host-response: structured output and metadata;
-- error: stable error kind, message, and structured details;
+- typed verb request/result records defined by the shared v1 WIT package;
+- error: stable public error code, URI, and message;
 - invocation context: cancellation/deadline/correlation metadata propagated
   out of band rather than embedded in ordinary tool input.
 
 Universal verb payloads are WIT records and the kernel's corresponding typed
-Rust values. Canonical UTF-8 JSON exists only at provider adapters and in the
-quarantined legacy generic world.
+Rust values. Canonical UTF-8 JSON exists only at provider adapters.
 
 The implementation must document maximum payload size, text encoding, and
 whether unknown metadata fields are preserved.
@@ -186,9 +170,9 @@ An address is represented as its canonical URI string at the component
 boundary. Bare OS paths are normalized by the kernel resolver before a
 component sees them.
 
-This revision uses host-issued opaque IDs with explicit owned and borrowed
-markers. The host validates IDs, permits borrowed use, and permits release
-only for owned handles. WIT resource-table handles remain a future ABI option.
+The URI is the identity. Components do not receive a second opaque resource
+identity or host-issued handle. Bare OS paths are accepted at the outer
+boundary and canonicalized to `file://...` before component routing.
 
 ## 7. Invocation semantics
 
@@ -205,13 +189,9 @@ The host must distinguish:
 An invocation must not silently continue after cancellation. The host owns
 the final outcome if cancellation races with a response.
 
-The legacy generic invocation test surface includes materialized chunks for
-its JSON-oriented stream operation. The typed tool surface is separate: its
-`read-stream`, `grep-stream`, and `poll-stream` operations are WIT
-`stream<T>` functions, with typed element records and component-model async
-bindings enabled in the host. A collecting adapter may be provided for
-callers that cannot consume a stream directly, but collection is adapter
-policy rather than the ABI.
+The typed tool surface is the only component invocation surface. A collecting
+adapter may be provided for callers that cannot consume a stream directly,
+but collection is adapter policy rather than the ABI.
 
 ## 8. Versioning and compatibility
 
@@ -245,9 +225,9 @@ not promise state survival across unload or replacement.
 The ABI package should live independently of any individual tool:
 
     crates/artist-component/
-    ├── wit/world.wit
+    ├── wit/tool-surface-v1/
     ├── src/lib.rs
-    └── conformance/echo/
+    └── conformance/verbs/
 
 Individual future extensions may include the ABI package and their own WIT
 interfaces. A source-first tool package has this shape:
@@ -301,10 +281,10 @@ runtime coordinator now provides the first hot-replacement boundary:
 - cloned version leases pin in-flight invocations to the old component;
 - failed builds or validation leave the previous active version untouched.
 
-Automatic filesystem watching remains a later trigger layer over this
-explicit reload operation. A debounced trigger is already present as a
-reusable seam: quiet-period requests supersede one another and call the same
-transactional build/validate/activate path.
+Filesystem watching is a trigger layer over the same explicit reload path. A
+shared debounced watcher covers both `tools/` and `resources/`; it marks the
+nearest package dirty and retries the transactional build/validate/activate
+path without publishing partial candidates.
 
 ## 11. Conformance exercise
 
@@ -326,13 +306,10 @@ The current implementation lives in the artist-component workspace crate and
 uses Wasmtime's Component Model bindings. The conformance fixture targets
 wasm32-wasip2 and receives no preopened filesystem or other host capability.
 
-## 12. Decisions reserved for later slices
+## 12. Current scope boundary
 
-- exact capability representation and enforcement;
-- resource-handle ownership and borrowing;
-- component discovery and trust roots;
-- filesystem-triggered hot replacement and reload policy;
-- tool Markdown/frontmatter schema;
-- provider-specific schema translation;
-- runtime bindings for shell and Python;
-- component-defined universal verbs.
+The v1 ABI and typed resource router are implemented. Shell/Python runtime
+bindings, PTYs, terminal state, prompt/completion protocols, and Brush/bash
+are intentionally outside this goal. Package-local custom WIT contracts are
+supported, but provider-facing JSON schema remains adapter metadata and does
+not redefine the typed component contract.

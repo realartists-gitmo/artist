@@ -1,27 +1,30 @@
 #![allow(unexpected_cfgs, unused_macros)]
+// Keep this shared guest source in the package dependency graph: every
+// conformance package includes it, and changing the canonical v1 worlds must
+// invalidate each package's component artifact.
 
 #[cfg(feature = "read")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "read-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "read-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "write")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "write-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "write-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "edit")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "edit-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "edit-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "find")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "find-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "find-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "grep")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "grep-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "grep-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "run")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "run-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "run-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "send")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "send-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "send-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "abort")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "abort-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "abort-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "delete")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "delete-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "delete-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 #[cfg(feature = "poll")]
-wit_bindgen::generate!({ path: "../../../wit/tool-surface", world: "poll-world", additional_derives: [serde::Serialize, serde::Deserialize] });
+wit_bindgen::generate!({ path: "../../../wit/tool-surface-v1", world: "poll-world", generate_all, additional_derives: [serde::Serialize, serde::Deserialize] });
 
-use artist::tool::types;
+use artist::resource::{self, types};
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(any(feature = "read", feature = "grep", feature = "poll"))]
 use wit_bindgen::StreamReader;
@@ -50,14 +53,14 @@ impl exports::artist::tool::read::Guest for TypedTool {
     fn read(
         requests: Vec<types::ReadRequest>,
     ) -> Vec<Result<types::ReadResult, types::Error>> {
-        artist::tool::host_read::read(&requests)
+        resource::read::read(&requests)
     }
 
     #[cfg(feature = "read")]
     fn read_stream(
         request: types::ReadRequest,
     ) -> Result<StreamReader<types::ReadResult>, types::Error> {
-        let value = artist::tool::host_read::read(&vec![request])
+        let value = resource::read::read(&vec![request])
             .into_iter().next().unwrap_or_else(|| Err(error("host returned no read result", None)))?;
         one_stream(value)
     }
@@ -68,7 +71,7 @@ impl exports::artist::tool::write::Guest for TypedTool {
     fn write(
         requests: Vec<types::WriteRequest>,
     ) -> Vec<Result<types::WriteResult, types::Error>> {
-        artist::tool::host_write::write(&requests)
+        resource::write::write(&requests)
     }
 }
 
@@ -77,21 +80,21 @@ impl exports::artist::tool::edit::Guest for TypedTool {
     fn edit(
         requests: Vec<types::EditRequest>,
     ) -> Vec<Result<types::EditResult, types::Error>> {
-        artist::tool::host_edit::edit(&requests)
+        resource::edit::edit(&requests)
     }
 }
 
 #[cfg(feature = "find")]
 impl exports::artist::tool::find::Guest for TypedTool {
     fn find(request: types::FindRequest) -> Result<Vec<String>, types::Error> {
-        artist::tool::host_find::find(&request)
+        resource::find::find(&request)
     }
 }
 
 #[cfg(feature = "grep")]
 impl exports::artist::tool::grep::Guest for TypedTool {
     fn grep(request: types::GrepRequest) -> Result<Vec<types::AnchoredText>, types::Error> {
-        artist::tool::host_grep::grep(&request)
+        resource::grep::grep(&request)
     }
 
     #[cfg(feature = "grep")]
@@ -110,7 +113,7 @@ impl exports::artist::tool::run::Guest for TypedTool {
     fn run(
         requests: Vec<types::RunRequest>,
     ) -> Vec<Result<String, types::Error>> {
-        artist::tool::host_run::run(&requests)
+        resource::run::run(&requests)
     }
 }
 
@@ -119,19 +122,19 @@ impl exports::artist::tool::send::Guest for TypedTool {
     fn send(
         requests: Vec<types::SendRequest>,
     ) -> Vec<Result<String, types::Error>> {
-        artist::tool::host_send::send(&requests)
+        resource::send::send(&requests)
     }
 }
 
 macro_rules! uri_verb {
-    ($module:ident, $host:ident, $method:ident) => {
+    ($module:ident, $import:ident, $method:ident) => {
         impl exports::artist::tool::$module::Guest for TypedTool {
             fn $module(
                 uris: Vec<String>,
             ) -> Vec<Result<String, types::Error>> {
                 let mut results = Vec::with_capacity(uris.len());
                 for uri in uris {
-                    let result = artist::tool::$host::$method(&vec![uri.clone()])
+                    let result = resource::$import::$method(&vec![uri.clone()])
                         .into_iter().next().unwrap_or_else(|| Err(error("host returned no result", Some(uri))));
                     results.push(result);
                 }
@@ -142,14 +145,14 @@ macro_rules! uri_verb {
 }
 
 #[cfg(feature = "abort")]
-uri_verb!(abort, host_abort, abort);
+uri_verb!(abort, abort, abort);
 #[cfg(feature = "delete")]
-uri_verb!(delete, host_delete, delete);
+uri_verb!(delete, delete, delete);
 
 #[cfg(feature = "poll")]
 impl exports::artist::tool::poll::Guest for TypedTool {
     fn poll(request: types::PollRequest) -> Result<types::PollResult, types::Error> {
-        artist::tool::host_poll::poll(&request)
+        resource::poll::poll(&request)
     }
 
     #[cfg(feature = "poll")]

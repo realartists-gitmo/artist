@@ -123,7 +123,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    /// Text-only rig message (legacy sessions and simple callers).
+    /// Convert the compact text message to Rig's provider message type.
     pub fn to_rig(&self) -> Message {
         match self.role {
             ChatRole::User => Message::user(&self.content),
@@ -377,7 +377,14 @@ where
         };
         let agent = builder
             .preamble(&system_prompt)
-            .dynamic_tools(named_tools(handles.kernel.clone(), invocation_context).await)
+            .dynamic_tools(
+                named_tools(
+                    handles.kernel.clone(),
+                    invocation_context,
+                    handles.cancel.clone(),
+                )
+                .await,
+            )
             .memory(attempt_memory)
             .conversation(handles.conversation_id.clone())
             .add_hook(steering::SteeringHook(handles.steering.clone()))

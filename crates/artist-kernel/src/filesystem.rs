@@ -4,6 +4,7 @@ use crate::{
     Request, ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
     Verb, address::uri_path, has_projection,
 };
+use cap_std::{ambient_authority, fs::Dir};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -11,11 +12,14 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tempfile::NamedTempFile;
 
 /// Native filesystem handler constrained to one root directory.
 pub struct FileHandler {
     root: PathBuf,
+    /// Capability-scoped access to the semantic project root.  `root` remains
+    /// useful for URI/debugging, but filesystem reads and directory mutations
+    /// in the typed path are performed relative to this handle.
+    dir: Dir,
     structure: StructuralAnalyzer,
     search: SearchService,
 }
@@ -34,8 +38,14 @@ impl FileHandler {
                 message: format!("filesystem root is not a directory: {}", root.display()),
             });
         }
+        let dir = Dir::open_ambient_dir(&root, ambient_authority()).map_err(|error| {
+            KernelError::Handler {
+                message: format!("open filesystem capability {}: {error}", root.display()),
+            }
+        })?;
         Ok(Self {
             root,
+            dir,
             structure: StructuralAnalyzer::default(),
             search: SearchService::new(),
         })
@@ -52,6 +62,14 @@ impl FileHandler {
     }
 
     fn typed_path(&self, uri: &crate::ResourceUri) -> Result<PathBuf, KernelError> {
+        let path = self.typed_path_syntax(uri)?;
+        self.resolve_existing(&path)
+    }
+
+    /// Resolve only address and containment. Claiming a URI must not probe
+    /// the filesystem: an absent file is still owned by this namespace and
+    /// should produce NotFound during execution.
+    fn typed_path_syntax(&self, uri: &crate::ResourceUri) -> Result<PathBuf, KernelError> {
         if uri.scheme() != "file" {
             return Err(KernelError::UnsupportedUri {
                 uri: uri.to_string(),
@@ -63,7 +81,10 @@ impl FileHandler {
             .map_err(|_| KernelError::InvalidUri {
                 message: uri.to_string(),
             })?;
-        self.resolve_existing(&path)
+        let relative = self.requested_relative(&path)?;
+        let resolved = self.root.join(relative);
+        self.ensure_in_root(&resolved)?;
+        Ok(resolved)
     }
 
     fn anchored_text(
@@ -112,46 +133,162 @@ impl FileHandler {
     }
 
     fn resolve_existing(&self, requested: &Path) -> Result<PathBuf, KernelError> {
-        let candidate = if requested.is_absolute() {
-            requested.to_owned()
-        } else {
-            self.root.join(requested)
-        };
-        let resolved = fs::canonicalize(&candidate).map_err(|error| {
+        let relative = self.requested_relative(requested)?;
+        let resolved = self.dir.canonicalize(&relative).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 KernelError::NotFound {
-                    uri: candidate.display().to_string(),
+                    uri: requested.display().to_string(),
                 }
             } else {
                 KernelError::Handler {
-                    message: format!("resolve {}: {error}", candidate.display()),
+                    message: format!("resolve {}: {error}", requested.display()),
                 }
             }
         })?;
+        let resolved = self.root.join(resolved);
         self.ensure_in_root(&resolved)?;
         Ok(resolved)
     }
 
-    fn resolve_for_write(&self, requested: &Path) -> Result<PathBuf, KernelError> {
-        let candidate = if requested.is_absolute() {
-            requested.to_owned()
+    fn requested_relative(&self, requested: &Path) -> Result<PathBuf, KernelError> {
+        if requested.is_absolute() {
+            let relative = requested
+                .strip_prefix(&self.root)
+                .map(Path::to_owned)
+                .map_err(|_| KernelError::InvalidRequest {
+                    message: format!("path escapes filesystem root: {}", requested.display()),
+                })?;
+            Ok(if relative.as_os_str().is_empty() {
+                PathBuf::from(".")
+            } else {
+                relative
+            })
         } else {
-            self.root.join(requested)
-        };
-        let parent = candidate
+            Ok(requested.to_owned())
+        }
+    }
+
+    fn relative_path(&self, path: &Path) -> Result<PathBuf, KernelError> {
+        path.strip_prefix(&self.root)
+            .map(Path::to_owned)
+            .map_err(|_| KernelError::InvalidRequest {
+                message: format!("path escapes filesystem root: {}", path.display()),
+            })
+    }
+
+    fn cap_read(&self, path: &Path) -> Result<Vec<u8>, KernelError> {
+        let relative = self.relative_path(path)?;
+        self.dir
+            .read(&relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("read {}: {error}", path.display()),
+            })
+    }
+
+    fn cap_metadata(&self, path: &Path) -> Result<cap_std::fs::Metadata, KernelError> {
+        let relative = self.relative_path(path)?;
+        self.dir
+            .metadata(&relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("stat {}: {error}", path.display()),
+            })
+    }
+
+    fn cap_read_dir(&self, path: &Path) -> Result<cap_std::fs::ReadDir, KernelError> {
+        let relative = self.relative_path(path)?;
+        self.dir
+            .read_dir(&relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("read directory {}: {error}", path.display()),
+            })
+    }
+
+    fn cap_atomic_replace(&self, path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
+        let relative = self.relative_path(path)?;
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        if !parent.as_os_str().is_empty() {
+            self.dir
+                .create_dir_all(parent)
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create parent for {}: {error}", path.display()),
+                })?;
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| KernelError::InvalidRequest {
+                message: format!("path has no filename: {}", path.display()),
+            })?
+            .to_string_lossy();
+        let temporary = parent.join(format!(
+            ".{name}.artist-tmp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        let mut options = cap_std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file =
+            self.dir
+                .open_with(&temporary, &options)
+                .map_err(|error| KernelError::Handler {
+                    message: format!("create temporary replacement: {error}"),
+                })?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| KernelError::Handler {
+                message: format!("write temporary replacement: {error}"),
+            })?;
+        self.dir
+            .rename(&temporary, &self.dir, &relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("atomically replace {}: {error}", path.display()),
+            })
+    }
+
+    fn cap_remove_file(&self, path: &Path) -> Result<(), KernelError> {
+        let relative = self.relative_path(path)?;
+        self.dir
+            .remove_file(&relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("delete {}: {error}", path.display()),
+            })
+    }
+
+    fn cap_remove_dir(&self, path: &Path) -> Result<(), KernelError> {
+        let relative = self.relative_path(path)?;
+        self.dir
+            .remove_dir(&relative)
+            .map_err(|error| KernelError::Handler {
+                message: format!("delete {}: {error}", path.display()),
+            })
+    }
+
+    fn resolve_for_write(&self, requested: &Path) -> Result<PathBuf, KernelError> {
+        let relative = self.requested_relative(requested)?;
+        let parent = relative
             .parent()
             .ok_or_else(|| KernelError::InvalidRequest {
-                message: format!("path has no parent: {}", candidate.display()),
+                message: format!("path has no parent: {}", requested.display()),
             })?;
-        let parent = fs::canonicalize(parent).map_err(|error| KernelError::Handler {
-            message: format!("resolve parent {}: {error}", parent.display()),
-        })?;
+        let parent_to_resolve = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let parent =
+            self.dir
+                .canonicalize(parent_to_resolve)
+                .map_err(|error| KernelError::Handler {
+                    message: format!("resolve parent {}: {error}", parent_to_resolve.display()),
+                })?;
+        let parent = self.root.join(parent);
         self.ensure_in_root(&parent)?;
         Ok(parent.join(
-            candidate
+            relative
                 .file_name()
                 .ok_or_else(|| KernelError::InvalidRequest {
-                    message: format!("path has no filename: {}", candidate.display()),
+                    message: format!("path has no filename: {}", requested.display()),
                 })?,
         ))
     }
@@ -166,15 +303,11 @@ impl FileHandler {
         }
     }
 
-    fn read_value(path: &Path) -> Result<Value, KernelError> {
-        let metadata = fs::metadata(path).map_err(|error| KernelError::Handler {
-            message: format!("stat {}: {error}", path.display()),
-        })?;
+    fn read_value(&self, path: &Path) -> Result<Value, KernelError> {
+        let metadata = self.cap_metadata(path)?;
         if metadata.is_dir() {
-            let mut entries = fs::read_dir(path)
-                .map_err(|error| KernelError::Handler {
-                    message: format!("read directory {}: {error}", path.display()),
-                })?
+            let mut entries = self
+                .cap_read_dir(path)?
                 .map(|entry| {
                     let entry = entry.map_err(|error| KernelError::Handler {
                         message: format!("read directory entry: {error}"),
@@ -184,7 +317,7 @@ impl FileHandler {
                     })?;
                     Ok(json!({
                         "name": entry.file_name().to_string_lossy(),
-                        "path": entry.path().to_string_lossy(),
+                        "path": path.join(entry.file_name()).to_string_lossy(),
                         "directory": file_type.is_dir(),
                     }))
                 })
@@ -193,9 +326,7 @@ impl FileHandler {
             return Ok(json!({"type": "directory", "entries": entries}));
         }
 
-        let bytes = fs::read(path).map_err(|error| KernelError::Handler {
-            message: format!("read {}: {error}", path.display()),
-        })?;
+        let bytes = self.cap_read(path)?;
         match String::from_utf8(bytes.clone()) {
             Ok(content) => Ok(json!({"type": "text", "content": content})),
             Err(_) => Ok(json!({
@@ -210,9 +341,7 @@ impl FileHandler {
 
     fn edit(&self, requested: &Path, args: &Value) -> Result<Value, KernelError> {
         let path = self.resolve_existing(requested)?;
-        let original = fs::read(&path).map_err(|error| KernelError::Handler {
-            message: format!("read {}: {error}", path.display()),
-        })?;
+        let original = self.cap_read(&path)?;
         let (provider, lines) = self.structural_lines(&path, &original);
         let inputs = lines
             .iter()
@@ -270,7 +399,7 @@ impl FileHandler {
             cursor = end;
         }
         rendered.extend_from_slice(&original[cursor..]);
-        atomic_replace(&path, &rendered)?;
+        self.cap_atomic_replace(&path, &rendered)?;
         Ok(json!({
             "edited": true,
             "path": path,
@@ -291,41 +420,6 @@ fn anchor_error(error: AnchorError) -> KernelError {
     KernelError::InvalidAnchor {
         message: error.to_string(),
     }
-}
-
-fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), KernelError> {
-    let permissions = fs::metadata(path)
-        .ok()
-        .map(|metadata| metadata.permissions());
-    let parent = path.parent().ok_or_else(|| KernelError::InvalidRequest {
-        message: format!("path has no parent: {}", path.display()),
-    })?;
-    let mut temporary = NamedTempFile::new_in(parent).map_err(|error| KernelError::Handler {
-        message: format!(
-            "create temporary edit file in {}: {error}",
-            parent.display()
-        ),
-    })?;
-    temporary
-        .write_all(bytes)
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|error| KernelError::Handler {
-            message: format!("write temporary edit file: {error}"),
-        })?;
-    if let Some(permissions) = permissions {
-        temporary
-            .as_file()
-            .set_permissions(permissions)
-            .map_err(|error| KernelError::Handler {
-                message: format!("preserve permissions for {}: {error}", path.display()),
-            })?;
-    }
-    temporary
-        .persist(path)
-        .map_err(|error| KernelError::Handler {
-            message: format!("atomically replace {}: {}", path.display(), error.error),
-        })?;
-    Ok(())
 }
 
 fn select_read_window(
@@ -381,7 +475,7 @@ impl FileHandler {
         uri: crate::ResourceUri,
         operations: &[crate::EditOperation],
     ) -> Result<crate::EditResult, KernelError> {
-        let original = fs::read(path).map_err(|error| KernelError::Handler {
+        let original = self.cap_read(path).map_err(|error| KernelError::Handler {
             message: format!("read {}: {error}", path.display()),
         })?;
         let (_, lines) = self.structural_lines(path, &original);
@@ -451,7 +545,7 @@ impl FileHandler {
             cursor = end;
         }
         rendered.extend_from_slice(&original[cursor..]);
-        atomic_replace(path, &rendered)?;
+        self.cap_atomic_replace(path, &rendered)?;
         let new = self.anchored_text(uri.clone(), path, &rendered)?;
         Ok(crate::EditResult {
             text: new.clone(),
@@ -504,7 +598,8 @@ impl Handler for FileHandler {
                         })?,
                 )?;
             match request.verb {
-                Verb::Read => Self::read_value(&self.resolve_existing(&requested)?)
+                Verb::Read => self
+                    .read_value(&self.resolve_existing(&requested)?)
                     .map(|value| json!({"path": requested, "value": value})),
                 Verb::Write => {
                     let path = self.resolve_for_write(&requested)?;
@@ -515,27 +610,21 @@ impl Handler for FileHandler {
                         .ok_or_else(|| KernelError::InvalidRequest {
                             message: "filesystem write requires an args.value string".to_owned(),
                         })?;
-                    atomic_replace(&path, content.as_bytes())?;
+                    self.cap_atomic_replace(&path, content.as_bytes())?;
                     Ok(json!({"written": true, "path": path}))
                 }
                 Verb::Edit => self.edit(&requested, &request.args),
                 Verb::Delete => {
                     let path = self.resolve_existing(&requested)?;
-                    if path.is_dir() {
-                        if fs::read_dir(&path)
-                            .map_err(|error| KernelError::Handler {
-                                message: error.to_string(),
-                            })?
-                            .next()
-                            .is_some()
-                        {
+                    if self.cap_metadata(&path)?.is_dir() {
+                        if self.cap_read_dir(&path)?.next().is_some() {
                             return Err(KernelError::NotEmpty {
                                 uri: request.target.to_string(),
                             });
                         }
-                        fs::remove_dir(&path)
+                        self.cap_remove_dir(&path)
                     } else {
-                        fs::remove_file(&path)
+                        self.cap_remove_file(&path)
                     }
                     .map_err(|error| KernelError::Handler {
                         message: format!("delete {}: {error}", path.display()),
@@ -599,22 +688,36 @@ impl TypedHandler for FileHandler {
 
     fn claims_operation(&self, operation: &Operation) -> bool {
         match operation {
-            Operation::Read(requests) => requests
-                .iter()
-                .all(|request| self.typed_path(&request.uri).is_ok()),
+            Operation::Read(requests) => requests.iter().all(|request| {
+                request.uri.scheme() == "file"
+                    && !has_projection(Path::new(request.uri.path()))
+                    && self.typed_path_syntax(&request.uri).is_ok()
+            }),
             Operation::Write(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "file" && request.uri.as_ref().to_file_path().is_ok()
+                request.uri.scheme() == "file"
+                    && !has_projection(Path::new(request.uri.path()))
+                    && request.uri.as_ref().to_file_path().is_ok()
             }),
             Operation::Edit(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "file" && request.uri.as_ref().to_file_path().is_ok()
+                request.uri.scheme() == "file"
+                    && !has_projection(Path::new(request.uri.path()))
+                    && request.uri.as_ref().to_file_path().is_ok()
             }),
-            Operation::Delete(uris) => uris.iter().all(|uri| self.typed_path(uri).is_ok()),
+            Operation::Delete(uris) => uris.iter().all(|uri| {
+                uri.scheme() == "file"
+                    && !has_projection(Path::new(uri.path()))
+                    && self.typed_path_syntax(uri).is_ok()
+            }),
             Operation::Find(request) => {
                 !request.roots.is_empty()
-                    && request.roots.iter().all(|uri| self.typed_path(uri).is_ok())
+                    && request.roots.iter().all(|uri| {
+                        uri.scheme() == "file"
+                            && !has_projection(Path::new(uri.path()))
+                            && self.typed_path_syntax(uri).is_ok()
+                    })
             }
             Operation::Grep(request) => {
-                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| self.typed_path(uri).is_ok()))
+                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())) && self.typed_path_syntax(uri).is_ok()))
                     || matches!(&request.source, crate::GrepSource::Text(text) if !text.is_empty())
             }
             _ => false,
@@ -634,35 +737,26 @@ impl TypedHandler for FileHandler {
                         .into_iter()
                         .map(|request| {
                             let path = self.typed_path(&request.uri)?;
-                            if path.is_dir() {
-                                let mut entries = fs::read_dir(&path)
-                                    .map_err(|error| KernelError::Handler {
-                                        message: error.to_string(),
-                                    })?
+                            if self.cap_metadata(&path)?.is_dir() {
+                                let mut entries = self
+                                    .cap_read_dir(&path)?
                                     .map(|entry| {
                                         let entry =
                                             entry.map_err(|error| KernelError::Handler {
                                                 message: error.to_string(),
                                             })?;
-                                        let path = entry.path();
-                                        if entry
+                                        let path = path.join(entry.file_name());
+                                        let is_dir = entry
                                             .file_type()
                                             .map_err(|error| KernelError::Handler {
                                                 message: error.to_string(),
                                             })?
-                                            .is_dir()
-                                        {
-                                            crate::ResourceUri::parse(&format!(
-                                                "{}/",
-                                                path.display()
-                                            ))
-                                        } else {
-                                            crate::ResourceUri::parse(&format!(
-                                                "{}{}",
-                                                path.display(),
-                                                if path.is_dir() { "/" } else { "" }
-                                            ))
-                                        }
+                                            .is_dir();
+                                        crate::ResourceUri::parse(&format!(
+                                            "{}{}",
+                                            path.display(),
+                                            if is_dir { "/" } else { "" }
+                                        ))
                                     })
                                     .collect::<Result<Vec<_>, _>>()?;
                                 entries.sort_by_key(ToString::to_string);
@@ -671,10 +765,7 @@ impl TypedHandler for FileHandler {
                                     entries,
                                 })
                             } else {
-                                let bytes =
-                                    fs::read(&path).map_err(|error| KernelError::Handler {
-                                        message: error.to_string(),
-                                    })?;
+                                let bytes = self.cap_read(&path)?;
                                 let text = self.anchored_text(request.uri, &path, &bytes)?;
                                 Ok(ReadResult::Text(select_read_window(
                                     text,
@@ -697,17 +788,8 @@ impl TypedHandler for FileHandler {
                                 }
                             })?;
                             let path = self.resolve_for_write(&requested)?;
-                            if let Some(parent) = path.parent() {
-                                fs::create_dir_all(parent).map_err(|error| {
-                                    KernelError::Handler {
-                                        message: error.to_string(),
-                                    }
-                                })?;
-                            }
-                            atomic_replace(&path, request.content.as_bytes())?;
-                            let bytes = fs::read(&path).map_err(|error| KernelError::Handler {
-                                message: error.to_string(),
-                            })?;
+                            self.cap_atomic_replace(&path, request.content.as_bytes())?;
+                            let bytes = self.cap_read(&path)?;
                             Ok(crate::WriteResult {
                                 text: self.anchored_text(request.uri, &path, &bytes)?,
                             })
@@ -730,21 +812,15 @@ impl TypedHandler for FileHandler {
                         .into_iter()
                         .map(|uri| {
                             let path = self.typed_path(&uri)?;
-                            if path.is_dir() {
-                                if fs::read_dir(&path)
-                                    .map_err(|error| KernelError::Handler {
-                                        message: error.to_string(),
-                                    })?
-                                    .next()
-                                    .is_some()
-                                {
+                            if self.cap_metadata(&path)?.is_dir() {
+                                if self.cap_read_dir(&path)?.next().is_some() {
                                     return Err(KernelError::NotEmpty {
                                         uri: uri.to_string(),
                                     });
                                 }
-                                fs::remove_dir(&path)
+                                self.cap_remove_dir(&path)
                             } else {
-                                fs::remove_file(&path)
+                                self.cap_remove_file(&path)
                             }
                             .map_err(|error| KernelError::Handler {
                                 message: error.to_string(),
@@ -900,6 +976,36 @@ mod tests {
         assert!(matches!(
             result.error,
             Some(KernelError::InvalidRequest { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capability_root_rejects_symlink_escape() {
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            root.path().join("link.txt"),
+        )
+        .unwrap();
+        let kernel = Kernel::new();
+        kernel
+            .register(FileHandler::new(root.path()).unwrap())
+            .await;
+
+        let result = kernel
+            .execute(request(
+                Verb::Read,
+                &root.path().join("link.txt"),
+                Value::Null,
+            ))
+            .await;
+        assert!(!result.ok);
+        assert!(matches!(
+            result.error,
+            Some(KernelError::InvalidRequest { .. }) | Some(KernelError::Handler { .. })
         ));
     }
 

@@ -116,7 +116,7 @@ impl SessionHandler {
             .to_owned();
         let mut state = session.state.lock().await;
         if state.status.terminal() {
-            return Err(KernelError::InvalidState {
+            return Err(KernelError::InvalidRequest {
                 message: "cannot send to an aborted session".to_owned(),
             });
         }
@@ -907,7 +907,10 @@ mod tests {
         let send = kernel
             .execute(request(Verb::Send, target, json!({"value": "late"})))
             .await;
-        assert!(matches!(send.error, Some(KernelError::InvalidState { .. })));
+        assert!(matches!(
+            send.error,
+            Some(KernelError::InvalidRequest { .. })
+        ));
     }
 
     #[tokio::test]

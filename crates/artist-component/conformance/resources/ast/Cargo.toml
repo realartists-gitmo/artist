@@ -1,5 +1,5 @@
 [package]
-name = "artist-component-echo"
+name = "artist-resource-ast"
 version = "0.1.0"
 edition = "2024"
 
@@ -9,10 +9,8 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.57.1"
-
-[package.metadata]
-artist-component-abi = "0.1"
+wit-bindgen = "0.60.0"
+serde = { version = "1", features = ["derive"] }
 
 [profile.product]
 inherits = "release"
