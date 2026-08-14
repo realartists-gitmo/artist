@@ -32,7 +32,13 @@ impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         // This component is a proof only. The application disables its file
         // route, leaving native artist_ast as the production owner.
-        if source_uri(&request.uri).is_none() {
+        let Some(source) = source_uri(&request.uri) else {
+            return types::ClaimDecision::Pass;
+        };
+        let Some(path) = source.strip_prefix("file://") else {
+            return types::ClaimDecision::Pass;
+        };
+        if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
             return types::ClaimDecision::Pass;
         }
         match request.verb {

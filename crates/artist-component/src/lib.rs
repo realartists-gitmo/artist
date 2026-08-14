@@ -520,6 +520,18 @@ impl HostState {
         I: IntoIterator<Item = String>,
     {
         let mut state = Self::with_capabilities(capabilities);
+        // Claiming is intentionally filesystem-capable: extension authors may
+        // inspect arbitrary host paths when deciding ownership. The caller
+        // accepts the resulting I/O cost and any policy implications.
+        state.wasi = wasmtime_wasi::WasiCtxBuilder::new()
+            .preopened_dir(
+                "/",
+                "/",
+                wasmtime_wasi::DirPerms::all(),
+                wasmtime_wasi::FilePerms::all(),
+            )
+            .expect("preopen host root for resource claim")
+            .build();
         state.context = scope.context.clone();
         state.scope = scope;
         state.phase = ComponentPhase::Claim;
