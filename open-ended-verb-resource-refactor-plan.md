@@ -79,6 +79,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 4 — Dynamic component invocation/linking
 
+- [x] Add Wasmtime component-artifact validation at the component boundary.
 - [ ] Replace generated per-verb host methods with one dynamic component invocation engine.
 - [ ] Resolve registered WIT function/interface type by `VerbId`.
 - [ ] Verify resource export identity, function name, parameter types, result types, and version exactly before publication.
@@ -170,4 +171,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added contract-checked dynamic call/result validation against active generations.
 - [x] Added transactional multi-package activation and kernel-facing batch activation.
 - [x] Added missing-artifact checks and identical-definition no-op generation behavior.
-- [ ] Next slice: typed dynamic component invocation and actual WIT contract activation.
+- [x] Added Wasmtime-backed component artifact validation with regression coverage.
+- [ ] Next slice: dynamic export/interface inspection and typed component invocation.

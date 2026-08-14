@@ -395,8 +395,20 @@ pub mod contracts {
 
 use artist_kernel::KernelHandle;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Validate a verb/resource artifact before it is published into an active
+/// package generation. This deliberately uses Wasmtime's component parser,
+/// not a magic-byte check, so core modules and malformed binaries are rejected.
+pub fn validate_component_artifact(path: impl AsRef<Path>) -> Result<(), String> {
+    let path = path.as_ref();
+    let engine = wasmtime::Engine::default();
+    wasmtime::component::Component::from_file(&engine, path)
+        .map(|_| ())
+        .map_err(|error| format!("invalid WebAssembly component {}: {error}", path.display()))
+}
 
 /// Errors raised while loading or invoking a component.
 #[derive(Debug, thiserror::Error)]
@@ -9562,6 +9574,15 @@ pub mod watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_artifact_validation_rejects_core_or_invalid_wasm() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("invalid.wasm");
+        std::fs::write(&path, b"not a component").unwrap();
+        let error = validate_component_artifact(&path).unwrap_err();
+        assert!(error.contains("invalid WebAssembly component"));
+    }
     use crate::tools::ToolsHandler;
     use std::path::PathBuf;
 
