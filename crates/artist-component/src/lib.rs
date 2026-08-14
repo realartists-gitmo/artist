@@ -393,7 +393,7 @@ pub mod contracts {
     }
 }
 
-use artist_kernel::KernelHandle;
+use artist_kernel::{KernelHandle, VerbId};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -416,6 +416,40 @@ pub struct ComponentExportDescriptor {
 /// Inspect a validated component without binding it to a closed world. The
 /// `implements` annotation is the authoritative versioned contract identity;
 /// callers can compare it with a discovered `VerbId` before publication.
+pub fn validate_verb_export(path: impl AsRef<Path>, verb: &VerbId) -> Result<(), String> {
+    let exports = inspect_component_exports(path)?;
+    let export = exports
+        .iter()
+        .find(|export| export.name == verb.function())
+        .ok_or_else(|| {
+            format!(
+                "component does not export function {} for {}",
+                verb.function(),
+                verb
+            )
+        })?;
+    let implements_match = export
+        .implements
+        .as_deref()
+        .is_some_and(|identity| identity == verb.as_str() || identity == verb.contract_versioned());
+    if !implements_match {
+        return Err(format!(
+            "export {} has incompatible contract annotation {:?}; expected {} or {}",
+            export.name,
+            export.implements,
+            verb,
+            verb.contract_versioned()
+        ));
+    }
+    if export.kind != "function" {
+        return Err(format!(
+            "export {} is not a component function",
+            export.name
+        ));
+    }
+    Ok(())
+}
+
 pub fn inspect_component_exports(
     path: impl AsRef<Path>,
 ) -> Result<Vec<ComponentExportDescriptor>, String> {

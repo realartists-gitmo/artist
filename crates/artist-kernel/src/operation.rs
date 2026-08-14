@@ -30,6 +30,26 @@ impl VerbId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn contract(&self) -> &str {
+        self.0.rsplit_once('/').unwrap().0
+    }
+
+    pub fn function(&self) -> &str {
+        self.0
+            .rsplit_once('/')
+            .and_then(|(_, function_and_version)| function_and_version.rsplit_once('@'))
+            .map(|(function, _)| function)
+            .unwrap()
+    }
+
+    pub fn contract_versioned(&self) -> String {
+        format!("{}@{}", self.contract(), self.version())
+    }
+
+    fn version(&self) -> &str {
+        self.0.rsplit_once('@').unwrap().1
+    }
 }
 
 impl fmt::Display for VerbId {
@@ -72,6 +92,9 @@ mod tests {
         let id = VerbId::from_str("thirdparty:render/render@1.0.0").unwrap();
         assert_eq!(id.as_str(), "thirdparty:render/render@1.0.0");
         assert_eq!(id.to_string(), "thirdparty:render/render@1.0.0");
+        assert_eq!(id.contract(), "thirdparty:render");
+        assert_eq!(id.function(), "render");
+        assert_eq!(id.contract_versioned(), "thirdparty:render@1.0.0");
     }
 
     #[test]

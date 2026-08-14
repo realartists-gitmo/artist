@@ -83,7 +83,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Add open-ended component export inspection with export names, kinds, and `implements` contract annotations.
 - [ ] Replace generated per-verb host methods with one dynamic component invocation engine.
 - [ ] Resolve registered WIT function/interface type by `VerbId`.
-- [ ] Verify resource export identity, function name, parameter types, result types, and version exactly before publication.
+- [x] Verify dynamic export identity, function name, and version annotation before invocation/publication.
+- [ ] Verify parameter types and result types exactly before publication.
 - [ ] Invoke Component Model values dynamically and validate returned values.
 - [ ] Link custom typed component imports through the same active contract registry.
 - [ ] Ensure a newly installed verb can be imported by a newly installed resource without Artist recompilation.
@@ -174,4 +175,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added missing-artifact checks and identical-definition no-op generation behavior.
 - [x] Added Wasmtime-backed component artifact validation with regression coverage.
 - [x] Added Wasmtime component export inspection without binding to a closed world.
-- [ ] Next slice: contract identity matching and generic dynamic component invocation.
+- [x] Added versioned `VerbId` contract/function accessors and component export identity matching.
+- [ ] Next slice: generic dynamic component invocation with typed parameter/result lowering.
