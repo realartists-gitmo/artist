@@ -174,6 +174,13 @@ impl VerbRegistry {
                     ),
                 });
             }
+            if let Some(artifact) = &definition.artifact {
+                if !artifact.is_file() {
+                    return Err(KernelError::NotFound {
+                        uri: artifact.display().to_string(),
+                    });
+                }
+            }
         }
 
         let mut entries = self.entries.write().map_err(|_| KernelError::Handler {
@@ -182,6 +189,11 @@ impl VerbRegistry {
         let generations = definitions
             .into_iter()
             .map(|definition| {
+                if let Some(active) = entries.get(&definition.identity) {
+                    if active.definition == definition {
+                        return active.generation;
+                    }
+                }
                 let generation = entries
                     .get(&definition.identity)
                     .map(|active| active.generation + 1)
@@ -304,6 +316,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let package = root.path().join("uppercase-package");
         std::fs::create_dir(&package).unwrap();
+        std::fs::write(package.join("uppercase.wasm"), b"component-artifact").unwrap();
         std::fs::write(
             package.join("verb.toml"),
             "identity = 'example:text/uppercase@1.0.0'\nfunction = 'uppercase'\nmodel_name = 'uppercase'\ndescription = 'Uppercase text'\ndocs = ['tool.md']\ncomponent = 'uppercase.wasm'\n",
@@ -319,6 +332,26 @@ mod tests {
             definitions[0].artifact,
             Some(package.join("uppercase.wasm"))
         );
+        let registry = VerbRegistry::new();
+        assert_eq!(registry.activate_discovered(root.path()).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn missing_component_artifact_is_rejected_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let package = root.path().join("missing");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("verb.toml"),
+            "identity = 'example:text/missing@1.0.0'\nfunction = 'missing'\nmodel_name = 'missing'\ndescription = 'Missing'",
+        )
+        .unwrap();
+        let registry = VerbRegistry::new();
+        assert!(matches!(
+            registry.activate_discovered(root.path()),
+            Err(KernelError::NotFound { .. })
+        ));
+        assert!(registry.definitions().unwrap().is_empty());
     }
 
     #[test]
@@ -379,8 +412,9 @@ mod tests {
         let registry = VerbRegistry::new();
         let identity = definition("uppercase").identity.clone();
         assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
-        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 2);
-        assert_eq!(registry.current(&identity).unwrap().unwrap().generation, 2);
+        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
+        assert_eq!(registry.activate(definition("uppercase")).unwrap(), 1);
+        assert_eq!(registry.current(&identity).unwrap().unwrap().generation, 1);
         assert!(registry.deactivate(&identity).unwrap().is_some());
         assert!(registry.current(&identity).unwrap().is_none());
     }

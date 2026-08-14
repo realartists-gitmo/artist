@@ -59,6 +59,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Create initial name-agnostic TOML package discovery for future verb packages.
 - [x] Define package metadata exports using canonical versioned identities and artifact paths.
 - [x] Atomically activate discovered package sets with duplicate/metadata validation before publication.
+- [x] Reject missing component artifacts before publication.
+- [x] Treat identical package definitions as publication no-ops, preserving their generation.
 - [ ] Validate actual WIT contracts and artifact compatibility before publication.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
 - [ ] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
@@ -167,4 +169,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added name-agnostic `verb.toml` discovery with malformed identity rejection.
 - [x] Added contract-checked dynamic call/result validation against active generations.
 - [x] Added transactional multi-package activation and kernel-facing batch activation.
+- [x] Added missing-artifact checks and identical-definition no-op generation behavior.
 - [ ] Next slice: typed dynamic component invocation and actual WIT contract activation.
