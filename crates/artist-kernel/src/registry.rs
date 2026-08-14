@@ -1,8 +1,8 @@
 use crate::{
     BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
     InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Pattern,
-    Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri, SearchService,
-    ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
+    ProcessManager, Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri,
+    SearchService, ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ struct Inner {
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
     resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>>,
     verbs: VerbRegistry,
+    processes: ProcessManager,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -611,6 +612,7 @@ impl Kernel {
                 tool_providers: RwLock::new(Vec::new()),
                 resource_catalog_providers: RwLock::new(Vec::new()),
                 verbs: VerbRegistry::new(),
+                processes: ProcessManager::new(),
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -618,6 +620,10 @@ impl Kernel {
 
     pub fn verb_registry(&self) -> VerbRegistry {
         self.inner.verbs.clone()
+    }
+
+    pub fn process_manager(&self) -> ProcessManager {
+        self.inner.processes.clone()
     }
 
     pub fn activate_verb(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
