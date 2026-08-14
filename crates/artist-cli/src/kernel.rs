@@ -114,31 +114,6 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 "path = \"../../typed-guest/src/lib.rs\"",
                 "path = \"src/lib.rs\"",
             );
-            // Exact bytes emitted by the pre-refactor seeder. These are
-            // intentionally separate from the current conformance package
-            // sources: untouched projects must migrate, customized projects
-            // must not be overwritten.
-            let legacy_manifest = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/fixtures/legacy-tool-seed/",
-                $verb,
-                "-Cargo.toml"
-            ));
-            let legacy_guest = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/fixtures/legacy-tool-seed/typed-guest-src-lib.rs"
-            ))
-            .replace("../../../wit/tool-surface", "../wit/tool-surface");
-            let legacy_wit = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/fixtures/legacy-tool-seed/tool-surface-world.wit"
-            ));
-            let legacy_lock = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/fixtures/legacy-tool-seed/",
-                $verb,
-                "-Cargo.lock"
-            ));
             let guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/typed-guest/src/lib.rs"
@@ -151,28 +126,6 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/wit/resource-surface/world.wit"
             ));
-            let legacy_manifest_match = package.join("Cargo.toml").exists()
-                && std::fs::read_to_string(package.join("Cargo.toml"))
-                    .ok()
-                    .as_deref()
-                    == Some(legacy_manifest);
-            let legacy_guest_match = package.join("src/lib.rs").exists()
-                && std::fs::read_to_string(package.join("src/lib.rs"))
-                    .ok()
-                    .as_deref()
-                    == Some(legacy_guest.as_str());
-            let legacy_lock_match = package.join("Cargo.lock").exists()
-                && std::fs::read(package.join("Cargo.lock")).ok().as_deref()
-                    == Some(legacy_lock.as_slice());
-            let legacy_wit_match = root.join("wit/tool-surface/world.wit").exists()
-                && std::fs::read(root.join("wit/tool-surface/world.wit"))
-                    .ok()
-                    .as_deref()
-                    == Some(legacy_wit.as_slice());
-            let legacy_unit = legacy_manifest_match
-                && legacy_guest_match
-                && legacy_lock_match
-                && legacy_wit_match;
             for (relative, bytes) in [
                 ("Cargo.toml", manifest.as_bytes()),
                 (
@@ -211,13 +164,7 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 ("../wit/resource-surface/world.wit", resource_wit.as_slice()),
             ] {
                 let path = package.join(relative);
-                let needs_repair = match relative {
-                    "Cargo.toml" | "Cargo.lock" | "src/lib.rs" => legacy_unit,
-                    "../wit/tool-surface-v1/deps/resource/world.wit"
-                    | "../wit/resource-surface/world.wit" => true,
-                    _ => false,
-                };
-                if !path.exists() || needs_repair {
+                if !path.exists() {
                     std::fs::write(path, bytes)?;
                 }
             }
@@ -263,67 +210,6 @@ mod tests {
     use super::*;
     use artist_kernel::Verb;
     use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn migrates_exact_pre_refactor_seed() {
-        let root = tempdir().unwrap();
-        let package = root.path().join("tools/read");
-        std::fs::create_dir_all(package.join("src")).unwrap();
-        let manifest = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/legacy-tool-seed/read-Cargo.toml"
-        ));
-        let guest = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/legacy-tool-seed/typed-guest-src-lib.rs"
-        ))
-        .replace("../../../wit/tool-surface", "../wit/tool-surface");
-        let lock = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/legacy-tool-seed/read-Cargo.lock"
-        ));
-        std::fs::write(package.join("Cargo.toml"), manifest).unwrap();
-        std::fs::write(package.join("Cargo.lock"), lock).unwrap();
-        std::fs::write(package.join("src/lib.rs"), guest).unwrap();
-        let old_wit = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/fixtures/legacy-tool-seed/tool-surface-world.wit"
-        ));
-        std::fs::create_dir_all(root.path().join("tools/wit/tool-surface")).unwrap();
-        std::fs::write(
-            root.path().join("tools/wit/tool-surface/world.wit"),
-            old_wit,
-        )
-        .unwrap();
-        seed_universal_tools(&root.path().join("tools")).unwrap();
-        assert!(
-            std::fs::read_to_string(package.join("Cargo.toml"))
-                .unwrap()
-                .contains("path = \"src/lib.rs\"")
-        );
-        assert!(
-            std::fs::read_to_string(package.join("src/lib.rs"))
-                .unwrap()
-                .contains("../wit/tool-surface-v1")
-        );
-        assert!(
-            !std::fs::read_to_string(package.join("Cargo.lock"))
-                .unwrap()
-                .contains("wit-bindgen 0.57.1")
-        );
-        let kernel = build(root.path()).await.unwrap();
-        let source = package.join("Cargo.toml");
-        let output = kernel
-            .execute_tool(
-                "read",
-                serde_json::json!({
-                    "requests": [{"uri": source.display().to_string(), "at": null, "before": null, "after": null}]
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(output.to_string().contains("artist-tool-read"));
-    }
 
     #[tokio::test]
     async fn clean_project_seeds_and_activates_named_read_tool() {
