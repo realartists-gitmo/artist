@@ -32,20 +32,69 @@ pub enum DynamicType {
 
 impl DynamicType {
     pub fn named(name: &str) -> Result<Self, KernelError> {
-        match name {
-            "bool" => Ok(Self::Bool),
-            "s32" => Ok(Self::S32),
-            "s64" => Ok(Self::S64),
-            "u32" => Ok(Self::U32),
-            "u64" => Ok(Self::U64),
-            "f64" => Ok(Self::F64),
-            "string" => Ok(Self::String),
-            "uri" | "resource-uri" => Ok(Self::ResourceUri),
-            _ => Err(KernelError::InvalidRequest {
-                message: format!("unknown dynamic contract type: {name}"),
-            }),
+        let name = name.trim();
+        let primitive = match name {
+            "bool" => Some(Self::Bool),
+            "s32" => Some(Self::S32),
+            "s64" => Some(Self::S64),
+            "u32" => Some(Self::U32),
+            "u64" => Some(Self::U64),
+            "f64" => Some(Self::F64),
+            "string" => Some(Self::String),
+            "uri" | "resource-uri" => Some(Self::ResourceUri),
+            _ => None,
+        };
+        if let Some(primitive) = primitive {
+            return Ok(primitive);
+        }
+        if let Some(inner) = name
+            .strip_prefix("list<")
+            .and_then(|value| value.strip_suffix('>'))
+        {
+            return Ok(Self::List(Box::new(Self::named(inner)?)));
+        }
+        if let Some(inner) = name
+            .strip_prefix("option<")
+            .and_then(|value| value.strip_suffix('>'))
+        {
+            return Ok(Self::Option(Box::new(Self::named(inner)?)));
+        }
+        if let Some(inner) = name
+            .strip_prefix("tuple<")
+            .and_then(|value| value.strip_suffix('>'))
+        {
+            return Ok(Self::Tuple(
+                split_type_arguments(inner)
+                    .into_iter()
+                    .map(Self::named)
+                    .collect::<Result<_, _>>()?,
+            ));
+        }
+        Err(KernelError::InvalidRequest {
+            message: format!("unknown dynamic contract type: {name}"),
+        })
+    }
+}
+
+fn split_type_arguments(value: &str) -> Vec<&str> {
+    let mut result = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                result.push(value[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
         }
     }
+    if start < value.len() {
+        result.push(value[start..].trim());
+    }
+    result
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -152,6 +201,16 @@ pub struct DynamicVerbResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_nested_manifest_contract_types() {
+        assert_eq!(
+            DynamicType::named("list<option<tuple<string,u32>>>").unwrap(),
+            DynamicType::List(Box::new(DynamicType::Option(Box::new(DynamicType::Tuple(
+                vec![DynamicType::String, DynamicType::U32],
+            )))))
+        );
+    }
 
     #[test]
     fn validates_nested_component_model_shaped_values() {

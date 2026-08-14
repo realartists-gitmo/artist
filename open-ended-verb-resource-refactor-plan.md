@@ -49,7 +49,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Define initial dynamic `DynamicType`/`DynamicValue`/function call/result abstractions and exact recursive validation rules.
 - [x] Add tests for nested record/list validation and rejection without JSON coercion.
 - [ ] Expand exact Wasmtime Component Model mapping and wire function signatures into activation.
-- [x] Parse primitive manifest contract names into checked dynamic contract types.
+- [x] Parse primitive and nested list/option/tuple manifest contract names into checked dynamic contract types.
 
 ## Slice 2 — Generic verb package registry
 
