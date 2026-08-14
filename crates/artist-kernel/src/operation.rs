@@ -6,7 +6,7 @@ use std::{fmt, str::FromStr};
 /// The kernel is being migrated from the closed `Verb` enum to this identity.
 /// The string is deliberately retained as the contract identity rather than
 /// reduced to a display name.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct VerbId(String);
 
 impl VerbId {
