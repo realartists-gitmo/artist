@@ -2,8 +2,8 @@ use crate::{
     BatchRequest, BatchResult, ClaimDecision, ClaimRegistry, Handler, HandlerDescriptor,
     InvocationContext, InvocationScope, ItemResult, KernelError, KernelHandle, Operation,
     OperationResult, Pattern, ProcessManager, Request, ResourceCatalogEntry,
-    ResourceCatalogProvider, ResourceUri, RouteRegistry, SearchService, ToolDefinition,
-    ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
+    ResourceCatalogProvider, ResourceRegistry, ResourceUri, RouteRegistry, SearchService,
+    ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ struct Inner {
     processes: ProcessManager,
     routes: RouteRegistry,
     claims: ClaimRegistry,
+    resources: ResourceRegistry,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -618,6 +619,7 @@ impl Kernel {
                 processes: ProcessManager::new(),
                 routes: RouteRegistry::default(),
                 claims: ClaimRegistry::default(),
+                resources: ResourceRegistry::default(),
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -637,6 +639,10 @@ impl Kernel {
 
     pub fn claim_registry(&self) -> ClaimRegistry {
         self.inner.claims.clone()
+    }
+
+    pub fn resource_registry(&self) -> ResourceRegistry {
+        self.inner.resources.clone()
     }
 
     pub fn activate_verb(&self, definition: VerbDefinition) -> Result<u64, KernelError> {

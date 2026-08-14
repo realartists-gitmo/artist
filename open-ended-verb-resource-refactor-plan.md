@@ -101,6 +101,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 5 — Delete the second semantic API
 
+- [x] Add an open-ended `DynamicResourceProvider`/`ResourceRegistry` foundation with typed invocation and dynamic claim arbitration.
 - [ ] Convert native FileHandler to the generic typed resource-provider registration path.
 - [ ] Convert SessionHandler to the generic typed resource-provider path.
 - [ ] Convert RepositoryHandler to the generic typed resource-provider path.
