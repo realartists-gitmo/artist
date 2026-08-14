@@ -181,6 +181,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added Wasmtime component export inspection without binding to a closed world.
 - [x] Added versioned `VerbId` contract/function accessors and component export identity matching.
 - [x] Added generic Wasmtime invocation path with no per-verb dispatch.
+- [x] Added dynamic parameter/result arity checks before calling Wasmtime.
 - [x] Added recursive dynamic value lowering/lifting for records, lists, tuples, options, results, variants, enums, flags, and primitives.
 - [x] Added registry-owned `DynamicVerbExecutor` dispatch without kernel-known verb names and with hot-swap generation recheck.
 - [x] Added direct executable process resources with lifecycle tests and no shell/PTY path.

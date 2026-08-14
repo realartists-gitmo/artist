@@ -4,7 +4,7 @@
 //! compatibility layer. It is the seam through which verb packages become
 //! discoverable and hot-swappable without changing kernel code.
 
-use crate::{DynamicType, DynamicValue, DynamicVerbCall, DynamicVerbResult, KernelError, VerbId};
+use crate::{DynamicType, DynamicVerbCall, DynamicVerbResult, KernelError, VerbId};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -368,6 +368,7 @@ impl VerbRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DynamicValue;
 
     fn definition(name: &str) -> VerbDefinition {
         VerbDefinition::new(

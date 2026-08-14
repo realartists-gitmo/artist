@@ -557,6 +557,23 @@ pub fn invoke_component_function(
     let function = instance
         .get_func(&mut store, verb.function())
         .ok_or_else(|| format!("component function {} disappeared after validation", verb))?;
+    let function_type = function.ty(&store);
+    if function_type.params().len() != params.len() {
+        return Err(format!(
+            "component function {} expects {} parameters, received {}",
+            verb,
+            function_type.params().len(),
+            params.len()
+        ));
+    }
+    if function_type.results().len() != results.len() {
+        return Err(format!(
+            "component function {} returns {} values, received {} result slots",
+            verb,
+            function_type.results().len(),
+            results.len()
+        ));
+    }
     function
         .call(&mut store, params, results)
         .map_err(|error| format!("component function {} failed: {error}", verb))
