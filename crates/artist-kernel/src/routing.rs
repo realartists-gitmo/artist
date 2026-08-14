@@ -47,6 +47,21 @@ impl RouteRegistry {
             })?;
         extractor.extract(input)
     }
+
+    pub fn extract_and_arbitrate(
+        &self,
+        identity: &VerbId,
+        input: &DynamicValue,
+        claims: &crate::ClaimRegistry,
+    ) -> Result<Vec<(ResourceUri, crate::ClaimDecision)>, KernelError> {
+        self.extract(identity, input)?
+            .into_iter()
+            .map(|uri| {
+                let decision = claims.arbitrate(identity, &uri)?;
+                Ok((uri, decision))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
