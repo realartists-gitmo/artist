@@ -413,6 +413,33 @@ pub struct ComponentExportDescriptor {
     pub kind: String,
 }
 
+/// Invoke a validated component export using Wasmtime's dynamic Component
+/// Model values. The caller supplies result slots because result types belong
+/// to the discovered WIT contract, not to this host crate.
+pub fn invoke_component_function(
+    path: impl AsRef<Path>,
+    verb: &VerbId,
+    params: &[wasmtime::component::Val],
+    results: &mut [wasmtime::component::Val],
+) -> Result<(), String> {
+    let path = path.as_ref();
+    validate_verb_export(path, verb)?;
+    let engine = wasmtime::Engine::default();
+    let component = wasmtime::component::Component::from_file(&engine, path)
+        .map_err(|error| format!("invalid WebAssembly component {}: {error}", path.display()))?;
+    let linker = wasmtime::component::Linker::new(&engine);
+    let mut store = wasmtime::Store::new(&engine, ());
+    let instance = linker
+        .instantiate(&mut store, &component)
+        .map_err(|error| format!("could not instantiate {}: {error}", path.display()))?;
+    let function = instance
+        .get_func(&mut store, verb.function())
+        .ok_or_else(|| format!("component function {} disappeared after validation", verb))?;
+    function
+        .call(&mut store, params, results)
+        .map_err(|error| format!("component function {} failed: {error}", verb))
+}
+
 /// Inspect a validated component without binding it to a closed world. The
 /// `implements` annotation is the authoritative versioned contract identity;
 /// callers can compare it with a discovered `VerbId` before publication.
