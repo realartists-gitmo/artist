@@ -38,7 +38,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Inventory all `Verb`, `Operation`, `Handler`, `TypedHandler`, `Request`, `OperationResult`, `Verb::ALL`, `invoke_*_typed`, and JSON adapters.
 - [x] Identify current WIT packages/worlds and generated-binding boundaries.
 - [ ] Identify current package watcher/activation/generation/lease boundaries.
-- [ ] Add a refactor-only compile/test gate document listing forbidden symbols.
+- [x] Add `open-ended-verb-architecture-gate.md`, a strict refactor-only gate listing forbidden symbols and final validation commands.
 - [ ] Preserve/expand behavior tests for anchors, edits, grep/find, poll, run/send, claims, generations, and hot swap before deleting old abstractions.
 
 ## Slice 1 — Dynamic identity and shared types
