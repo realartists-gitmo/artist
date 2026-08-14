@@ -129,6 +129,10 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 "/fixtures/legacy-tool-seed/typed-guest-src-lib.rs"
             ))
             .replace("../../../wit/tool-surface", "../wit/tool-surface");
+            let legacy_wit = include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/legacy-tool-seed/tool-surface-world.wit"
+            ));
             let legacy_lock = include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/fixtures/legacy-tool-seed/",
@@ -160,7 +164,15 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             let legacy_lock_match = package.join("Cargo.lock").exists()
                 && std::fs::read(package.join("Cargo.lock")).ok().as_deref()
                     == Some(legacy_lock.as_slice());
-            let legacy_unit = legacy_manifest_match && legacy_guest_match && legacy_lock_match;
+            let legacy_wit_match = root.join("wit/tool-surface/world.wit").exists()
+                && std::fs::read(root.join("wit/tool-surface/world.wit"))
+                    .ok()
+                    .as_deref()
+                    == Some(legacy_wit.as_slice());
+            let legacy_unit = legacy_manifest_match
+                && legacy_guest_match
+                && legacy_lock_match
+                && legacy_wit_match;
             for (relative, bytes) in [
                 ("Cargo.toml", manifest.as_bytes()),
                 (
@@ -273,6 +285,16 @@ mod tests {
         std::fs::write(package.join("Cargo.toml"), manifest).unwrap();
         std::fs::write(package.join("Cargo.lock"), lock).unwrap();
         std::fs::write(package.join("src/lib.rs"), guest).unwrap();
+        let old_wit = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/legacy-tool-seed/tool-surface-world.wit"
+        ));
+        std::fs::create_dir_all(root.path().join("tools/wit/tool-surface")).unwrap();
+        std::fs::write(
+            root.path().join("tools/wit/tool-surface/world.wit"),
+            old_wit,
+        )
+        .unwrap();
         seed_universal_tools(&root.path().join("tools")).unwrap();
         assert!(
             std::fs::read_to_string(package.join("Cargo.toml"))
