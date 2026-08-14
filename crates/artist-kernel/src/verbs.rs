@@ -145,21 +145,63 @@ impl VerbRegistry {
     }
 
     pub fn activate(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
+        let mut generations = self.activate_packages(vec![definition])?;
+        Ok(generations.remove(0))
+    }
+
+    /// Publish a package set as one transaction. All identities are checked
+    /// before the lock is mutated, so a malformed or duplicate package cannot
+    /// leave a partially updated active registry.
+    pub fn activate_packages(
+        &self,
+        definitions: Vec<VerbDefinition>,
+    ) -> Result<Vec<u64>, KernelError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for definition in &definitions {
+            if !seen.insert(definition.identity.clone()) {
+                return Err(KernelError::Conflict {
+                    uri: format!("verb://{}", definition.identity),
+                });
+            }
+            if definition.function.is_empty()
+                || definition.model_name.is_empty()
+                || definition.description.is_empty()
+            {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "verb {} has incomplete package metadata",
+                        definition.identity
+                    ),
+                });
+            }
+        }
+
         let mut entries = self.entries.write().map_err(|_| KernelError::Handler {
             message: "verb registry lock poisoned".to_owned(),
         })?;
-        let generation = entries
-            .get(&definition.identity)
-            .map(|active| active.generation + 1)
-            .unwrap_or(1);
-        entries.insert(
-            definition.identity.clone(),
-            Arc::new(ActiveVerb {
-                definition,
-                generation,
-            }),
-        );
-        Ok(generation)
+        let generations = definitions
+            .into_iter()
+            .map(|definition| {
+                let generation = entries
+                    .get(&definition.identity)
+                    .map(|active| active.generation + 1)
+                    .unwrap_or(1);
+                entries.insert(
+                    definition.identity.clone(),
+                    Arc::new(ActiveVerb {
+                        definition,
+                        generation,
+                    }),
+                );
+                generation
+            })
+            .collect();
+        Ok(generations)
+    }
+
+    pub fn activate_discovered(&self, root: &Path) -> Result<Vec<u64>, KernelError> {
+        let definitions = discover_verb_packages(root)?;
+        self.activate_packages(definitions)
     }
 
     pub fn deactivate(&self, identity: &VerbId) -> Result<Option<Arc<ActiveVerb>>, KernelError> {
@@ -311,6 +353,25 @@ mod tests {
             output: crate::DynamicValue::String("HELLO".into()),
         };
         registry.validate_result(&call, &result).unwrap();
+    }
+
+    #[test]
+    fn package_batch_is_atomic_on_duplicate_identity() {
+        let registry = VerbRegistry::new();
+        let existing = definition("existing");
+        registry.activate(existing.clone()).unwrap();
+        let duplicate = definition("new");
+        let error = registry
+            .activate_packages(vec![duplicate.clone(), duplicate])
+            .unwrap_err();
+        assert!(matches!(error, KernelError::Conflict { .. }));
+        assert!(registry.current(&existing.identity).unwrap().is_some());
+        assert!(
+            registry
+                .current(&VerbId::new("example:new/new@1.0.0").unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

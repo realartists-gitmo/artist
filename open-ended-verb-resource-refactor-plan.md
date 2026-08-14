@@ -58,7 +58,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
 - [x] Create initial name-agnostic TOML package discovery for future verb packages.
 - [x] Define package metadata exports using canonical versioned identities and artifact paths.
-- [ ] Atomically activate discovered packages only after WIT contract validation.
+- [x] Atomically activate discovered package sets with duplicate/metadata validation before publication.
+- [ ] Validate actual WIT contracts and artifact compatibility before publication.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
 - [ ] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
 
@@ -165,4 +166,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added kernel-exported dynamic typed values and `DynamicVerbCall`/`DynamicVerbResult` scaffolding; legacy dispatch is not yet routed through them.
 - [x] Added name-agnostic `verb.toml` discovery with malformed identity rejection.
 - [x] Added contract-checked dynamic call/result validation against active generations.
-- [ ] Next slice: typed dynamic component invocation and atomic package activation.
+- [x] Added transactional multi-package activation and kernel-facing batch activation.
+- [ ] Next slice: typed dynamic component invocation and actual WIT contract activation.

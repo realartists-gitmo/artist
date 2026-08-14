@@ -624,6 +624,13 @@ impl Kernel {
         self.inner.verbs.activate(definition)
     }
 
+    pub fn activate_verbs(
+        &self,
+        definitions: Vec<VerbDefinition>,
+    ) -> Result<Vec<u64>, KernelError> {
+        self.inner.verbs.activate_packages(definitions)
+    }
+
     pub fn active_verbs(&self) -> Result<Vec<Arc<crate::ActiveVerb>>, KernelError> {
         self.inner.verbs.definitions()
     }
