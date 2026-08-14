@@ -1,9 +1,9 @@
 use crate::{
-    BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
-    InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Pattern,
-    ProcessManager, Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri,
-    RouteRegistry, SearchService, ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition,
-    VerbRegistry,
+    BatchRequest, BatchResult, ClaimDecision, ClaimRegistry, Handler, HandlerDescriptor,
+    InvocationContext, InvocationScope, ItemResult, KernelError, KernelHandle, Operation,
+    OperationResult, Pattern, ProcessManager, Request, ResourceCatalogEntry,
+    ResourceCatalogProvider, ResourceUri, RouteRegistry, SearchService, ToolDefinition,
+    ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ struct Inner {
     verbs: VerbRegistry,
     processes: ProcessManager,
     routes: RouteRegistry,
+    claims: ClaimRegistry,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -616,6 +617,7 @@ impl Kernel {
                 verbs: VerbRegistry::new(),
                 processes: ProcessManager::new(),
                 routes: RouteRegistry::default(),
+                claims: ClaimRegistry::default(),
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -631,6 +633,10 @@ impl Kernel {
 
     pub fn route_registry(&self) -> RouteRegistry {
         self.inner.routes.clone()
+    }
+
+    pub fn claim_registry(&self) -> ClaimRegistry {
+        self.inner.claims.clone()
     }
 
     pub fn activate_verb(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
