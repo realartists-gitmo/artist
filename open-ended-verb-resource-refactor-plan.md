@@ -64,7 +64,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Treat identical package definitions as publication no-ops, preserving their generation.
 - [ ] Validate actual WIT contracts and artifact compatibility before publication.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
-- [ ] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
+- [x] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
 
 ## Slice 3 — Generic typed call and routing model
 
@@ -144,7 +144,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [ ] Dynamic cross-component import/composition test passes.
 - [ ] Incompatible WIT types fail before publication.
 - [ ] Contract changes create new incompatible generations rather than silent relinking.
-- [ ] New verb deletion removes model tool visibility.
+- [x] Dynamic package reconciliation removes deleted verb tool descriptors.
 - [ ] Existing pinned generation remains executable after hot swap.
 - [ ] Arbitrary executable-power proof passes.
 - [ ] Full workspace tests pass.

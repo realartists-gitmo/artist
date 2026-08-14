@@ -650,6 +650,13 @@ impl Kernel {
         self.inner.verbs.activate_packages(definitions)
     }
 
+    pub fn reconcile_verbs(
+        &self,
+        definitions: Vec<VerbDefinition>,
+    ) -> Result<Vec<crate::VerbId>, KernelError> {
+        self.inner.verbs.reconcile_packages(definitions)
+    }
+
     pub fn active_verbs(&self) -> Result<Vec<Arc<crate::ActiveVerb>>, KernelError> {
         self.inner.verbs.definitions()
     }

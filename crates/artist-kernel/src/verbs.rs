@@ -282,12 +282,45 @@ impl VerbRegistry {
     }
 
     pub fn deactivate(&self, identity: &VerbId) -> Result<Option<Arc<ActiveVerb>>, KernelError> {
-        self.entries
+        let removed = self
+            .entries
             .write()
             .map_err(|_| KernelError::Handler {
                 message: "verb registry lock poisoned".to_owned(),
             })
-            .map(|mut entries| entries.remove(identity))
+            .map(|mut entries| entries.remove(identity))?;
+        self.executors
+            .write()
+            .map_err(|_| KernelError::Handler {
+                message: "verb executor registry lock poisoned".to_owned(),
+            })?
+            .remove(identity);
+        Ok(removed)
+    }
+
+    pub fn reconcile_packages(
+        &self,
+        definitions: Vec<VerbDefinition>,
+    ) -> Result<Vec<VerbId>, KernelError> {
+        self.activate_packages(definitions.clone())?;
+        let desired = definitions
+            .into_iter()
+            .map(|definition| definition.identity)
+            .collect::<std::collections::BTreeSet<_>>();
+        let removed = self
+            .entries
+            .read()
+            .map_err(|_| KernelError::Handler {
+                message: "verb registry lock poisoned".to_owned(),
+            })?
+            .keys()
+            .filter(|identity| !desired.contains(*identity))
+            .cloned()
+            .collect::<Vec<_>>();
+        for identity in &removed {
+            self.deactivate(identity)?;
+        }
+        Ok(removed)
     }
 
     pub fn acquire(&self, identity: &VerbId) -> Result<VerbLease, KernelError> {
@@ -549,6 +582,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.output, DynamicValue::String("HELLO".into()));
+    }
+
+    #[test]
+    fn package_reconciliation_removes_deleted_dynamic_tools() {
+        let registry = VerbRegistry::new();
+        registry.activate(definition("old")).unwrap();
+        let removed = registry
+            .reconcile_packages(vec![definition("new")])
+            .unwrap();
+        assert_eq!(removed, vec![VerbId::new("example:old/old@1.0.0").unwrap()]);
+        assert!(
+            registry
+                .current(&VerbId::new("example:old/old@1.0.0").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(registry.tool_descriptors().unwrap().len(), 1);
     }
 
     #[test]
