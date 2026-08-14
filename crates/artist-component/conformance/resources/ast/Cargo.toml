@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 wit-bindgen = "0.60.0"
 serde = { version = "1", features = ["derive"] }
+url = "2"
 
 [profile.product]
 inherits = "release"

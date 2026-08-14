@@ -35,7 +35,10 @@ impl exports::artist::resource::extension::Guest for AstResource {
         let Some(source) = source_uri(&request.uri) else {
             return types::ClaimDecision::Pass;
         };
-        let Some(path) = source.strip_prefix("file://") else {
+        let Ok(uri) = url::Url::parse(&source) else {
+            return types::ClaimDecision::Pass;
+        };
+        let Ok(path) = uri.to_file_path() else {
             return types::ClaimDecision::Pass;
         };
         if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
