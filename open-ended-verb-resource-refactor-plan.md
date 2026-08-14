@@ -138,7 +138,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Require a non-empty capability identity for process execution in the direct process primitive.
 - [x] Return authoritative `process://<id>` resource URIs.
 - [x] Implement process read/send/poll/abort/delete lifecycle in `ProcessManager`; integrate with generic verb/resource routing remains pending.
-- [ ] Preserve creation context for cwd/environment; later sends cannot alter it.
+- [x] Preserve creation context for cwd/environment; later sends cannot alter it, and snapshots expose the authoritative context.
 - [ ] Add helper executable and run/send/read/poll/abort/delete tests.
 - [ ] Add WASM component proof that invokes process execution through ordinary resource composition.
 - [ ] Confirm no shell, PTY, Brush, or test-only host API exists.

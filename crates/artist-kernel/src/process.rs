@@ -19,12 +19,16 @@ pub struct ProcessSnapshot {
     pub output: String,
     pub exit_code: Option<i32>,
     pub aborted: bool,
+    pub cwd: Option<String>,
+    pub environment: BTreeMap<String, String>,
 }
 
 struct ProcessState {
     child: Child,
     output: Arc<Mutex<Vec<u8>>>,
     aborted: bool,
+    cwd: Option<String>,
+    environment: BTreeMap<String, String>,
 }
 
 fn spawn_reader<R: Read + Send + 'static>(mut stream: R, output: Arc<Mutex<Vec<u8>>>) {
@@ -118,6 +122,8 @@ impl ProcessManager {
                     child,
                     output,
                     aborted: false,
+                    cwd: cwd.map(|path| path.display().to_string()),
+                    environment: environment.iter().cloned().collect(),
                 })),
             );
         Ok(uri)
@@ -163,6 +169,8 @@ impl ProcessManager {
             output,
             exit_code,
             aborted: process.aborted,
+            cwd: process.cwd.clone(),
+            environment: process.environment.clone(),
         })
     }
 
