@@ -138,6 +138,21 @@ pub struct ActiveVerb {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct VerbLease {
+    pub active: Arc<ActiveVerb>,
+}
+
+impl VerbLease {
+    pub fn generation(&self) -> u64 {
+        self.active.generation
+    }
+
+    pub fn definition(&self) -> &VerbDefinition {
+        &self.active.definition
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct VerbRegistry {
     entries: Arc<std::sync::RwLock<BTreeMap<VerbId, Arc<ActiveVerb>>>>,
@@ -265,6 +280,16 @@ impl VerbRegistry {
                 message: "verb registry lock poisoned".to_owned(),
             })
             .map(|mut entries| entries.remove(identity))
+    }
+
+    pub fn acquire(&self, identity: &VerbId) -> Result<VerbLease, KernelError> {
+        let active = self
+            .current(identity)?
+            .ok_or_else(|| KernelError::UnsupportedVerb {
+                verb: identity.to_string(),
+                uri: "<verb-lease>".into(),
+            })?;
+        Ok(VerbLease { active })
     }
 
     pub fn current(&self, identity: &VerbId) -> Result<Option<Arc<ActiveVerb>>, KernelError> {
