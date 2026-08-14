@@ -35,6 +35,14 @@ impl VerbId {
         self.0.rsplit_once('/').unwrap().0
     }
 
+    pub fn package(&self) -> &str {
+        self.contract().split_once(':').unwrap().0
+    }
+
+    pub fn interface(&self) -> &str {
+        self.contract().split_once(':').unwrap().1
+    }
+
     pub fn function(&self) -> &str {
         self.0
             .rsplit_once('/')
@@ -47,7 +55,7 @@ impl VerbId {
         format!("{}@{}", self.contract(), self.version())
     }
 
-    fn version(&self) -> &str {
+    pub fn version(&self) -> &str {
         self.0.rsplit_once('@').unwrap().1
     }
 }
@@ -93,7 +101,10 @@ mod tests {
         assert_eq!(id.as_str(), "thirdparty:render/render@1.0.0");
         assert_eq!(id.to_string(), "thirdparty:render/render@1.0.0");
         assert_eq!(id.contract(), "thirdparty:render");
+        assert_eq!(id.package(), "thirdparty");
+        assert_eq!(id.interface(), "render");
         assert_eq!(id.function(), "render");
+        assert_eq!(id.version(), "1.0.0");
         assert_eq!(id.contract_versioned(), "thirdparty:render@1.0.0");
     }
 

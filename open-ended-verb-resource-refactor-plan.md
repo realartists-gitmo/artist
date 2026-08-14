@@ -9,7 +9,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [ ] Exactly one semantic kernel execution path: typed/dynamic Component Model values only.
 - [ ] No legacy `Handler`, `Kernel.handlers`, JSON resource ABI, or internal `Request -> serde_json::Value` dispatch.
 - [ ] No closed `Verb` or `Operation` enum in the kernel.
-- [ ] Canonical versioned `VerbId` identifies a concrete WIT contract/interface.
+- [x] Canonical versioned `VerbId` identifies a concrete WIT package/interface/function contract, with package, interface, function, and version accessors.
 - [ ] Claims, exports, routing, generations, and capabilities use dynamic contract identities.
 - [ ] Ten current verbs are ordinary installed verb packages, not kernel special cases.
 - [ ] Verb request/result schemas are owned by verb WIT contracts.
