@@ -403,11 +403,44 @@ use std::time::Instant;
 /// package generation. This deliberately uses Wasmtime's component parser,
 /// not a magic-byte check, so core modules and malformed binaries are rejected.
 pub fn validate_component_artifact(path: impl AsRef<Path>) -> Result<(), String> {
+    inspect_component_exports(path).map(|_| ())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComponentExportDescriptor {
+    pub name: String,
+    pub implements: Option<String>,
+    pub kind: String,
+}
+
+/// Inspect a validated component without binding it to a closed world. The
+/// `implements` annotation is the authoritative versioned contract identity;
+/// callers can compare it with a discovered `VerbId` before publication.
+pub fn inspect_component_exports(
+    path: impl AsRef<Path>,
+) -> Result<Vec<ComponentExportDescriptor>, String> {
     let path = path.as_ref();
     let engine = wasmtime::Engine::default();
-    wasmtime::component::Component::from_file(&engine, path)
-        .map(|_| ())
-        .map_err(|error| format!("invalid WebAssembly component {}: {error}", path.display()))
+    let component = wasmtime::component::Component::from_file(&engine, path)
+        .map_err(|error| format!("invalid WebAssembly component {}: {error}", path.display()))?;
+    Ok(component
+        .component_type()
+        .exports(&engine)
+        .map(|(name, export)| ComponentExportDescriptor {
+            name: name.to_owned(),
+            implements: export.implements.map(str::to_owned),
+            kind: match export.ty {
+                wasmtime::component::types::ComponentItem::ComponentFunc(_) => "function",
+                wasmtime::component::types::ComponentItem::CoreFunc(_) => "core-function",
+                wasmtime::component::types::ComponentItem::Module(_) => "module",
+                wasmtime::component::types::ComponentItem::Component(_) => "component",
+                wasmtime::component::types::ComponentItem::ComponentInstance(_) => "instance",
+                wasmtime::component::types::ComponentItem::Type(_) => "type",
+                wasmtime::component::types::ComponentItem::Resource(_) => "resource",
+            }
+            .to_owned(),
+        })
+        .collect())
 }
 
 /// Errors raised while loading or invoking a component.
