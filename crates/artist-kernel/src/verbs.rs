@@ -25,6 +25,8 @@ pub struct VerbPackageManifest {
     pub dependencies: Vec<String>,
     pub input_type: Option<String>,
     pub output_type: Option<String>,
+    #[serde(default)]
+    pub wit: Option<String>,
     #[serde(default = "default_manifest_file")]
     pub component: String,
 }
@@ -61,6 +63,14 @@ impl VerbPackageManifest {
                 VerbId::new(dependency).map_err(|message| KernelError::InvalidRequest { message })
             })
             .collect::<Result<_, _>>()?;
+        if let Some(wit) = &self.wit {
+            let wit_path = package_dir.join(wit);
+            wit_parser::Resolve::default()
+                .push_path(&wit_path)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!("invalid WIT contract {}: {error}", wit_path.display()),
+                })?;
+        }
         if let (Some(input), Some(output)) = (&self.input_type, &self.output_type) {
             definition.input_type = Some(DynamicType::named(input)?);
             definition.output_type = Some(DynamicType::named(output)?);

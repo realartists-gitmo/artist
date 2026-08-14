@@ -67,7 +67,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Require discovered packages to declare primitive typed input/output contract names.
 - [x] Reject missing component artifacts before publication.
 - [x] Treat identical package definitions as publication no-ops, preserving their generation.
-- [ ] Validate actual WIT contracts and artifact compatibility before publication; manifest primitive contracts are an interim bridge.
+- [x] Parse an optional manifest WIT source with `wit-parser` before publication; artifact/function compatibility validation remains pending.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
 - [x] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
 
