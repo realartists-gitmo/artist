@@ -643,6 +643,13 @@ impl Kernel {
         self.inner.verbs.activate(definition)
     }
 
+    pub fn execute_dynamic(
+        &self,
+        call: crate::DynamicVerbCall,
+    ) -> Result<crate::DynamicVerbResult, KernelError> {
+        self.inner.verbs.execute(&call)
+    }
+
     pub fn activate_verbs(
         &self,
         definitions: Vec<VerbDefinition>,

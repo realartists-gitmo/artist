@@ -30,6 +30,24 @@ pub enum DynamicType {
     Flags(Vec<String>),
 }
 
+impl DynamicType {
+    pub fn named(name: &str) -> Result<Self, KernelError> {
+        match name {
+            "bool" => Ok(Self::Bool),
+            "s32" => Ok(Self::S32),
+            "s64" => Ok(Self::S64),
+            "u32" => Ok(Self::U32),
+            "u64" => Ok(Self::U64),
+            "f64" => Ok(Self::F64),
+            "string" => Ok(Self::String),
+            "uri" | "resource-uri" => Ok(Self::ResourceUri),
+            _ => Err(KernelError::InvalidRequest {
+                message: format!("unknown dynamic contract type: {name}"),
+            }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum DynamicValue {
     Bool(bool),

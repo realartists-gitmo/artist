@@ -23,6 +23,8 @@ pub struct VerbPackageManifest {
     pub docs: Vec<String>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    pub input_type: Option<String>,
+    pub output_type: Option<String>,
     #[serde(default = "default_manifest_file")]
     pub component: String,
 }
@@ -59,6 +61,14 @@ impl VerbPackageManifest {
                 VerbId::new(dependency).map_err(|message| KernelError::InvalidRequest { message })
             })
             .collect::<Result<_, _>>()?;
+        if let (Some(input), Some(output)) = (&self.input_type, &self.output_type) {
+            definition.input_type = Some(DynamicType::named(input)?);
+            definition.output_type = Some(DynamicType::named(output)?);
+        } else if self.input_type.is_some() || self.output_type.is_some() {
+            return Err(KernelError::InvalidRequest {
+                message: "verb package must declare both input_type and output_type".into(),
+            });
+        }
         definition.source = Some(package_dir.to_owned());
         definition.artifact = Some(package_dir.join(&self.component));
         Ok(definition)
