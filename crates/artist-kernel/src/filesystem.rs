@@ -2,7 +2,7 @@ use crate::{
     Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler,
     HandlerDescriptor, KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult,
     Request, ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
-    Verb, address::uri_path, has_projection, has_query_projection,
+    Verb, address::uri_path,
 };
 use cap_std::{ambient_authority, fs::Dir};
 use serde::Deserialize;
@@ -59,6 +59,29 @@ impl FileHandler {
     /// line-only identity when no usable parser exists.
     pub fn structural_lines(&self, path: &Path, bytes: &[u8]) -> (String, Vec<StructuralLine>) {
         self.structure.analyze(path, bytes)
+    }
+
+    fn is_virtual_projection(&self, uri: &crate::ResourceUri) -> bool {
+        let Ok(path) = uri.as_ref().to_file_path() else {
+            return false;
+        };
+        let Ok(relative) = self.requested_relative(&path) else {
+            return false;
+        };
+        let mut current = self.root.join(relative);
+        if current.is_file() {
+            return false;
+        }
+        while let Some(parent) = current.parent() {
+            if parent.is_file() {
+                return true;
+            }
+            if parent == self.root {
+                break;
+            }
+            current = parent.to_owned();
+        }
+        false
     }
 
     fn typed_path(&self, uri: &crate::ResourceUri) -> Result<PathBuf, KernelError> {
@@ -578,9 +601,7 @@ impl Handler for FileHandler {
 
     fn claims(&self, address: &ResourceAddress) -> bool {
         address.as_uri().is_some_and(|uri| {
-            uri.scheme() == "file"
-                && !has_projection(Path::new(uri.path()))
-                && !has_query_projection(uri)
+            uri.scheme() == "file" && uri.query().is_none() && !self.is_virtual_projection(uri)
         })
     }
 
@@ -689,42 +710,32 @@ impl TypedHandler for FileHandler {
     }
 
     fn claims_operation(&self, operation: &Operation) -> bool {
+        let ordinary = |uri: &crate::ResourceUri| {
+            uri.scheme() == "file" && uri.query().is_none() && !self.is_virtual_projection(uri)
+        };
         match operation {
             Operation::Read(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "file"
-                    && !has_projection(Path::new(request.uri.path()))
-                    && !has_query_projection(&request.uri)
-                    && self.typed_path_syntax(&request.uri).is_ok()
+                ordinary(&request.uri) && self.typed_path_syntax(&request.uri).is_ok()
             }),
             Operation::Write(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "file"
-                    && !has_projection(Path::new(request.uri.path()))
-                    && !has_query_projection(&request.uri)
-                    && request.uri.as_ref().to_file_path().is_ok()
+                ordinary(&request.uri) && request.uri.as_ref().to_file_path().is_ok()
             }),
             Operation::Edit(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "file"
-                    && !has_projection(Path::new(request.uri.path()))
-                    && !has_query_projection(&request.uri)
-                    && request.uri.as_ref().to_file_path().is_ok()
+                ordinary(&request.uri) && request.uri.as_ref().to_file_path().is_ok()
             }),
-            Operation::Delete(uris) => uris.iter().all(|uri| {
-                uri.scheme() == "file"
-                    && !has_projection(Path::new(uri.path()))
-                    && !has_query_projection(uri)
-                    && self.typed_path_syntax(uri).is_ok()
-            }),
+            Operation::Delete(uris) => uris
+                .iter()
+                .all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok()),
             Operation::Find(request) => {
                 !request.roots.is_empty()
-                    && request.roots.iter().all(|uri| {
-                        uri.scheme() == "file"
-                            && !has_projection(Path::new(uri.path()))
-                            && !has_query_projection(uri)
-                            && self.typed_path_syntax(uri).is_ok()
-                    })
+                    && request
+                        .roots
+                        .iter()
+                        .all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok())
             }
             Operation::Grep(request) => {
-                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())) && !has_query_projection(uri) && self.typed_path_syntax(uri).is_ok()))
+                matches!(&request.source,
+                crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| ordinary(uri) && self.typed_path_syntax(uri).is_ok()))
                     || matches!(&request.source, crate::GrepSource::Text(text) if !text.is_empty())
             }
             _ => false,

@@ -8169,6 +8169,8 @@ pub mod resources {
         dirty: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
         activation_locks:
             Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>>,
+        disabled_file_package: Option<String>,
+        publication_lock: Arc<std::sync::Mutex<()>>,
     }
 
     impl ResourcesHandler {
@@ -8192,20 +8194,18 @@ pub mod resources {
                     super::watcher::SharedWatcher::dirty_set,
                 ),
                 activation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                disabled_file_package: None,
+                publication_lock: Arc::new(std::sync::Mutex::new(())),
             })
+        }
+
+        pub fn without_file_package(mut self, name: impl Into<String>) -> Self {
+            self.disabled_file_package = Some(name.into());
+            self
         }
 
         pub fn activate(&self, package_root: impl AsRef<Path>) -> Result<u64, KernelError> {
             let package_root = package_root.as_ref();
-            let lock = {
-                let mut locks = self.activation_locks.lock().unwrap();
-                Arc::clone(
-                    locks
-                        .entry(package_root.to_owned())
-                        .or_insert_with(|| Arc::new(std::sync::Mutex::new(()))),
-                )
-            };
-            let _activation = lock.lock().unwrap();
             let package = match ResourcePackage::discover(package_root) {
                 Ok(package) => package,
                 Err(error) => {
@@ -8283,28 +8283,37 @@ pub mod resources {
             let package_root = package.root.clone();
             // A successful rename replaces every prior name associated with
             // this package root, preventing ghost catalog/routing entries.
-            if let Some(active) = self.active.current(&package.manifest.name) {
-                if active.package.root != package_root {
-                    return Err(KernelError::Conflict {
-                        uri: package.manifest.name.clone(),
-                    });
-                }
+            let lock = {
+                let mut locks = self.activation_locks.lock().unwrap();
+                Arc::clone(
+                    locks
+                        .entry(package_root.to_owned())
+                        .or_insert_with(|| Arc::new(std::sync::Mutex::new(()))),
+                )
+            };
+            let _activation = lock.lock().unwrap();
+            let _publication = self.publication_lock.lock().unwrap();
+            let mut active = self.active.write().unwrap();
+            if let Some(existing) = active.get(&package.manifest.name)
+                && existing.package.root != package_root
+            {
+                return Err(KernelError::Conflict {
+                    uri: package.manifest.name.clone(),
+                });
             }
-            let generation = self
-                .active
-                .current(&package.manifest.name)
+            let generation = active
+                .get(&package.manifest.name)
                 .map(|current| current.generation + 1)
                 .unwrap_or(1);
-            self.active
-                .remove_where(|active| active.package.root == package_root);
-            self.active.insert(
+            active.retain(|_, value| value.package.root != package_root);
+            active.insert(
                 package.manifest.name.clone(),
-                ActiveResource {
+                Arc::new(ActiveResource {
                     package,
                     generation,
                     artifact: Arc::new(bytes),
                     host,
-                },
+                }),
             );
             self.dirty.lock().unwrap().remove(&package_root);
             Ok(generation)
@@ -8484,6 +8493,14 @@ pub mod resources {
             }
             let mut candidates = Vec::new();
             for package in self.discover() {
+                if uri.scheme() == "file"
+                    && self
+                        .disabled_file_package
+                        .as_ref()
+                        .is_some_and(|name| name == &package.manifest.name)
+                {
+                    continue;
+                }
                 if !package
                     .advertised_schemes()
                     .any(|scheme| scheme == uri.scheme())
@@ -8558,10 +8575,15 @@ pub mod resources {
                 {
                     continue;
                 }
-                if active
-                    .package
-                    .advertised_schemes()
-                    .any(|scheme| scheme == uri.scheme())
+                if !(uri.scheme() == "file"
+                    && self
+                        .disabled_file_package
+                        .as_ref()
+                        .is_some_and(|name| name == &active.package.manifest.name))
+                    && active
+                        .package
+                        .advertised_schemes()
+                        .any(|scheme| scheme == uri.scheme())
                     && !candidates
                         .iter()
                         .any(|current: &Arc<ActiveResource>| Arc::ptr_eq(current, active))
@@ -9950,7 +9972,7 @@ mod tests {
         std::fs::create_dir_all(package.join("src")).unwrap();
         std::fs::write(
             package.join("resource.md"),
-            "---\nname: artist-ast\ndescription: AST projections\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes:\n  - schemes: [file]\nexports: [read]\ncapabilities: [resource.read]\ndocs:\n  - uri: file://<path>?symbols\n    summary: Lists symbols\n    verbs: [read]\n    query:\n      - name: kind\n        summary: Symbol kind\n---\n\nFull AST documentation.\n",
+            "---\nname: artist-ast\ndescription: AST projections\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes:\n  - schemes: [file]\nexports: [read]\ncapabilities: [resource.read]\ndocs:\n  - uri: file://<path>/symbols/\n    summary: Lists symbols\n    verbs: [read]\n    query:\n      - name: kind\n        summary: Symbol kind\n---\n\nFull AST documentation.\n",
         )
         .unwrap();
         let handler = resources::ResourcesHandler::new(root.path()).unwrap();
@@ -9979,7 +10001,7 @@ mod tests {
             catalog[0]
                 .docs
                 .iter()
-                .any(|doc| doc.uri == "file://<path>?symbols")
+                .any(|doc| doc.uri == "file://<path>/symbols/")
         );
     }
 
@@ -10045,7 +10067,7 @@ mod tests {
             .await;
 
         let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
-        let projection = artist_kernel::ResourceUri::parse(&format!("{file}?symbols")).unwrap();
+        let projection = artist_kernel::ResourceUri::parse(&format!("{file}/symbols/")).unwrap();
         let result = kernel
             .execute_operation(artist_kernel::Operation::Read(vec![
                 artist_kernel::ReadRequest {
@@ -10131,7 +10153,7 @@ mod tests {
 
         let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
         let projection =
-            artist_kernel::ResourceUri::parse(&format!("{file}?symbols=main/callers&limit=1"))
+            artist_kernel::ResourceUri::parse(&format!("{file}/symbols/main/callers?limit=1"))
                 .unwrap();
         let result = kernel
             .execute_operation(artist_kernel::Operation::Read(vec![
@@ -10150,7 +10172,7 @@ mod tests {
         let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
             panic!("AST child did not return anchored text: {values:?}");
         };
-        assert_eq!(text.uri.query(), Some("symbols=main/callers&limit=1"));
+        assert_eq!(text.uri.query(), Some("limit=1"));
         assert!(text.lines.iter().any(|line| line.text.contains("main()")));
     }
 
@@ -10168,7 +10190,7 @@ mod tests {
             .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
             .await;
         let projection = artist_kernel::ResourceUri::parse(&format!(
-            "{}?symbols",
+            "{}/symbols/",
             artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap()
         ))
         .unwrap();

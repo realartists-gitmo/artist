@@ -33,7 +33,7 @@ pub use operation::Verb;
 pub use registry::Kernel;
 pub use repository::RepositoryHandler;
 pub use request::{BatchRequest, Request};
-pub use resolver::{has_projection, has_query_projection, is_file_uri, normalize};
+pub use resolver::{is_file_uri, normalize};
 pub use result::{BatchResult, ItemResult};
 pub use search::{Pattern, SearchService};
 pub use session::SessionHandler;

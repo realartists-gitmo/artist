@@ -38,7 +38,8 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         .with_context(|| format!("initialize resources root at {}", resources_root.display()))?;
     seed_ast_resource(&resources_root)?;
     let shared_watcher = SharedWatcher::new();
-    let resources = ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?;
+    let resources = ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))?
+        .without_file_package("artist-ast");
     kernel.register_typed_resource_handler(resources).await;
     let tool_capabilities = artist_kernel::Verb::ALL
         .iter()

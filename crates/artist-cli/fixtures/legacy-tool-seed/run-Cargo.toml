@@ -10,7 +10,7 @@ default = ["run"]
 run = []
 
 [lib]
-path = "../../typed-guest/src/lib.rs"
+path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]

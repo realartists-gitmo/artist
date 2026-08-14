@@ -18,34 +18,21 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
     }
 }
 
-fn selector(uri: &str) -> Option<String> {
-    let query = uri.split_once('?')?.1;
-    let item = query.split('&').find(|item| {
-        let key = item.split_once('=').map_or(*item, |(key, _)| key);
-        key == "symbols"
-    })?;
-    let value = item.split_once('=').map_or("", |(_, value)| value);
-    Some(if value.is_empty() {
-        "symbols".to_owned()
-    } else {
-        format!("symbols/{value}")
-    })
-}
-
 fn source_uri(uri: &str) -> Option<String> {
-    let source = uri.split_once('?').map_or(uri, |(source, _)| source);
-    source.starts_with("file://").then(|| source.to_owned())
+    let path = uri.split('?').next().unwrap_or(uri);
+    let (source, projection) = path.split_once("/symbols")?;
+    let boundary = projection
+        .chars()
+        .next()
+        .is_none_or(|character| character == '/');
+    (boundary && source.starts_with("file://")).then(|| source.to_owned())
 }
 
 impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
-        // Query-form AST selectors are the WASM namespace. Legacy path-form
-        // projections remain exclusively owned by the native compatibility
-        // provider.
-        if !request.uri.starts_with("file://")
-            || !request.uri.contains('?')
-            || selector(&request.uri).is_none()
-        {
+        // This component is a proof only. The application disables its file
+        // route, leaving native artist_ast as the production owner.
+        if source_uri(&request.uri).is_none() {
             return types::ClaimDecision::Pass;
         }
         match request.verb {
@@ -78,11 +65,8 @@ impl exports::artist::resource::read::Guest for AstResource {
                 let types::ReadResult::Text(source_text) = source_text else {
                     return Err(error("AST source is not text", Some(target)));
                 };
-                let selector = selector(&target);
-                let suffix = selector
-                    .as_deref()
-                    .and_then(|selector| selector.strip_prefix("symbols/"))
-                    .unwrap_or_default();
+                let path = target.split('?').next().unwrap_or(&target);
+                let suffix = path.split("/symbols/").nth(1).unwrap_or_default();
                 let symbol = suffix.split('/').next().filter(|value| !value.is_empty());
                 let is_callers = suffix.split('/').any(|part| part == "callers");
                 let limit = target

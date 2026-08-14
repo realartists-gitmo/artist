@@ -9,7 +9,7 @@ use crate::{
     AnchorSet, AnchoredLine, AnchoredText, BoxFuture, ClaimDecision, Handler, HandlerDescriptor,
     KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request,
     ResourceAddress, ResourceUri, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
-    Verb, has_projection, is_file_uri, normalize,
+    Verb, is_file_uri, normalize,
 };
 use serde_json::{Value, json};
 use std::{
@@ -86,10 +86,27 @@ impl RepositoryHandler {
     }
 
     fn claims_file_projection(&self, uri: &ResourceUri) -> bool {
-        self.file_projections
-            && uri.scheme() == "file"
-            && has_projection(Path::new(uri.path()))
-            && (self.file_symbol_projections || !uri.path().contains("/symbols"))
+        if !self.file_projections || uri.scheme() != "file" || uri.query().is_some() {
+            return false;
+        }
+        let Ok(path) = uri.as_ref().to_file_path() else {
+            return false;
+        };
+        if path.is_file() {
+            return false;
+        }
+        let mut current = path;
+        while let Some(parent) = current.parent() {
+            if parent.is_file() {
+                return self.file_symbol_projections
+                    || !current.to_string_lossy().contains("/symbols");
+            }
+            if parent == self.root {
+                break;
+            }
+            current = parent.to_owned();
+        }
+        false
     }
 
     fn file_and_suffix(
