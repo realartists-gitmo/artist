@@ -393,7 +393,7 @@ pub mod contracts {
     }
 }
 
-use artist_kernel::{KernelHandle, VerbId};
+use artist_kernel::{DynamicValue, KernelHandle, VerbId};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -411,6 +411,128 @@ pub struct ComponentExportDescriptor {
     pub name: String,
     pub implements: Option<String>,
     pub kind: String,
+}
+
+pub fn dynamic_value_to_component_val(
+    value: &DynamicValue,
+) -> Result<wasmtime::component::Val, String> {
+    use wasmtime::component::Val;
+    Ok(match value {
+        DynamicValue::Bool(value) => Val::Bool(*value),
+        DynamicValue::S32(value) => Val::S32(*value),
+        DynamicValue::S64(value) => Val::S64(*value),
+        DynamicValue::U32(value) => Val::U32(*value),
+        DynamicValue::U64(value) => Val::U64(*value),
+        DynamicValue::F64(value) => Val::Float64(*value),
+        DynamicValue::String(value) => Val::String(value.clone()),
+        DynamicValue::ResourceUri(value) => Val::String(value.to_string()),
+        DynamicValue::List(values) => Val::List(
+            values
+                .iter()
+                .map(dynamic_value_to_component_val)
+                .collect::<Result<_, _>>()?,
+        ),
+        DynamicValue::Tuple(values) => Val::Tuple(
+            values
+                .iter()
+                .map(dynamic_value_to_component_val)
+                .collect::<Result<_, _>>()?,
+        ),
+        DynamicValue::Record(values) => Val::Record(
+            values
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), dynamic_value_to_component_val(value)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        DynamicValue::Option(value) => Val::Option(
+            value
+                .as_deref()
+                .map(dynamic_value_to_component_val)
+                .transpose()?
+                .map(Box::new),
+        ),
+        DynamicValue::Result(Ok(value)) => {
+            Val::Result(Ok(Some(Box::new(dynamic_value_to_component_val(value)?))))
+        }
+        DynamicValue::Result(Err(value)) => {
+            Val::Result(Err(Some(Box::new(dynamic_value_to_component_val(value)?))))
+        }
+        DynamicValue::Enum(value) => Val::Enum(value.clone()),
+        DynamicValue::Variant(name, value) => Val::Variant(
+            name.clone(),
+            value
+                .as_deref()
+                .map(dynamic_value_to_component_val)
+                .transpose()?
+                .map(Box::new),
+        ),
+        DynamicValue::Flags(values) => Val::Flags(values.clone()),
+    })
+}
+
+pub fn component_val_to_dynamic_value(
+    value: &wasmtime::component::Val,
+) -> Result<DynamicValue, String> {
+    use wasmtime::component::Val;
+    Ok(match value {
+        Val::Bool(value) => DynamicValue::Bool(*value),
+        Val::S32(value) => DynamicValue::S32(*value),
+        Val::S64(value) => DynamicValue::S64(*value),
+        Val::U32(value) => DynamicValue::U32(*value),
+        Val::U64(value) => DynamicValue::U64(*value),
+        Val::Float64(value) => DynamicValue::F64(*value),
+        Val::String(value) => DynamicValue::String(value.clone()),
+        Val::List(values) => DynamicValue::List(
+            values
+                .iter()
+                .map(component_val_to_dynamic_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        Val::Tuple(values) => DynamicValue::Tuple(
+            values
+                .iter()
+                .map(component_val_to_dynamic_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        Val::Record(values) => DynamicValue::Record(
+            values
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), component_val_to_dynamic_value(value)?)))
+                .collect::<Result<_, String>>()?,
+        ),
+        Val::Option(value) => DynamicValue::Option(
+            value
+                .as_deref()
+                .map(component_val_to_dynamic_value)
+                .transpose()?
+                .map(Box::new),
+        ),
+        Val::Result(Ok(Some(value))) => {
+            DynamicValue::Result(Ok(Box::new(component_val_to_dynamic_value(value)?)))
+        }
+        Val::Result(Err(Some(value))) => {
+            DynamicValue::Result(Err(Box::new(component_val_to_dynamic_value(value)?)))
+        }
+        Val::Result(Ok(None)) | Val::Result(Err(None)) => {
+            return Err("unit result payloads need an explicit unit dynamic type".to_owned());
+        }
+        Val::Enum(value) => DynamicValue::Enum(value.clone()),
+        Val::Variant(name, value) => DynamicValue::Variant(
+            name.clone(),
+            value
+                .as_deref()
+                .map(component_val_to_dynamic_value)
+                .transpose()?
+                .map(Box::new),
+        ),
+        Val::Flags(values) => DynamicValue::Flags(values.clone()),
+        Val::S8(_) | Val::U8(_) | Val::S16(_) | Val::U16(_) | Val::Float32(_) | Val::Char(_) => {
+            return Err("unsupported narrow Component Model value".to_owned());
+        }
+        Val::Map(_) | Val::Resource(_) | Val::Future(_) | Val::Stream(_) | Val::ErrorContext(_) => {
+            return Err("unsupported Component Model value kind".to_owned());
+        }
+    })
 }
 
 /// Invoke a validated component export using Wasmtime's dynamic Component
@@ -9668,6 +9790,20 @@ pub mod watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_values_round_trip_through_component_values() {
+        let value = DynamicValue::Record(std::collections::BTreeMap::from([
+            ("name".into(), DynamicValue::String("uppercase".into())),
+            ("enabled".into(), DynamicValue::Bool(true)),
+            (
+                "items".into(),
+                DynamicValue::List(vec![DynamicValue::S32(7), DynamicValue::S32(9)]),
+            ),
+        ]));
+        let component = dynamic_value_to_component_val(&value).unwrap();
+        assert_eq!(component_val_to_dynamic_value(&component).unwrap(), value);
+    }
 
     #[test]
     fn component_artifact_validation_rejects_core_or_invalid_wasm() {

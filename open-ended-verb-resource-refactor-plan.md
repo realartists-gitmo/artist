@@ -86,7 +86,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Verify dynamic export identity, function name, and version annotation before invocation/publication.
 - [ ] Verify parameter types and result types exactly before publication.
 - [x] Add generic Wasmtime dynamic function invocation with caller-supplied Component Model values/result slots.
-- [ ] Convert Artist `DynamicValue` recursively to/from Wasmtime `Val` and validate returned values.
+- [x] Convert Artist `DynamicValue` recursively to/from Wasmtime `Val` for supported Component Model values.
+- [ ] Preserve resource URI/type identity and validate returned values against registered WIT types.
 - [ ] Link custom typed component imports through the same active contract registry.
 - [ ] Ensure a newly installed verb can be imported by a newly installed resource without Artist recompilation.
 - [ ] Add incompatible-WIT activation rejection and contract-change generation tests.
@@ -178,4 +179,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added Wasmtime component export inspection without binding to a closed world.
 - [x] Added versioned `VerbId` contract/function accessors and component export identity matching.
 - [x] Added generic Wasmtime invocation path with no per-verb dispatch.
-- [ ] Next slice: recursive Artist dynamic-value to Wasmtime `Val` lowering and result lifting.
+- [x] Added recursive dynamic value lowering/lifting for records, lists, tuples, options, results, variants, enums, flags, and primitives.
+- [ ] Next slice: bind conversion to registered WIT types and replace one existing per-verb adapter.
