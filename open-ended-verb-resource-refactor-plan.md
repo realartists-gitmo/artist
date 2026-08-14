@@ -56,8 +56,9 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Define initial active verb generations and replacement/deactivation API; lease integration remains pending.
 - [x] Attach the dynamic verb registry to `Kernel` for package/runtime integration.
 - [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
-- [ ] Create one package discovery/activation path for current verbs and future packages.
-- [ ] Define package metadata exports using canonical versioned identities.
+- [x] Create initial name-agnostic TOML package discovery for future verb packages.
+- [x] Define package metadata exports using canonical versioned identities and artifact paths.
+- [ ] Atomically activate discovered packages only after WIT contract validation.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
 - [ ] Add dynamic activation, deletion, conflict, malformed-package, generation, and lease tests.
 
@@ -161,4 +162,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added and tested exported canonical `VerbId` as the first dynamic-identity seam; the legacy enum remains temporarily during migration.
 - [x] Added and tested the initial hot-swappable `VerbRegistry`/`VerbDefinition` skeleton.
 - [x] Added kernel-exported dynamic typed values and `DynamicVerbCall`/`DynamicVerbResult` scaffolding; legacy dispatch is not yet routed through them.
-- [ ] Next slice: package discovery and typed dynamic invocation.
+- [x] Added name-agnostic `verb.toml` discovery with malformed identity rejection.
+- [ ] Next slice: typed dynamic invocation and package activation.

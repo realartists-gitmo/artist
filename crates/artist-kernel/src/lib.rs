@@ -46,4 +46,6 @@ pub use structure::{
 };
 pub use typed::*;
 pub use uri::ResourceUri;
-pub use verbs::{ActiveVerb, VerbDefinition, VerbRegistry};
+pub use verbs::{
+    ActiveVerb, VerbDefinition, VerbPackageManifest, VerbRegistry, discover_verb_packages,
+};
