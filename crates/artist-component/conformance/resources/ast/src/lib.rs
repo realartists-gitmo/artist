@@ -27,12 +27,6 @@ fn source_uri(uri: &str) -> Option<String> {
 impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         let path = request.uri.split('?').next().unwrap_or(&request.uri);
-        // The application kernel's native repository projection owns the
-        // complete file:// AST surface. This extension remains available for
-        // explicit resource use without shadowing that implementation.
-        if path.starts_with("file://") {
-            return types::ClaimDecision::Pass;
-        }
         let recognized = path.contains("/symbols") || source_uri(path).is_some();
         if path.contains("/symbols") && request.verb == types::Verb::Read {
             return types::ClaimDecision::Handle;
@@ -70,14 +64,30 @@ impl exports::artist::resource::read::Guest for AstResource {
                 let types::ReadResult::Text(source_text) = source_text else {
                     return Err(error("AST source is not text", Some(target)));
                 };
+                let path = target.split('?').next().unwrap_or(&target);
+                let suffix = path.split("/symbols/").nth(1).unwrap_or_default();
+                let symbol = suffix.split('/').next().filter(|value| !value.is_empty());
+                let is_callers = suffix.split('/').any(|part| part == "callers");
                 let lines = source_text
                     .lines
                     .into_iter()
                     .filter(|line| {
-                        line.text.contains("fn ")
-                            || line.text.contains("struct ")
-                            || line.text.contains("enum ")
-                            || line.text.contains("class ")
+                        if let Some(symbol) = symbol {
+                            if is_callers {
+                                line.text.contains(&format!("{symbol}("))
+                                    && !line.text.contains(&format!("fn {symbol}"))
+                            } else {
+                                line.text.contains(&format!("fn {symbol}"))
+                                    || line.text.contains(&format!("struct {symbol}"))
+                                    || line.text.contains(&format!("enum {symbol}"))
+                                    || line.text.contains(&format!("class {symbol}"))
+                            }
+                        } else {
+                            line.text.contains("fn ")
+                                || line.text.contains("struct ")
+                                || line.text.contains("enum ")
+                                || line.text.contains("class ")
+                        }
                     })
                     .collect();
                 Ok(types::ReadResult::Text(types::AnchoredText {

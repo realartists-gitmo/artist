@@ -8,8 +8,8 @@
 use crate::{
     AnchorSet, AnchoredLine, AnchoredText, BoxFuture, ClaimDecision, Handler, HandlerDescriptor,
     KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult, Request,
-    ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler, Verb,
-    has_projection, is_file_uri, normalize,
+    ResourceAddress, ResourceUri, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
+    Verb, has_projection, is_file_uri, normalize,
 };
 use serde_json::{Value, json};
 use std::{
@@ -24,6 +24,7 @@ pub struct RepositoryHandler {
     structure: StructuralAnalyzer,
     search: SearchService,
     file_projections: bool,
+    file_symbol_projections: bool,
 }
 
 impl RepositoryHandler {
@@ -50,6 +51,7 @@ impl RepositoryHandler {
             structure: StructuralAnalyzer::default(),
             search: SearchService::new(),
             file_projections: true,
+            file_symbol_projections: true,
         })
     }
 
@@ -58,6 +60,11 @@ impl RepositoryHandler {
     /// in the application kernel. `repo://` remains handled in both modes.
     pub fn without_file_projections(mut self) -> Self {
         self.file_projections = false;
+        self
+    }
+
+    pub fn without_file_symbol_projections(mut self) -> Self {
+        self.file_symbol_projections = false;
         self
     }
 
@@ -76,6 +83,13 @@ impl RepositoryHandler {
 
     fn is_local(target: &ResourceAddress) -> bool {
         is_file_uri(target)
+    }
+
+    fn claims_file_projection(&self, uri: &ResourceUri) -> bool {
+        self.file_projections
+            && uri.scheme() == "file"
+            && has_projection(Path::new(uri.path()))
+            && (self.file_symbol_projections || !uri.path().contains("/symbols"))
     }
 
     fn file_and_suffix(
@@ -571,22 +585,17 @@ impl TypedHandler for RepositoryHandler {
     fn claims_operation(&self, operation: &Operation) -> bool {
         match operation {
             Operation::Read(requests) => requests.iter().all(|request| {
-                request.uri.scheme() == "repo"
-                    || (self.file_projections
-                        && request.uri.scheme() == "file"
-                        && has_projection(Path::new(request.uri.path())))
+                request.uri.scheme() == "repo" || self.claims_file_projection(&request.uri)
             }),
-            Operation::Find(request) => request.roots.iter().all(|uri| {
-                uri.scheme() == "repo"
-                    || (self.file_projections
-                        && uri.scheme() == "file"
-                        && has_projection(Path::new(uri.path())))
-            }),
+            Operation::Find(request) => request
+                .roots
+                .iter()
+                .all(|uri| uri.scheme() == "repo" || self.claims_file_projection(uri)),
             Operation::Grep(request) => matches!(
                 &request.source,
                 crate::GrepSource::Resources(uris)
                     if !uris.is_empty()
-                        && uris.iter().all(|uri| uri.scheme() == "repo" || (self.file_projections && uri.scheme() == "file" && has_projection(Path::new(uri.path()))))
+                        && uris.iter().all(|uri| uri.scheme() == "repo" || self.claims_file_projection(uri))
             ),
             _ => false,
         }
@@ -597,36 +606,25 @@ impl TypedHandler for RepositoryHandler {
         operation: &'a Operation,
     ) -> BoxFuture<'a, Result<ClaimDecision, KernelError>> {
         let reserve = match operation {
-            Operation::Write(requests) => requests.iter().any(|request| {
-                self.file_projections
-                    && request.uri.scheme() == "file"
-                    && has_projection(Path::new(request.uri.path()))
-            }),
-            Operation::Edit(requests) => requests.iter().any(|request| {
-                self.file_projections
-                    && request.uri.scheme() == "file"
-                    && has_projection(Path::new(request.uri.path()))
-            }),
-            Operation::Run(requests) => requests.iter().any(|request| {
-                self.file_projections
-                    && request.uri.scheme() == "file"
-                    && has_projection(Path::new(request.uri.path()))
-            }),
-            Operation::Send(requests) => requests.iter().any(|request| {
-                self.file_projections
-                    && request.uri.scheme() == "file"
-                    && has_projection(Path::new(request.uri.path()))
-            }),
-            Operation::Poll(request) => request.targets.iter().any(|target| {
-                self.file_projections
-                    && target.uri.scheme() == "file"
-                    && has_projection(Path::new(target.uri.path()))
-            }),
-            Operation::Abort(uris) | Operation::Delete(uris) => uris.iter().any(|uri| {
-                self.file_projections
-                    && uri.scheme() == "file"
-                    && has_projection(Path::new(uri.path()))
-            }),
+            Operation::Write(requests) => requests
+                .iter()
+                .any(|request| self.claims_file_projection(&request.uri)),
+            Operation::Edit(requests) => requests
+                .iter()
+                .any(|request| self.claims_file_projection(&request.uri)),
+            Operation::Run(requests) => requests
+                .iter()
+                .any(|request| self.claims_file_projection(&request.uri)),
+            Operation::Send(requests) => requests
+                .iter()
+                .any(|request| self.claims_file_projection(&request.uri)),
+            Operation::Poll(request) => request
+                .targets
+                .iter()
+                .any(|target| self.claims_file_projection(&target.uri)),
+            Operation::Abort(uris) | Operation::Delete(uris) => {
+                uris.iter().any(|uri| self.claims_file_projection(uri))
+            }
             Operation::Find(_) | Operation::Read(_) | Operation::Grep(_) => false,
         };
         Box::pin(async move {

@@ -4261,6 +4261,7 @@ pub mod package {
         sync::{Mutex, OnceLock},
         time::Duration,
     };
+    use walkdir::WalkDir;
 
     /// Per-invocation Wasmtime resource ceilings. These are deliberately runtime
     /// policy rather than part of any package or WIT contract.
@@ -4309,6 +4310,54 @@ pub mod package {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap()
+    }
+
+    pub(crate) struct CargoComponentTarget {
+        pub package_name: String,
+        pub package_version: String,
+        pub target_name: String,
+        pub target_directory: PathBuf,
+    }
+
+    pub(crate) fn resolve_component_target(
+        manifest: &Path,
+    ) -> Result<CargoComponentTarget, String> {
+        let metadata = cargo_metadata::MetadataCommand::new()
+            .manifest_path(manifest)
+            .no_deps()
+            .other_options(vec!["--offline".to_owned()])
+            .exec()
+            .map_err(|error| format!("cargo metadata failed: {error}"))?;
+        let package = metadata
+            .packages
+            .iter()
+            .find(|package| package.manifest_path.as_str() == manifest.to_string_lossy())
+            .or_else(|| metadata.packages.first())
+            .ok_or_else(|| "Cargo metadata contained no package".to_owned())?;
+        let target = package
+            .targets
+            .iter()
+            .find(|target| {
+                target
+                    .kind
+                    .iter()
+                    .any(|kind| matches!(kind, cargo_metadata::TargetKind::CDyLib))
+            })
+            .or_else(|| {
+                package.targets.iter().find(|target| {
+                    target
+                        .kind
+                        .iter()
+                        .any(|kind| matches!(kind, cargo_metadata::TargetKind::Bin))
+                })
+            })
+            .ok_or_else(|| "package must declare a cdylib or bin target".to_owned())?;
+        Ok(CargoComponentTarget {
+            package_name: package.name.clone(),
+            package_version: package.version.to_string(),
+            target_name: target.name.clone(),
+            target_directory: metadata.target_directory.clone().into_std_path_buf(),
+        })
     }
 
     /// Build one authored package target and recover the emitted component.
@@ -4405,6 +4454,82 @@ pub mod package {
         Ok(artifact)
     }
 
+    /// Package-independent cache helpers shared by tool and resource
+    /// adapters. Their manifests and component validation differ, but the
+    /// Cargo/fingerprint/provenance boundary should remain one implementation.
+    pub(crate) fn hash_path(hasher: &mut Sha256, path: &Path) -> Result<(), String> {
+        if path.is_file() {
+            hasher.update(path.to_string_lossy().as_bytes());
+            hasher.update(
+                fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?,
+            );
+            return Ok(());
+        }
+        if path.is_dir() {
+            let mut files = WalkDir::new(path)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.path().to_owned())
+                .collect::<Vec<_>>();
+            files.sort();
+            for file in files {
+                hash_path(hasher, &file)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+        let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    pub(crate) fn provenance_matches(path: &Path, fingerprint: &str, artifact: &Path) -> bool {
+        let Ok(bytes) = fs::read(path) else {
+            return false;
+        };
+        let Ok(provenance) = serde_json::from_slice::<BuildProvenance>(&bytes) else {
+            return false;
+        };
+        provenance.fingerprint == fingerprint
+            && sha256_file(artifact).is_ok_and(|hash| hash == provenance.artifact_sha256)
+    }
+
+    pub(crate) fn find_cached_artifact(
+        root: &Path,
+        target_name: &str,
+        target: &str,
+        profile: BuildProfile,
+        fingerprint: &str,
+    ) -> Result<Option<(PathBuf, PathBuf)>, String> {
+        let filename = format!("{}.wasm", target_name.replace('-', "_"));
+        let mut directory = Some(root);
+        while let Some(current) = directory {
+            let artifact = current
+                .join("target")
+                .join(target)
+                .join(profile.directory())
+                .join(&filename);
+            let provenance = artifact.with_extension("wasm.artist.json");
+            if artifact.is_file() {
+                let valid = fs::read(&provenance)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<BuildProvenance>(&bytes).ok())
+                    .is_some_and(|value| {
+                        value.fingerprint == fingerprint
+                            && sha256_file(&artifact)
+                                .is_ok_and(|hash| hash == value.artifact_sha256)
+                    });
+                if valid {
+                    return Ok(Some((artifact, provenance)));
+                }
+            }
+            directory = current.parent();
+        }
+        Ok(None)
+    }
+
     fn register_epoch_engine(engine: &wasmtime::Engine) {
         let engines = EPOCH_ENGINES.get_or_init(|| Mutex::new(Vec::new()));
         engines.lock().unwrap().push(engine.clone());
@@ -4424,8 +4549,6 @@ pub mod package {
                 .expect("artist WASM epoch ticker must start");
         });
     }
-    use walkdir::WalkDir;
-
     #[derive(Clone, Debug, Deserialize, PartialEq)]
     pub struct ToolFrontmatter {
         pub name: String,
@@ -4460,7 +4583,7 @@ pub mod package {
     }
 
     impl BuildProfile {
-        fn directory(self) -> &'static str {
+        pub(crate) fn directory(self) -> &'static str {
             match self {
                 Self::Debug => "debug",
                 Self::Release => "release",
@@ -4615,54 +4738,20 @@ pub mod package {
                 .ok_or_else(|| ComponentError::Build {
                     diagnostics: "source package has no Cargo.toml".to_owned(),
                 })?;
-            let mut metadata_command = cargo_metadata::MetadataCommand::new();
-            metadata_command
-                .manifest_path(manifest)
-                .no_deps()
-                .other_options(vec!["--offline".to_owned()]);
-            let metadata = metadata_command
-                .exec()
-                .map_err(|error| ComponentError::Build {
-                    diagnostics: format!("cargo metadata failed: {error}"),
-                })?;
-            let package = metadata
-                .packages
-                .iter()
-                .find(|package| package.manifest_path.as_str() == manifest.to_string_lossy())
-                .or_else(|| metadata.packages.first())
-                .ok_or_else(|| ComponentError::Build {
-                    diagnostics: "Cargo metadata contained no package".to_owned(),
-                })?;
-            let target = package
-                .targets
-                .iter()
-                .find(|target| {
-                    target
-                        .kind
-                        .iter()
-                        .any(|kind| matches!(kind, cargo_metadata::TargetKind::CDyLib))
-                })
-                .or_else(|| {
-                    package.targets.iter().find(|target| {
-                        target
-                            .kind
-                            .iter()
-                            .any(|kind| matches!(kind, cargo_metadata::TargetKind::Bin))
-                    })
-                })
-                .ok_or_else(|| ComponentError::Build {
-                    diagnostics: "package must declare a cdylib or bin target".to_owned(),
-                })?;
+            let target = super::package::resolve_component_target(manifest)
+                .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
 
-            let fingerprint = fingerprint(self, options, &package.version.to_string())?;
+            let fingerprint = fingerprint(self, options, &target.package_version)?;
             if !options.force {
-                if let Some((artifact, provenance)) = find_cached_artifact(
+                if let Some((artifact, provenance)) = super::package::find_cached_artifact(
                     &self.root,
-                    &target.name,
+                    &target.target_name,
                     &options.target,
                     options.profile,
                     &fingerprint,
-                )? {
+                )
+                .map_err(|diagnostics| ComponentError::Build { diagnostics })?
+                {
                     if validate_artifact(&artifact, self, options).is_ok() {
                         return Ok(BuildResult {
                             artifact,
@@ -4674,20 +4763,21 @@ pub mod package {
                 }
             }
 
-            let artifact = build_wasm_artifact(&self.root, manifest, &target.name, options)
+            let artifact = build_wasm_artifact(&self.root, manifest, &target.target_name, options)
                 .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
             let provenance = artifact.with_extension("wasm.artist.json");
 
             validate_artifact(&artifact, self, options)?;
             let provenance_value = BuildProvenance {
-                package_name: package.name.clone(),
-                package_version: package.version.to_string(),
+                package_name: target.package_name,
+                package_version: target.package_version,
                 contract: self.contract.as_ref().map(ToString::to_string),
                 abi_version: ABI_VERSION.to_owned(),
                 target: options.target.clone(),
                 profile: options.profile.directory().to_owned(),
                 fingerprint: fingerprint.clone(),
-                artifact_sha256: sha256_file(&artifact)?,
+                artifact_sha256: super::package::sha256_file(&artifact)
+                    .map_err(|diagnostics| ComponentError::Build { diagnostics })?,
                 cargo_version: tool_version("cargo"),
                 rustc_version: tool_version("rustc"),
             };
@@ -4731,43 +4821,24 @@ pub mod package {
             &package.root.join("Cargo.toml"),
             &package.root.join("Cargo.lock"),
         ] {
-            hash_path(&mut hasher, path)?;
+            super::package::hash_path(&mut hasher, path)
+                .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
         }
-        hash_path(
+        super::package::hash_path(
             &mut hasher,
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/tool-surface-v1"),
-        )?;
-        hash_path(
+        )
+        .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
+        super::package::hash_path(
             &mut hasher,
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("conformance/typed-guest/src"),
-        )?;
+        )
+        .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
         if let Some(source) = &package.source {
-            hash_path(&mut hasher, source)?;
+            super::package::hash_path(&mut hasher, source)
+                .map_err(|diagnostics| ComponentError::Build { diagnostics })?;
         }
         Ok(format!("{:x}", hasher.finalize()))
-    }
-
-    fn hash_path(hasher: &mut Sha256, path: &Path) -> Result<(), ComponentError> {
-        if path.is_file() {
-            hasher.update(path.to_string_lossy().as_bytes());
-            hasher.update(fs::read(path).map_err(|error| ComponentError::Build {
-                diagnostics: format!("could not read {}: {error}", path.display()),
-            })?);
-            return Ok(());
-        }
-        if path.is_dir() {
-            let mut files = WalkDir::new(path)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-                .map(|entry| entry.path().to_owned())
-                .collect::<Vec<_>>();
-            files.sort();
-            for file in files {
-                hash_path(hasher, &file)?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn validate_artifact(
@@ -4843,51 +4914,6 @@ pub mod package {
         Ok(())
     }
 
-    fn read_provenance(path: &Path) -> Result<BuildProvenance, ComponentError> {
-        let bytes = fs::read(path).map_err(|error| ComponentError::Build {
-            diagnostics: error.to_string(),
-        })?;
-        serde_json::from_slice(&bytes).map_err(|error| ComponentError::Build {
-            diagnostics: error.to_string(),
-        })
-    }
-
-    fn find_cached_artifact(
-        root: &Path,
-        target_name: &str,
-        target: &str,
-        profile: BuildProfile,
-        fingerprint: &str,
-    ) -> Result<Option<(PathBuf, PathBuf)>, ComponentError> {
-        let filename = format!("{}.wasm", target_name.replace('-', "_"));
-        let mut directory = Some(root);
-        while let Some(current) = directory {
-            let artifact = current
-                .join("target")
-                .join(target)
-                .join(profile.directory())
-                .join(&filename);
-            let provenance = artifact.with_extension("wasm.artist.json");
-            if artifact.is_file() {
-                if let Ok(value) = read_provenance(&provenance)
-                    && value.fingerprint == fingerprint
-                    && sha256_file(&artifact).is_ok_and(|hash| hash == value.artifact_sha256)
-                {
-                    return Ok(Some((artifact, provenance)));
-                }
-            }
-            directory = current.parent();
-        }
-        Ok(None)
-    }
-
-    fn sha256_file(path: &Path) -> Result<String, ComponentError> {
-        let bytes = fs::read(path).map_err(|error| ComponentError::Build {
-            diagnostics: error.to_string(),
-        })?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
-    }
-
     pub(crate) fn tool_version(tool: &str) -> String {
         Command::new(tool)
             .arg("--version")
@@ -4909,17 +4935,11 @@ pub mod generations {
     };
 
     #[derive(Clone)]
-    pub struct GenerationStore<T> {
-        current: Arc<RwLock<HashMap<String, Arc<T>>>>,
-        history: Arc<RwLock<HashMap<String, Vec<Arc<T>>>>>,
-    }
+    pub struct GenerationStore<T>(Arc<RwLock<HashMap<String, Arc<T>>>>);
 
     impl<T> Default for GenerationStore<T> {
         fn default() -> Self {
-            Self {
-                current: Arc::new(RwLock::new(HashMap::new())),
-                history: Arc::new(RwLock::new(HashMap::new())),
-            }
+            Self(Arc::new(RwLock::new(HashMap::new())))
         }
     }
 
@@ -4927,7 +4947,7 @@ pub mod generations {
         type Target = RwLock<HashMap<String, Arc<T>>>;
 
         fn deref(&self) -> &Self::Target {
-            &self.current
+            &self.0
         }
     }
 
@@ -4937,8 +4957,7 @@ pub mod generations {
         }
 
         pub fn next_generation(&self, name: &str, current: impl Fn(&T) -> u64) -> u64 {
-            self.current
-                .read()
+            self.read()
                 .unwrap()
                 .get(name)
                 .map(|active| current(active.as_ref()) + 1)
@@ -4947,47 +4966,16 @@ pub mod generations {
 
         pub fn insert(&self, name: String, generation: T) -> Arc<T> {
             let generation = Arc::new(generation);
-            if let Some(previous) = self
-                .current
-                .write()
-                .unwrap()
-                .insert(name.clone(), Arc::clone(&generation))
-            {
-                self.history
-                    .write()
-                    .unwrap()
-                    .entry(name)
-                    .or_default()
-                    .push(previous);
-            }
+            self.write().unwrap().insert(name, Arc::clone(&generation));
             generation
         }
 
         pub fn current(&self, name: &str) -> Option<Arc<T>> {
-            self.current.read().unwrap().get(name).cloned()
-        }
-
-        pub fn generation(
-            &self,
-            name: &str,
-            number: u64,
-            get_number: impl Fn(&T) -> u64,
-        ) -> Option<Arc<T>> {
-            if let Some(current) = self.current(name) {
-                if get_number(current.as_ref()) == number {
-                    return Some(current);
-                }
-            }
-            self.history.read().unwrap().get(name).and_then(|values| {
-                values
-                    .iter()
-                    .find(|value| get_number(value.as_ref()) == number)
-                    .cloned()
-            })
+            self.read().unwrap().get(name).cloned()
         }
 
         pub fn values(&self) -> Vec<Arc<T>> {
-            self.current.read().unwrap().values().cloned().collect()
+            self.read().unwrap().values().cloned().collect()
         }
     }
 
@@ -7015,8 +7003,6 @@ pub mod resources {
         fs,
         path::{Path, PathBuf},
     };
-    use walkdir::WalkDir;
-
     #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
     pub struct ResourceRoute {
         pub schemes: Vec<String>,
@@ -7812,8 +7798,11 @@ pub mod resources {
                     message: format!("resource.wit has no resolvable world: {error}"),
                 }
             })?;
-            for key in resolve.worlds[world].imports.keys() {
-                let wit_parser::WorldKey::Interface(interface_id) = key else {
+            for item in resolve.worlds[world].imports.values() {
+                let wit_parser::WorldItem::Interface {
+                    id: interface_id, ..
+                } = item
+                else {
                     continue;
                 };
                 let interface = &resolve.interfaces[*interface_id];
@@ -7903,54 +7892,18 @@ pub mod resources {
                     .ok_or_else(|| KernelError::InvalidRequest {
                         message: "resource source package has no Cargo.toml".to_owned(),
                     })?;
-            let mut metadata_command = cargo_metadata::MetadataCommand::new();
-            metadata_command
-                .manifest_path(manifest)
-                .no_deps()
-                .other_options(vec!["--offline".to_owned()]);
-            let metadata = metadata_command
-                .exec()
-                .map_err(|error| KernelError::Handler {
-                    message: format!("cargo metadata failed: {error}"),
-                })?;
-            let cargo_target_directory = metadata.target_directory.clone().into_std_path_buf();
-            let package = metadata
-                .packages
-                .iter()
-                .find(|package| package.manifest_path.as_str() == manifest.to_string_lossy())
-                .or_else(|| metadata.packages.first())
-                .ok_or_else(|| KernelError::InvalidRequest {
-                    message: "resource Cargo metadata contained no package".to_owned(),
-                })?;
-            let target = package
-                .targets
-                .iter()
-                .find(|target| {
-                    target
-                        .kind
-                        .iter()
-                        .any(|kind| matches!(kind, cargo_metadata::TargetKind::CDyLib))
-                })
-                .or_else(|| {
-                    package.targets.iter().find(|target| {
-                        target
-                            .kind
-                            .iter()
-                            .any(|kind| matches!(kind, cargo_metadata::TargetKind::Bin))
-                    })
-                })
-                .ok_or_else(|| KernelError::InvalidRequest {
-                    message: "resource package must declare a cdylib or bin target".to_owned(),
-                })?;
-            let profile = profile_directory(options.profile);
-            let artifact_path = cargo_target_directory
+            let target = super::package::resolve_component_target(manifest)
+                .map_err(|message| KernelError::Handler { message })?;
+            let profile = super::package::BuildProfile::directory(options.profile);
+            let artifact_path = target
+                .target_directory
                 .join(&options.target)
                 .join(profile)
-                .join(format!("{}.wasm", target.name.replace('-', "_")));
+                .join(format!("{}.wasm", target.target_name.replace('-', "_")));
             let provenance = artifact_path.with_extension("wasm.artist.json");
             if !options.force
                 && artifact_path.is_file()
-                && provenance_matches(&provenance, &fingerprint, &artifact_path)
+                && super::package::provenance_matches(&provenance, &fingerprint, &artifact_path)
             {
                 validate_artifact(&artifact_path, self, options)?;
                 return Ok(ResourceBuildResult {
@@ -7960,19 +7913,24 @@ pub mod resources {
                     cached: true,
                 });
             }
-            let artifact =
-                super::package::build_wasm_artifact(&self.root, manifest, &target.name, options)
-                    .map_err(|message| KernelError::Handler { message })?;
+            let artifact = super::package::build_wasm_artifact(
+                &self.root,
+                manifest,
+                &target.target_name,
+                options,
+            )
+            .map_err(|message| KernelError::Handler { message })?;
             validate_artifact(&artifact, self, options)?;
             let provenance_value = super::package::BuildProvenance {
-                package_name: package.name.clone(),
-                package_version: package.version.to_string(),
+                package_name: target.package_name,
+                package_version: target.package_version,
                 contract: Some(self.manifest.contract.clone()),
                 abi_version: super::ABI_VERSION.to_owned(),
                 target: options.target.clone(),
                 profile: profile.to_owned(),
                 fingerprint: fingerprint.clone(),
-                artifact_sha256: sha256_file(&artifact)?,
+                artifact_sha256: super::package::sha256_file(&artifact)
+                    .map_err(|message| KernelError::Handler { message })?,
                 cargo_version: super::package::tool_version("cargo"),
                 rustc_version: super::package::tool_version("rustc"),
             };
@@ -7990,14 +7948,6 @@ pub mod resources {
                 fingerprint,
                 cached: false,
             })
-        }
-    }
-
-    fn profile_directory(profile: super::package::BuildProfile) -> &'static str {
-        match profile {
-            super::package::BuildProfile::Debug => "debug",
-            super::package::BuildProfile::Release => "release",
-            super::package::BuildProfile::Product => "product",
         }
     }
 
@@ -8049,7 +7999,7 @@ pub mod resources {
         hasher.update(b"artist-resource-component-v1\0");
         hasher.update(super::ABI_VERSION.as_bytes());
         hasher.update(options.target.as_bytes());
-        hasher.update(profile_directory(options.profile).as_bytes());
+        hasher.update(super::package::BuildProfile::directory(options.profile).as_bytes());
         hasher.update(package.manifest.name.as_bytes());
         hasher.update(package.manifest.version.as_bytes());
         hasher.update(package.manifest.contract.as_bytes());
@@ -8062,52 +8012,14 @@ pub mod resources {
             &package.root.join("Cargo.toml"),
             &package.root.join("Cargo.lock"),
         ] {
-            hash_path(&mut hasher, path)?;
+            super::package::hash_path(&mut hasher, path)
+                .map_err(|message| KernelError::Handler { message })?;
         }
         if let Some(source) = &package.source {
-            hash_path(&mut hasher, source)?;
+            super::package::hash_path(&mut hasher, source)
+                .map_err(|message| KernelError::Handler { message })?;
         }
         Ok(format!("{:x}", hasher.finalize()))
-    }
-
-    fn hash_path(hasher: &mut Sha256, path: &Path) -> Result<(), KernelError> {
-        if path.is_file() {
-            hasher.update(path.to_string_lossy().as_bytes());
-            hasher.update(fs::read(path).map_err(|error| KernelError::Handler {
-                message: format!("read {}: {error}", path.display()),
-            })?);
-        } else if path.is_dir() {
-            let mut files = WalkDir::new(path)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file())
-                .map(|entry| entry.path().to_owned())
-                .collect::<Vec<_>>();
-            files.sort();
-            for file in files {
-                hash_path(hasher, &file)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn sha256_file(path: &Path) -> Result<String, KernelError> {
-        let bytes = fs::read(path).map_err(|error| KernelError::Handler {
-            message: format!("read {}: {error}", path.display()),
-        })?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
-    }
-
-    fn provenance_matches(path: &Path, fingerprint: &str, artifact: &Path) -> bool {
-        let Ok(bytes) = fs::read(path) else {
-            return false;
-        };
-        let Ok(provenance) = serde_json::from_slice::<super::package::BuildProvenance>(&bytes)
-        else {
-            return false;
-        };
-        provenance.fingerprint == fingerprint
-            && sha256_file(artifact).is_ok_and(|hash| hash == provenance.artifact_sha256)
     }
 
     fn validate_artifact(
@@ -8213,6 +8125,22 @@ pub mod resources {
                     return Err(error);
                 }
             };
+            if !self.dirty.lock().unwrap().contains(package_root)
+                && self
+                    .active
+                    .read()
+                    .unwrap()
+                    .get(&package.manifest.name)
+                    .is_some_and(|active| active.package.root == package.root)
+            {
+                return Ok(self
+                    .active
+                    .read()
+                    .unwrap()
+                    .get(&package.manifest.name)
+                    .map(|active| active.generation)
+                    .unwrap());
+            }
             let options = super::package::BuildOptions {
                 granted_capabilities: package.manifest.capabilities.clone(),
                 ..Default::default()
@@ -8429,12 +8357,19 @@ pub mod resources {
                 }
                 let snapshotted = scope.snapshotted_generation(&package.manifest.name);
                 let package_dirty = self.dirty.lock().unwrap().contains(&package.root);
-                let active = snapshotted
-                    .and_then(|generation| {
-                        self.active
-                            .generation(&package.manifest.name, generation, |active| {
-                                active.generation
-                            })
+                let active = scope
+                    .generation_handle::<ActiveResource>(&resource_package_pin_key(
+                        &package.manifest.name,
+                    ))
+                    .or_else(|| {
+                        snapshotted.and_then(|generation| {
+                            self.active
+                                .read()
+                                .unwrap()
+                                .get(&package.manifest.name)
+                                .filter(|active| active.generation == generation)
+                                .cloned()
+                        })
                     })
                     .or_else(|| {
                         if !package_dirty {
@@ -8459,15 +8394,12 @@ pub mod resources {
                     let generation =
                         scope.snapshot_generation(&active.package.manifest.name, active.generation);
                     if generation != active.generation {
-                        if let Some(previous) = self.active.generation(
-                            &active.package.manifest.name,
-                            generation,
-                            |candidate| candidate.generation,
-                        ) {
-                            candidates.push(previous);
-                        }
                         continue;
                     }
+                    scope.pin_generation_handle(
+                        resource_package_pin_key(&active.package.manifest.name),
+                        Arc::clone(&active),
+                    );
                     candidates.push(active);
                 }
             }
@@ -8536,7 +8468,8 @@ pub mod resources {
                         (Verb::Grep, uris.iter().collect())
                     }
                     artist_kernel::GrepSource::Text(text) => {
-                        (Verb::Grep, text.iter().map(|text| &text.uri).collect())
+                        let _ = text;
+                        (Verb::Grep, Vec::new())
                     }
                 },
                 Operation::Run(items) => (Verb::Run, items.iter().map(|item| &item.uri).collect()),
@@ -9007,6 +8940,10 @@ pub mod resources {
                         candidate.generation,
                     );
                     scope.pin_generation_handle(pin_key, Arc::clone(&candidate));
+                    scope.pin_generation_handle(
+                        resource_package_pin_key(&candidate.package.manifest.name),
+                        Arc::clone(&candidate),
+                    );
                 }
                 Ok(decision)
             })
@@ -9065,7 +9002,18 @@ pub mod resources {
                             && candidate.generation == generation
                     });
                 }
-                let (candidate, decision) = self.select_candidate(verb, &uri, candidates).await?;
+                // Claiming and invoking are one routing transaction. The
+                // kernel records the decision against this operation before
+                // entering the invoke phase; reuse that decision and the
+                // generation lease instead of asking a hot-reloadable
+                // component to claim the operation a second time.
+                let claim_key =
+                    format!("resource-extensions:{}:{}", verb, operation_uri(&operation));
+                let (candidate, decision) = if let Some(decision) = scope.pinned_claim(&claim_key) {
+                    (candidates.into_iter().next(), decision)
+                } else {
+                    self.select_candidate(verb, &uri, candidates).await?
+                };
                 if decision == artist_kernel::ClaimDecision::Reserve {
                     return Err(KernelError::UnsupportedVerb {
                         verb: verb.to_string(),
@@ -9246,6 +9194,10 @@ pub mod resources {
 
     fn generation_pin_key(verb: Verb, uri: &ResourceUri) -> String {
         format!("{}:{}", verb, uri.without_fragment())
+    }
+
+    fn resource_package_pin_key(package: &str) -> String {
+        format!("resource-package:{package}")
     }
 }
 
@@ -9724,6 +9676,26 @@ mod tests {
     }
 
     #[test]
+    fn validates_named_wit_imports_for_nested_capability_authority() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("resource.md"),
+            "---\nname: aliased\ndescription: Aliased\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes: [{schemes: [file]}]\nexports: [read]\ncapabilities: []\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("resource.wit"),
+            "package example:aliased@1.0.0;\nworld aliased { import source-read: artist:%resource/read@1.0.0; export artist:%resource/extension@1.0.0; export artist:%resource/read@1.0.0; }\n",
+        )
+        .unwrap();
+        let error = resources::ResourcePackage::discover(root.path()).unwrap_err();
+        assert!(
+            matches!(error, artist_kernel::KernelError::PermissionDenied { ref uri } if uri == "resource.read")
+        );
+    }
+
+    #[test]
     fn discovers_tool_markdown_packages() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -9860,7 +9832,9 @@ mod tests {
         let authored_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources");
         let active_handler = resources::ResourcesHandler::new(&authored_root).unwrap();
         active_handler.activate(authored_root.join("ast")).unwrap();
+        let generation = active_handler.active_generation("artist-ast");
         let catalog = active_handler.catalog();
+        assert_eq!(active_handler.active_generation("artist-ast"), generation);
         assert_eq!(catalog.len(), 1);
         assert_eq!(
             catalog[0].description,

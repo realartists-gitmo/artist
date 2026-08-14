@@ -20,7 +20,8 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     kernel
         .register_typed(
             RepositoryHandler::new(root)
-                .with_context(|| format!("initialize repository handler at {}", root.display()))?,
+                .with_context(|| format!("initialize repository handler at {}", root.display()))?
+                .without_file_symbol_projections(),
         )
         .await;
     kernel
@@ -113,6 +114,18 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                 "path = \"../../typed-guest/src/lib.rs\"",
                 "path = \"src/lib.rs\"",
             );
+            let legacy_manifest = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../artist-component/conformance/verbs/",
+                $verb,
+                "/Cargo.toml"
+            ));
+            let legacy_guest = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../artist-component/conformance/verbs/",
+                $verb,
+                "/src/lib.rs"
+            ));
             let guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/typed-guest/src/lib.rs"
@@ -168,18 +181,12 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
                         .exists()
                         .then(|| std::fs::read_to_string(&path).ok())
                         .flatten()
-                        .is_some_and(|contents| contents.contains("../../typed-guest/src/lib.rs")),
+                        .is_some_and(|contents| contents == legacy_manifest),
                     "src/lib.rs" => path
                         .exists()
                         .then(|| std::fs::read_to_string(&path).ok())
                         .flatten()
-                        .is_some_and(|contents| {
-                            contents.contains("typed-guest")
-                                || contents.contains("../../../wit/tool-surface-v1")
-                                || contents.contains("../../wit/tool-surface-v1")
-                                || contents.contains("../../../wit/tool-surface")
-                                || contents.contains("../../wit/tool-surface")
-                        }),
+                        .is_some_and(|contents| contents == legacy_guest),
                     "../wit/tool-surface-v1/deps/resource/world.wit"
                     | "../wit/resource-surface/world.wit" => true,
                     _ => false,
@@ -265,6 +272,20 @@ mod tests {
             .unwrap();
         assert!(output.to_string().contains("hello"));
 
+        // A framework migration must not overwrite source that the user has
+        // customized. The old seed text is intentionally still present in
+        // this source so path-based repair would destroy it.
+        let read_source = root.path().join("tools/read/src/lib.rs");
+        let mut customized = std::fs::read_to_string(&read_source).unwrap();
+        customized.push_str("\n// user customization: preserve me\n");
+        std::fs::write(&read_source, customized).unwrap();
+        let _ = build(root.path()).await.unwrap();
+        assert!(
+            std::fs::read_to_string(&read_source)
+                .unwrap()
+                .contains("user customization: preserve me")
+        );
+
         let docs = kernel
             .execute_tool(
                 "read",
@@ -277,9 +298,8 @@ mod tests {
         assert!(docs.to_string().contains("artist-ast"));
         assert!(root.path().join("resources/ast/resource.wit").is_file());
 
-        // File projections must retain the complete native AST semantics.
-        // The seeded extension documents the same surface, but does not
-        // replace the native repository projection with a shallow fallback.
+        // The seeded AST extension owns file symbol projections; native
+        // repository code continues to own the remaining projections.
         let projection = format!("file://{}/symbols/", ast_source.display());
         let symbols = kernel
             .execute_tool(
