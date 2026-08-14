@@ -50,7 +50,7 @@ impl VerbPackageManifest {
         let identity = VerbId::new(&self.identity)
             .map_err(|message| KernelError::InvalidRequest { message })?;
         let mut definition = VerbDefinition::new(
-            identity,
+            identity.clone(),
             &self.function,
             &self.model_name,
             &self.description,
@@ -65,11 +65,34 @@ impl VerbPackageManifest {
             .collect::<Result<_, _>>()?;
         if let Some(wit) = &self.wit {
             let wit_path = package_dir.join(wit);
-            wit_parser::Resolve::default()
-                .push_path(&wit_path)
-                .map_err(|error| KernelError::InvalidRequest {
-                    message: format!("invalid WIT contract {}: {error}", wit_path.display()),
+            let mut resolve = wit_parser::Resolve::default();
+            let (package_id, _) =
+                resolve
+                    .push_path(&wit_path)
+                    .map_err(|error| KernelError::InvalidRequest {
+                        message: format!("invalid WIT contract {}: {error}", wit_path.display()),
+                    })?;
+            let package = &resolve.packages[package_id];
+            let interface_id = package
+                .interfaces
+                .get(identity.interface())
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: format!(
+                        "WIT interface {} is absent from {}",
+                        identity.interface(),
+                        wit_path.display()
+                    ),
                 })?;
+            let interface = &resolve.interfaces[*interface_id];
+            if !interface.functions.contains_key(&self.function) {
+                return Err(KernelError::InvalidRequest {
+                    message: format!(
+                        "WIT function {} is absent from {}",
+                        self.function,
+                        wit_path.display()
+                    ),
+                });
+            }
         }
         if let (Some(input), Some(output)) = (&self.input_type, &self.output_type) {
             definition.input_type = Some(DynamicType::named(input)?);
@@ -522,6 +545,24 @@ mod tests {
             name,
             format!("{name} description"),
         )
+    }
+
+    #[test]
+    fn manifest_wit_contract_must_contain_declared_function() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("contract.wit"),
+            "package example:text@1.0.0; interface text { uppercase: func(input: string) -> string }",
+        )
+        .unwrap();
+        let manifest = VerbPackageManifest::from_toml(
+            "identity = 'example:text/uppercase@1.0.0'\nfunction = 'missing'\nmodel_name = 'uppercase'\ndescription = 'Uppercase'\nwit = 'contract.wit'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            manifest.definition(root.path()),
+            Err(KernelError::InvalidRequest { .. })
+        ));
     }
 
     #[test]
