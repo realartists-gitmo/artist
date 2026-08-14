@@ -264,8 +264,8 @@ mod tests {
     use artist_kernel::Verb;
     use tempfile::tempdir;
 
-    #[test]
-    fn migrates_exact_pre_refactor_seed() {
+    #[tokio::test]
+    async fn migrates_exact_pre_refactor_seed() {
         let root = tempdir().unwrap();
         let package = root.path().join("tools/read");
         std::fs::create_dir_all(package.join("src")).unwrap();
@@ -311,6 +311,18 @@ mod tests {
                 .unwrap()
                 .contains("wit-bindgen 0.57.1")
         );
+        let kernel = build(root.path()).await.unwrap();
+        let source = package.join("Cargo.toml");
+        let output = kernel
+            .execute_tool(
+                "read",
+                serde_json::json!({
+                    "requests": [{"uri": source.display().to_string(), "at": null, "before": null, "after": null}]
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(output.to_string().contains("artist-tool-read"));
     }
 
     #[tokio::test]

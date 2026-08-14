@@ -7733,6 +7733,7 @@ pub mod resources {
         generation: u64,
         artifact: Arc<Vec<u8>>,
         host: Arc<ResourceComponentHost>,
+        fingerprint: String,
     }
 
     impl ResourcePackage {
@@ -8248,27 +8249,18 @@ pub mod resources {
                     });
                 }
             }
-            if !self.dirty.lock().unwrap().contains(package_root)
-                && self
-                    .active
-                    .read()
-                    .unwrap()
-                    .get(&package.manifest.name)
-                    .is_some_and(|active| active.package.root == package.root)
-            {
-                return Ok(self
-                    .active
-                    .read()
-                    .unwrap()
-                    .get(&package.manifest.name)
-                    .map(|active| active.generation)
-                    .unwrap());
-            }
             let options = super::package::BuildOptions {
                 granted_capabilities: package.manifest.capabilities.clone(),
                 ..Default::default()
             };
             let candidate_fingerprint = fingerprint(&package, &options)?;
+            if let Some(active) = self.active.read().unwrap().get(&package.manifest.name)
+                && active.package.root == package.root
+                && active.fingerprint == candidate_fingerprint
+            {
+                self.dirty.lock().unwrap().remove(package_root);
+                return Ok(active.generation);
+            }
             let build = match package.build(&options) {
                 Ok(build) => build,
                 Err(error) => {
@@ -8327,6 +8319,7 @@ pub mod resources {
                     generation,
                     artifact: Arc::new(bytes),
                     host,
+                    fingerprint: candidate_fingerprint,
                 }),
             );
             self.dirty.lock().unwrap().remove(&package_root);
@@ -8479,6 +8472,10 @@ pub mod resources {
                 .filter(|active| {
                     active.package.root.is_dir()
                         && active.package.root.join("resource.md").is_file()
+                        && self
+                            .disabled_file_package
+                            .as_ref()
+                            .is_none_or(|name| active.package.manifest.name != *name)
                 })
                 .map(|active| active.package.clone())
                 .collect::<Vec<_>>();
@@ -10015,7 +10012,7 @@ mod tests {
             catalog[0]
                 .docs
                 .iter()
-                .any(|doc| doc.uri == "file://<path>?symbols=")
+                .any(|doc| doc.uri == "file://<path>/symbols/")
         );
     }
 
