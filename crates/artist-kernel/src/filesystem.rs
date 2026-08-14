@@ -893,6 +893,16 @@ impl TypedHandler for FileHandler {
             }
         })
     }
+
+    fn execute_text_grep<'a>(
+        &'a self,
+        pattern: &'a str,
+        texts: Vec<AnchoredText>,
+    ) -> Option<BoxFuture<'a, Result<Vec<AnchoredText>, KernelError>>> {
+        Some(Box::pin(async move {
+            self.search.grep_text(&texts, &Pattern::parse(pattern)?)
+        }))
+    }
 }
 
 #[cfg(test)]

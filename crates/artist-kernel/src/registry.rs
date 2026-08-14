@@ -1039,17 +1039,17 @@ impl Kernel {
                 }
                 Ok(OperationResult::Grep(Ok(text)))
             }
-            source => {
-                self.execute_typed_item(
-                    handlers,
-                    Operation::Grep(crate::GrepRequest {
-                        pattern: request.pattern,
-                        source,
-                    }),
-                    host,
-                    scope,
-                )
-                .await
+            crate::GrepSource::Text(text) => {
+                for handler in handlers {
+                    if let Some(result) = handler.execute_text_grep(&request.pattern, text.clone())
+                    {
+                        return Ok(OperationResult::Grep(result.await));
+                    }
+                }
+                Err(KernelError::UnsupportedVerb {
+                    verb: "grep".to_owned(),
+                    uri: "<supplied-text>".to_owned(),
+                })
             }
         }
     }
