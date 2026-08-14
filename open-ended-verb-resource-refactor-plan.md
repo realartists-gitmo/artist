@@ -53,7 +53,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 ## Slice 2 — Generic verb package registry
 
 - [x] Define initial `VerbDefinition`: identity, model name, docs, function, source/artifact metadata.
-- [x] Define initial active verb generations and replacement/deactivation API; lease integration remains pending.
+- [x] Define initial active verb generations and replacement/deactivation API.
+- [x] Add immutable `VerbLease` handles for active generations.
 - [x] Attach the dynamic verb registry to `Kernel` for package/runtime integration.
 - [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
 - [x] Create initial name-agnostic TOML package discovery for future verb packages.
