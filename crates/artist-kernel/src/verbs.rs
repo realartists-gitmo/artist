@@ -348,6 +348,17 @@ impl VerbRegistry {
 
     pub fn activate_discovered(&self, root: &Path) -> Result<Vec<u64>, KernelError> {
         let definitions = discover_verb_packages(root)?;
+        if let Some(definition) = definitions
+            .iter()
+            .find(|definition| definition.input_type.is_none() || definition.output_type.is_none())
+        {
+            return Err(KernelError::InvalidRequest {
+                message: format!(
+                    "verb package {} has no complete typed function contract",
+                    definition.identity
+                ),
+            });
+        }
         self.activate_packages(definitions)
     }
 
@@ -511,7 +522,7 @@ mod tests {
         std::fs::write(package.join("uppercase.wasm"), b"component-artifact").unwrap();
         std::fs::write(
             package.join("verb.toml"),
-            "identity = 'example:text/uppercase@1.0.0'\nfunction = 'uppercase'\nmodel_name = 'uppercase'\ndescription = 'Uppercase text'\ndocs = ['tool.md']\ncomponent = 'uppercase.wasm'\n",
+            "identity = 'example:text/uppercase@1.0.0'\nfunction = 'uppercase'\nmodel_name = 'uppercase'\ndescription = 'Uppercase text'\ndocs = ['tool.md']\ninput_type = 'string'\noutput_type = 'string'\ncomponent = 'uppercase.wasm'\n",
         )
         .unwrap();
         let definitions = discover_verb_packages(root.path()).unwrap();
@@ -535,7 +546,7 @@ mod tests {
         std::fs::create_dir(&package).unwrap();
         std::fs::write(
             package.join("verb.toml"),
-            "identity = 'example:text/missing@1.0.0'\nfunction = 'missing'\nmodel_name = 'missing'\ndescription = 'Missing'",
+            "identity = 'example:text/missing@1.0.0'\nfunction = 'missing'\nmodel_name = 'missing'\ndescription = 'Missing'\ninput_type = 'string'\noutput_type = 'string'", 
         )
         .unwrap();
         let registry = VerbRegistry::new();
