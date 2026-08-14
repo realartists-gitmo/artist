@@ -79,8 +79,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Add verb-owned dynamic extractor execution and ordered URI output.
 - [x] Add dynamic claim arbitration keyed by `(VerbId, URI)`.
 - [x] Preserve Pass/Handle/Reserve and Handle+Reserve Conflict semantics in the dynamic claim registry.
-- [ ] Route claims through candidate generation snapshots and leases.
-- [ ] Pin selected resource generations before invocation.
+- [x] Route claims through candidate generation snapshots and leases.
+- [x] Pin selected resource generations before invocation via `ClaimedResource`.
 - [ ] Add tests proving the kernel never names request fields such as `uri`, `roots`, `targets`, or `source`.
 - [ ] Add dynamic conflict and reserve tests for a verb unknown to Artist source.
 

@@ -62,6 +62,18 @@ impl RouteRegistry {
             })
             .collect()
     }
+
+    pub fn extract_and_arbitrate_for_lease(
+        &self,
+        lease: &crate::VerbLease,
+        input: &DynamicValue,
+        claims: &crate::ClaimRegistry,
+    ) -> Result<Vec<crate::ClaimedResource>, KernelError> {
+        self.extract(&lease.definition().identity, input)?
+            .into_iter()
+            .map(|uri| claims.arbitrate_for_lease(lease, uri))
+            .collect()
+    }
 }
 
 #[cfg(test)]

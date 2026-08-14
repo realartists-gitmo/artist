@@ -1,10 +1,17 @@
 //! Dynamic claim arbitration keyed by versioned verb identity and URI.
 
-use crate::{ClaimDecision, KernelError, ResourceUri, VerbId};
+use crate::{ClaimDecision, KernelError, ResourceUri, VerbId, VerbLease};
 use std::sync::Arc;
 
 pub trait DynamicClaimProvider: Send + Sync {
     fn claim(&self, verb: &VerbId, uri: &ResourceUri) -> ClaimDecision;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimedResource {
+    pub uri: ResourceUri,
+    pub decision: ClaimDecision,
+    pub generation: u64,
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +55,22 @@ impl ClaimRegistry {
             (false, true) => Ok(ClaimDecision::Reserve),
             (false, false) => Ok(ClaimDecision::Pass),
         }
+    }
+
+    /// Arbitrate against a pinned verb generation. The lease keeps the
+    /// selected contract alive across hot swaps and makes the generation
+    /// explicit to downstream resource invocation.
+    pub fn arbitrate_for_lease(
+        &self,
+        lease: &VerbLease,
+        uri: ResourceUri,
+    ) -> Result<ClaimedResource, KernelError> {
+        let decision = self.arbitrate(&lease.definition().identity, &uri)?;
+        Ok(ClaimedResource {
+            uri,
+            decision,
+            generation: lease.generation(),
+        })
     }
 }
 
