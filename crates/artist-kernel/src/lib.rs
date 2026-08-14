@@ -29,7 +29,7 @@ pub use handler::{
     BoxFuture, ClaimDecision, Handler, HandlerDescriptor, KernelHandle, ResourceCatalogDoc,
     ResourceCatalogEntry, ResourceCatalogProvider, ToolDefinition, ToolProvider, TypedHandler,
 };
-pub use operation::Verb;
+pub use operation::{Verb, VerbId};
 pub use registry::Kernel;
 pub use repository::RepositoryHandler;
 pub use request::{BatchRequest, Request};
