@@ -20,6 +20,7 @@ mod session;
 mod structure;
 mod typed;
 mod uri;
+mod verbs;
 
 pub use address::ResourceAddress;
 pub use anchors::{AddressedItem, Anchor, AnchorError, AnchorInput, AnchorSet};
@@ -43,3 +44,4 @@ pub use structure::{
 };
 pub use typed::*;
 pub use uri::ResourceUri;
+pub use verbs::{ActiveVerb, VerbDefinition, VerbRegistry};

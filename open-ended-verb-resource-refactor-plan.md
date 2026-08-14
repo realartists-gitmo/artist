@@ -51,8 +51,9 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 2 — Generic verb package registry
 
-- [ ] Define `VerbDefinition`: identity, model name, docs, WIT contract/function type, extractor contract, schema adapter metadata, source/artifact, dependencies.
-- [ ] Define active verb generations, leases, dirty tracking, fingerprint CAS, and hot-swap semantics.
+- [x] Define initial `VerbDefinition`: identity, model name, docs, function, source/artifact metadata.
+- [x] Define initial active verb generations and replacement/deactivation API; lease integration remains pending.
+- [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
 - [ ] Create one package discovery/activation path for current verbs and future packages.
 - [ ] Define package metadata exports using canonical versioned identities.
 - [ ] Make watcher/catalog/model-tool discovery derive solely from active verb definitions.
@@ -156,4 +157,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Plan created before implementation.
 - [x] Baseline inventory recorded.
 - [x] Added and tested exported canonical `VerbId` as the first dynamic-identity seam; the legacy enum remains temporarily during migration.
-- [ ] Next slice: dynamic WIT value/type representation and verb registry skeleton.
+- [x] Added and tested the initial hot-swappable `VerbRegistry`/`VerbDefinition` skeleton.
+- [ ] Next slice: dynamic WIT value/type representation and registry package discovery.
