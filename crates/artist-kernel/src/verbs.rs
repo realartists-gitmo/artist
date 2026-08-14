@@ -273,6 +273,40 @@ impl VerbRegistry {
             }
         }
         drop(active);
+        let by_identity = definitions
+            .iter()
+            .map(|definition| (&definition.identity, definition))
+            .collect::<BTreeMap<_, _>>();
+        fn visit(
+            identity: &VerbId,
+            by_identity: &BTreeMap<&VerbId, &VerbDefinition>,
+            visiting: &mut std::collections::BTreeSet<VerbId>,
+            visited: &mut std::collections::BTreeSet<VerbId>,
+        ) -> Result<(), KernelError> {
+            if visited.contains(identity) {
+                return Ok(());
+            }
+            if !visiting.insert(identity.clone()) {
+                return Err(KernelError::Conflict {
+                    uri: format!("verb://dependency-cycle/{identity}"),
+                });
+            }
+            if let Some(definition) = by_identity.get(identity) {
+                for dependency in &definition.dependencies {
+                    if by_identity.contains_key(dependency) {
+                        visit(dependency, by_identity, visiting, visited)?;
+                    }
+                }
+            }
+            visiting.remove(identity);
+            visited.insert(identity.clone());
+            Ok(())
+        }
+        let mut visiting = std::collections::BTreeSet::new();
+        let mut visited = std::collections::BTreeSet::new();
+        for identity in &seen {
+            visit(identity, &by_identity, &mut visiting, &mut visited)?;
+        }
 
         let mut entries = self.entries.write().map_err(|_| KernelError::Handler {
             message: "verb registry lock poisoned".to_owned(),
@@ -549,6 +583,20 @@ mod tests {
             tools[0].identity.to_string(),
             "example:uppercase/uppercase@1.0.0"
         );
+    }
+
+    #[test]
+    fn activation_rejects_dependency_cycles_before_publication() {
+        let registry = VerbRegistry::new();
+        let mut first = definition("first");
+        let mut second = definition("second");
+        first.dependencies.push(second.identity.clone());
+        second.dependencies.push(first.identity.clone());
+        assert!(matches!(
+            registry.activate_packages(vec![first, second]),
+            Err(KernelError::Conflict { .. })
+        ));
+        assert!(registry.definitions().unwrap().is_empty());
     }
 
     #[test]

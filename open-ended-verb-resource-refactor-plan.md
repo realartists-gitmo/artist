@@ -58,6 +58,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Attach the dynamic verb registry to `Kernel` for package/runtime integration.
 - [x] Add package dependency identities and validate their canonical version syntax.
 - [x] Validate dynamic package dependencies against the active/batch identity set before publication.
+- [x] Reject dependency cycles before publication.
 - [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, and dependency activation ordering.
 - [x] Create initial name-agnostic TOML package discovery for future verb packages.
 - [x] Define package metadata exports using canonical versioned identities and artifact paths.
