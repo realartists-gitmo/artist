@@ -33,12 +33,7 @@ fn source_uri(uri: &str) -> Option<String> {
             {
                 return None;
             }
-            let uri = url::Url::parse(source).ok()?;
-            let path = uri.to_file_path().ok()?;
-            std::fs::metadata(path)
-                .ok()
-                .filter(|metadata| metadata.is_file())?;
-            Some(source.to_owned())
+            resource::filesystem::is_file(source).then(|| source.to_owned())
         })
         .next()
 }

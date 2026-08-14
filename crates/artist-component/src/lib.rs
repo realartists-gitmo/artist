@@ -7225,6 +7225,28 @@ pub mod resources {
         fn link_nested_standard_imports(
             linker: &mut wasmtime::component::Linker<super::HostState>,
         ) -> Result<(), KernelError> {
+            let mut filesystem =
+                linker
+                    .instance("artist:resource/filesystem")
+                    .map_err(|error| KernelError::Handler {
+                        message: format!("create filesystem host instance: {error}"),
+                    })?;
+            filesystem
+                .func_wrap(
+                    "is-file",
+                    |_caller: wasmtime::StoreContextMut<'_, super::HostState>,
+                     (uri,): (String,)| {
+                        Ok::<_, wasmtime::Error>((artist_kernel::ResourceUri::parse(&uri)
+                            .ok()
+                            .and_then(|uri| uri.as_ref().to_file_path().ok())
+                            .is_some_and(|path| {
+                                std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
+                            }),))
+                    },
+                )
+                .map_err(|error| KernelError::Handler {
+                    message: format!("link filesystem host instance: {error}"),
+                })?;
             macro_rules! link {
                 ($interface:ident) => {
                     super::resource_async_host_bindings::artist::resource::$interface::add_to_linker::<

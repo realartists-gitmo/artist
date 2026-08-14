@@ -54,6 +54,10 @@ interface types {
     record claim-request { verb: verb, uri: uri }
 }
 
+interface filesystem {
+    is-file: func(uri: string) -> bool;
+}
+
 interface extension {
     use types.{claim-request, claim-decision};
     claim: func(request: claim-request) -> claim-decision;
