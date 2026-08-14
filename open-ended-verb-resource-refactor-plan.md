@@ -56,7 +56,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Define initial active verb generations and replacement/deactivation API.
 - [x] Add immutable `VerbLease` handles for active generations.
 - [x] Attach the dynamic verb registry to `Kernel` for package/runtime integration.
-- [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
+- [x] Add package dependency identities and validate their canonical version syntax.
+- [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, and dependency activation ordering.
 - [x] Create initial name-agnostic TOML package discovery for future verb packages.
 - [x] Define package metadata exports using canonical versioned identities and artifact paths.
 - [x] Atomically activate discovered package sets with duplicate/metadata validation before publication.

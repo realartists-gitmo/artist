@@ -21,6 +21,8 @@ pub struct VerbPackageManifest {
     pub description: String,
     #[serde(default)]
     pub docs: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     #[serde(default = "default_manifest_file")]
     pub component: String,
 }
@@ -50,6 +52,13 @@ impl VerbPackageManifest {
             &self.description,
         );
         definition.docs = self.docs.clone();
+        definition.dependencies = self
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                VerbId::new(dependency).map_err(|message| KernelError::InvalidRequest { message })
+            })
+            .collect::<Result<_, _>>()?;
         definition.source = Some(package_dir.to_owned());
         definition.artifact = Some(package_dir.join(&self.component));
         Ok(definition)
@@ -99,6 +108,7 @@ pub struct VerbDefinition {
     pub docs: Vec<String>,
     pub source: Option<PathBuf>,
     pub artifact: Option<PathBuf>,
+    pub dependencies: Vec<VerbId>,
     /// The typed function contract. Optional only while compatibility packages
     /// are being migrated; dynamically invokable packages must provide both.
     pub input_type: Option<DynamicType>,
@@ -120,6 +130,7 @@ impl VerbDefinition {
             docs: Vec::new(),
             source: None,
             artifact: None,
+            dependencies: Vec::new(),
             input_type: None,
             output_type: None,
         }
