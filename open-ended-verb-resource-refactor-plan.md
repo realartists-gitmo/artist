@@ -73,8 +73,8 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 3 — Generic typed call and routing model
 
-- [ ] Add `DynamicVerbCall { verb, function, typed_input }`.
-- [ ] Add `DynamicVerbResult { typed_values }`.
+- [x] Add `DynamicVerbCall { verb, function, typed_input }`.
+- [x] Add `DynamicVerbResult { typed_values }`.
 - [x] Add registry-level dynamic call validation against the active function and typed input/output contracts.
 - [x] Add verb-owned dynamic extractor execution and ordered URI output.
 - [x] Add dynamic claim arbitration keyed by `(VerbId, URI)`.
