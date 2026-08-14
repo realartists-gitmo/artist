@@ -2,7 +2,7 @@ use crate::{
     Anchor, AnchorError, AnchorSet, AnchoredLine, AnchoredText, BoxFuture, Handler,
     HandlerDescriptor, KernelError, KernelHandle, Operation, OperationResult, Pattern, ReadResult,
     Request, ResourceAddress, SearchService, StructuralAnalyzer, StructuralLine, TypedHandler,
-    Verb, address::uri_path, has_projection,
+    Verb, address::uri_path, has_projection, has_query_projection,
 };
 use cap_std::{ambient_authority, fs::Dir};
 use serde::Deserialize;
@@ -577,9 +577,11 @@ impl Handler for FileHandler {
     }
 
     fn claims(&self, address: &ResourceAddress) -> bool {
-        address
-            .as_uri()
-            .is_some_and(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())))
+        address.as_uri().is_some_and(|uri| {
+            uri.scheme() == "file"
+                && !has_projection(Path::new(uri.path()))
+                && !has_query_projection(uri)
+        })
     }
 
     fn execute<'a>(
@@ -691,21 +693,25 @@ impl TypedHandler for FileHandler {
             Operation::Read(requests) => requests.iter().all(|request| {
                 request.uri.scheme() == "file"
                     && !has_projection(Path::new(request.uri.path()))
+                    && !has_query_projection(&request.uri)
                     && self.typed_path_syntax(&request.uri).is_ok()
             }),
             Operation::Write(requests) => requests.iter().all(|request| {
                 request.uri.scheme() == "file"
                     && !has_projection(Path::new(request.uri.path()))
+                    && !has_query_projection(&request.uri)
                     && request.uri.as_ref().to_file_path().is_ok()
             }),
             Operation::Edit(requests) => requests.iter().all(|request| {
                 request.uri.scheme() == "file"
                     && !has_projection(Path::new(request.uri.path()))
+                    && !has_query_projection(&request.uri)
                     && request.uri.as_ref().to_file_path().is_ok()
             }),
             Operation::Delete(uris) => uris.iter().all(|uri| {
                 uri.scheme() == "file"
                     && !has_projection(Path::new(uri.path()))
+                    && !has_query_projection(uri)
                     && self.typed_path_syntax(uri).is_ok()
             }),
             Operation::Find(request) => {
@@ -713,11 +719,12 @@ impl TypedHandler for FileHandler {
                     && request.roots.iter().all(|uri| {
                         uri.scheme() == "file"
                             && !has_projection(Path::new(uri.path()))
+                            && !has_query_projection(uri)
                             && self.typed_path_syntax(uri).is_ok()
                     })
             }
             Operation::Grep(request) => {
-                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())) && self.typed_path_syntax(uri).is_ok()))
+                matches!(&request.source, crate::GrepSource::Resources(uris) if !uris.is_empty() && uris.iter().all(|uri| uri.scheme() == "file" && !has_projection(Path::new(uri.path())) && !has_query_projection(uri) && self.typed_path_syntax(uri).is_ok()))
                     || matches!(&request.source, crate::GrepSource::Text(text) if !text.is_empty())
             }
             _ => false,

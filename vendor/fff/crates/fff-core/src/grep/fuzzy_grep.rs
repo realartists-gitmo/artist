@@ -112,9 +112,10 @@ pub fn fuzzy_line_matches(pattern: &str, line: &str) -> bool {
     let Some((&first, &last)) = indices.indices.first().zip(indices.indices.last()) else {
         return false;
     };
-    // neo-frizbee may return matched indices in score order rather than
-    // source order. Normalize the endpoints before computing the span.
-    let span = last.abs_diff(first) + 1;
+    // Use the extrema rather than assuming the returned indices are ordered.
+    let min_index = indices.indices.iter().copied().min().unwrap_or(first);
+    let max_index = indices.indices.iter().copied().max().unwrap_or(last);
+    let span = max_index - min_index + 1;
     if span > needle_len * 3 {
         return false;
     }
@@ -411,9 +412,11 @@ pub(super) fn fuzzy_grep_search<'a>(
                         let indices = &match_indices.indices;
 
                         if let (Some(&first), Some(&last)) = (indices.first(), indices.last()) {
-                            // reject widely scattered matches; indices may be
-                            // returned in score order rather than source order.
-                            let span = last.abs_diff(first) + 1;
+                            // Reject widely scattered matches using the true
+                            // extrema, not the first/last returned indices.
+                            let min_index = indices.iter().copied().min().unwrap_or(first);
+                            let max_index = indices.iter().copied().max().unwrap_or(last);
+                            let span = max_index - min_index + 1;
                             if span > max_match_span {
                                 continue;
                             }

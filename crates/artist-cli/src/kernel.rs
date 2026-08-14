@@ -103,14 +103,13 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             std::fs::create_dir_all(root.join("wit/tool-surface-v1"))?;
             std::fs::create_dir_all(root.join("wit/tool-surface-v1/deps/resource"))?;
             std::fs::create_dir_all(root.join("wit/resource-surface"))?;
-            let historical_manifest = include_str!(concat!(
+            let manifest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/verbs/",
                 $verb,
                 "/Cargo.toml"
             ))
-            .replace("wit-bindgen = \"0.60.0\"", "wit-bindgen = \"0.57.1\"");
-            let manifest = historical_manifest.replace(
+            .replace(
                 "path = \"../../typed-guest/src/lib.rs\"",
                 "path = \"src/lib.rs\"",
             );
@@ -118,12 +117,16 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             // intentionally separate from the current conformance package
             // sources: untouched projects must migrate, customized projects
             // must not be overwritten.
-            let legacy_manifest = historical_manifest;
+            let legacy_manifest = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/legacy-tool-seed/",
+                $verb,
+                "-Cargo.toml"
+            ));
             let legacy_guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/conformance/typed-guest/src/lib.rs"
+                "/fixtures/legacy-tool-seed/typed-guest-src-lib.rs"
             ))
-            .replace("../../../wit/tool-surface-v1", "../wit/tool-surface")
             .replace("../../../wit/tool-surface", "../wit/tool-surface");
             let guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -244,12 +247,11 @@ mod tests {
         std::fs::create_dir_all(package.join("src")).unwrap();
         let manifest = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../artist-component/conformance/verbs/read/Cargo.toml"
-        ))
-        .replace("wit-bindgen = \"0.60.0\"", "wit-bindgen = \"0.57.1\"");
+            "/fixtures/legacy-tool-seed/read-Cargo.toml"
+        ));
         let guest = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../artist-component/conformance/typed-guest/src/lib.rs"
+            "/fixtures/legacy-tool-seed/typed-guest-src-lib.rs"
         ))
         .replace("../../../wit/tool-surface", "../wit/tool-surface");
         std::fs::write(package.join("Cargo.toml"), manifest).unwrap();

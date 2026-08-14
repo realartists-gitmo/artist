@@ -7790,6 +7790,46 @@ pub mod resources {
             })
         }
 
+        fn resource_wit_imports(
+            path: &Path,
+        ) -> Result<std::collections::HashSet<String>, KernelError> {
+            let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
+            let mut resolve = wit_parser::Resolve::default();
+            resolve
+                .push_dir(canonical)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!("parse canonical resource WIT: {error}"),
+                })?;
+            let package = resolve
+                .push_file(path)
+                .map_err(|error| KernelError::InvalidRequest {
+                    message: format!("parse resource.wit {}: {error}", path.display()),
+                })?;
+            let world = resolve.select_world(&[package], None).map_err(|error| {
+                KernelError::InvalidRequest {
+                    message: format!("resource.wit has no resolvable world: {error}"),
+                }
+            })?;
+            let mut imports = std::collections::HashSet::new();
+            for item in resolve.worlds[world].imports.values() {
+                let wit_parser::WorldItem::Interface { id, .. } = item else {
+                    continue;
+                };
+                let interface = &resolve.interfaces[*id];
+                if interface.package.is_some_and(|package| {
+                    let name = &resolve.packages[package].name;
+                    name.namespace == "artist" && name.name == "resource"
+                }) && interface.name.as_deref().is_some_and(|name| {
+                    super::contracts::Verb::ALL
+                        .iter()
+                        .any(|verb| verb.to_string() == name)
+                }) {
+                    imports.insert(interface.name.clone().unwrap());
+                }
+            }
+            Ok(imports)
+        }
+
         fn validate_resource_wit(path: &Path, capabilities: &[String]) -> Result<(), KernelError> {
             let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/resource-surface");
             let mut resolve = wit_parser::Resolve::default();
@@ -8103,14 +8143,12 @@ pub mod resources {
             }
         }
         if let Some(wit) = &package.wit {
-            let source = fs::read_to_string(wit).map_err(|error| KernelError::Handler {
-                message: format!("read resource WIT {}: {error}", wit.display()),
-            })?;
+            let declared_imports = ResourcePackage::resource_wit_imports(wit)?;
             for verb in super::contracts::Verb::ALL {
                 let actual = actual_imports
                     .iter()
                     .any(|import| import.contains(&format!("resource/{verb}")));
-                let declared = source.contains(&format!("resource/{verb}"));
+                let declared = declared_imports.contains(&verb.to_string());
                 if actual != declared {
                     return Err(KernelError::InvalidRequest {
                         message: format!(
@@ -8129,7 +8167,8 @@ pub mod resources {
         files: FileHandler,
         active: super::generations::GenerationStore<ActiveResource>,
         dirty: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
-        activation_lock: Arc<std::sync::Mutex<()>>,
+        activation_locks:
+            Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<std::sync::Mutex<()>>>>>,
     }
 
     impl ResourcesHandler {
@@ -8152,17 +8191,25 @@ pub mod resources {
                     || Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     super::watcher::SharedWatcher::dirty_set,
                 ),
-                activation_lock: Arc::new(std::sync::Mutex::new(())),
+                activation_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             })
         }
 
         pub fn activate(&self, package_root: impl AsRef<Path>) -> Result<u64, KernelError> {
             let package_root = package_root.as_ref();
+            let lock = {
+                let mut locks = self.activation_locks.lock().unwrap();
+                Arc::clone(
+                    locks
+                        .entry(package_root.to_owned())
+                        .or_insert_with(|| Arc::new(std::sync::Mutex::new(()))),
+                )
+            };
+            let _activation = lock.lock().unwrap();
             let package = match ResourcePackage::discover(package_root) {
                 Ok(package) => package,
                 Err(error) => {
                     if !package_root.is_dir() {
-                        let _activation = self.activation_lock.lock().unwrap();
                         self.active
                             .remove_where(|active| active.package.root == package_root);
                         self.dirty.lock().unwrap().remove(package_root);
@@ -8184,6 +8231,13 @@ pub mod resources {
                     return Err(error);
                 }
             };
+            if let Some(active) = self.active.current(&package.manifest.name) {
+                if active.package.root != package.root {
+                    return Err(KernelError::Conflict {
+                        uri: package.manifest.name.clone(),
+                    });
+                }
+            }
             if !self.dirty.lock().unwrap().contains(package_root)
                 && self
                     .active
@@ -8229,12 +8283,20 @@ pub mod resources {
             let package_root = package.root.clone();
             // A successful rename replaces every prior name associated with
             // this package root, preventing ghost catalog/routing entries.
-            let _activation = self.activation_lock.lock().unwrap();
-            self.active
-                .remove_where(|active| active.package.root == package_root);
+            if let Some(active) = self.active.current(&package.manifest.name) {
+                if active.package.root != package_root {
+                    return Err(KernelError::Conflict {
+                        uri: package.manifest.name.clone(),
+                    });
+                }
+            }
             let generation = self
                 .active
-                .next_generation(&package.manifest.name, |current| current.generation);
+                .current(&package.manifest.name)
+                .map(|current| current.generation + 1)
+                .unwrap_or(1);
+            self.active
+                .remove_where(|active| active.package.root == package_root);
             self.active.insert(
                 package.manifest.name.clone(),
                 ActiveResource {
@@ -8300,6 +8362,11 @@ pub mod resources {
                         uri: import.to_owned(),
                     });
                 };
+                if visiting.contains(identity) {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!("resource dependency cycle at {identity}"),
+                    });
+                }
                 let active = if self.dirty.lock().unwrap().contains(&package.root) {
                     // A dependency edit follows the same candidate path as a
                     // top-level edit. A failed rebuild leaves the prior
@@ -8372,6 +8439,8 @@ pub mod resources {
         }
 
         pub fn catalog(&self) -> Vec<ResourceCatalogEntry> {
+            self.active
+                .remove_where(|active| !active.package.root.is_dir());
             // The model catalog is a view of published generations, not a
             // second discovery registry. Activate valid candidates first;
             // failed activation leaves an existing generation untouched and
@@ -8403,6 +8472,8 @@ pub mod resources {
             verb: Verb,
             scope: &artist_kernel::InvocationScope,
         ) -> Vec<Arc<ActiveResource>> {
+            self.active
+                .remove_where(|active| !active.package.root.is_dir());
             // A claim phase may already have selected an active generation.
             // Reuse that leased object even if the live registry has swapped
             // to a newer generation before a nested call arrives.
@@ -9879,7 +9950,7 @@ mod tests {
         std::fs::create_dir_all(package.join("src")).unwrap();
         std::fs::write(
             package.join("resource.md"),
-            "---\nname: artist-ast\ndescription: AST projections\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes:\n  - schemes: [file]\nexports: [read]\ncapabilities: [resource.read]\ndocs:\n  - uri: file://<path>/symbols/\n    summary: Lists symbols\n    verbs: [read]\n    query:\n      - name: kind\n        summary: Symbol kind\n---\n\nFull AST documentation.\n",
+            "---\nname: artist-ast\ndescription: AST projections\nversion: 0.1.0\ncontract: artist:resource:extension@1\nroutes:\n  - schemes: [file]\nexports: [read]\ncapabilities: [resource.read]\ndocs:\n  - uri: file://<path>?symbols\n    summary: Lists symbols\n    verbs: [read]\n    query:\n      - name: kind\n        summary: Symbol kind\n---\n\nFull AST documentation.\n",
         )
         .unwrap();
         let handler = resources::ResourcesHandler::new(root.path()).unwrap();
@@ -9908,7 +9979,7 @@ mod tests {
             catalog[0]
                 .docs
                 .iter()
-                .any(|doc| doc.uri == "file://<path>/symbols/")
+                .any(|doc| doc.uri == "file://<path>?symbols")
         );
     }
 
@@ -9974,7 +10045,7 @@ mod tests {
             .await;
 
         let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
-        let projection = artist_kernel::ResourceUri::parse(&format!("{file}/symbols/")).unwrap();
+        let projection = artist_kernel::ResourceUri::parse(&format!("{file}?symbols")).unwrap();
         let result = kernel
             .execute_operation(artist_kernel::Operation::Read(vec![
                 artist_kernel::ReadRequest {
@@ -10029,7 +10100,7 @@ mod tests {
     async fn ast_resource_exposes_deeper_children_and_preserves_query_identity() {
         let project = tempfile::tempdir().unwrap();
         let source = project.path().join("main.rs");
-        std::fs::write(&source, "fn main() {}\nfn helper() {}\n").unwrap();
+        std::fs::write(&source, "fn main() {}\nfn caller() { main(); }\n").unwrap();
         let authored_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources/ast");
         let authored = resources::ResourcePackage::discover(&authored_root).unwrap();
@@ -10060,7 +10131,7 @@ mod tests {
 
         let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
         let projection =
-            artist_kernel::ResourceUri::parse(&format!("{file}/symbols/main/callers?limit=1"))
+            artist_kernel::ResourceUri::parse(&format!("{file}?symbols=main/callers&limit=1"))
                 .unwrap();
         let result = kernel
             .execute_operation(artist_kernel::Operation::Read(vec![
@@ -10079,8 +10150,8 @@ mod tests {
         let Ok(artist_kernel::ReadResult::Text(text)) = &values[0] else {
             panic!("AST child did not return anchored text: {values:?}");
         };
-        assert_eq!(text.uri.query(), Some("limit=1"));
-        assert!(text.lines.iter().any(|line| line.text.contains("fn main")));
+        assert_eq!(text.uri.query(), Some("symbols=main/callers&limit=1"));
+        assert!(text.lines.iter().any(|line| line.text.contains("main()")));
     }
 
     #[tokio::test]
@@ -10097,7 +10168,7 @@ mod tests {
             .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
             .await;
         let projection = artist_kernel::ResourceUri::parse(&format!(
-            "{}/symbols/",
+            "{}?symbols",
             artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap()
         ))
         .unwrap();

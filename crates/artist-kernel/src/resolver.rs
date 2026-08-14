@@ -28,6 +28,17 @@ pub fn has_projection(path: &Path) -> bool {
     })
 }
 
+/// Returns whether the URI query selects a derived projection rather than a
+/// filesystem path. Query projections are owned by resource extensions.
+pub fn has_query_projection(uri: &crate::ResourceUri) -> bool {
+    uri.query().is_some_and(|query| {
+        query.split('&').any(|item| {
+            let key = item.split_once('=').map_or(item, |(key, _)| key);
+            PROJECTIONS.contains(&key)
+        })
+    })
+}
+
 /// Canonicalizes every native path into the file URI form used internally.
 pub fn normalize(address: &ResourceAddress) -> Result<ResourceAddress, KernelError> {
     Ok(ResourceAddress::uri(crate::address::canonical_uri(
