@@ -2,7 +2,7 @@ use crate::{
     BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
     InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Pattern,
     Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri, SearchService,
-    ToolDefinition, ToolProvider, TypedHandler, Verb,
+    ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ struct Inner {
     typed_handlers: RwLock<Vec<Arc<dyn TypedHandler>>>,
     tool_providers: RwLock<Vec<Arc<dyn ToolProvider>>>,
     resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>>,
+    verbs: VerbRegistry,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -609,9 +610,22 @@ impl Kernel {
                 typed_handlers: RwLock::new(Vec::new()),
                 tool_providers: RwLock::new(Vec::new()),
                 resource_catalog_providers: RwLock::new(Vec::new()),
+                verbs: VerbRegistry::new(),
                 background: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    pub fn verb_registry(&self) -> VerbRegistry {
+        self.inner.verbs.clone()
+    }
+
+    pub fn activate_verb(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
+        self.inner.verbs.activate(definition)
+    }
+
+    pub fn active_verbs(&self) -> Result<Vec<Arc<crate::ActiveVerb>>, KernelError> {
+        self.inner.verbs.definitions()
     }
 
     /// Retain a runtime-owned background service until the last kernel clone

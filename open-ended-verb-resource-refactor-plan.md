@@ -53,6 +53,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 - [x] Define initial `VerbDefinition`: identity, model name, docs, function, source/artifact metadata.
 - [x] Define initial active verb generations and replacement/deactivation API; lease integration remains pending.
+- [x] Attach the dynamic verb registry to `Kernel` for package/runtime integration.
 - [ ] Add WIT contract/function type, extractor contract, schema adapter metadata, dependencies, and immutable invocation leases.
 - [ ] Create one package discovery/activation path for current verbs and future packages.
 - [ ] Define package metadata exports using canonical versioned identities.
