@@ -4286,22 +4286,24 @@ pub mod package {
         }
     }
 
+    static COMPONENT_ENGINE: OnceLock<wasmtime::Engine> = OnceLock::new();
+
     #[allow(deprecated)]
     pub(crate) fn component_engine() -> Result<wasmtime::Engine, ComponentError> {
-        let mut config = wasmtime::Config::new();
-        config.wasm_component_model(true);
-        config.wasm_component_model_implements(true);
-        config.async_support(true);
-        config.wasm_component_model_async(true);
-        config.epoch_interruption(true);
-        config.consume_fuel(true);
-        let engine = wasmtime::Engine::new(&config)
-            .map_err(|error| ComponentError::Load(anyhow::anyhow!(error.to_string())))?;
-        register_epoch_engine(&engine);
-        Ok(engine)
+        let engine = COMPONENT_ENGINE.get_or_init(|| {
+            let mut config = wasmtime::Config::new();
+            config.wasm_component_model(true);
+            config.wasm_component_model_implements(true);
+            config.async_support(true);
+            config.wasm_component_model_async(true);
+            config.epoch_interruption(true);
+            config.consume_fuel(true);
+            wasmtime::Engine::new(&config).expect("artist WASM engine must initialize")
+        });
+        register_epoch_engine();
+        Ok(engine.clone())
     }
 
-    static EPOCH_ENGINES: OnceLock<Mutex<Vec<wasmtime::Engine>>> = OnceLock::new();
     static EPOCH_TICKER: OnceLock<()> = OnceLock::new();
     static CARGO_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -4530,25 +4532,24 @@ pub mod package {
         Ok(None)
     }
 
-    fn register_epoch_engine(engine: &wasmtime::Engine) {
-        let engines = EPOCH_ENGINES.get_or_init(|| Mutex::new(Vec::new()));
-        engines.lock().unwrap().push(engine.clone());
+    fn register_epoch_engine() {
         EPOCH_TICKER.get_or_init(|| {
             std::thread::Builder::new()
                 .name("artist-wasm-epoch".to_owned())
                 .spawn(|| {
                     loop {
                         std::thread::sleep(Duration::from_millis(10));
-                        if let Some(engines) = EPOCH_ENGINES.get() {
-                            for engine in engines.lock().unwrap().iter() {
-                                engine.increment_epoch();
-                            }
+                        // All components share the one engine, so the ticker has
+                        // no reload-sized registry to retain forever.
+                        if let Some(engine) = COMPONENT_ENGINE.get() {
+                            engine.increment_epoch();
                         }
                     }
                 })
                 .expect("artist WASM epoch ticker must start");
         });
     }
+
     #[derive(Clone, Debug, Deserialize, PartialEq)]
     pub struct ToolFrontmatter {
         pub name: String,
@@ -4976,6 +4977,12 @@ pub mod generations {
 
         pub fn values(&self) -> Vec<Arc<T>> {
             self.read().unwrap().values().cloned().collect()
+        }
+
+        pub fn remove_where(&self, mut predicate: impl FnMut(&T) -> bool) {
+            self.write()
+                .unwrap()
+                .retain(|_, value| !predicate(value.as_ref()));
         }
     }
 
@@ -7112,6 +7119,8 @@ pub mod resources {
                         ),
                     }
                 })?;
+                Self::link_nested_standard_imports(&mut linker)?;
+                self.link_custom_imports(&mut linker)?;
                 let instance =
                     super::$module::$world::instantiate_async(&mut store, &self.component, &linker)
                         .await
@@ -7270,6 +7279,7 @@ pub mod resources {
             // implementation sees a claim-phase state with no kernel, so any
             // attempted nested call is denied rather than executed.
             Self::link_nested_standard_imports(&mut linker)?;
+            self.link_custom_imports(&mut linker)?;
             let instance =
                 super::resource_async_extension_bindings::ExtensionWorld::instantiate_async(
                     &mut store,
@@ -8070,6 +8080,46 @@ pub mod resources {
                 });
             }
         }
+        // The component type is authoritative: a package cannot hide a
+        // standard nested operation import behind stale or missing WIT.
+        let actual_imports = component
+            .component_type()
+            .imports(&engine)
+            .map(|(name, _)| name.to_owned())
+            .collect::<Vec<_>>();
+        for import in &actual_imports {
+            for verb in super::contracts::Verb::ALL {
+                if import.contains(&format!("resource/{verb}"))
+                    && !package
+                        .manifest
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == &format!("resource.{verb}"))
+                {
+                    return Err(KernelError::PermissionDenied {
+                        uri: format!("resource.{verb}"),
+                    });
+                }
+            }
+        }
+        if let Some(wit) = &package.wit {
+            let source = fs::read_to_string(wit).map_err(|error| KernelError::Handler {
+                message: format!("read resource WIT {}: {error}", wit.display()),
+            })?;
+            for verb in super::contracts::Verb::ALL {
+                let actual = actual_imports
+                    .iter()
+                    .any(|import| import.contains(&format!("resource/{verb}")));
+                let declared = source.contains(&format!("resource/{verb}"));
+                if actual != declared {
+                    return Err(KernelError::InvalidRequest {
+                        message: format!(
+                            "resource.wit/component import mismatch for {verb}: declared={declared}, actual={actual}"
+                        ),
+                    });
+                }
+            }
+        }
         let _ = options;
         Ok(())
     }
@@ -8079,6 +8129,7 @@ pub mod resources {
         files: FileHandler,
         active: super::generations::GenerationStore<ActiveResource>,
         dirty: Arc<std::sync::Mutex<std::collections::HashSet<PathBuf>>>,
+        activation_lock: Arc<std::sync::Mutex<()>>,
     }
 
     impl ResourcesHandler {
@@ -8101,6 +8152,7 @@ pub mod resources {
                     || Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
                     super::watcher::SharedWatcher::dirty_set,
                 ),
+                activation_lock: Arc::new(std::sync::Mutex::new(())),
             })
         }
 
@@ -8109,6 +8161,13 @@ pub mod resources {
             let package = match ResourcePackage::discover(package_root) {
                 Ok(package) => package,
                 Err(error) => {
+                    if !package_root.is_dir() {
+                        let _activation = self.activation_lock.lock().unwrap();
+                        self.active
+                            .remove_where(|active| active.package.root == package_root);
+                        self.dirty.lock().unwrap().remove(package_root);
+                        return Err(error);
+                    }
                     // Discovery is part of candidate activation. A malformed
                     // edit to an already-active package must leave the
                     // complete prior generation usable, just like a failed
@@ -8168,6 +8227,11 @@ pub mod resources {
                 dependencies,
             )?);
             let package_root = package.root.clone();
+            // A successful rename replaces every prior name associated with
+            // this package root, preventing ghost catalog/routing entries.
+            let _activation = self.activation_lock.lock().unwrap();
+            self.active
+                .remove_where(|active| active.package.root == package_root);
             let generation = self
                 .active
                 .next_generation(&package.manifest.name, |current| current.generation);
@@ -9345,7 +9409,7 @@ pub mod watcher {
             let relative = path.strip_prefix(root).ok()?;
             let package = relative.components().next()?.as_os_str();
             let package = root.join(package);
-            (package != *root && package.is_dir()).then_some(package)
+            (package != *root).then_some(package)
         })
     }
 }

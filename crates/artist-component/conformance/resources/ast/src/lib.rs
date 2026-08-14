@@ -19,21 +19,24 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
 }
 
 fn source_uri(uri: &str) -> Option<String> {
-    ["/symbols", "/map", "/surface", "/show/"]
-        .iter()
-        .find_map(|marker| uri.find(marker).map(|index| uri[..index].to_owned()))
+    let path = uri.split('?').next().unwrap_or(uri);
+    let (source, projection) = path.split_once("/symbols")?;
+    let boundary = projection
+        .chars()
+        .next()
+        .is_none_or(|character| character == '/');
+    (boundary && source.starts_with("file://")).then(|| source.to_owned())
 }
 
 impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         let path = request.uri.split('?').next().unwrap_or(&request.uri);
-        let recognized = path.contains("/symbols") || source_uri(path).is_some();
-        if path.contains("/symbols") && request.verb == types::Verb::Read {
-            return types::ClaimDecision::Handle;
-        }
-        if !recognized {
+        // Production file projections remain owned by artist_ast/native
+        // repository code until this proof implements the full semantics.
+        let Some(source) = source_uri(path) else {
             return types::ClaimDecision::Pass;
-        }
+        };
+        let _ = source;
         match request.verb {
             types::Verb::Read => types::ClaimDecision::Handle,
             _ => types::ClaimDecision::Reserve,
@@ -68,7 +71,11 @@ impl exports::artist::resource::read::Guest for AstResource {
                 let suffix = path.split("/symbols/").nth(1).unwrap_or_default();
                 let symbol = suffix.split('/').next().filter(|value| !value.is_empty());
                 let is_callers = suffix.split('/').any(|part| part == "callers");
-                let lines = source_text
+                let limit = target
+                    .split_once('?')
+                    .and_then(|(_, query)| query.split('&').find_map(|part| part.strip_prefix("limit=")))
+                    .and_then(|value| value.parse::<usize>().ok());
+                let mut lines = source_text
                     .lines
                     .into_iter()
                     .filter(|line| {
@@ -89,6 +96,7 @@ impl exports::artist::resource::read::Guest for AstResource {
                                 || line.text.contains("class ")
                         }
                     })
+                    .take(limit.unwrap_or(usize::MAX))
                     .collect();
                 Ok(types::ReadResult::Text(types::AnchoredText {
                     uri: target,

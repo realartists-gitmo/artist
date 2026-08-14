@@ -20,8 +20,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     kernel
         .register_typed(
             RepositoryHandler::new(root)
-                .with_context(|| format!("initialize repository handler at {}", root.display()))?
-                .without_file_symbol_projections(),
+                .with_context(|| format!("initialize repository handler at {}", root.display()))?,
         )
         .await;
     kernel
@@ -104,28 +103,28 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             std::fs::create_dir_all(root.join("wit/tool-surface-v1"))?;
             std::fs::create_dir_all(root.join("wit/tool-surface-v1/deps/resource"))?;
             std::fs::create_dir_all(root.join("wit/resource-surface"))?;
-            let manifest = include_str!(concat!(
+            let historical_manifest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/verbs/",
                 $verb,
                 "/Cargo.toml"
             ))
-            .replace(
+            .replace("wit-bindgen = \"0.60.0\"", "wit-bindgen = \"0.57.1\"");
+            let manifest = historical_manifest.replace(
                 "path = \"../../typed-guest/src/lib.rs\"",
                 "path = \"src/lib.rs\"",
             );
-            let legacy_manifest = include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/conformance/verbs/",
-                $verb,
-                "/Cargo.toml"
-            ));
+            // Exact bytes emitted by the pre-refactor seeder. These are
+            // intentionally separate from the current conformance package
+            // sources: untouched projects must migrate, customized projects
+            // must not be overwritten.
+            let legacy_manifest = historical_manifest;
             let legacy_guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../artist-component/conformance/verbs/",
-                $verb,
-                "/src/lib.rs"
-            ));
+                "/../artist-component/conformance/typed-guest/src/lib.rs"
+            ))
+            .replace("../../../wit/tool-surface-v1", "../wit/tool-surface")
+            .replace("../../../wit/tool-surface", "../wit/tool-surface");
             let guest = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../artist-component/conformance/typed-guest/src/lib.rs"
@@ -238,6 +237,36 @@ mod tests {
     use artist_kernel::Verb;
     use tempfile::tempdir;
 
+    #[test]
+    fn migrates_exact_pre_refactor_seed() {
+        let root = tempdir().unwrap();
+        let package = root.path().join("tools/read");
+        std::fs::create_dir_all(package.join("src")).unwrap();
+        let manifest = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../artist-component/conformance/verbs/read/Cargo.toml"
+        ))
+        .replace("wit-bindgen = \"0.60.0\"", "wit-bindgen = \"0.57.1\"");
+        let guest = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../artist-component/conformance/typed-guest/src/lib.rs"
+        ))
+        .replace("../../../wit/tool-surface", "../wit/tool-surface");
+        std::fs::write(package.join("Cargo.toml"), manifest).unwrap();
+        std::fs::write(package.join("src/lib.rs"), guest).unwrap();
+        seed_universal_tools(&root.path().join("tools")).unwrap();
+        assert!(
+            std::fs::read_to_string(package.join("Cargo.toml"))
+                .unwrap()
+                .contains("path = \"src/lib.rs\"")
+        );
+        assert!(
+            std::fs::read_to_string(package.join("src/lib.rs"))
+                .unwrap()
+                .contains("../wit/tool-surface-v1")
+        );
+    }
+
     #[tokio::test]
     async fn clean_project_seeds_and_activates_named_read_tool() {
         let root = tempdir().unwrap();
@@ -298,8 +327,8 @@ mod tests {
         assert!(docs.to_string().contains("artist-ast"));
         assert!(root.path().join("resources/ast/resource.wit").is_file());
 
-        // The seeded AST extension owns file symbol projections; native
-        // repository code continues to own the remaining projections.
+        // Native repository projections retain ownership of production AST
+        // semantics; the seeded extension remains available as a package.
         let projection = format!("file://{}/symbols/", ast_source.display());
         let symbols = kernel
             .execute_tool(
