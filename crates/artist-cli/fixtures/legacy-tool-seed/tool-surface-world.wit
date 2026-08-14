@@ -3,6 +3,7 @@ package artist:tool@0.1.0;
 interface types {
     type uri = string;
     type anchor = string;
+    type pattern = string;
 
     enum line-ending {
         none,
@@ -37,6 +38,7 @@ interface types {
     enum error-code {
         invalid-uri,
         invalid-input,
+        invalid-pattern,
         not-found,
         wrong-kind,
         invalid-anchor,
@@ -45,7 +47,6 @@ interface types {
         unsupported,
         permission-denied,
         conflict,
-        not-live,
         not-empty,
         aborted,
         internal,
@@ -116,14 +117,13 @@ interface types {
     }
 
     record edit-result {
-        uri: uri,
-        changed: list<anchored-text>,
+        text: anchored-text,
         diff: anchored-diff,
     }
 
     record find-request {
         roots: list<uri>,
-        query: string,
+        query: pattern,
     }
 
     variant grep-source {
@@ -132,27 +132,13 @@ interface types {
     }
 
     record grep-request {
-        pattern: string,
+        pattern: pattern,
         source: grep-source,
     }
 
     record run-request {
         uri: uri,
         args: list<string>,
-        context: execution-context,
-    }
-
-    record environment-entry {
-        name: string,
-        value: string,
-    }
-
-    record execution-context {
-        working-uri: option<uri>,
-        environment: list<environment-entry>,
-        cancellation-token: option<string>,
-        deadline-ms: option<u64>,
-        correlation-id: option<string>,
     }
 
     record send-request {
@@ -191,8 +177,6 @@ interface types {
     record poll-request {
         targets: list<poll-target>,
         until: option<poll-condition-wire>,
-        before: option<u32>,
-        after: option<u32>,
     }
 
     record poll-result {

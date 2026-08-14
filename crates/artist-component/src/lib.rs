@@ -8303,12 +8303,16 @@ pub mod resources {
                 });
             }
             let mut active = self.active.write().unwrap();
-            if let Some(existing) = active.get(&package.manifest.name)
-                && existing.package.root != package_root
-            {
-                return Err(KernelError::Conflict {
-                    uri: package.manifest.name.clone(),
-                });
+            if let Some(existing) = active.get(&package.manifest.name) {
+                if existing.package.root != package_root {
+                    return Err(KernelError::Conflict {
+                        uri: package.manifest.name.clone(),
+                    });
+                }
+                if existing.fingerprint == candidate_fingerprint {
+                    self.dirty.lock().unwrap().remove(&package_root);
+                    return Ok(existing.generation);
+                }
             }
             let generation = active
                 .get(&package.manifest.name)
