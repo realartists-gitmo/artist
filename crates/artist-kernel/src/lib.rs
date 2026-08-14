@@ -11,6 +11,7 @@ mod error;
 mod filesystem;
 mod handler;
 mod operation;
+mod process;
 mod registry;
 mod repository;
 mod request;
@@ -33,6 +34,7 @@ pub use handler::{
     ResourceCatalogEntry, ResourceCatalogProvider, ToolDefinition, ToolProvider, TypedHandler,
 };
 pub use operation::{Verb, VerbId};
+pub use process::{ProcessManager, ProcessSnapshot};
 pub use registry::Kernel;
 pub use repository::RepositoryHandler;
 pub use request::{BatchRequest, Request};

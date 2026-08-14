@@ -126,10 +126,10 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 8 — Effect-complete process resource
 
-- [ ] Add trusted direct executable-file run primitive with exact argv and no shell.
+- [x] Add trusted direct executable-file run primitive with exact argv and no shell.
 - [ ] Require a dynamic capability identity for process execution.
-- [ ] Return authoritative `process://<id>` resource URIs.
-- [ ] Integrate process read/send/poll/abort/delete with generic verb/resource routing.
+- [x] Return authoritative `process://<id>` resource URIs.
+- [x] Implement process read/send/poll/abort/delete lifecycle in `ProcessManager`; integrate with generic verb/resource routing remains pending.
 - [ ] Preserve creation context for cwd/environment; later sends cannot alter it.
 - [ ] Add helper executable and run/send/read/poll/abort/delete tests.
 - [ ] Add WASM component proof that invokes process execution through ordinary resource composition.
@@ -181,4 +181,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added generic Wasmtime invocation path with no per-verb dispatch.
 - [x] Added recursive dynamic value lowering/lifting for records, lists, tuples, options, results, variants, enums, flags, and primitives.
 - [x] Added registry-owned `DynamicVerbExecutor` dispatch without kernel-known verb names and with hot-swap generation recheck.
+- [x] Added direct executable process resources with lifecycle tests and no shell/PTY path.
 - [ ] Next slice: bind conversion to registered WIT types and replace one existing per-verb adapter.
