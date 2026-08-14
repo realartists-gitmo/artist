@@ -4,7 +4,7 @@
 //! compatibility layer. It is the seam through which verb packages become
 //! discoverable and hot-swappable without changing kernel code.
 
-use crate::{DynamicType, KernelError, VerbId};
+use crate::{DynamicType, DynamicVerbCall, DynamicVerbResult, KernelError, VerbId};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -180,6 +180,60 @@ impl VerbRegistry {
             .map(|entries| entries.get(identity).cloned())
     }
 
+    pub fn validate_call(&self, call: &DynamicVerbCall) -> Result<Arc<ActiveVerb>, KernelError> {
+        let active = self
+            .current(&call.verb)?
+            .ok_or_else(|| KernelError::UnsupportedVerb {
+                verb: call.verb.to_string(),
+                uri: "<dynamic-call>".to_owned(),
+            })?;
+        if active.definition.function != call.function {
+            return Err(KernelError::InvalidRequest {
+                message: format!(
+                    "function {} is not exported by verb {}",
+                    call.function, call.verb
+                ),
+            });
+        }
+        let input_type =
+            active
+                .definition
+                .input_type
+                .as_ref()
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: format!("verb {} has no published input contract", call.verb),
+                })?;
+        call.input.validate(input_type)?;
+        Ok(active)
+    }
+
+    pub fn validate_result(
+        &self,
+        call: &DynamicVerbCall,
+        result: &DynamicVerbResult,
+    ) -> Result<(), KernelError> {
+        if result.verb != call.verb || result.function != call.function {
+            return Err(KernelError::InvalidRequest {
+                message: "dynamic result identity does not match its call".to_owned(),
+            });
+        }
+        let active = self
+            .current(&call.verb)?
+            .ok_or_else(|| KernelError::UnsupportedVerb {
+                verb: call.verb.to_string(),
+                uri: "<dynamic-result>".to_owned(),
+            })?;
+        let output_type =
+            active
+                .definition
+                .output_type
+                .as_ref()
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: format!("verb {} has no published output contract", call.verb),
+                })?;
+        result.output.validate(output_type)
+    }
+
     pub fn definitions(&self) -> Result<Vec<Arc<ActiveVerb>>, KernelError> {
         self.entries
             .read()
@@ -234,6 +288,29 @@ mod tests {
         .definition(Path::new("."))
         .unwrap_err();
         assert!(matches!(error, KernelError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn dynamic_calls_are_checked_against_the_active_contract() {
+        let registry = VerbRegistry::new();
+        let identity = VerbId::new("example:text/uppercase@1.0.0").unwrap();
+        let definition =
+            VerbDefinition::new(identity.clone(), "uppercase", "uppercase", "Uppercase")
+                .with_contract(DynamicType::String, DynamicType::String);
+        registry.activate(definition).unwrap();
+        let call = DynamicVerbCall {
+            verb: identity.clone(),
+            function: "uppercase".into(),
+            input: crate::DynamicValue::String("hello".into()),
+        };
+        let active = registry.validate_call(&call).unwrap();
+        assert_eq!(active.generation, 1);
+        let result = DynamicVerbResult {
+            verb: identity,
+            function: "uppercase".into(),
+            output: crate::DynamicValue::String("HELLO".into()),
+        };
+        registry.validate_result(&call, &result).unwrap();
     }
 
     #[test]

@@ -66,6 +66,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 - [ ] Add `DynamicVerbCall { verb, function, typed_input }`.
 - [ ] Add `DynamicVerbResult { typed_values }`.
+- [x] Add registry-level dynamic call validation against the active function and typed input/output contracts.
 - [ ] Add verb-owned extractor execution and URI ordering.
 - [ ] Route claims using only `(VerbId, URI)` and candidate generation snapshots.
 - [ ] Preserve Pass/Handle/Reserve and multiple-owner Conflict semantics.
@@ -163,4 +164,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Added and tested the initial hot-swappable `VerbRegistry`/`VerbDefinition` skeleton.
 - [x] Added kernel-exported dynamic typed values and `DynamicVerbCall`/`DynamicVerbResult` scaffolding; legacy dispatch is not yet routed through them.
 - [x] Added name-agnostic `verb.toml` discovery with malformed identity rejection.
-- [ ] Next slice: typed dynamic invocation and package activation.
+- [x] Added contract-checked dynamic call/result validation against active generations.
+- [ ] Next slice: typed dynamic component invocation and atomic package activation.
