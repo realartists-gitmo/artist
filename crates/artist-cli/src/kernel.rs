@@ -77,12 +77,17 @@ fn seed_ast_resource(root: &Path) -> Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/conformance/resources/ast/resource.wit"
     ));
+    let lock = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../artist-component/conformance/resources/ast/Cargo.lock"
+    ));
     let shared_wit = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../artist-component/wit/resource-surface/world.wit"
     ));
     for (relative, bytes) in [
         ("Cargo.toml", manifest.as_bytes()),
+        ("Cargo.lock", lock.as_slice()),
         ("resource.md", resource_md.as_slice()),
         ("resource.wit", resource_wit.as_slice()),
         ("src/lib.rs", guest.as_bytes()),

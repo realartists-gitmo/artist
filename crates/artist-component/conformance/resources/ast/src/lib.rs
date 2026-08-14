@@ -20,28 +20,34 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
 
 fn source_uri(uri: &str) -> Option<String> {
     let path = uri.split('?').next().unwrap_or(uri);
-    let (source, projection) = path.split_once("/symbols")?;
-    let boundary = projection
-        .chars()
+    path.match_indices("/symbols")
+        .rev()
+        .filter_map(|(index, _)| {
+            let source = &path[..index];
+            let suffix = &path[index + "/symbols".len()..];
+            if !source.starts_with("file://")
+                || !suffix
+                    .chars()
+                    .next()
+                    .is_none_or(|character| character == '/')
+            {
+                return None;
+            }
+            let uri = url::Url::parse(source).ok()?;
+            let path = uri.to_file_path().ok()?;
+            std::fs::metadata(path)
+                .ok()
+                .filter(|metadata| metadata.is_file())?;
+            Some(source.to_owned())
+        })
         .next()
-        .is_none_or(|character| character == '/');
-    (boundary && source.starts_with("file://")).then(|| source.to_owned())
 }
 
 impl exports::artist::resource::extension::Guest for AstResource {
     fn claim(request: types::ClaimRequest) -> types::ClaimDecision {
         // This component is a proof only. The application disables its file
         // route, leaving native artist_ast as the production owner.
-        let Some(source) = source_uri(&request.uri) else {
-            return types::ClaimDecision::Pass;
-        };
-        let Ok(uri) = url::Url::parse(&source) else {
-            return types::ClaimDecision::Pass;
-        };
-        let Ok(path) = uri.to_file_path() else {
-            return types::ClaimDecision::Pass;
-        };
-        if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        if source_uri(&request.uri).is_none() {
             return types::ClaimDecision::Pass;
         }
         match request.verb {

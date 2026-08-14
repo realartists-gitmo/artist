@@ -10066,7 +10066,7 @@ mod tests {
     #[tokio::test]
     async fn ast_resource_reads_a_file_through_the_typed_nested_resource_path() {
         let project = tempfile::tempdir().unwrap();
-        let source = project.path().join("main.rs");
+        let source = project.path().join("hello world.rs");
         std::fs::write(&source, "fn main() {}\nstruct Marker;\n").unwrap();
         let authored_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("conformance/resources/ast");
@@ -10096,8 +10096,9 @@ mod tests {
             .register_typed_handler(resources::ResourcesHandler::new(&resource_root).unwrap())
             .await;
 
-        let file = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
-        let projection = artist_kernel::ResourceUri::parse(&format!("{file}/symbols/")).unwrap();
+        let source_uri = artist_kernel::ResourceUri::parse(&source.display().to_string()).unwrap();
+        let projection =
+            artist_kernel::ResourceUri::parse(&format!("{source_uri}/symbols/")).unwrap();
         let result = kernel
             .execute_operation(artist_kernel::Operation::Read(vec![
                 artist_kernel::ReadRequest {
