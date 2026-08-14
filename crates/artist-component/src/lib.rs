@@ -8062,6 +8062,9 @@ pub mod resources {
             &package.root.join("resource.wit"),
             &package.root.join("Cargo.toml"),
             &package.root.join("Cargo.lock"),
+            &package.root.join("../wit/resource-surface/world.wit"),
+            &package.root.join("../../wit/resource-surface/world.wit"),
+            &package.root.join("../../../wit/resource-surface/world.wit"),
         ] {
             super::package::hash_path(&mut hasher, path)
                 .map_err(|message| KernelError::Handler { message })?;
