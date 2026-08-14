@@ -81,7 +81,11 @@ impl exports::artist::resource::read::Guest for AstResource {
                     return Err(error("AST source is not text", Some(target)));
                 };
                 let path = target.split('?').next().unwrap_or(&target);
-                let suffix = path.split("/symbols/").nth(1).unwrap_or_default();
+                let suffix = path
+                    .strip_prefix(&source)
+                    .and_then(|rest| rest.strip_prefix("/symbols"))
+                    .unwrap_or_default()
+                    .trim_start_matches('/');
                 let symbol = suffix.split('/').next().filter(|value| !value.is_empty());
                 let is_callers = suffix.split('/').any(|part| part == "callers");
                 let limit = target
