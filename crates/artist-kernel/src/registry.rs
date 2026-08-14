@@ -654,6 +654,10 @@ impl Kernel {
         self.inner.verbs.definitions()
     }
 
+    pub fn active_verb_tools(&self) -> Result<Vec<crate::VerbToolDescriptor>, KernelError> {
+        self.inner.verbs.tool_descriptors()
+    }
+
     /// Retain a runtime-owned background service until the last kernel clone
     /// is dropped. Services can implement `Drop` to stop and join their
     /// worker cleanly; this is intentionally generic so the kernel does not

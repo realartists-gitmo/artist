@@ -132,6 +132,14 @@ impl VerbDefinition {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerbToolDescriptor {
+    pub identity: VerbId,
+    pub name: String,
+    pub description: String,
+    pub docs: Vec<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ActiveVerb {
     pub definition: VerbDefinition,
@@ -355,6 +363,19 @@ impl VerbRegistry {
         result.output.validate(output_type)
     }
 
+    pub fn tool_descriptors(&self) -> Result<Vec<VerbToolDescriptor>, KernelError> {
+        Ok(self
+            .definitions()?
+            .into_iter()
+            .map(|active| VerbToolDescriptor {
+                identity: active.definition.identity.clone(),
+                name: active.definition.model_name.clone(),
+                description: active.definition.description.clone(),
+                docs: active.definition.docs.clone(),
+            })
+            .collect())
+    }
+
     pub fn definitions(&self) -> Result<Vec<Arc<ActiveVerb>>, KernelError> {
         self.entries
             .read()
@@ -454,6 +475,21 @@ mod tests {
             output: crate::DynamicValue::String("HELLO".into()),
         };
         registry.validate_result(&call, &result).unwrap();
+    }
+
+    #[test]
+    fn active_tool_descriptors_are_derived_from_dynamic_packages() {
+        let registry = VerbRegistry::new();
+        let mut definition = definition("uppercase");
+        definition.docs.push("uppercase.md".into());
+        registry.activate(definition).unwrap();
+        let tools = registry.tool_descriptors().unwrap();
+        assert_eq!(tools[0].name, "uppercase");
+        assert_eq!(tools[0].docs, vec!["uppercase.md"]);
+        assert_eq!(
+            tools[0].identity.to_string(),
+            "example:uppercase/uppercase@1.0.0"
+        );
     }
 
     #[test]

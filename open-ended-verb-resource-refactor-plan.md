@@ -119,7 +119,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 
 ## Slice 7 — Dynamic model tool adapter
 
-- [ ] Generate model-facing tool definitions from active verb packages.
+- [x] Expose typed model-tool descriptors derived from active verb package metadata.
 - [ ] Generate/introspect model schemas from registered WIT contracts.
 - [ ] Keep JSON conversion exclusively in the external model adapter.
 - [ ] Add dynamic tool add/edit/remove/hot-swap behavior without restart.

@@ -54,5 +54,5 @@ pub use typed::*;
 pub use uri::ResourceUri;
 pub use verbs::{
     ActiveVerb, DynamicVerbExecutor, VerbDefinition, VerbLease, VerbPackageManifest, VerbRegistry,
-    discover_verb_packages,
+    VerbToolDescriptor, discover_verb_packages,
 };
