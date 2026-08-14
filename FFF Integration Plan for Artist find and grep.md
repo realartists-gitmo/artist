@@ -1540,9 +1540,9 @@ For `find`:
 Search resource names under one or more roots.
 
 Patterns:
-- bare text or lit:TEXT — literal
+- bare text or fz:TEXT — fuzzy
+- lit:TEXT — literal
 - re:REGEX — regex
-- fz:TEXT — fuzzy
 ```
 
 For `grep`:
@@ -1551,9 +1551,9 @@ For `grep`:
 Search textual resource contents.
 
 Patterns:
-- bare text or lit:TEXT — literal
+- bare text or fz:TEXT — fuzzy
+- lit:TEXT — literal
 - re:REGEX — regex
-- fz:TEXT — fuzzy
 ```
 
 Do not expose a mode enum.

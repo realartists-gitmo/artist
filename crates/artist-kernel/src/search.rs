@@ -32,7 +32,7 @@ impl Pattern {
         } else if let Some(value) = input.strip_prefix("fz:") {
             ("fuzzy", value)
         } else {
-            ("literal", input)
+            ("fuzzy", input)
         };
         if payload.is_empty() {
             return Err(KernelError::InvalidPattern {
@@ -397,11 +397,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     #[test]
-    fn parses_artist_patterns_without_fff_inference() {
-        assert_eq!(
-            Pattern::parse("foo").unwrap(),
-            Pattern::Literal("foo".into())
-        );
+    fn parses_artist_patterns_with_fuzzy_default() {
+        assert_eq!(Pattern::parse("foo").unwrap(), Pattern::Fuzzy("foo".into()));
         assert_eq!(
             Pattern::parse("lit:re:foo").unwrap(),
             Pattern::Literal("re:foo".into())
@@ -420,11 +417,11 @@ mod tests {
         );
         assert_eq!(
             Pattern::parse("*.rs").unwrap(),
-            Pattern::Literal("*.rs".into())
+            Pattern::Fuzzy("*.rs".into())
         );
         assert_eq!(
             Pattern::parse("git:modified").unwrap(),
-            Pattern::Literal("git:modified".into())
+            Pattern::Fuzzy("git:modified".into())
         );
         for input in ["", "lit:", "re:", "fz:"] {
             assert!(matches!(

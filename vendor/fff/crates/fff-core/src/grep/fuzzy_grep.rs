@@ -77,6 +77,11 @@ pub fn fuzzy_line_matches(pattern: &str, line: &str) -> bool {
     if pattern.is_empty() || line.is_empty() {
         return false;
     }
+    // Exact containment is always a valid fuzzy match and avoids sending the
+    // common case through the score-order acceptance heuristics.
+    if line.contains(pattern) {
+        return true;
+    }
     let max_typos = (pattern.len() / 3).min(2);
     let scoring = neo_frizbee::Scoring {
         exact_match_bonus: 100,
@@ -107,7 +112,9 @@ pub fn fuzzy_line_matches(pattern: &str, line: &str) -> bool {
     let Some((&first, &last)) = indices.indices.first().zip(indices.indices.last()) else {
         return false;
     };
-    let span = last - first + 1;
+    // neo-frizbee may return matched indices in score order rather than
+    // source order. Normalize the endpoints before computing the span.
+    let span = last.abs_diff(first) + 1;
     if span > needle_len * 3 {
         return false;
     }
@@ -404,8 +411,9 @@ pub(super) fn fuzzy_grep_search<'a>(
                         let indices = &match_indices.indices;
 
                         if let (Some(&first), Some(&last)) = (indices.first(), indices.last()) {
-                            // reject widely scattered matches
-                            let span = last - first + 1;
+                            // reject widely scattered matches; indices may be
+                            // returned in score order rather than source order.
+                            let span = last.abs_diff(first) + 1;
                             if span > max_match_span {
                                 continue;
                             }

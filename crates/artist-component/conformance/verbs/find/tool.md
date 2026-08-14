@@ -1,6 +1,6 @@
 ---
 name: artist-tool-find
-description: "Search resource names under roots. Patterns: bare text or lit:TEXT are literal; re:REGEX is regex; fz:TEXT is fuzzy."
+description: "Search resource names under roots. Patterns: bare text or fz:TEXT are fuzzy; lit:TEXT is literal; re:REGEX is regex."
 version: 0.1.0
 contract: artist:tool:find@1
 capabilities:
