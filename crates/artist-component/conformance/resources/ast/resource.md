@@ -10,13 +10,18 @@ exports:
 capabilities:
   - resource.read
 docs:
-  - uri: file://<path>/symbols/
+  - uri: file://<path>?symbols=
     summary: Symbol projection for a source file
     verbs: [read]
-  - uri: file://<path>/symbols/<symbol>/callers
+    query:
+      - name: symbols
+        summary: AST projection path
+  - uri: file://<path>?symbols=<symbol>/callers
     summary: Callers of a symbol
     verbs: [read]
     query:
+      - name: symbols
+        summary: AST projection path
       - name: limit
         summary: Maximum caller rows
 ---

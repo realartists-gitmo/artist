@@ -1,6 +1,6 @@
 use crate::{
-    AnchoredText, InvocationContext, InvocationScope, KernelError, Operation, OperationResult,
-    Request, ResourceAddress, Verb,
+    InvocationContext, InvocationScope, KernelError, Operation, OperationResult, Request,
+    ResourceAddress, Verb,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,17 +87,6 @@ pub trait TypedHandler: Send + Sync {
         scope: InvocationScope,
     ) -> BoxFuture<'a, Result<OperationResult, KernelError>> {
         self.execute_typed(operation, host, scope.context)
-    }
-
-    /// Direct supplied-text grep hook. This deliberately bypasses URI claim
-    /// arbitration: text already exists in the invocation and is not a
-    /// resource provider operation.
-    fn execute_text_grep<'a>(
-        &'a self,
-        _pattern: &'a str,
-        _texts: Vec<AnchoredText>,
-    ) -> Option<BoxFuture<'a, Result<Vec<AnchoredText>, KernelError>>> {
-        None
     }
 }
 

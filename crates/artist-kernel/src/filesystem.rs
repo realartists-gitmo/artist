@@ -885,23 +885,13 @@ impl TypedHandler for FileHandler {
                             }
                             matches
                         }
-                        crate::GrepSource::Text(text) => self.search.grep_text(&text, &pattern)?,
+                        crate::GrepSource::Text(text) => SearchService::grep_text(&text, &pattern)?,
                     };
                     Ok(OperationResult::Grep(Ok(matches)))
                 }
                 _ => unreachable!(),
             }
         })
-    }
-
-    fn execute_text_grep<'a>(
-        &'a self,
-        pattern: &'a str,
-        texts: Vec<AnchoredText>,
-    ) -> Option<BoxFuture<'a, Result<Vec<AnchoredText>, KernelError>>> {
-        Some(Box::pin(async move {
-            self.search.grep_text(&texts, &Pattern::parse(pattern)?)
-        }))
     }
 }
 

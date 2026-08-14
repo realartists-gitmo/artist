@@ -8205,7 +8205,17 @@ pub mod resources {
         }
 
         pub fn activate(&self, package_root: impl AsRef<Path>) -> Result<u64, KernelError> {
-            let package_root = package_root.as_ref();
+            self.activate_with_visiting(
+                package_root.as_ref(),
+                &mut std::collections::HashSet::new(),
+            )
+        }
+
+        fn activate_with_visiting(
+            &self,
+            package_root: &Path,
+            visiting: &mut std::collections::HashSet<String>,
+        ) -> Result<u64, KernelError> {
             let package = match ResourcePackage::discover(package_root) {
                 Ok(package) => package,
                 Err(error) => {
@@ -8258,6 +8268,7 @@ pub mod resources {
                 granted_capabilities: package.manifest.capabilities.clone(),
                 ..Default::default()
             };
+            let candidate_fingerprint = fingerprint(&package, &options)?;
             let build = match package.build(&options) {
                 Ok(build) => build,
                 Err(error) => {
@@ -8270,11 +8281,7 @@ pub mod resources {
             let bytes = fs::read(&build.artifact).map_err(|error| KernelError::Handler {
                 message: format!("read resource artifact: {error}"),
             })?;
-            let dependencies = self.resource_dependencies(
-                &package,
-                &bytes,
-                &mut std::collections::HashSet::new(),
-            )?;
+            let dependencies = self.resource_dependencies(&package, &bytes, visiting)?;
             let host = Arc::new(ResourceComponentHost::new(
                 &bytes,
                 package.manifest.capabilities.clone(),
@@ -8293,6 +8300,13 @@ pub mod resources {
             };
             let _activation = lock.lock().unwrap();
             let _publication = self.publication_lock.lock().unwrap();
+            let current_package = ResourcePackage::discover(&package_root)?;
+            let current_fingerprint = fingerprint(&current_package, &options)?;
+            if current_fingerprint != candidate_fingerprint {
+                return Err(KernelError::Conflict {
+                    uri: package_root.display().to_string(),
+                });
+            }
             let mut active = self.active.write().unwrap();
             if let Some(existing) = active.get(&package.manifest.name)
                 && existing.package.root != package_root
@@ -8381,7 +8395,7 @@ pub mod resources {
                     // top-level edit. A failed rebuild leaves the prior
                     // generation available, while a successful one becomes
                     // the generation pinned into this activation.
-                    let _ = self.activate(&package.root);
+                    self.activate_with_visiting(&package.root, visiting)?;
                     self.active
                         .read()
                         .unwrap()
@@ -8397,7 +8411,7 @@ pub mod resources {
                 let (dependency_bytes, dependency_package) = if let Some(active) = active {
                     (active.artifact.clone(), active.package.clone())
                 } else {
-                    self.activate(&package.root)?;
+                    self.activate_with_visiting(&package.root, visiting)?;
                     let active = self
                         .active
                         .read()
@@ -10001,7 +10015,7 @@ mod tests {
             catalog[0]
                 .docs
                 .iter()
-                .any(|doc| doc.uri == "file://<path>/symbols/")
+                .any(|doc| doc.uri == "file://<path>?symbols=")
         );
     }
 

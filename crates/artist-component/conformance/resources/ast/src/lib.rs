@@ -19,13 +19,11 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
 }
 
 fn source_uri(uri: &str) -> Option<String> {
-    let path = uri.split('?').next().unwrap_or(uri);
-    let (source, projection) = path.split_once("/symbols")?;
-    let boundary = projection
-        .chars()
-        .next()
-        .is_none_or(|character| character == '/');
-    (boundary && source.starts_with("file://")).then(|| source.to_owned())
+    let (source, query) = uri.split_once('?')?;
+    let has_symbols = query
+        .split('&')
+        .any(|part| part.strip_prefix("symbols=").is_some());
+    (has_symbols && source.starts_with("file://")).then(|| source.to_owned())
 }
 
 impl exports::artist::resource::extension::Guest for AstResource {
@@ -65,8 +63,12 @@ impl exports::artist::resource::read::Guest for AstResource {
                 let types::ReadResult::Text(source_text) = source_text else {
                     return Err(error("AST source is not text", Some(target)));
                 };
-                let path = target.split('?').next().unwrap_or(&target);
-                let suffix = path.split("/symbols/").nth(1).unwrap_or_default();
+                let suffix = target
+                    .split_once('?')
+                    .and_then(|(_, query)| {
+                        query.split('&').find_map(|part| part.strip_prefix("symbols="))
+                    })
+                    .unwrap_or_default();
                 let symbol = suffix.split('/').next().filter(|value| !value.is_empty());
                 let is_callers = suffix.split('/').any(|part| part == "callers");
                 let limit = target

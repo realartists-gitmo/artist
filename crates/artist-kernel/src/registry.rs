@@ -1,8 +1,8 @@
 use crate::{
     BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
-    InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Request,
-    ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri, ToolDefinition, ToolProvider,
-    TypedHandler, Verb,
+    InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Pattern,
+    Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri, SearchService,
+    ToolDefinition, ToolProvider, TypedHandler, Verb,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -1040,16 +1040,10 @@ impl Kernel {
                 Ok(OperationResult::Grep(Ok(text)))
             }
             crate::GrepSource::Text(text) => {
-                for handler in handlers {
-                    if let Some(result) = handler.execute_text_grep(&request.pattern, text.clone())
-                    {
-                        return Ok(OperationResult::Grep(result.await));
-                    }
-                }
-                Err(KernelError::UnsupportedVerb {
-                    verb: "grep".to_owned(),
-                    uri: "<supplied-text>".to_owned(),
-                })
+                let pattern = Pattern::parse(&request.pattern)?;
+                Ok(OperationResult::Grep(SearchService::grep_text(
+                    &text, &pattern,
+                )))
             }
         }
     }

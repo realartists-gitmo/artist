@@ -321,7 +321,6 @@ impl SearchService {
     }
 
     pub fn grep_text(
-        &self,
         texts: &[AnchoredText],
         pattern: &Pattern,
     ) -> Result<Vec<AnchoredText>, KernelError> {
