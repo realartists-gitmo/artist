@@ -233,6 +233,13 @@ impl VerbRegistry {
         definitions: Vec<VerbDefinition>,
     ) -> Result<Vec<u64>, KernelError> {
         let mut seen = std::collections::BTreeSet::new();
+        let desired = definitions
+            .iter()
+            .map(|definition| definition.identity.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let active = self.entries.read().map_err(|_| KernelError::Handler {
+            message: "verb registry lock poisoned".to_owned(),
+        })?;
         for definition in &definitions {
             if !seen.insert(definition.identity.clone()) {
                 return Err(KernelError::Conflict {
@@ -250,6 +257,13 @@ impl VerbRegistry {
                     ),
                 });
             }
+            for dependency in &definition.dependencies {
+                if !desired.contains(dependency) && !active.contains_key(dependency) {
+                    return Err(KernelError::NotFound {
+                        uri: format!("verb://dependency/{dependency}"),
+                    });
+                }
+            }
             if let Some(artifact) = &definition.artifact {
                 if !artifact.is_file() {
                     return Err(KernelError::NotFound {
@@ -258,6 +272,7 @@ impl VerbRegistry {
                 }
             }
         }
+        drop(active);
 
         let mut entries = self.entries.write().map_err(|_| KernelError::Handler {
             message: "verb registry lock poisoned".to_owned(),
@@ -534,6 +549,20 @@ mod tests {
             tools[0].identity.to_string(),
             "example:uppercase/uppercase@1.0.0"
         );
+    }
+
+    #[test]
+    fn activation_rejects_missing_dynamic_dependencies() {
+        let registry = VerbRegistry::new();
+        let mut definition = definition("dependent");
+        definition
+            .dependencies
+            .push(VerbId::new("example:missing/missing@1.0.0").unwrap());
+        assert!(matches!(
+            registry.activate(definition),
+            Err(KernelError::NotFound { .. })
+        ));
+        assert!(registry.definitions().unwrap().is_empty());
     }
 
     #[test]
