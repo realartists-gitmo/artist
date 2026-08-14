@@ -70,7 +70,7 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [ ] Add `DynamicVerbCall { verb, function, typed_input }`.
 - [ ] Add `DynamicVerbResult { typed_values }`.
 - [x] Add registry-level dynamic call validation against the active function and typed input/output contracts.
-- [ ] Add verb-owned extractor execution and URI ordering.
+- [x] Add verb-owned dynamic extractor execution and ordered URI output.
 - [ ] Route claims using only `(VerbId, URI)` and candidate generation snapshots.
 - [ ] Preserve Pass/Handle/Reserve and multiple-owner Conflict semantics.
 - [ ] Pin selected resource generations before invocation.

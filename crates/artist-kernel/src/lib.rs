@@ -17,6 +17,7 @@ mod repository;
 mod request;
 mod resolver;
 mod result;
+mod routing;
 mod search;
 mod session;
 mod structure;
@@ -40,6 +41,7 @@ pub use repository::RepositoryHandler;
 pub use request::{BatchRequest, Request};
 pub use resolver::{is_file_uri, normalize};
 pub use result::{BatchResult, ItemResult};
+pub use routing::{DynamicRouteExtractor, RouteRegistry};
 pub use search::{Pattern, SearchService};
 pub use session::SessionHandler;
 pub use structure::{

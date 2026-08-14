@@ -2,7 +2,8 @@ use crate::{
     BatchRequest, BatchResult, ClaimDecision, Handler, HandlerDescriptor, InvocationContext,
     InvocationScope, ItemResult, KernelError, KernelHandle, Operation, OperationResult, Pattern,
     ProcessManager, Request, ResourceCatalogEntry, ResourceCatalogProvider, ResourceUri,
-    SearchService, ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition, VerbRegistry,
+    RouteRegistry, SearchService, ToolDefinition, ToolProvider, TypedHandler, Verb, VerbDefinition,
+    VerbRegistry,
 };
 use std::any::Any;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ struct Inner {
     resource_catalog_providers: RwLock<Vec<Arc<dyn ResourceCatalogProvider>>>,
     verbs: VerbRegistry,
     processes: ProcessManager,
+    routes: RouteRegistry,
     background: Mutex<Vec<Box<dyn Any + Send>>>,
 }
 
@@ -613,6 +615,7 @@ impl Kernel {
                 resource_catalog_providers: RwLock::new(Vec::new()),
                 verbs: VerbRegistry::new(),
                 processes: ProcessManager::new(),
+                routes: RouteRegistry::default(),
                 background: Mutex::new(Vec::new()),
             }),
         }
@@ -624,6 +627,10 @@ impl Kernel {
 
     pub fn process_manager(&self) -> ProcessManager {
         self.inner.processes.clone()
+    }
+
+    pub fn route_registry(&self) -> RouteRegistry {
+        self.inner.routes.clone()
     }
 
     pub fn activate_verb(&self, definition: VerbDefinition) -> Result<u64, KernelError> {
