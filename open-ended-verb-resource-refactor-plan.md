@@ -46,8 +46,9 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Add canonical `VerbId` in the kernel with parse, canonical display, equality, and version validation.
 - [ ] Move shared resource data into a small stable WIT package: URI, anchors, anchored text, line endings, errors, claim decision, verb identity.
 - [ ] Remove the shared package's static ten-verb interfaces and `Verb::ALL` references from new code.
-- [ ] Define dynamic `WitType`/`WitValue`/function signature abstractions and exact validation rules.
-- [ ] Add tests for canonical identity, incompatible versions, and value/type validation.
+- [x] Define initial dynamic `DynamicType`/`DynamicValue`/function call/result abstractions and exact recursive validation rules.
+- [x] Add tests for nested record/list validation and rejection without JSON coercion.
+- [ ] Expand exact Wasmtime Component Model mapping and wire function signatures into activation.
 
 ## Slice 2 — Generic verb package registry
 
@@ -159,4 +160,5 @@ This document is the durable implementation ledger. Update checkboxes and notes 
 - [x] Baseline inventory recorded.
 - [x] Added and tested exported canonical `VerbId` as the first dynamic-identity seam; the legacy enum remains temporarily during migration.
 - [x] Added and tested the initial hot-swappable `VerbRegistry`/`VerbDefinition` skeleton.
-- [ ] Next slice: dynamic WIT value/type representation and registry package discovery.
+- [x] Added kernel-exported dynamic typed values and `DynamicVerbCall`/`DynamicVerbResult` scaffolding; legacy dispatch is not yet routed through them.
+- [ ] Next slice: package discovery and typed dynamic invocation.

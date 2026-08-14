@@ -6,6 +6,7 @@
 
 mod address;
 mod anchors;
+mod dynamic;
 mod error;
 mod filesystem;
 mod handler;
@@ -24,6 +25,7 @@ mod verbs;
 
 pub use address::ResourceAddress;
 pub use anchors::{AddressedItem, Anchor, AnchorError, AnchorInput, AnchorSet};
+pub use dynamic::{DynamicType, DynamicValue, DynamicVerbCall, DynamicVerbResult};
 pub use error::KernelError;
 pub use filesystem::FileHandler;
 pub use handler::{

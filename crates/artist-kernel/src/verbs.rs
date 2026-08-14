@@ -4,7 +4,7 @@
 //! compatibility layer. It is the seam through which verb packages become
 //! discoverable and hot-swappable without changing kernel code.
 
-use crate::{KernelError, VerbId};
+use crate::{DynamicType, KernelError, VerbId};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +16,10 @@ pub struct VerbDefinition {
     pub docs: Vec<String>,
     pub source: Option<PathBuf>,
     pub artifact: Option<PathBuf>,
+    /// The typed function contract. Optional only while compatibility packages
+    /// are being migrated; dynamically invokable packages must provide both.
+    pub input_type: Option<DynamicType>,
+    pub output_type: Option<DynamicType>,
 }
 
 impl VerbDefinition {
@@ -33,7 +37,15 @@ impl VerbDefinition {
             docs: Vec::new(),
             source: None,
             artifact: None,
+            input_type: None,
+            output_type: None,
         }
+    }
+
+    pub fn with_contract(mut self, input: DynamicType, output: DynamicType) -> Self {
+        self.input_type = Some(input);
+        self.output_type = Some(output);
+        self
     }
 }
 
