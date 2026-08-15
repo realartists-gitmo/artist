@@ -27,7 +27,13 @@ fn discovered_tool_package_projects_to_a_wit_typed_verb_definition() {
         "example:tool/echo@1.0.0"
     );
     assert_eq!(definitions[0].input_type, Some(DynamicType::String));
-    assert_eq!(definitions[0].output_type, Some(DynamicType::String));
+    assert_eq!(
+        definitions[0].output_type,
+        Some(DynamicType::Result {
+            ok: Some(Box::new(DynamicType::String)),
+            err: Some(Box::new(DynamicType::String)),
+        })
+    );
     assert_eq!(definitions[0].extractor.as_deref(), Some("tool-wit"));
     assert_eq!(definitions[0].schema.as_deref(), Some("tool-frontmatter"));
 }

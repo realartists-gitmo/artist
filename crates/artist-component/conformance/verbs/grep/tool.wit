@@ -6,4 +6,4 @@ interface grep {
     grep: func(requests: list<grep-request>) -> list<result<grep-response, error>>;
     observe: func(response: result<grep-response, error>) -> string;
 }
-world tool-world { export grep; }
+world tool-world { import artist:%resource/host@1.0.0; export grep; }

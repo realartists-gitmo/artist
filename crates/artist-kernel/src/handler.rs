@@ -1,4 +1,5 @@
 use crate::{InvocationContext, InvocationScope, KernelError};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -88,14 +89,10 @@ pub trait ToolProvider: Send + Sync {
         scope: InvocationScope,
     ) -> BoxFuture<'a, Vec<Result<ToolModelResult, KernelError>>> {
         Box::pin(async move {
-            let mut results = Vec::with_capacity(args.len());
-            for arg in args {
-                results.push(
-                    self.execute_tool_for_model_result(name, arg, host.clone(), scope.child())
-                        .await,
-                );
-            }
-            results
+            join_all(args.into_iter().map(|arg| {
+                self.execute_tool_for_model_result(name, arg, host.clone(), scope.child())
+            }))
+            .await
         })
     }
 
@@ -107,14 +104,11 @@ pub trait ToolProvider: Send + Sync {
         scope: InvocationScope,
     ) -> BoxFuture<'a, Vec<Result<crate::DynamicValue, KernelError>>> {
         Box::pin(async move {
-            let mut results = Vec::with_capacity(args.len());
-            for arg in args {
-                results.push(
-                    self.execute_tool_for_model(name, arg, host.clone(), scope.child())
-                        .await,
-                );
-            }
-            results
+            join_all(
+                args.into_iter()
+                    .map(|arg| self.execute_tool_for_model(name, arg, host.clone(), scope.child())),
+            )
+            .await
         })
     }
 
@@ -221,6 +215,18 @@ pub struct KernelHandle {
             + Send
             + Sync,
     >,
+    universal_dispatch: Option<
+        Arc<
+            dyn Fn(
+                    String,
+                    crate::DynamicValue,
+                    InvocationScope,
+                )
+                    -> BoxFuture<'static, Result<Vec<crate::DynamicResourceResult>, KernelError>>
+                + Send
+                + Sync,
+        >,
+    >,
 }
 
 impl KernelHandle {
@@ -295,7 +301,25 @@ impl KernelHandle {
             dynamic_dispatch,
             direct_dynamic_dispatch,
             direct_dynamic_batch_dispatch,
+            universal_dispatch: None,
         }
+    }
+
+    pub(crate) fn with_universal_dispatch(
+        mut self,
+        dispatch: Arc<
+            dyn Fn(
+                    String,
+                    crate::DynamicValue,
+                    InvocationScope,
+                )
+                    -> BoxFuture<'static, Result<Vec<crate::DynamicResourceResult>, KernelError>>
+                + Send
+                + Sync,
+        >,
+    ) -> Self {
+        self.universal_dispatch = Some(dispatch);
+        self
     }
 
     pub fn execute_dynamic_resources(
@@ -311,6 +335,22 @@ impl KernelHandle {
         scope: InvocationScope,
     ) -> BoxFuture<'static, Result<Vec<crate::DynamicResourceResult>, KernelError>> {
         (self.dynamic_dispatch)(call, scope)
+    }
+
+    pub fn execute_universal_with_scope(
+        &self,
+        function: String,
+        input: crate::DynamicValue,
+        scope: InvocationScope,
+    ) -> BoxFuture<'static, Result<Vec<crate::DynamicResourceResult>, KernelError>> {
+        match &self.universal_dispatch {
+            Some(dispatch) => dispatch(function, input, scope),
+            None => Box::pin(async {
+                Err(KernelError::Handler {
+                    message: "kernel handle does not support universal dispatch".to_owned(),
+                })
+            }),
+        }
     }
 
     /// Invoke one provider directly through the open resource ABI. This is a

@@ -6,4 +6,4 @@ interface run {
     run: func(requests: list<run-request>) -> list<result<run-response, error>>;
     observe: func(response: result<run-response, error>) -> string;
 }
-world tool-world { export run; }
+world tool-world { import artist:%resource/host@1.0.0; export run; }

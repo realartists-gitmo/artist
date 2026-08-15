@@ -116,6 +116,77 @@ impl Kernel {
         self.inner.verbs.definitions()
     }
 
+    /// Resolve an open universal function against the active verb catalog and
+    /// claim registry. Resource schemes are deliberately opaque here: the
+    /// provider that claims `(function, uri)` determines the implementation.
+    pub fn resolve_resource_verb(
+        &self,
+        function: &str,
+        uri: &crate::ResourceUri,
+    ) -> Result<crate::VerbId, KernelError> {
+        let candidates = self
+            .active_verbs()?
+            .into_iter()
+            .filter(|active| active.definition.function == function)
+            .filter(|active| {
+                matches!(
+                    self.inner
+                        .claims
+                        .arbitrate(&active.definition.identity, uri),
+                    Ok(crate::ClaimDecision::Handle)
+                )
+            })
+            .map(|active| active.definition.identity.clone())
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [verb] => Ok(verb.clone()),
+            [] => Err(crate::KernelError::UnsupportedVerb {
+                verb: function.to_owned(),
+                uri: uri.to_string(),
+            }),
+            _ => Err(crate::KernelError::Conflict {
+                uri: uri.to_string(),
+            }),
+        }
+    }
+
+    pub async fn execute_universal_function_with_scope(
+        &self,
+        function: String,
+        uri: crate::ResourceUri,
+        input: crate::DynamicValue,
+        scope: crate::InvocationScope,
+    ) -> Result<Vec<crate::DynamicResourceResult>, KernelError> {
+        let verb = self.resolve_resource_verb(&function, &uri)?;
+        let invocation = self.inner.invocations.begin(input.clone());
+        let result = match self
+            .inner
+            .resources
+            .invoke_with_host(&verb, &uri, input, self.handle(), scope)
+            .await
+        {
+            Ok(result) => {
+                let _ = self.inner.invocations.complete(
+                    &invocation.uri,
+                    Ok(result.output.clone()),
+                    "",
+                    "",
+                );
+                result
+            }
+            Err(error) => {
+                let _ = self.inner.invocations.complete(
+                    &invocation.uri,
+                    Err(error.clone()),
+                    "",
+                    error.to_string(),
+                );
+                return Err(error);
+            }
+        };
+        Ok(vec![crate::DynamicResourceResult { uri, result }])
+    }
+
     pub fn active_verb_tools(&self) -> Result<Vec<crate::VerbToolDescriptor>, KernelError> {
         self.inner.verbs.tool_descriptors()
     }
@@ -623,6 +694,7 @@ impl Kernel {
         let dynamic_kernel = self.clone();
         let direct_dynamic_kernel = self.clone();
         let direct_dynamic_batch_kernel = direct_dynamic_kernel.clone();
+        let universal_kernel = self.clone();
         KernelHandle::with_dispatch(
             Arc::new(move |call, scope| {
                 let kernel = dynamic_kernel.clone();
@@ -662,5 +734,31 @@ impl Kernel {
                 })
             }),
         )
+        .with_universal_dispatch(Arc::new(move |function, input, scope| {
+            let kernel = universal_kernel.clone();
+            Box::pin(async move {
+                let uri = match &input {
+                    crate::DynamicValue::Record(fields) => fields
+                        .get("uri")
+                        .or_else(|| fields.get("root"))
+                        .and_then(|value| match value {
+                            crate::DynamicValue::ResourceUri(uri) => Some(uri.clone()),
+                            crate::DynamicValue::String(uri) => crate::ResourceUri::parse(uri).ok(),
+                            _ => None,
+                        })
+                        .ok_or_else(|| crate::KernelError::InvalidRequest {
+                            message: "universal adapter input has no URI".to_owned(),
+                        })?,
+                    _ => {
+                        return Err(crate::KernelError::InvalidRequest {
+                            message: "universal adapter input is not a record".to_owned(),
+                        });
+                    }
+                };
+                kernel
+                    .execute_universal_function_with_scope(function, uri, input, scope)
+                    .await
+            })
+        }))
     }
 }

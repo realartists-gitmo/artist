@@ -6,4 +6,4 @@ interface delete {
     delete: func(requests: list<uri-request>) -> list<result<uri-response, error>>;
     observe: func(response: result<uri-response, error>) -> string;
 }
-world tool-world { export delete; }
+world tool-world { import artist:%resource/host@1.0.0; export delete; }

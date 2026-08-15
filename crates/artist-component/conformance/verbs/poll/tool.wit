@@ -7,4 +7,4 @@ interface poll {
     poll: func(requests: list<poll-request>) -> list<result<poll-response, error>>;
     observe: func(response: result<poll-response, error>) -> string;
 }
-world tool-world { export poll; }
+world tool-world { import artist:%resource/host@1.0.0; export poll; }

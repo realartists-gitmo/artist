@@ -203,9 +203,10 @@ pub fn dynamic_type_from_wit(
     }
 }
 
-/// Parse a WIT source file and derive the scalar item contract for a canonical
-/// batch function. The outer list/result shape is validated here and is not
-/// exposed as the model-facing input shape.
+/// Parse a WIT source file and derive the scalar request and scalar item
+/// contract for a canonical batch function. The outer list shape is removed,
+/// but the item `result<Response, Error>` remains authoritative: it is the
+/// value returned on stdout and consumed by the package observer.
 pub fn dynamic_contract_from_wit(
     path: &Path,
     interface_name: &str,
@@ -254,12 +255,12 @@ pub fn dynamic_contract_from_wit(
         }
     };
     let batch_output = dynamic_type_from_wit(&resolve, output)?;
-    let (scalar_output, error_output) = match batch_output {
+    let scalar_item = match batch_output {
         DynamicType::List(inner) => match *inner {
-            DynamicType::Result {
-                ok: Some(ok),
-                err: Some(err),
-            } => (*ok, *err),
+            item @ DynamicType::Result {
+                ok: Some(_),
+                err: Some(_),
+            } => item,
             _ => {
                 return Err(KernelError::InvalidRequest {
                     message: format!(
@@ -289,10 +290,7 @@ pub fn dynamic_contract_from_wit(
     let observer_output = observer
         .result
         .and_then(|result| dynamic_type_from_wit(&resolve, result).ok());
-    let expected_observer_input = DynamicType::Result {
-        ok: Some(Box::new(scalar_output.clone())),
-        err: Some(Box::new(error_output)),
-    };
+    let expected_observer_input = scalar_item.clone();
     if observer.params.len() != 1
         || observer_input != Some(expected_observer_input)
         || observer_output != Some(DynamicType::String)
@@ -303,7 +301,7 @@ pub fn dynamic_contract_from_wit(
             ),
         });
     }
-    Ok((scalar_input, scalar_output))
+    Ok((scalar_input, scalar_item))
 }
 
 pub trait DynamicVerbExecutor: Send + Sync {

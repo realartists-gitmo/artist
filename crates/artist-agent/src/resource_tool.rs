@@ -1,5 +1,6 @@
 use artist_kernel::{DynamicType, DynamicValue, Kernel};
-use futures::StreamExt;
+use artist_session::ToolOutcomeRecord;
+use futures::{StreamExt, future::join_all};
 use rig_agent::{
     agent::{
         hook::InvalidToolCallAction,
@@ -45,6 +46,7 @@ pub(crate) enum BatchedRunEvent {
     ToolResult {
         id: String,
         content: String,
+        outcome: ToolOutcomeRecord,
         duration_ms: u64,
     },
     Reasoning(String),
@@ -64,6 +66,8 @@ pub async fn run_batched_agent<M>(
     kernel: Kernel,
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
+    additional_params: Option<Value>,
+    mut take_steering: impl FnMut() -> Vec<String>,
     mut on_event: impl FnMut(BatchedRunEvent) -> Result<(), String>,
 ) -> Result<(String, Vec<Message>), String>
 where
@@ -96,6 +100,7 @@ where
                 if let Some(preamble) = preamble.clone() {
                     request = request.preamble(preamble);
                 }
+                request = request.additional_params_opt(additional_params.clone());
                 let mut stream = model
                     .stream(request.build())
                     .await
@@ -168,20 +173,45 @@ where
                 let tool_results = results
                     .into_iter()
                     .map(|(id, result)| -> Result<UserContent, String> {
-                        let content = match result {
-                            Ok(value) => ToolResultContent::json(value),
-                            Err(error) => {
-                                ToolResultContent::json(serde_json::json!({ "error": error }))
+                        let (content, outcome) = match result {
+                            Ok(value) => {
+                                (ToolResultContent::json(value), ToolOutcomeRecord::Success)
                             }
+                            Err(error) => (
+                                ToolResultContent::json(
+                                    serde_json::json!({ "error": error.clone() }),
+                                ),
+                                ToolOutcomeRecord::Error {
+                                    kind: None,
+                                    message: error,
+                                },
+                            ),
                         };
                         let content_text = match &content {
                             ToolResultContent::Json { value } => value.to_string(),
                             ToolResultContent::Text(text) => text.text.clone(),
                             ToolResultContent::Image(_) => "[image]".to_owned(),
                         };
+                        let steering = take_steering();
+                        let content_text = if steering.is_empty() {
+                            content_text
+                        } else {
+                            format!(
+                                "{}\n\n{}",
+                                content_text,
+                                steering
+                                    .iter()
+                                    .map(|message| format!(
+                                        "<user_steering>\n{message}\n</user_steering>"
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n")
+                            )
+                        };
                         on_event(BatchedRunEvent::ToolResult {
                             id: id.clone(),
-                            content: content_text,
+                            content: content_text.clone(),
+                            outcome,
                             duration_ms: tool_starts
                                 .remove(&id)
                                 .map(|start| start.elapsed().as_millis() as u64)
@@ -190,7 +220,7 @@ where
                         Ok(UserContent::ToolResult(ToolResult {
                             id,
                             call_id: None,
-                            content: OneOrMany::one(content),
+                            content: OneOrMany::one(ToolResultContent::text(content_text)),
                         }))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -277,15 +307,12 @@ pub async fn execute_sibling_calls(
                 continue;
             }
         };
-        let namespace = match uri.scheme() {
-            "file" => "filesystem",
-            _ => "resources",
-        };
         let requests = items
             .iter()
             .map(|(_, name, value)| {
-                let verb = artist_kernel::VerbId::new(format!("artist:{namespace}/{name}@1.0.0"))
-                    .map_err(|message| message.to_owned());
+                let verb = kernel
+                    .resolve_resource_verb(name, &uri)
+                    .map_err(|error| error.to_string());
                 verb.map(|verb| artist_kernel::MixedResourceRequest {
                     verb,
                     uri: uri.clone(),
@@ -315,21 +342,28 @@ pub async fn execute_sibling_calls(
             );
         }
     }
-    for (name, items) in grouped {
+    let group_results = join_all(grouped.into_iter().filter_map(|(name, items)| {
         let items = items
             .into_iter()
             .filter(|(index, _)| !handled.contains(index))
             .collect::<Vec<_>>();
-        if items.is_empty() {
-            continue;
-        }
-        let values = kernel
-            .execute_tools_for_model(
-                name.as_str(),
-                items.iter().map(|(_, value)| value.clone()).collect(),
-                scope.child(),
-            )
-            .await;
+        (!items.is_empty()).then(|| {
+            let kernel = kernel.clone();
+            let scope = scope.child();
+            async move {
+                let values = kernel
+                    .execute_tools_for_model(
+                        name.as_str(),
+                        items.iter().map(|(_, value)| value.clone()).collect(),
+                        scope,
+                    )
+                    .await;
+                (items, values)
+            }
+        })
+    }))
+    .await;
+    for (items, values) in group_results {
         for ((index, _), value) in items.into_iter().zip(values) {
             results[index].1 = Some(
                 value

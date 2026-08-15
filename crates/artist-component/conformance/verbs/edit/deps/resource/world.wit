@@ -16,3 +16,5 @@ interface types {
 }
 world resource-types { export types; }
 
+interface host { invoke: func(verb: string, uri: string, input: string) -> string; }
+world resource-host { export host; }

@@ -3,6 +3,7 @@ use crate::{
     ClaimDecision, DynamicClaimProvider, DynamicValue, DynamicVerbResult, KernelError, ResourceUri,
     VerbId,
 };
+use futures::future::join_all;
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
 pub type ResourceFuture<'a> =
@@ -368,13 +369,18 @@ impl ResourceRegistry {
                 }));
             }
         }
-        let mut grouped = BTreeMap::new();
-        for (index, (provider, requests)) in groups {
-            grouped.insert(
-                index,
-                provider.invoke_batch(verb, requests, scope.child()).await,
-            );
-        }
+        let mut grouped = join_all(groups.into_iter().map(|(index, (provider, requests))| {
+            let scope = scope.clone();
+            async move {
+                (
+                    index,
+                    provider.invoke_batch(verb, requests, scope.child()).await,
+                )
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let mut offsets = BTreeMap::<usize, usize>::new();
         assignments
             .into_iter()
@@ -565,13 +571,18 @@ impl ResourceRegistry {
                 }));
             }
         }
-        let mut grouped = BTreeMap::new();
-        for (index, (provider, requests)) in groups {
-            grouped.insert(
-                index,
-                provider.invoke_mixed_batch(requests, scope.child()).await,
-            );
-        }
+        let mut grouped = join_all(groups.into_iter().map(|(index, (provider, requests))| {
+            let scope = scope.clone();
+            async move {
+                (
+                    index,
+                    provider.invoke_mixed_batch(requests, scope.child()).await,
+                )
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
         let mut offsets = BTreeMap::<usize, usize>::new();
         assignments
             .into_iter()

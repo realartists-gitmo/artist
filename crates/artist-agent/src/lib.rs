@@ -13,7 +13,10 @@ mod steering;
 pub use lifecycle::{LifecycleEmitter, LifecycleEvent};
 pub use steering::SteeringHandle;
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Context, Result, anyhow};
 use artist_session::{Recorder, RunFinished, RunStarted, ToolOutcomeRecord};
@@ -334,17 +337,18 @@ where
         let run_id = format!("r-{}", uuid::Uuid::new_v4().simple());
         let run_recorder = handles.recorder.with_run(&run_id);
 
-        let mut builder = client.agent(model);
-        // These fields belong to the ChatGPT subscription transport. Keep them
-        // off OpenAI Responses and Chat Completions requests, whose accepted
-        // parameter shapes differ.
-        if let Some(params) = request_params(
+        let custom_params = request_params(
             provider.provider,
             provider.api,
             overload_retry.cache_key(),
             provider.reasoning_effort.as_deref(),
             handles.fast_mode,
-        ) {
+        );
+        let mut builder = client.agent(model);
+        // These fields belong to the ChatGPT subscription transport. Keep them
+        // off OpenAI Responses and Chat Completions requests, whose accepted
+        // parameter shapes differ.
+        if let Some(params) = custom_params.clone() {
             builder = builder.additional_params(params);
         }
         let (main_prompt, prompt_diagnostics) = prompt_config::main_prompt();
@@ -433,7 +437,9 @@ where
         // AgentRun and executes it through Artist's grouped batch boundary.
         // This is the only execution path for the configured agent.
         if batched_driver_enabled() {
-            let (_output, run_messages) = run_batched_agent(
+            let attempt_observed = Arc::new(AtomicBool::new(false));
+            let attempt_observed_for_events = Arc::clone(&attempt_observed);
+            let batched = run_batched_agent(
                 client.completion_model(model),
                 seed_prompt.clone(),
                 seed_history.clone(),
@@ -442,18 +448,24 @@ where
                 handles.kernel.clone(),
                 invocation_context,
                 handles.cancel.clone(),
+                custom_params,
+                || handles.steering.take_for_batched(),
                 |event| match event {
                     BatchedRunEvent::ToolCall {
                         id,
                         name,
                         arguments,
-                    } => on_event(PromptEvent::ToolCall {
-                        id,
-                        name,
-                        arguments,
-                    })
-                    .map_err(|error| error.to_string()),
+                    } => {
+                        attempt_observed_for_events.store(true, Ordering::Relaxed);
+                        on_event(PromptEvent::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        })
+                        .map_err(|error| error.to_string())
+                    }
                     BatchedRunEvent::ToolExecutionStart { id, name } => {
+                        attempt_observed_for_events.store(true, Ordering::Relaxed);
                         handles
                             .lifecycle
                             .emit(LifecycleEvent::ToolStarted(format!("main:{id}")));
@@ -463,31 +475,17 @@ where
                     BatchedRunEvent::ToolResult {
                         id,
                         content,
+                        outcome,
                         duration_ms,
                     } => {
-                        let steering = handles.steering.take_for_batched();
-                        let content = if steering.is_empty() {
-                            content
-                        } else {
-                            format!(
-                                "{}\n\n{}",
-                                content,
-                                steering
-                                    .iter()
-                                    .map(|message| {
-                                        format!("<user_steering>\n{message}\n</user_steering>")
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n")
-                            )
-                        };
+                        attempt_observed_for_events.store(true, Ordering::Relaxed);
                         handles
                             .lifecycle
                             .emit(LifecycleEvent::ToolFinished(format!("main:{id}")));
                         on_event(PromptEvent::ToolResult {
                             id,
                             content,
-                            outcome: None,
+                            outcome: Some(outcome),
                             duration_ms: Some(duration_ms),
                             images: 0,
                         })
@@ -502,8 +500,33 @@ where
                     }
                 },
             )
-            .await
-            .map_err(|error| anyhow!(error))?;
+            .await;
+            let (_output, run_messages) = match batched {
+                Ok(value) => value,
+                Err(error)
+                    if !handles.cancel.is_cancelled()
+                        && !error.contains("agent run aborted")
+                        && !attempt_observed.load(Ordering::Relaxed)
+                        && provider_retry::is_overload(provider.provider, &error)
+                        && let Some(delay) = overload_retry.schedule() =>
+                {
+                    tokio::time::sleep(delay).await;
+                    continue 'retry;
+                }
+                Err(error) if handles.cancel.is_cancelled() || error == "agent run aborted" => {
+                    conversation::retain_cancelled_turn(
+                        handles.memory.as_ref(),
+                        &handles.conversation_id,
+                        vec![seed_prompt.clone()],
+                        String::new(),
+                    )
+                    .await
+                    .context("retain cancelled batched turn")?;
+                    run_recorder.record(RunFinished::Cancelled);
+                    return Ok(RunOutcome::Cancelled);
+                }
+                Err(error) => return Err(anyhow!(error)),
+            };
             handles
                 .memory
                 .append(&handles.conversation_id, run_messages)

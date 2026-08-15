@@ -36,6 +36,7 @@ pub struct InvocationStore {
     next_id: Arc<AtomicU64>,
     values: Arc<Mutex<BTreeMap<String, Invocation>>>,
     changed: Arc<Notify>,
+    per_invocation: Arc<Mutex<BTreeMap<String, Arc<Notify>>>>,
 }
 
 impl Default for InvocationStore {
@@ -44,6 +45,7 @@ impl Default for InvocationStore {
             next_id: Arc::new(AtomicU64::new(0)),
             values: Arc::new(Mutex::new(BTreeMap::new())),
             changed: Arc::new(Notify::new()),
+            per_invocation: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -58,6 +60,10 @@ impl InvocationStore {
             .lock()
             .expect("invocation store lock")
             .insert(id.to_string(), invocation.clone());
+        self.per_invocation
+            .lock()
+            .expect("invocation notification store lock")
+            .insert(id.to_string(), Arc::new(Notify::new()));
         self.changed.notify_waiters();
         invocation
     }
@@ -87,6 +93,7 @@ impl InvocationStore {
             stderr.into(),
         );
         values.insert(id, completed.clone());
+        self.notify_invocation(uri);
         self.changed.notify_waiters();
         Ok(completed)
     }
@@ -108,6 +115,7 @@ impl InvocationStore {
             })?;
         let aborted = Invocation::aborted(current.uri.clone(), current.stdin, stderr);
         values.insert(id, aborted.clone());
+        self.notify_invocation(uri);
         self.changed.notify_waiters();
         Ok(aborted)
     }
@@ -155,6 +163,7 @@ impl InvocationStore {
             })?;
         let updated = Invocation { stdin, ..current };
         values.insert(id, updated.clone());
+        self.notify_invocation(uri);
         self.changed.notify_waiters();
         Ok(updated)
     }
@@ -171,8 +180,52 @@ impl InvocationStore {
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
             })?;
+        if let Ok(mut notifications) = self.per_invocation.lock() {
+            notifications.remove(&id);
+        }
         self.changed.notify_waiters();
         Ok(())
+    }
+
+    fn notify_invocation(&self, uri: &ResourceUri) {
+        if let Ok(id) = invocation_id(uri) {
+            if let Some(notify) = self
+                .per_invocation
+                .lock()
+                .ok()
+                .and_then(|items| items.get(&id).cloned())
+            {
+                notify.notify_waiters();
+            }
+        }
+        self.changed.notify_waiters();
+    }
+
+    pub async fn wait_for_invocation_change(
+        &self,
+        uri: &ResourceUri,
+        timeout: Option<std::time::Duration>,
+    ) -> bool {
+        let id = match invocation_id(uri) {
+            Ok(id) => id,
+            Err(_) => return false,
+        };
+        let notify = self
+            .per_invocation
+            .lock()
+            .ok()
+            .and_then(|items| items.get(&id).cloned());
+        let Some(notify) = notify else {
+            return false;
+        };
+        let wait = notify.notified();
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, wait).await.is_ok(),
+            None => {
+                wait.await;
+                true
+            }
+        }
     }
 
     pub async fn wait_for_change(&self, timeout: Option<std::time::Duration>) -> bool {
@@ -394,15 +447,22 @@ impl DynamicResourceProvider for InvocationResourceProvider {
                     ),
                 )])),
                 "read" => Self::output(&self.store.get(uri)?, channel),
-                "poll" => loop {
-                    let invocation = self.store.get(uri)?;
-                    if !matches!(invocation.status, InvocationStatus::Running) {
-                        break Self::output(&invocation, channel);
+                "poll" => {
+                    let started = std::time::Instant::now();
+                    loop {
+                        let invocation = self.store.get(uri)?;
+                        if !matches!(invocation.status, InvocationStatus::Running) {
+                            break Self::output(&invocation, channel);
+                        }
+                        let timeout = Self::poll_timeout(&input)
+                            .map(|timeout| timeout.saturating_sub(started.elapsed()));
+                        if timeout.is_some_and(|timeout| timeout.is_zero())
+                            || !self.store.wait_for_invocation_change(uri, timeout).await
+                        {
+                            break Self::output(&invocation, channel);
+                        }
                     }
-                    if !self.store.wait_for_change(Self::poll_timeout(&input)).await {
-                        break Self::output(&invocation, channel);
-                    }
-                },
+                }
                 "write" if channel == "stdin" => {
                     self.store.set_stdin(uri, input.clone())?;
                     input

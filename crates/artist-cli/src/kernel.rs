@@ -69,12 +69,12 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         },
     )))?;
     let process_bindings = ProcessVerbBindings {
-        run: native_verb("exec", "run"),
-        write: native_verb("exec", "write"),
-        read: native_verb("exec", "read"),
-        poll: native_verb("exec", "poll"),
-        abort: native_verb("exec", "abort"),
-        delete: native_verb("exec", "delete"),
+        run: native_verb("osproc", "run"),
+        write: native_verb("osproc", "write"),
+        read: native_verb("osproc", "read"),
+        poll: native_verb("osproc", "poll"),
+        abort: native_verb("osproc", "abort"),
+        delete: native_verb("osproc", "delete"),
     };
     for definition in process_bindings.definitions() {
         kernel.route_registry().register(
@@ -100,8 +100,7 @@ pub async fn build(root: &Path) -> Result<Kernel> {
     let shared_watcher = SharedWatcher::new();
     let resources = Arc::new(
         ResourcesHandler::new_with_watcher(&resources_root, Some(&shared_watcher))
-            .with_context(|| format!("load resources at {}", resources_root.display()))?
-            .without_file_package("artist-ast"),
+            .with_context(|| format!("load resources at {}", resources_root.display()))?,
     );
     kernel.register_dynamic_resource_provider(Arc::new(DynamicResourcesProvider::new(
         resources.clone(),
@@ -300,7 +299,26 @@ fn seed_universal_tools(root: &Path) -> Result<()> {
             ("deps/resource/world.wit", dependency_wit),
         ] {
             let path = package.join(relative);
-            if !path.exists() {
+            let refresh = if path.exists() {
+                match relative {
+                    "typed-guest/src/lib.rs" => std::fs::read_to_string(&path)
+                        .map(|contents| {
+                            contents.contains("artist-ast")
+                                || contents.contains("has no resource host")
+                        })
+                        .unwrap_or(false),
+                    "tool.wit" => std::fs::read_to_string(&path)
+                        .map(|contents| !contents.contains("artist:%resource/host"))
+                        .unwrap_or(false),
+                    "deps/resource/world.wit" => std::fs::read_to_string(&path)
+                        .map(|contents| !contents.contains("interface host"))
+                        .unwrap_or(false),
+                    _ => false,
+                }
+            } else {
+                true
+            };
+            if refresh {
                 std::fs::write(path, bytes)?;
             }
         }
@@ -369,7 +387,7 @@ pub async fn dispatch(kernel: &Kernel, verb: Verb, target: &str, args: &str) -> 
             fields.insert("cwd".to_owned(), DynamicValue::Option(None));
             fields.insert("environment".to_owned(), DynamicValue::List(Vec::new()));
         }
-        native_verb("exec", "run")
+        native_verb("osproc", "run")
     } else {
         native_verb(dynamic_namespace(&uri), dynamic_function(verb))
     };
@@ -382,7 +400,7 @@ pub async fn dispatch(kernel: &Kernel, verb: Verb, target: &str, args: &str) -> 
 fn dynamic_namespace(uri: &ResourceUri) -> &'static str {
     match uri.scheme() {
         "session" => "session",
-        "exec" => "exec",
+        "osproc" => "osproc",
         "repo" => "repository",
         "resources" => "resources",
         _ => "filesystem",
@@ -678,7 +696,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(format!("{docs:?}").contains("artist-ast"));
+        assert!(format!("{docs:?}").contains("artist-ast"), "{docs:?}");
         assert!(root.path().join("resources/ast/resource.wit").is_file());
 
         // Native repository projections retain ownership of production AST

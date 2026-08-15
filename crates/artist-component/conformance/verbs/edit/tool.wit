@@ -6,4 +6,4 @@ interface edit {
     edit: func(requests: list<edit-request>) -> list<result<edit-response, error>>;
     observe: func(response: result<edit-response, error>) -> string;
 }
-world tool-world { export edit; }
+world tool-world { import artist:%resource/host@1.0.0; export edit; }

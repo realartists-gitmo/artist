@@ -834,6 +834,25 @@ impl DynamicResourceProvider for FileResourceProvider {
                     .all(|request| request.uri == requests[0].uri)
                 && requests
                     .iter()
+                    .filter(|request| request.verb == self.bindings.write)
+                    .count()
+                    > 1
+            {
+                return requests
+                    .into_iter()
+                    .map(|request| {
+                        Err(KernelError::Conflict {
+                            uri: request.uri.to_string(),
+                        })
+                    })
+                    .collect();
+            }
+            if !requests.is_empty()
+                && requests
+                    .iter()
+                    .all(|request| request.uri == requests[0].uri)
+                && requests
+                    .iter()
                     .any(|request| request.verb == self.bindings.write)
                 && requests.iter().any(|request| {
                     request.verb == self.bindings.edit || request.verb == self.bindings.insert

@@ -6,4 +6,4 @@ interface find {
     find: func(requests: list<find-request>) -> list<result<find-response, error>>;
     observe: func(response: result<find-response, error>) -> string;
 }
-world tool-world { export find; }
+world tool-world { import artist:%resource/host@1.0.0; export find; }

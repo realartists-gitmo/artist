@@ -6,4 +6,4 @@ interface write {
     write: func(requests: list<write-request>) -> list<result<write-response, error>>;
     observe: func(response: result<write-response, error>) -> string;
 }
-world tool-world { export write; }
+world tool-world { import artist:%resource/host@1.0.0; export write; }

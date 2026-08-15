@@ -36,8 +36,16 @@ interface extension {
     claim: func(request: claim-request) -> claim-decision;
 }
 
+interface host {
+    invoke: func(verb: string, uri: string, input: string) -> string;
+}
+
 world host-world {
     import filesystem;
+}
+
+world resource-host {
+    export host;
 }
 
 world types-world {

@@ -10,6 +10,18 @@ fn error(message: impl ToString, uri: Option<String>) -> types::Error {
     }
 }
 
+fn invoke_json(verb: &str, uri: &str, input: serde_json::Value) -> Result<serde_json::Value, types::Error> {
+    let output = artist::resource::host::invoke(verb, uri, &input.to_string());
+    let value = serde_json::from_str::<serde_json::Value>(&output)
+        .map_err(|parse_error| error(format!("invalid {verb} host output: {parse_error}"), Some(uri.to_owned())))?;
+    if let Some(error_value) = value.get("err") {
+        return Err(json_error(error_value, uri));
+    }
+    value.get("ok").cloned().ok_or_else(|| {
+        error(format!("{verb} host output has neither ok nor err"), Some(uri.to_owned()))
+    })
+}
+
 #[cfg(feature = "read")]
 fn text(uri: String, content: &str) -> types::AnchoredText {
     types::AnchoredText {
@@ -35,16 +47,135 @@ impl exports::artist::tool::read::Guest for TypedTool {
             .into_iter()
             .map(|request| {
                 let uri = request.uri.clone();
-                Ok(exports::artist::tool::read::ReadResponse::Text(text(
-                    uri,
-                    "artist-ast\n",
-                )))
+                let input = serde_json::json!({
+                    "uri": uri,
+                    "at": null,
+                    "before": null,
+                    "after": null,
+                })
+                .to_string();
+                let output = artist::resource::host::invoke("read", &request.uri, &input);
+                read_response(&output, &request.uri)
             })
             .collect()
     }
 
     fn observe(response: Result<exports::artist::tool::read::ReadResponse, types::Error>) -> String {
         format!("{response:?}")
+    }
+}
+
+#[cfg(feature = "read")]
+fn read_response(
+    output: &str,
+    fallback_uri: &str,
+) -> Result<exports::artist::tool::read::ReadResponse, types::Error> {
+    let value: serde_json::Value = serde_json::from_str(output).map_err(|parse_error| {
+        error(
+            format!("invalid read host output: {parse_error}"),
+            Some(fallback_uri.to_owned()),
+        )
+    })?;
+    if let Some(error_value) = value.get("err") {
+        return Err(json_error(error_value, fallback_uri));
+    }
+    let success = value.get("ok").ok_or_else(|| {
+        error("read host output has neither ok nor err".to_owned(), Some(fallback_uri.to_owned()))
+    })?;
+    if let Some(text_value) = success.get("text") {
+        return Ok(exports::artist::tool::read::ReadResponse::Text(json_text(
+            text_value,
+            fallback_uri,
+        )?));
+    }
+    if let Some(directory) = success.get("directory") {
+        let uri = directory
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(fallback_uri)
+            .to_owned();
+        let entries = directory
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| error("read directory has no entries".to_owned(), Some(uri.clone())))?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| error("read directory entry is not a URI".to_owned(), Some(uri.clone())))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(exports::artist::tool::read::ReadResponse::Directory(
+            exports::artist::tool::read::DirectoryResult { uri, entries },
+        ));
+    }
+    Err(error(
+        format!("read host output has unknown response variant: {success}"),
+        Some(fallback_uri.to_owned()),
+    ))
+}
+
+#[cfg(any(feature = "read", feature = "write"))]
+fn json_text(
+    value: &serde_json::Value,
+    fallback_uri: &str,
+) -> Result<types::AnchoredText, types::Error> {
+    let uri = value
+        .get("uri")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback_uri)
+        .to_owned();
+    let lines = value
+        .get("lines")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| error("read text has no lines".to_owned(), Some(uri.clone())))?
+        .iter()
+        .map(|line| {
+            let ending = match line.get("ending").and_then(serde_json::Value::as_str) {
+                Some("crlf") => types::LineEnding::Crlf,
+                Some("cr") => types::LineEnding::Cr,
+                Some("none") => types::LineEnding::None,
+                _ => types::LineEnding::Lf,
+            };
+            Ok(types::AnchoredLine {
+                anchor: line.get("anchor").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                text: line.get("text").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                ending,
+            })
+        })
+        .collect::<Result<Vec<_>, types::Error>>()?;
+    Ok(types::AnchoredText { uri, lines })
+}
+
+fn json_error(value: &serde_json::Value, fallback_uri: &str) -> types::Error {
+    let code = match value.get("code").and_then(serde_json::Value::as_str) {
+        Some("invalid-uri") => types::ErrorCode::InvalidUri,
+        Some("invalid-input") => types::ErrorCode::InvalidInput,
+        Some("invalid-pattern") => types::ErrorCode::InvalidPattern,
+        Some("not-found") => types::ErrorCode::NotFound,
+        Some("wrong-kind") => types::ErrorCode::WrongKind,
+        Some("invalid-anchor") => types::ErrorCode::InvalidAnchor,
+        Some("stale-anchor") => types::ErrorCode::StaleAnchor,
+        Some("immutable") => types::ErrorCode::Immutable,
+        Some("permission-denied") => types::ErrorCode::PermissionDenied,
+        Some("conflict") => types::ErrorCode::Conflict,
+        Some("not-empty") => types::ErrorCode::NotEmpty,
+        Some("aborted") => types::ErrorCode::Aborted,
+        _ => types::ErrorCode::Internal,
+    };
+    types::Error {
+        code,
+        uri: value
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .or(Some(fallback_uri))
+            .map(str::to_owned),
+        message: value
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("resource invocation failed")
+            .to_owned(),
     }
 }
 
@@ -56,9 +187,20 @@ impl exports::artist::tool::write::Guest for TypedTool {
         requests
             .into_iter()
             .map(|request| {
+                let uri = request.uri.clone();
+                let output = invoke_json(
+                    "write",
+                    &uri,
+                    serde_json::json!({"uri": uri, "content": request.content}),
+                )?;
+                let text = output
+                    .get("text")
+                    .filter(|value| !value.is_null())
+                    .map(|value| json_text(value, &uri))
+                    .transpose()?;
                 Ok(exports::artist::tool::write::WriteResponse {
-                    uri: request.uri,
-                    text: None,
+                    uri,
+                    text,
                 })
             })
             .collect()
@@ -77,10 +219,18 @@ impl exports::artist::tool::edit::Guest for TypedTool {
         requests
             .into_iter()
             .map(|request| {
-                Err(error(
-                    "typed conformance guest has no resource host",
-                    Some(request.uri),
-                ))
+                let uri = request.uri.clone();
+                let _ = invoke_json("edit", &uri, serde_json::json!({
+                    "uri": uri,
+                    "start": request.start,
+                    "end": request.end,
+                    "content": request.content,
+                }))?;
+                Ok(exports::artist::tool::edit::EditResponse {
+                    uri: uri.clone(),
+                    changed: Vec::new(),
+                    diff: types::AnchoredDiff { uri: uri.clone(), hunks: Vec::new() },
+                })
             })
             .collect()
     }
@@ -98,10 +248,17 @@ impl exports::artist::tool::insert::Guest for TypedTool {
         requests
             .into_iter()
             .map(|request| {
-                Err(error(
-                    "typed conformance guest has no resource host",
-                    Some(request.uri),
-                ))
+                let uri = request.uri.clone();
+                let _ = invoke_json("insert", &uri, serde_json::json!({
+                    "uri": uri,
+                    "at": null,
+                    "content": request.content,
+                }))?;
+                Ok(exports::artist::tool::insert::InsertResponse {
+                    uri: uri.clone(),
+                    changed: Vec::new(),
+                    diff: types::AnchoredDiff { uri: uri.clone(), hunks: Vec::new() },
+                })
             })
             .collect()
     }
@@ -118,7 +275,16 @@ impl exports::artist::tool::find::Guest for TypedTool {
     ) -> Vec<Result<exports::artist::tool::find::FindResponse, types::Error>> {
         requests
             .into_iter()
-            .map(|_| Ok(exports::artist::tool::find::FindResponse { uris: Vec::new() }))
+            .map(|request| {
+                let root = request.root.clone();
+                let output = invoke_json("find", &root, serde_json::json!({
+                    "root": root,
+                    "query": request.query,
+                }))?;
+                let uris = output.get("uris").and_then(serde_json::Value::as_array)
+                    .unwrap_or(&Vec::new()).iter().filter_map(|uri| uri.as_str().map(str::to_owned)).collect();
+                Ok(exports::artist::tool::find::FindResponse { uris })
+            })
             .collect()
     }
 
@@ -134,7 +300,12 @@ impl exports::artist::tool::grep::Guest for TypedTool {
     ) -> Vec<Result<exports::artist::tool::grep::GrepResponse, types::Error>> {
         requests
             .into_iter()
-            .map(|_| {
+            .map(|request| {
+                let uri = request.uri.clone();
+                let _ = invoke_json("grep", &uri, serde_json::json!({
+                    "uri": uri,
+                    "pattern": request.pattern,
+                }))?;
                 Ok(exports::artist::tool::grep::GrepResponse {
                     matches: Vec::new(),
                 })
@@ -155,7 +326,9 @@ impl exports::artist::tool::run::Guest for TypedTool {
         requests
             .into_iter()
             .map(|request| {
-                Ok(exports::artist::tool::run::RunResponse { uri: request.uri })
+                let uri = request.uri.clone();
+                let _ = invoke_json("run", &uri, serde_json::json!({"uri": uri, "args": request.args}))?;
+                Ok(exports::artist::tool::run::RunResponse { uri })
             })
             .collect()
     }
@@ -173,9 +346,16 @@ impl exports::artist::tool::poll::Guest for TypedTool {
         requests
             .into_iter()
             .map(|request| {
+                let uri = request.uri.clone();
+                let _ = invoke_json("poll", &uri, serde_json::json!({
+                    "uri": uri,
+                    "from": null,
+                    "match": request.match,
+                    "timeout-ms": request.timeout_ms,
+                }))?;
                 Ok(exports::artist::tool::poll::PollResponse {
-                    uri: request.uri.clone(),
-                    text: text(request.uri, ""),
+                    uri: uri.clone(),
+                    text: text(uri, ""),
                     reason: exports::artist::tool::poll::PollReason::Timeout,
                 })
             })
@@ -197,7 +377,9 @@ macro_rules! uri_verb {
                 requests
                     .into_iter()
                     .map(|request| {
-                        Ok(exports::artist::tool::$module::UriResponse { uri: request.uri })
+                        let uri = request.uri.clone();
+                        let _ = invoke_json(stringify!($module), &uri, serde_json::json!({"uri": uri}))?;
+                        Ok(exports::artist::tool::$module::UriResponse { uri })
                     })
                     .collect()
             }

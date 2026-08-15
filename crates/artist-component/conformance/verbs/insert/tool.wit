@@ -9,4 +9,4 @@ interface insert {
     observe: func(response: result<insert-response, error>) -> string;
 }
 
-world tool-world { export insert; }
+world tool-world { import artist:%resource/host@1.0.0; export insert; }

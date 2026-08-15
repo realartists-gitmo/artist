@@ -7,4 +7,4 @@ interface read {
     read: func(requests: list<read-request>) -> list<result<read-response, error>>;
     observe: func(response: result<read-response, error>) -> string;
 }
-world tool-world { export read; }
+world tool-world { import artist:%resource/host@1.0.0; export read; }

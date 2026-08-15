@@ -6,4 +6,4 @@ interface abort {
     abort: func(requests: list<uri-request>) -> list<result<uri-response, error>>;
     observe: func(response: result<uri-response, error>) -> string;
 }
-world tool-world { export abort; }
+world tool-world { import artist:%resource/host@1.0.0; export abort; }
