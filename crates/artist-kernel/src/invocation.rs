@@ -12,6 +12,7 @@ use crate::{
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationStatus {
@@ -30,10 +31,21 @@ pub struct Invocation {
     pub status: InvocationStatus,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct InvocationStore {
     next_id: Arc<AtomicU64>,
     values: Arc<Mutex<BTreeMap<String, Invocation>>>,
+    changed: Arc<Notify>,
+}
+
+impl Default for InvocationStore {
+    fn default() -> Self {
+        Self {
+            next_id: Arc::new(AtomicU64::new(0)),
+            values: Arc::new(Mutex::new(BTreeMap::new())),
+            changed: Arc::new(Notify::new()),
+        }
+    }
 }
 
 impl InvocationStore {
@@ -46,6 +58,7 @@ impl InvocationStore {
             .lock()
             .expect("invocation store lock")
             .insert(id.to_string(), invocation.clone());
+        self.changed.notify_waiters();
         invocation
     }
 
@@ -74,6 +87,7 @@ impl InvocationStore {
             stderr.into(),
         );
         values.insert(id, completed.clone());
+        self.changed.notify_waiters();
         Ok(completed)
     }
 
@@ -94,6 +108,7 @@ impl InvocationStore {
             })?;
         let aborted = Invocation::aborted(current.uri.clone(), current.stdin, stderr);
         values.insert(id, aborted.clone());
+        self.changed.notify_waiters();
         Ok(aborted)
     }
 
@@ -140,6 +155,7 @@ impl InvocationStore {
             })?;
         let updated = Invocation { stdin, ..current };
         values.insert(id, updated.clone());
+        self.changed.notify_waiters();
         Ok(updated)
     }
 
@@ -154,7 +170,20 @@ impl InvocationStore {
             .map(|_| ())
             .ok_or_else(|| KernelError::NotFound {
                 uri: uri.to_string(),
-            })
+            })?;
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    pub async fn wait_for_change(&self, timeout: Option<std::time::Duration>) -> bool {
+        let notified = self.changed.notified();
+        match timeout {
+            Some(timeout) => tokio::time::timeout(timeout, notified).await.is_ok(),
+            None => {
+                notified.await;
+                true
+            }
+        }
     }
 }
 
@@ -169,6 +198,7 @@ impl ResourceCatalogProvider for InvocationStore {
                 verbs: vec![
                     "read".into(),
                     "poll".into(),
+                    "find".into(),
                     "write".into(),
                     "abort".into(),
                     "delete".into(),
@@ -245,7 +275,31 @@ impl InvocationResourceProvider {
                     ),
                 ]))
             }
+            "root" => DynamicValue::Record(BTreeMap::from([(
+                "entries".to_owned(),
+                DynamicValue::List(vec![DynamicValue::ResourceUri(invocation.uri.clone())]),
+            )])),
             _ => DynamicValue::Record(BTreeMap::new()),
+        }
+    }
+
+    fn poll_timeout(input: &DynamicValue) -> Option<std::time::Duration> {
+        let DynamicValue::Record(fields) = input else {
+            return None;
+        };
+        match fields.get("timeout-ms") {
+            Some(DynamicValue::Option(Some(value))) => match value.as_ref() {
+                DynamicValue::U64(value) => Some(std::time::Duration::from_millis(*value)),
+                DynamicValue::S64(value) if *value >= 0 => {
+                    Some(std::time::Duration::from_millis(*value as u64))
+                }
+                _ => None,
+            },
+            Some(DynamicValue::U64(value)) => Some(std::time::Duration::from_millis(*value)),
+            Some(DynamicValue::S64(value)) if *value >= 0 => {
+                Some(std::time::Duration::from_millis(*value as u64))
+            }
+            _ => None,
         }
     }
 }
@@ -299,7 +353,7 @@ impl DynamicClaimProvider for InvocationResourceProvider {
         if uri.scheme() == "invocations"
             && matches!(
                 verb.function(),
-                "read" | "write" | "poll" | "abort" | "delete"
+                "read" | "find" | "write" | "poll" | "abort" | "delete"
             )
         {
             ClaimDecision::Handle
@@ -319,7 +373,36 @@ impl DynamicResourceProvider for InvocationResourceProvider {
         Box::pin(async move {
             let channel = Self::channel(uri)?;
             let output = match verb.function() {
-                "read" | "poll" => Self::output(&self.store.get(uri)?, channel),
+                "find" if channel == "root" => DynamicValue::Record(BTreeMap::from([(
+                    "entries".to_owned(),
+                    DynamicValue::List(
+                        self.store
+                            .all()?
+                            .into_iter()
+                            .map(|invocation| DynamicValue::ResourceUri(invocation.uri))
+                            .collect(),
+                    ),
+                )])),
+                "read" if channel == "root" => DynamicValue::Record(BTreeMap::from([(
+                    "entries".to_owned(),
+                    DynamicValue::List(
+                        self.store
+                            .all()?
+                            .into_iter()
+                            .map(|invocation| DynamicValue::ResourceUri(invocation.uri))
+                            .collect(),
+                    ),
+                )])),
+                "read" => Self::output(&self.store.get(uri)?, channel),
+                "poll" => loop {
+                    let invocation = self.store.get(uri)?;
+                    if !matches!(invocation.status, InvocationStatus::Running) {
+                        break Self::output(&invocation, channel);
+                    }
+                    if !self.store.wait_for_change(Self::poll_timeout(&input)).await {
+                        break Self::output(&invocation, channel);
+                    }
+                },
                 "write" if channel == "stdin" => {
                     self.store.set_stdin(uri, input.clone())?;
                     input

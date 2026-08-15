@@ -65,7 +65,7 @@ pub async fn run_batched_agent<M>(
     context: artist_kernel::InvocationContext,
     cancellation: tokio_util::sync::CancellationToken,
     mut on_event: impl FnMut(BatchedRunEvent) -> Result<(), String>,
-) -> Result<String, String>
+) -> Result<(String, Vec<Message>), String>
 where
     M: CompletionModel + 'static,
 {
@@ -100,7 +100,11 @@ where
                     .stream(request.build())
                     .await
                     .map_err(|error| error.to_string())?;
-                while let Some(item) = stream.next().await {
+                while let Some(item) = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err("agent run aborted".to_owned()),
+                    item = stream.next() => item,
+                } {
                     match item.map_err(|error| error.to_string())? {
                         StreamedAssistantContent::Text(text) => {
                             on_event(BatchedRunEvent::Text(text.text))?;
@@ -194,7 +198,7 @@ where
                     .map_err(|error| error.to_string())?;
             }
             AgentRunStep::Done(response) => {
-                return Ok(response.output);
+                return Ok((response.output, run.messages().to_vec()));
             }
         }
     }
@@ -234,7 +238,91 @@ pub async fn execute_sibling_calls(
         }
     }
     let scope = artist_kernel::InvocationScope::with_cancellation(context, cancellation);
+
+    // Same-resource mutations are one transaction, regardless of tool name.
+    // This is deliberately resolved before the ordinary per-tool groups so
+    // write+edit and edit+insert cannot execute in hidden map order.
+    let mut mutation_groups = BTreeMap::<String, Vec<(usize, String, DynamicValue)>>::new();
+    for (index, call) in calls.iter().enumerate() {
+        if !matches!(call.name.as_str(), "write" | "edit" | "insert") || results[index].1.is_some()
+        {
+            continue;
+        }
+        let Some(value) = grouped
+            .get(&call.name)
+            .and_then(|items| items.iter().find(|(item, _)| *item == index))
+            .map(|(_, value)| value.clone())
+        else {
+            continue;
+        };
+        let Some(uri) = value_uri(&value) else {
+            continue;
+        };
+        mutation_groups
+            .entry(uri.clone())
+            .or_default()
+            .push((index, call.name.clone(), value));
+    }
+    let mut handled = BTreeSet::new();
+    for (uri_text, items) in mutation_groups
+        .into_iter()
+        .filter(|(_, items)| items.len() > 1)
+    {
+        let uri = match artist_kernel::ResourceUri::parse(&uri_text) {
+            Ok(uri) => uri,
+            Err(error) => {
+                for (index, _, _) in items {
+                    results[index].1 = Some(Err(error.to_string()));
+                }
+                continue;
+            }
+        };
+        let namespace = match uri.scheme() {
+            "file" => "filesystem",
+            _ => "resources",
+        };
+        let requests = items
+            .iter()
+            .map(|(_, name, value)| {
+                let verb = artist_kernel::VerbId::new(format!("artist:{namespace}/{name}@1.0.0"))
+                    .map_err(|message| message.to_owned());
+                verb.map(|verb| artist_kernel::MixedResourceRequest {
+                    verb,
+                    uri: uri.clone(),
+                    input: value.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(requests) = requests else {
+            for (index, _, _) in items {
+                results[index].1 = Some(Err("invalid mutation verb".into()));
+            }
+            continue;
+        };
+        let outputs = kernel
+            .invoke_mixed_dynamic_resources(requests, scope.child())
+            .await;
+        for ((index, _, _), output) in items.into_iter().zip(outputs) {
+            handled.insert(index);
+            results[index].1 = Some(
+                output
+                    .map(|value| {
+                        dynamic_to_json(artist_kernel::DynamicValue::Result(Ok(Box::new(
+                            value.output,
+                        ))))
+                    })
+                    .map_err(|error| error.to_string()),
+            );
+        }
+    }
     for (name, items) in grouped {
+        let items = items
+            .into_iter()
+            .filter(|(index, _)| !handled.contains(index))
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            continue;
+        }
         let values = kernel
             .execute_tools_for_model(
                 name.as_str(),
@@ -259,6 +347,17 @@ pub async fn execute_sibling_calls(
             )
         })
         .collect()
+}
+
+fn value_uri(value: &DynamicValue) -> Option<String> {
+    let DynamicValue::Record(fields) = value else {
+        return None;
+    };
+    match fields.get("uri").or_else(|| fields.get("root")) {
+        Some(DynamicValue::ResourceUri(uri)) => Some(uri.to_string()),
+        Some(DynamicValue::String(uri)) => Some(uri.clone()),
+        _ => None,
+    }
 }
 
 /// Build the model-facing named tools from the live kernel catalog.
@@ -500,6 +599,14 @@ pub fn normalize_json(value: Value, expected: &DynamicType) -> Result<DynamicVal
         }
         DynamicType::Variant(cases) => {
             if let Some(text) = value.as_str() {
+                if cases.contains_key("at") && text.starts_with('#') {
+                    return Ok(DynamicValue::Variant(
+                        "at".to_owned(),
+                        Some(Box::new(DynamicValue::String(
+                            text.trim_start_matches('#').to_owned(),
+                        ))),
+                    ));
+                }
                 let expected_case = cases
                     .keys()
                     .find(|name| normalized(name) == normalized(text))

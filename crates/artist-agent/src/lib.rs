@@ -433,7 +433,7 @@ where
         // AgentRun and executes it through Artist's grouped batch boundary.
         // This is the only execution path for the configured agent.
         if batched_driver_enabled() {
-            let output = run_batched_agent(
+            let (_output, run_messages) = run_batched_agent(
                 client.completion_model(model),
                 seed_prompt.clone(),
                 seed_history.clone(),
@@ -506,10 +506,7 @@ where
             .map_err(|error| anyhow!(error))?;
             handles
                 .memory
-                .append(
-                    &handles.conversation_id,
-                    vec![seed_prompt.clone(), Message::assistant(output)],
-                )
+                .append(&handles.conversation_id, run_messages)
                 .await
                 .context("persist batched agent turn")?;
             run_recorder.record(RunFinished::Completed);

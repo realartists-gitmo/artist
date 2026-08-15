@@ -2828,7 +2828,7 @@ pub mod package {
 /// `Arc` generations, so readers never observe a partially swapped package.
 pub mod generations {
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         ops::Deref,
         sync::{Arc, RwLock},
     };
@@ -2909,7 +2909,7 @@ pub mod runtime {
         package::{BuildOptions, ToolPackage},
     };
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         fs,
         path::PathBuf,
         sync::{Arc, Mutex},
@@ -3606,7 +3606,7 @@ pub mod tools {
     };
     use serde_json::Value;
     use std::{
-        collections::HashMap,
+        collections::{BTreeMap, HashMap},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -3882,6 +3882,7 @@ pub mod tools {
             DynamicType::Record(fields) => serde_json::json!({
                 "type":"object",
                 "properties":fields.iter().map(|(name, ty)| (name.clone(), dynamic_type_schema(ty))).collect::<serde_json::Map<_, _>>(),
+                "required":fields.iter().filter_map(|(name, ty)| (!matches!(ty, DynamicType::Option(_))).then_some(name.clone())).collect::<Vec<_>>(),
                 "additionalProperties":false
             }),
             DynamicType::Option(inner) => {
@@ -3898,6 +3899,17 @@ pub mod tools {
                 serde_json::json!({"anyOf":variants})
             }
             DynamicType::Enum(values) => serde_json::json!({"type":"string","enum":values}),
+            DynamicType::Variant(values)
+                if values.len() == 3
+                    && values.contains_key("top")
+                    && values.contains_key("bottom")
+                    && values.contains_key("at") =>
+            {
+                serde_json::json!({
+                    "type":"string",
+                    "anyOf":[{"enum":["top","bottom"]},{"type":"string","pattern":"^#.+$"}]
+                })
+            }
             DynamicType::Variant(values) => serde_json::json!({
                 "type":"object",
                 "oneOf":values.iter().map(|(name, payload)| {
@@ -4070,6 +4082,14 @@ pub mod tools {
         /// loading and ABI validation.
         fn ensure_activated(&self, registrations: &[ToolRegistration]) -> Result<(), KernelError> {
             for registration in registrations {
+                // The ten universal verbs are kernel adapters, not guest
+                // implementations. Their contract packages remain catalog
+                // metadata, while execution is routed through the live
+                // resource providers below; never cold-build their fixture
+                // guest on publication or invocation.
+                if is_universal_tool(&registration.tool_name()) {
+                    continue;
+                }
                 let package_root = self.package_path_for_name(&registration.package)?;
                 self.activate(&package_root)?;
             }
@@ -4435,6 +4455,92 @@ pub mod tools {
                 .invoke_async_with_scope(args, host, scope)
                 .await
         }
+
+        async fn execute_universal_native(
+            name: &str,
+            args: DynamicValue,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Result<DynamicValue, KernelError> {
+            let results = Self::execute_universal_native_batch(name, vec![args], host, scope).await;
+            results.into_iter().next().unwrap_or_else(|| {
+                Err(KernelError::Handler {
+                    message: "universal adapter returned no result".into(),
+                })
+            })
+        }
+
+        async fn execute_universal_native_batch(
+            name: &str,
+            args: Vec<DynamicValue>,
+            host: KernelHandle,
+            scope: artist_kernel::InvocationScope,
+        ) -> Vec<Result<DynamicValue, KernelError>> {
+            let mut requests = Vec::with_capacity(args.len());
+            let mut results: Vec<Option<Result<DynamicValue, KernelError>>> =
+                (0..args.len()).map(|_| None).collect();
+            for (index, input) in args.into_iter().enumerate() {
+                let input = match input {
+                    DynamicValue::Record(fields) => match fields.get("requests") {
+                        Some(DynamicValue::List(requests)) if requests.len() == 1 => {
+                            requests[0].clone()
+                        }
+                        _ => DynamicValue::Record(fields),
+                    },
+                    input => input,
+                };
+                let uri = match input_uri(&input) {
+                    Ok(uri) => uri,
+                    Err(error) => {
+                        results[index] = Some(Err(error));
+                        continue;
+                    }
+                };
+                requests.push((index, uri, input));
+            }
+            if requests.is_empty() {
+                return results.into_iter().map(Option::unwrap).collect();
+            }
+            let mut groups: BTreeMap<String, (VerbId, Vec<(usize, ResourceUri, DynamicValue)>)> =
+                BTreeMap::new();
+            for (index, uri, input) in requests {
+                match universal_resource_verb(name, &uri) {
+                    Ok(verb) => groups
+                        .entry(verb.to_string())
+                        .or_insert_with(|| (verb.clone(), Vec::new()))
+                        .1
+                        .push((index, uri, input)),
+                    Err(error) => results[index] = Some(Err(error)),
+                }
+            }
+            for (_, (verb, group)) in groups {
+                let batch = host
+                    .invoke_dynamic_resource_batch_with_scope(
+                        verb,
+                        group
+                            .iter()
+                            .map(|(_, uri, input)| artist_kernel::ResourceRequest {
+                                uri: uri.clone(),
+                                input: input.clone(),
+                            })
+                            .collect(),
+                        scope.child(),
+                    )
+                    .await;
+                for ((index, uri, _), result) in group.into_iter().zip(batch) {
+                    results[index] = Some(match result {
+                        Ok(value) => Ok(DynamicValue::Result(Ok(Box::new(native_tool_response(
+                            name,
+                            value.output,
+                        ))))),
+                        Err(error) => Ok(DynamicValue::Result(Err(Box::new(native_error(
+                            &error, &uri,
+                        ))))),
+                    });
+                }
+            }
+            results.into_iter().map(Option::unwrap).collect()
+        }
     }
 
     impl ToolProvider for ToolsHandler {
@@ -4468,6 +4574,24 @@ pub mod tools {
             host: KernelHandle,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    return ToolsHandler::execute_universal_native(
+                        name,
+                        args,
+                        host,
+                        artist_kernel::InvocationScope::new(
+                            artist_kernel::InvocationContext::default(),
+                        ),
+                    )
+                    .await;
+                }
+                let registration = self
+                    .registrations()?
+                    .into_iter()
+                    .find(|registration| registration.tool_name() == name)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no named tool registered: {name}"),
+                    })?;
                 let output = self
                     .execute_named_inner_async(
                         name,
@@ -4476,7 +4600,7 @@ pub mod tools {
                         artist_kernel::InvocationContext::default(),
                     )
                     .await?;
-                json_to_dynamic(output)
+                typed_tool_output(&output, &registration)
             })
         }
 
@@ -4488,10 +4612,26 @@ pub mod tools {
             context: artist_kernel::InvocationContext,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    return ToolsHandler::execute_universal_native(
+                        name,
+                        args,
+                        host,
+                        artist_kernel::InvocationScope::new(context),
+                    )
+                    .await;
+                }
+                let registration = self
+                    .registrations()?
+                    .into_iter()
+                    .find(|registration| registration.tool_name() == name)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no named tool registered: {name}"),
+                    })?;
                 let output = self
                     .execute_named_inner_async(name, dynamic_to_json(&args), host, context)
                     .await?;
-                json_to_dynamic(output)
+                typed_tool_output(&output, &registration)
             })
         }
 
@@ -4503,10 +4643,20 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Result<DynamicValue, KernelError>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    return ToolsHandler::execute_universal_native(name, args, host, scope).await;
+                }
+                let registration = self
+                    .registrations()?
+                    .into_iter()
+                    .find(|registration| registration.tool_name() == name)
+                    .ok_or_else(|| KernelError::Handler {
+                        message: format!("no named tool registered: {name}"),
+                    })?;
                 let output = self
                     .execute_named_inner_async_scope(name, dynamic_to_json(&args), host, scope)
                     .await?;
-                json_to_dynamic(output)
+                typed_tool_output(&output, &registration)
             })
         }
 
@@ -4555,6 +4705,17 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Result<artist_kernel::ToolModelResult, KernelError>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    let value =
+                        ToolsHandler::execute_universal_native(name, args, host, scope).await?;
+                    return Ok(artist_kernel::ToolModelResult {
+                        stdobs: format!("{value:?}"),
+                        stdout: Ok(value),
+                        verb: VerbId::new(format!("artist:tool/{name}@1.0.0"))
+                            .map_err(|message| KernelError::InvalidRequest { message })?,
+                        generation: 0,
+                    });
+                }
                 let registration = self
                     .registrations()?
                     .into_iter()
@@ -4581,7 +4742,7 @@ pub mod tools {
                         message: "component returned no tool result".to_owned(),
                     })?;
                 Ok(artist_kernel::ToolModelResult {
-                    stdout: json_to_dynamic(value),
+                    stdout: Ok(typed_tool_output(&value, &registration)?),
                     stdobs,
                     verb,
                     generation,
@@ -4597,6 +4758,10 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<DynamicValue, KernelError>>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    return ToolsHandler::execute_universal_native_batch(name, args, host, scope)
+                        .await;
+                }
                 let registration = match self
                     .registrations()
                     .ok()
@@ -4649,6 +4814,22 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<artist_kernel::ToolModelResult, KernelError>>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    return ToolsHandler::execute_universal_native_batch(name, args, host, scope)
+                        .await
+                        .into_iter()
+                        .map(|value| {
+                            let value = value?;
+                            Ok(artist_kernel::ToolModelResult {
+                                stdobs: format!("{value:?}"),
+                                stdout: Ok(value),
+                                verb: VerbId::new(format!("artist:tool/{name}@1.0.0"))
+                                    .map_err(|message| KernelError::InvalidRequest { message })?,
+                                generation: 0,
+                            })
+                        })
+                        .collect();
+                }
                 let registration = match self
                     .registrations()
                     .ok()
@@ -4704,7 +4885,7 @@ pub mod tools {
                     .into_iter()
                     .map(|(value, stdobs)| {
                         Ok(artist_kernel::ToolModelResult {
-                            stdout: json_to_dynamic(value),
+                            stdout: Ok(typed_tool_output(&value, &registration)?),
                             stdobs,
                             verb: verb.clone(),
                             generation,
@@ -4722,6 +4903,32 @@ pub mod tools {
             scope: artist_kernel::InvocationScope,
         ) -> BoxFuture<'a, Vec<Result<DynamicVerbResult, KernelError>>> {
             Box::pin(async move {
+                if is_universal_tool(name) {
+                    let verb = match VerbId::new(format!("artist:tool/{name}@1.0.0")) {
+                        Ok(verb) => verb,
+                        Err(message) => {
+                            return args
+                                .into_iter()
+                                .map(|_| {
+                                    Err(KernelError::InvalidRequest {
+                                        message: message.clone(),
+                                    })
+                                })
+                                .collect();
+                        }
+                    };
+                    return ToolsHandler::execute_universal_native_batch(name, args, host, scope)
+                        .await
+                        .into_iter()
+                        .map(|value| {
+                            value.map(|output| DynamicVerbResult {
+                                verb: verb.clone(),
+                                function: name.to_owned(),
+                                output,
+                            })
+                        })
+                        .collect();
+                }
                 let registration = match self.registrations().ok().and_then(|registrations| {
                     registrations
                         .into_iter()
@@ -4797,14 +5004,16 @@ pub mod tools {
                 ));
                 values
                     .into_iter()
-                    .map(|value| match (identity.clone(), json_to_dynamic(value)) {
-                        (Ok(verb), Ok(output)) => Ok(DynamicVerbResult {
-                            verb,
-                            function: name.to_owned(),
-                            output,
-                        }),
-                        (Err(message), _) => Err(KernelError::InvalidRequest { message }),
-                        (_, Err(error)) => Err(error),
+                    .map(|value| {
+                        match (identity.clone(), typed_tool_output(&value, &registration)) {
+                            (Ok(verb), Ok(output)) => Ok(DynamicVerbResult {
+                                verb,
+                                function: name.to_owned(),
+                                output,
+                            }),
+                            (Err(message), _) => Err(KernelError::InvalidRequest { message }),
+                            (_, Err(error)) => Err(error),
+                        }
                     })
                     .collect()
             })
@@ -4849,6 +5058,251 @@ pub mod tools {
                     .collect::<Result<_, KernelError>>()?,
             ),
         })
+    }
+
+    fn json_to_dynamic_typed(value: &Value, ty: &DynamicType) -> Result<DynamicValue, KernelError> {
+        let invalid = || KernelError::InvalidRequest {
+            message: format!("component output does not satisfy typed contract {ty:?}"),
+        };
+        match ty {
+            DynamicType::Bool => value.as_bool().map(DynamicValue::Bool).ok_or_else(invalid),
+            DynamicType::S8 => value
+                .as_i64()
+                .and_then(|v| i8::try_from(v).ok())
+                .map(DynamicValue::S8)
+                .ok_or_else(invalid),
+            DynamicType::S16 => value
+                .as_i64()
+                .and_then(|v| i16::try_from(v).ok())
+                .map(DynamicValue::S16)
+                .ok_or_else(invalid),
+            DynamicType::S32 => value
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok())
+                .map(DynamicValue::S32)
+                .ok_or_else(invalid),
+            DynamicType::S64 => value.as_i64().map(DynamicValue::S64).ok_or_else(invalid),
+            DynamicType::U8 => value
+                .as_u64()
+                .and_then(|v| u8::try_from(v).ok())
+                .map(DynamicValue::U8)
+                .ok_or_else(invalid),
+            DynamicType::U16 => value
+                .as_u64()
+                .and_then(|v| u16::try_from(v).ok())
+                .map(DynamicValue::U16)
+                .ok_or_else(invalid),
+            DynamicType::U32 => value
+                .as_u64()
+                .and_then(|v| u32::try_from(v).ok())
+                .map(DynamicValue::U32)
+                .ok_or_else(invalid),
+            DynamicType::U64 => value.as_u64().map(DynamicValue::U64).ok_or_else(invalid),
+            DynamicType::F32 => value
+                .as_f64()
+                .map(|v| DynamicValue::F32(v as f32))
+                .ok_or_else(invalid),
+            DynamicType::F64 => value.as_f64().map(DynamicValue::F64).ok_or_else(invalid),
+            DynamicType::Char => value
+                .as_str()
+                .and_then(|v| {
+                    let mut chars = v.chars();
+                    let c = chars.next()?;
+                    chars.next().is_none().then_some(c)
+                })
+                .map(DynamicValue::Char)
+                .ok_or_else(invalid),
+            DynamicType::String => value
+                .as_str()
+                .map(|v| DynamicValue::String(v.to_owned()))
+                .ok_or_else(invalid),
+            DynamicType::ResourceUri => value
+                .as_str()
+                .ok_or_else(invalid)
+                .and_then(|v| ResourceUri::parse(v).map(DynamicValue::ResourceUri)),
+            DynamicType::List(inner) => value
+                .as_array()
+                .ok_or_else(invalid)?
+                .iter()
+                .map(|v| json_to_dynamic_typed(v, inner))
+                .collect::<Result<_, _>>()
+                .map(DynamicValue::List),
+            DynamicType::Tuple(types) => {
+                let values = value.as_array().ok_or_else(invalid)?;
+                if values.len() != types.len() {
+                    return Err(invalid());
+                }
+                values
+                    .iter()
+                    .zip(types)
+                    .map(|(v, ty)| json_to_dynamic_typed(v, ty))
+                    .collect::<Result<_, _>>()
+                    .map(DynamicValue::Tuple)
+            }
+            DynamicType::Record(types) => {
+                let fields = value.as_object().ok_or_else(invalid)?;
+                types
+                    .iter()
+                    .map(|(name, ty)| {
+                        let field = fields.get(name).ok_or_else(invalid)?;
+                        Ok((name.clone(), json_to_dynamic_typed(field, ty)?))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, KernelError>>()
+                    .map(DynamicValue::Record)
+            }
+            DynamicType::Option(inner) => {
+                if value.is_null() {
+                    Ok(DynamicValue::Option(None))
+                } else {
+                    Ok(DynamicValue::Option(Some(Box::new(json_to_dynamic_typed(
+                        value, inner,
+                    )?))))
+                }
+            }
+            DynamicType::Result { ok, err } => {
+                let fields = value.as_object().ok_or_else(invalid)?;
+                if let Some(value) = fields.get("ok") {
+                    let ty = ok.as_deref().ok_or_else(invalid)?;
+                    Ok(DynamicValue::Result(Ok(Box::new(json_to_dynamic_typed(
+                        value, ty,
+                    )?))))
+                } else if let Some(value) = fields.get("err") {
+                    let ty = err.as_deref().ok_or_else(invalid)?;
+                    Ok(DynamicValue::Result(Err(Box::new(json_to_dynamic_typed(
+                        value, ty,
+                    )?))))
+                } else {
+                    Err(invalid())
+                }
+            }
+            DynamicType::Enum(values) => value
+                .as_str()
+                .filter(|v| values.iter().any(|candidate| candidate == v))
+                .map(|v| DynamicValue::Enum(v.to_owned()))
+                .ok_or_else(invalid),
+            DynamicType::Variant(cases) => {
+                let fields = value.as_object().ok_or_else(invalid)?;
+                let (name, value) = fields.iter().next().ok_or_else(invalid)?;
+                let case = cases.get(name).ok_or_else(invalid)?;
+                let payload = match (case, value.is_null()) {
+                    (None, true) => None,
+                    (Some(ty), _) => Some(Box::new(json_to_dynamic_typed(value, ty)?)),
+                    _ => return Err(invalid()),
+                };
+                Ok(DynamicValue::Variant(name.clone(), payload))
+            }
+            DynamicType::Flags(flags) => {
+                let values = value
+                    .as_array()
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_owned).ok_or_else(invalid))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if values
+                    .iter()
+                    .all(|v| flags.iter().any(|candidate| candidate == v))
+                {
+                    Ok(DynamicValue::Flags(values))
+                } else {
+                    Err(invalid())
+                }
+            }
+        }
+    }
+
+    fn typed_tool_output(
+        value: &Value,
+        registration: &ToolRegistration,
+    ) -> Result<DynamicValue, KernelError> {
+        let definition = registration.dynamic_definition()?;
+        let output_type =
+            definition
+                .output_type
+                .as_ref()
+                .ok_or_else(|| KernelError::InvalidRequest {
+                    message: "tool has no output type".into(),
+                })?;
+        json_to_dynamic_typed(value, output_type)
+    }
+
+    fn input_uri(input: &DynamicValue) -> Result<ResourceUri, KernelError> {
+        let DynamicValue::Record(fields) = input else {
+            return Err(KernelError::InvalidRequest {
+                message: "universal tool input must be a record".into(),
+            });
+        };
+        match fields.get("uri").or_else(|| fields.get("root")) {
+            Some(DynamicValue::ResourceUri(uri)) => Ok(uri.clone()),
+            Some(DynamicValue::String(uri)) => ResourceUri::parse(uri),
+            None => match fields.get("target") {
+                Some(DynamicValue::String(path)) => ResourceUri::parse(&format!("file://{}", path)),
+                _ => Err(KernelError::InvalidRequest {
+                    message: "universal tool input is missing uri".into(),
+                }),
+            },
+            _ => Err(KernelError::InvalidRequest {
+                message: "universal tool input uri has invalid type".into(),
+            }),
+        }
+    }
+
+    fn universal_resource_verb(name: &str, uri: &ResourceUri) -> Result<VerbId, KernelError> {
+        let namespace = match uri.scheme() {
+            "file" => "filesystem",
+            "repo" => "repository",
+            "exec" => "exec",
+            "session" => "session",
+            "resources" => "resources",
+            "tools" => "tools",
+            _ => "resources",
+        };
+        VerbId::new(format!("artist:{namespace}/{name}@1.0.0"))
+            .map_err(|message| KernelError::InvalidRequest { message })
+    }
+
+    fn native_error(error: &KernelError, uri: &ResourceUri) -> DynamicValue {
+        DynamicValue::Record(BTreeMap::from([
+            ("code".into(), DynamicValue::Enum("internal".into())),
+            (
+                "uri".into(),
+                DynamicValue::Option(Some(Box::new(DynamicValue::ResourceUri(uri.clone())))),
+            ),
+            ("message".into(), DynamicValue::String(error.to_string())),
+        ]))
+    }
+
+    fn native_tool_response(name: &str, value: DynamicValue) -> DynamicValue {
+        match (name, value) {
+            ("read", DynamicValue::Record(mut fields)) if fields.contains_key("entries") => {
+                DynamicValue::Variant(
+                    "directory".into(),
+                    Some(Box::new(DynamicValue::Record(fields))),
+                )
+            }
+            ("read", DynamicValue::Record(fields)) if fields.contains_key("lines") => {
+                DynamicValue::Variant("text".into(), Some(Box::new(DynamicValue::Record(fields))))
+            }
+            ("run" | "abort" | "delete", DynamicValue::ResourceUri(uri)) => DynamicValue::Record(
+                BTreeMap::from([("uri".into(), DynamicValue::ResourceUri(uri))]),
+            ),
+            (_, value) => value,
+        }
+    }
+
+    fn is_universal_tool(name: &str) -> bool {
+        matches!(
+            name,
+            "read"
+                | "write"
+                | "edit"
+                | "insert"
+                | "find"
+                | "grep"
+                | "run"
+                | "poll"
+                | "abort"
+                | "delete"
+        )
     }
 
     fn dynamic_to_json(value: &DynamicValue) -> Value {
@@ -5119,7 +5573,11 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            assert!(dynamic_to_json(&result).to_string().contains("artist-ast"));
+            assert!(
+                dynamic_to_json(&result)
+                    .to_string()
+                    .contains("named tool dispatch")
+            );
         }
 
         #[tokio::test]
@@ -5148,11 +5606,13 @@ pub mod tools {
             let input =
                 json_to_dynamic(serde_json::json!({"target": target.to_string_lossy()})).unwrap();
             let first = kernel.execute_tool("read", input.clone()).await.unwrap();
-            assert!(dynamic_to_json(&first).to_string().contains("artist-ast"));
-            let first_generation = observed_tools
-                .registry
-                .current_generation("artist-tool-read")
-                .expect("first generation active");
+            assert!(
+                dynamic_to_json(&first)
+                    .to_string()
+                    .contains("generation one")
+            );
+            // Universal `read` is now the live kernel adapter; its contract
+            // package is metadata and therefore has no guest generation.
 
             let bindings = ToolsVerbBindings {
                 read: VerbId::new("artist:tools/read@1.0.0").unwrap(),
@@ -5179,7 +5639,11 @@ pub mod tools {
                 "not valid frontmatter"
             );
             let second = kernel.execute_tool("read", input).await.unwrap();
-            assert!(dynamic_to_json(&second).to_string().contains("artist-ast"));
+            assert!(
+                dynamic_to_json(&second)
+                    .to_string()
+                    .contains("generation one")
+            );
 
             // A later valid self-edit must use the same handler allocation and
             // activate a new generation on the named-tool path.  Checking the
@@ -5213,12 +5677,17 @@ pub mod tools {
                 )
                 .await
                 .unwrap();
-            assert!(dynamic_to_json(&third).to_string().contains("artist-ast"));
-            let second_generation = observed_tools
-                .registry
-                .current_generation("artist-tool-read")
-                .expect("repaired generation active");
-            assert!(second_generation > first_generation);
+            assert!(
+                dynamic_to_json(&third)
+                    .to_string()
+                    .contains("generation one")
+            );
+            assert!(
+                observed_tools
+                    .registry
+                    .current_generation("artist-tool-read")
+                    .is_none()
+            );
         }
 
         #[tokio::test]
@@ -7736,7 +8205,7 @@ mod tests {
 
     #[test]
     fn typed_lifting_preserves_uri_aliases_inside_nested_values() {
-        let uri = artist_kernel::ResourceUri::parse("process://42").unwrap();
+        let uri = artist_kernel::ResourceUri::parse("exec://42").unwrap();
         let value = DynamicValue::Record(std::collections::BTreeMap::from([(
             "targets".into(),
             DynamicValue::List(vec![DynamicValue::ResourceUri(uri.clone())]),

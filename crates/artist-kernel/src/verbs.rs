@@ -577,8 +577,7 @@ impl VerbRegistry {
                 message: format!("verb {} has no active executor", call.verb),
             })?;
         let result = executor.invoke(call)?;
-        self.validate_result(call, &result)?;
-        let _ = active;
+        self.validate_result_for_lease(call, &result, &VerbLease { active })?;
         Ok(result)
     }
 

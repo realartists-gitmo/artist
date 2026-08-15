@@ -220,7 +220,7 @@ impl ProcessManager {
             message: "process id lock poisoned".to_owned(),
         })?;
         *next_id += 1;
-        let uri = format!("process://{}", *next_id);
+        let uri = format!("exec://{}", *next_id);
         self.processes
             .lock()
             .map_err(|_| KernelError::Handler {
@@ -398,7 +398,7 @@ impl ProcessResourceProvider {
     }
 
     fn root(uri: &ResourceUri) -> bool {
-        uri.scheme() == "process" && uri.path().matches('/').count() <= 1
+        uri.scheme() == "exec" && uri.path().matches('/').count() <= 1
     }
 
     fn value(uri: ResourceUri, snapshot: ProcessSnapshot) -> DynamicValue {
@@ -425,14 +425,14 @@ impl DynamicClaimProvider for ProcessResourceProvider {
                 .then_some(ClaimDecision::Handle)
                 .unwrap_or(ClaimDecision::Pass);
         }
-        let child = uri.scheme() == "process"
+        let child = uri.scheme() == "exec"
             && (uri.path().ends_with("/stdin") || uri.path().ends_with("/ctl"));
         if (verb == &self.bindings.write && child)
             || ((verb == &self.bindings.read
                 || verb == &self.bindings.poll
                 || verb == &self.bindings.abort
                 || verb == &self.bindings.delete)
-                && (uri.scheme() == "process"))
+                && (uri.scheme() == "exec"))
         {
             ClaimDecision::Handle
         } else {

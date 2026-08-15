@@ -69,12 +69,12 @@ pub async fn build(root: &Path) -> Result<Kernel> {
         },
     )))?;
     let process_bindings = ProcessVerbBindings {
-        run: native_verb("process", "run"),
-        write: native_verb("process", "write"),
-        read: native_verb("process", "read"),
-        poll: native_verb("process", "poll"),
-        abort: native_verb("process", "abort"),
-        delete: native_verb("process", "delete"),
+        run: native_verb("exec", "run"),
+        write: native_verb("exec", "write"),
+        read: native_verb("exec", "read"),
+        poll: native_verb("exec", "poll"),
+        abort: native_verb("exec", "abort"),
+        delete: native_verb("exec", "delete"),
     };
     for definition in process_bindings.definitions() {
         kernel.route_registry().register(
@@ -369,7 +369,7 @@ pub async fn dispatch(kernel: &Kernel, verb: Verb, target: &str, args: &str) -> 
             fields.insert("cwd".to_owned(), DynamicValue::Option(None));
             fields.insert("environment".to_owned(), DynamicValue::List(Vec::new()));
         }
-        native_verb("process", "run")
+        native_verb("exec", "run")
     } else {
         native_verb(dynamic_namespace(&uri), dynamic_function(verb))
     };
@@ -382,7 +382,7 @@ pub async fn dispatch(kernel: &Kernel, verb: Verb, target: &str, args: &str) -> 
 fn dynamic_namespace(uri: &ResourceUri) -> &'static str {
     match uri.scheme() {
         "session" => "session",
-        "process" => "process",
+        "exec" => "exec",
         "repo" => "repository",
         "resources" => "resources",
         _ => "filesystem",
